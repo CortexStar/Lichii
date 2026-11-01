@@ -620,7 +620,10 @@ void EmitContext::DefineCooperativeMatrixScratch(const IR::Program& program) {
     const Id f16{F16[1]};
     const Id array{TypeArray(f16, Const(640U * max_subgroups))};
     Decorate(array, spv::Decoration::ArrayStride, 2U);
-    const Id pointer{TypePointer(spv::StorageClass::Workgroup, array)};
+    const Id struct_type{TypeStruct(array)};
+    MemberDecorate(struct_type, 0U, spv::Decoration::Offset, 0U);
+    Decorate(struct_type, spv::Decoration::Block);
+    const Id pointer{TypePointer(spv::StorageClass::Workgroup, struct_type)};
     coop_scratch_f16 = TypePointer(spv::StorageClass::Workgroup, f16);
     coop_scratch = AddGlobalVariable(pointer, spv::StorageClass::Workgroup);
     coop_scratch_array = array;

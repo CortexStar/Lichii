@@ -35,7 +35,7 @@ Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a0, Id a1, Id a2, Id a3
     const auto imm = [&](u32 v) { return ctx.Const(v); };
 
     const auto ptr = [&](Id index) {
-        return ctx.OpAccessChain(ctx.coop_scratch_f16, ctx.coop_scratch, index);
+        return ctx.OpAccessChain(ctx.coop_scratch_f16, ctx.coop_scratch, imm(0U), index);
     };
     const auto lo_f16 = [&](Id value) {
         return ctx.OpCompositeExtract(f16, ctx.OpBitcast(f16x2, value), 0U);
