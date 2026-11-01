@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <optional>
 #include <set>
@@ -113,7 +114,8 @@ VK_DEFINE_HANDLE(VmaAllocator)
     EXTENSION(NV, GEOMETRY_SHADER_PASSTHROUGH, geometry_shader_passthrough)                        \
     EXTENSION(NV, VIEWPORT_ARRAY2, viewport_array2)                                                \
     EXTENSION(NV, VIEWPORT_SWIZZLE, viewport_swizzle)                                              \
-    EXTENSION(EXT, FILTER_CUBIC, filter_cubic)                                                     \
+    EXTENSION(NV, COOPERATIVE_MATRIX, cooperative_matrix)                                             \
+    EXTENSION(EXT, FILTER_CUBIC, filter_cubic)                                                         \
     EXTENSION(IMG, FILTER_CUBIC, filter_cubic_img)                                                 \
     EXTENSION(QCOM, FILTER_CUBIC_WEIGHTS, filter_cubic_weights)
 
@@ -714,6 +716,28 @@ FN_MAX_LIMIT_LIST
         return features.host_query_reset.hostQueryReset != VK_FALSE;
     }
 
+    /// Returns true if the device supports VK_NV_cooperative_matrix (used for tensor ops).
+    bool IsExtCooperativeMatrixSupported() const {
+        return extensions.cooperative_matrix &&
+               features.cooperative_matrix_features.cooperativeMatrix &&
+               IsFloat16Supported() && SupportedSpirvVersion() >= 0x00010400 &&
+               cooperative_matrix_shape_supported &&
+               extensions.subgroup_size_control &&
+               features.subgroup_size_control.subgroupSizeControl &&
+               features.subgroup_size_control.computeFullSubgroups &&
+               IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT) &&
+               properties.subgroup_size_control.minSubgroupSize <= 32 &&
+               properties.subgroup_size_control.maxSubgroupSize >= 32 &&
+               (GetSubgroupSupportedStages() & VK_SHADER_STAGE_COMPUTE_BIT) &&
+               IsSubgroupFeatureSupported(VK_SUBGROUP_FEATURE_BASIC_BIT);
+    }
+
+    u32 GetMaxTensorWorkgroupSize() const {
+        return (std::min)({properties.properties.limits.maxComputeWorkGroupSize[0],
+                          properties.properties.limits.maxComputeWorkGroupInvocations,
+                          properties.subgroup_size_control.maxComputeWorkgroupSubgroups * 32U});
+    }
+
     /// Returns true if the device supports VK_EXT_transform_feedback.
     bool IsExtTransformFeedbackSupported() const {
         return extensions.transform_feedback;
@@ -1209,12 +1233,15 @@ private:
 #undef FEATURE_CORE
 #undef FEATURE_EXT
 
+        VkPhysicalDeviceCooperativeMatrixFeaturesNV cooperative_matrix_features{};
+
         VkPhysicalDeviceFeatures features{};
     };
 
     struct Properties {
         VkPhysicalDeviceDriverProperties driver{};
         VkPhysicalDeviceSubgroupProperties subgroup_properties{};
+        VkPhysicalDeviceCooperativeMatrixPropertiesNV cooperative_matrix{};
         VkPhysicalDeviceFloatControlsProperties float_controls{};
         VkPhysicalDevicePushDescriptorPropertiesKHR push_descriptor{};
         VkPhysicalDeviceDescriptorBufferPropertiesEXT descriptor_buffer{};
@@ -1230,6 +1257,7 @@ private:
     Extensions extensions{};
     Features features{};
     Properties properties{};
+    bool cooperative_matrix_shape_supported{};
 
     VkPhysicalDeviceFeatures2 features2{};
     VkPhysicalDeviceProperties2 properties2{};

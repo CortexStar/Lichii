@@ -1653,6 +1653,9 @@ void TextureCacheRuntime::ConvertImage(Framebuffer* dst, ImageView& dst_view, Im
         }
         break;
     case PixelFormat::A8B8G8R8_UNORM:
+        if (src_view.format == PixelFormat::X8_D24_UNORM) {
+            return blit_image_helper.ConvertX8D24ToABGR8(dst, src_view);
+        }
         if (src_view.format == PixelFormat::S8_UINT_D24_UNORM) {
             return blit_image_helper.ConvertD24S8ToABGR8(dst, src_view);
         }
@@ -1671,6 +1674,11 @@ void TextureCacheRuntime::ConvertImage(Framebuffer* dst, ImageView& dst_view, Im
     case PixelFormat::D16_UNORM:
         if (src_view.format == PixelFormat::R16_UNORM) {
             return blit_image_helper.ConvertR16ToD16(dst, src_view);
+        }
+        break;
+    case PixelFormat::X8_D24_UNORM:
+        if (src_view.format == PixelFormat::A8B8G8R8_UNORM) {
+            return blit_image_helper.ConvertABGR8ToX8D24(dst, src_view);
         }
         break;
     case PixelFormat::S8_UINT_D24_UNORM:

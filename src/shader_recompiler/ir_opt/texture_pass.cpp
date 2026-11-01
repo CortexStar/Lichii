@@ -531,8 +531,11 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
             addr = *track_addr;
         }
     } else {
+        // Surface (storage image) descriptors may live in another constant buffer than the
+        // textures'. The opcode is still the Bound*/Bindless* form here, hence IndexedInstruction.
+        const bool is_surface{IsStorageImageOpcode(IndexedInstruction(inst))};
         addr = ConstBufferAddr{
-            .index = env.TextureBoundBuffer(),
+            .index = is_surface ? env.SurfaceBoundBuffer() : env.TextureBoundBuffer(),
             .offset = inst.Arg(0).U32(),
             .shift_left = 0,
             .secondary_index = 0,

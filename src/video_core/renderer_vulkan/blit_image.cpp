@@ -16,6 +16,8 @@
 #include "video_core/host_shaders/blit_depth_msaa_frag_spv.h"
 #include "video_core/host_shaders/blit_depth_stencil_msaa_frag_spv.h"
 #include "video_core/host_shaders/convert_abgr8_to_d24s8_frag_spv.h"
+#include "video_core/host_shaders/convert_abgr8_to_x8d24_frag_spv.h"
+#include "video_core/host_shaders/convert_x8d24_to_abgr8_frag_spv.h"
 #include "video_core/host_shaders/convert_abgr8_to_d32f_frag_spv.h"
 #include "video_core/host_shaders/convert_d24s8_to_abgr8_frag_spv.h"
 #include "video_core/host_shaders/convert_d32f_to_abgr8_frag_spv.h"
@@ -629,6 +631,8 @@ BlitImageHelper::BlitImageHelper(const Device& device_, Scheduler& scheduler_,
       convert_abgr8_to_d24s8_frag(device.IsExtShaderStencilExportSupported()
                                  ? BuildShader(device, CONVERT_ABGR8_TO_D24S8_FRAG_SPV)
                                  : vk::ShaderModule{}),
+      convert_abgr8_to_x8d24_frag(BuildShader(device, CONVERT_ABGR8_TO_X8D24_FRAG_SPV)),
+      convert_x8d24_to_abgr8_frag(BuildShader(device, CONVERT_X8D24_TO_ABGR8_FRAG_SPV)),
       convert_abgr8_to_d32f_frag(BuildShader(device, CONVERT_ABGR8_TO_D32F_FRAG_SPV)),
       convert_d32f_to_abgr8_frag(BuildShader(device, CONVERT_D32F_TO_ABGR8_FRAG_SPV)),
       convert_d24s8_to_abgr8_frag(BuildShader(device, CONVERT_D24S8_TO_ABGR8_FRAG_SPV)),
@@ -832,6 +836,20 @@ void BlitImageHelper::ConvertR16ToD16(const Framebuffer* dst_framebuffer,
                                       const ImageView& src_image_view) {
     ConvertColorToDepthPipeline(convert_r16_to_d16_pipeline, dst_framebuffer->RenderPass());
     Convert(*convert_r16_to_d16_pipeline, dst_framebuffer, src_image_view);
+}
+
+void BlitImageHelper::ConvertABGR8ToX8D24(const Framebuffer* dst_framebuffer,
+                                       const ImageView& src_image_view) {
+    ConvertPipelineDepthTargetEx(convert_abgr8_to_x8d24_pipeline, dst_framebuffer->RenderPass(),
+                                 convert_abgr8_to_x8d24_frag);
+    Convert(*convert_abgr8_to_x8d24_pipeline, dst_framebuffer, src_image_view);
+}
+
+void BlitImageHelper::ConvertX8D24ToABGR8(const Framebuffer* dst_framebuffer,
+                                       const ImageView& src_image_view) {
+    ConvertPipelineEx(convert_x8d24_to_abgr8_pipeline, dst_framebuffer->RenderPass(),
+                      convert_x8d24_to_abgr8_frag, true, false);
+    Convert(*convert_x8d24_to_abgr8_pipeline, dst_framebuffer, src_image_view);
 }
 
 void BlitImageHelper::ConvertABGR8ToD24S8(const Framebuffer* dst_framebuffer,

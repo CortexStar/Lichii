@@ -97,6 +97,14 @@ template <typename Translate>
     }
 }
 
+template <typename Drain, typename Translate, typename Flush>
+void Nx2SynchronizeGpuWrittenCommands(GPUVAddr address, size_t size, Drain&& drain,
+                                     Translate&& translate, Flush&& flush) {
+    if (size == 0) return;
+    drain();
+    if (Nx2HasGpuWrittenPage(address, size, translate)) flush();
+}
+
 // NVN2 queues release their progress values into the second page of a two-page GPU-accessible
 // region and GPU acquires read the same offsets in the first page (the CPU polls the second).
 // Something on the console copies one into the other; until that is known, the puller mirrors

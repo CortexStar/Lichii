@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <catch2/catch_test_macros.hpp>
+#include <optional>
 
 #include "video_core/nx2.h"
 
@@ -43,4 +44,43 @@ TEST_CASE("A new session forgets the pages the previous one wrote",
     for (u64 page = 63; page <= 67; ++page) {
         REQUIRE_FALSE(Tegra::Nx2IsGpuWritten(page * Page));
     }
+}
+
+TEST_CASE("Command synchronization drains a page's first queued GPU write before checking it",
+          "[video_core][nx2_command_sync]") {
+    Tegra::Nx2ClearGpuWrittenPages();
+    u32 host_word = 0;
+    u32 gpu_word = 0;
+    bool drained = false;
+    bool flushed = false;
+    Tegra::Nx2SynchronizeGpuWrittenCommands(8 * Page, sizeof(u32),
+        [&] {
+            drained = true;
+            gpu_word = 42;
+            Tegra::Nx2MarkGpuWritten(8 * Page, sizeof(u32));
+        },
+        [&](GPUVAddr page) {
+            REQUIRE(drained);
+            return std::optional{page};
+        },
+        [&] {
+            REQUIRE(drained);
+            flushed = true;
+            host_word = gpu_word;
+        });
+    REQUIRE(flushed);
+    REQUIRE(host_word == 42);
+}
+
+TEST_CASE("Command synchronization skips clean-page flushes but still drains queued work",
+          "[video_core][nx2_command_sync]") {
+    Tegra::Nx2ClearGpuWrittenPages();
+    u32 drains = 0;
+    for (const size_t size : {size_t{0}, sizeof(u32)}) {
+        Tegra::Nx2SynchronizeGpuWrittenCommands(8 * Page, size,
+            [&] { ++drains; },
+            [](GPUVAddr page) { return std::optional{page}; },
+            [] { FAIL("A clean command page must not be flushed"); });
+    }
+    REQUIRE(drains == 1);
 }

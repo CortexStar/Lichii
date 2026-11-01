@@ -41,17 +41,21 @@ struct LoweredNativeCode {
     /// Constant buffer holding the texture handles if the program requires one, otherwise ~0U
     /// (the engine's register value is used).
     u32 texture_bound = ~0U;
+    /// Constant buffer for surface descriptors, when the program needs another than texture_bound.
+    u32 surface_bound = ~0U;
 };
 
 class GenericEnvironment : public Shader::Environment {
 public:
     explicit GenericEnvironment() = default;
     explicit GenericEnvironment(Tegra::MemoryManager& gpu_memory_, GPUVAddr program_base_,
-                                u32 start_address_);
+                                u32 start_address_, bool support_cooperative_matrix_ = false);
 
     ~GenericEnvironment() override;
 
     [[nodiscard]] u32 TextureBoundBuffer() const final;
+
+    [[nodiscard]] u32 SurfaceBoundBuffer() const final;
 
     [[nodiscard]] u32 LocalMemorySize() const final;
 
@@ -117,6 +121,7 @@ protected:
 
     u32 local_memory_size{};
     u32 texture_bound{};
+    u32 surface_bound = ~0U; ///< ~0U: unset, surfaces use texture_bound
     u32 shared_memory_size{};
     std::array<u32, 3> workgroup_size{};
 
@@ -131,6 +136,7 @@ protected:
 
     bool has_unbound_instructions = false;
     bool has_hle_engine_state = false;
+    bool support_cooperative_matrix = false;
 };
 
 class GraphicsEnvironment final : public GenericEnvironment {
@@ -140,7 +146,8 @@ public:
                                  Tegra::MemoryManager& gpu_memory_,
                                  Tegra::Engines::Maxwell3D::Regs::ShaderType program,
                                  GPUVAddr program_base_, u32 start_address_,
-                                 std::shared_ptr<const LoweredNativeCode> lowered_native_ = {});
+                                 std::shared_ptr<const LoweredNativeCode> lowered_native_ = {},
+                                 bool support_cooperative_matrix_ = false);
 
     ~GraphicsEnvironment() override = default;
 
@@ -202,7 +209,8 @@ public:
     explicit ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_compute_,
                                 Tegra::MemoryManager& gpu_memory_, GPUVAddr program_base_,
                                 u32 start_address_,
-                                std::shared_ptr<const LoweredNativeCode> lowered_native_ = {});
+                                std::shared_ptr<const LoweredNativeCode> lowered_native_ = {},
+                                bool support_cooperative_matrix_ = false);
 
     ~ComputeEnvironment() override = default;
 
@@ -258,6 +266,8 @@ public:
 
     [[nodiscard]] u32 TextureBoundBuffer() const override;
 
+    [[nodiscard]] u32 SurfaceBoundBuffer() const override;
+
     [[nodiscard]] std::array<u32, 3> WorkgroupSize() const override;
 
     [[nodiscard]] std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32 bank,
@@ -279,6 +289,7 @@ private:
     u32 local_memory_size{};
     u32 shared_memory_size{};
     u32 texture_bound{};
+    u32 surface_bound = ~0U; ///< ~0U: unset, surfaces use texture_bound
     u32 read_lowest{};
     u32 read_highest{};
     u32 initial_offset{};

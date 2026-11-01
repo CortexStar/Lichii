@@ -189,15 +189,11 @@ endif()
 AddJsonPackage(spirv-headers)
 
 # Sirit
-if (YUZU_USE_BUNDLED_SIRIT)
-    AddJsonPackage(sirit-ci)
-else()
-    AddJsonPackage(sirit)
-    if(MSVC AND CXX_CLANG)
-        target_compile_options(siritobj PRIVATE
-            $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-error=unused-command-line-argument>
-        )
-    endif()
+AddJsonPackage(NAME sirit FORCE_BUNDLED_PACKAGE ON)
+if(MSVC AND CXX_CLANG)
+    target_compile_options(siritobj PRIVATE
+        $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-error=unused-command-line-argument>
+    )
 endif()
 
 # reshadefx

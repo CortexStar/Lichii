@@ -88,6 +88,10 @@ public:
 
     [[nodiscard]] virtual u32 TextureBoundBuffer() const = 0;
 
+    /// Constant buffer holding the surface (image write) descriptors; the texture one unless the
+    /// program needs both from different buffers.
+    [[nodiscard]] virtual u32 SurfaceBoundBuffer() const { return TextureBoundBuffer(); }
+
     [[nodiscard]] virtual u32 LocalMemorySize() const = 0;
 
     [[nodiscard]] virtual u32 SharedMemorySize() const = 0;

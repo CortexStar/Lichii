@@ -286,6 +286,7 @@ public:
     Id sample_id{};
     Id is_helper_invocation{};
     Id subgroup_local_invocation_id{};
+    Id subgroup_id{};
     Id subgroup_mask_eq{};
     Id subgroup_mask_lt{};
     Id subgroup_mask_le{};
@@ -317,6 +318,12 @@ public:
     Id rescaling_push_constants{};
     Id rescaling_textures_type{};
     Id rescaling_images_type{};
+
+    Id cooperative_matrix_type_a{};
+    Id cooperative_matrix_type_b{};
+    Id cooperative_matrix_type_c{};
+    Id coop_scratch{};
+    Id coop_scratch_f16{};
     u32 rescaling_textures_member_index{};
     u32 rescaling_images_member_index{};
     u32 rescaling_downfactor_member_index{};
@@ -402,6 +409,7 @@ private:
     void DefineLocalMemory(const IR::Program& program);
     void DefineSharedMemory(const IR::Program& program);
     void DefineSharedMemoryFunctions(const IR::Program& program);
+    void DefineCooperativeMatrixScratch(const IR::Program& program);
     void DefineConstantBuffers(const Info& info, u32& binding);
     void DefineConstantBufferIndirectFunctions(const Info& info);
     void DefineStorageBuffers(const Info& info, u32& binding);

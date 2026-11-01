@@ -107,6 +107,15 @@ Result StartThread(Core::System& system, Handle thread_handle) {
     // Try to start the thread.
     R_TRY(thread->Run(system.Kernel()));
 
+    // A lower-priority thread on our own core cannot run until we block. Remember it so the next
+    // IPC call can give it the time it gets on hardware (see SendSyncRequestImpl in svc_ipc.cpp).
+    KThread& cur_thread = GetCurrentThread(system.Kernel());
+    if (thread->GetActiveCore() == cur_thread.GetActiveCore() &&
+        thread->GetPriority() > cur_thread.GetPriority()) {
+        thread->Open(system.Kernel());
+        cur_thread.GetPendingStartedThreads().push_back(thread.GetPointerUnsafe());
+    }
+
     R_SUCCEED();
 }
 

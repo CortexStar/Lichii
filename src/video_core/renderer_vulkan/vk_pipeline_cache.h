@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <exception>
 #include <filesystem>
 #include <future>
 #include <memory>
@@ -227,6 +228,7 @@ private:
     GraphicsPipeline* current_pipeline{};
 
     ::Common::unordered_map<ComputePipelineCacheKey, std::unique_ptr<ComputePipeline>> compute_cache;
+    ::Common::unordered_map<ComputePipelineCacheKey, std::exception_ptr> rejected_tensor_pipelines;
     ::Common::unordered_map<GraphicsPipelineCacheKey, std::unique_ptr<GraphicsPipeline>> graphics_cache;
 
     ShaderPools main_pools;

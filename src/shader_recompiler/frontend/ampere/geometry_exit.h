@@ -109,6 +109,15 @@ GeometryExitEnvelope AnalyzeGeometryExit(const Code& code) {
             if (has_c && (form == 1 || form == 4 || form == 5 || form == 6)) read_register(bits(index, 64, 8));
         };
         read_predicate(guard & 7);
+        if (is_exit(index)) {
+            if (guard != 7)
+                return fail(index, "native instruction before exit setup state is dead");
+            // The handler finalizes the output through R0; the rest of the setup state may stay
+            // live when the body ends without reading it.
+            if ((live_registers & 1) || (read_predicates & live_predicates))
+                return fail(index, "native exit handler reads exit setup state");
+            break;
+        }
         if (opcode == 0x919 || opcode == 0x923) {
             if (opcode == 0x923) read_register(bits(index, 24, 8));
             write_register(bits(index, 16, 8));
@@ -128,6 +137,32 @@ GeometryExitEnvelope AnalyzeGeometryExit(const Code& code) {
             read_sources(true);
             if (family == 0x024 && bits(index, 74, 1)) read_predicate(bits(index, 87, 3));
             write_register(bits(index, 16, 8));
+        } else if (family == 0x105 && (form == 1 || form == 5 || form == 6)) {
+            // F2I: register, constant buffer or uniform source in operand b; a is unused.
+            if (form == 1) read_register(bits(index, 32, 8));
+            write_register(bits(index, 16, 8));
+        } else if (family == 0x011 && form != 0) {
+            // LEA (.X reads the carry predicate), optional carry out.
+            read_sources(true);
+            if (bits(index, 74, 1)) read_predicate(bits(index, 87, 3));
+            write_register(bits(index, 16, 8));
+            write_predicate(bits(index, 81, 3));
+        } else if (opcode == 0xb82) {
+            // LDC with a register index; a 64-bit load writes a pair.
+            if (bits(index, 24, 8) != 255) read_register(bits(index, 24, 8));
+            write_register(bits(index, 16, 8));
+            if (bits(index, 73, 3) == 5) write_register(bits(index, 16, 8) + 1);
+        } else if (family == 0x012 && form != 0) {
+            // LOP3.LUT with an optional predicate result.
+            read_sources(true);
+            write_register(bits(index, 16, 8));
+            write_predicate(bits(index, 81, 3));
+        } else if (opcode == 0x322) {
+            // AST: stores 1-4 components from operand b for the vertex in c; writes nothing.
+            const u32 value = bits(index, 32, 8), components = bits(index, 74, 2) + 1;
+            if (value != 255)
+                for (u32 i = 0; i < components; ++i) read_register(value + i);
+            read_register(bits(index, 64, 8));
         } else if (family == 0x00c && form != 0 && !bits(index, 72, 1)) {
             read_sources(false);
             read_predicate(bits(index, 87, 3));

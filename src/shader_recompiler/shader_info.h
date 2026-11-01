@@ -251,6 +251,7 @@ struct Info {
     bool uses_sample_id{};
     bool uses_is_helper_invocation{};
     bool uses_subgroup_invocation_id{};
+    bool uses_tensor_mul_add{};
     bool uses_subgroup_shuffles{};
     bool uses_quad_shuffles{};
     std::array<bool, 30> uses_patches{};

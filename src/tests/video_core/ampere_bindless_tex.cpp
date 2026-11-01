@@ -5,6 +5,7 @@
 #include <catch2/generators/catch_generators.hpp>
 
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
+#include "shader_recompiler/frontend/ir/ir_emitter.h"
 #include "shader_recompiler/frontend/ir/program.h"
 #include "shader_recompiler/frontend/maxwell/translate/translate.h"
 #include "shader_recompiler/host_translate_info.h"
@@ -487,11 +488,9 @@ TEST_CASE("Ampere uniform bindless TEX preserves scalar and pair result masks",
         REQUIRE(((lowered.instructions[3] >> 31) & 15) == mask);
         for (u32 i = 0; i < count; ++i) REQUIRE(lowered.instructions[4 + i] == Copy(i, 250 + i));
     }
-    for (const u32 mask : {0U, 2U, 7U, 14U}) {
-        auto code = sample;
-        code[1].words[2] = 0x0c9e00ffU | (mask << 8);
-        REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(code)));
-    }
+    auto empty_mask = sample;
+    empty_mask[1].words[2] = 0x0c9e00ffU;
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(empty_mask)));
     for (const u32 mask : {1U, 3U}) {
         for (const u32 target : {214U, 215U, 216U}) {
             auto code = sample;
@@ -542,7 +541,7 @@ TEST_CASE("Ampere uniform bindless TEX rejects unverified handle pairs and contr
         code[0].words[bit / 32] ^= 1U << (bit % 32);
         REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(code)));
     }
-    for (const u32 opcode : {0x941U, 0x942U, 0x944U, 0x945U, 0x948U,
+    for (const u32 opcode : {0x941U, 0x942U, 0x944U, 0x945U,
                              0x949U, 0x950U, 0x958U}) {
         const std::array<Instruction, 4> code{{sample[0], sample[1],
                                              {{0x7000U | opcode, 0, 0x03800000, 0}},
@@ -578,8 +577,8 @@ TEST_CASE("Ampere uniform bindless TEX does not change bound texture metadata",
 
 TEST_CASE("Ampere uniform bindless TEX rejects unsupported texture modes",
           "[video_core][ampere][bindless_tex]") {
-    for (const u32 bit : {46U, 54U, 59U, 60U, 61U, 72U, 76U, 77U, 78U, 79U,
-                         80U, 81U, 84U, 88U, 89U, 91U, 96U}) {
+    for (const u32 bit : {46U, 54U, 59U, 60U, 61U, 76U, 77U, 78U, 79U,
+                         80U, 81U, 84U, 89U, 91U, 96U}) {
         auto code = sample;
         code[1].words[bit / 32] ^= 1U << (bit % 32);
         const auto lowered = LowerToMaxwell(code);
@@ -617,5 +616,132 @@ TEST_CASE("Ampere uniform bindless TEX protects uniform state and output pairs",
     const auto aliased = LowerToMaxwell(alias);
     REQUIRE_FALSE(static_cast<bool>(aliased));
     REQUIRE(aliased.error_offset == 0);
+}
+TEST_CASE("Ampere uniform bindless TEX compacts noncontiguous masks and discards unused outputs",
+          "[video_core][ampere][bindless_tex]") {
+    const u32 mask = GENERATE(2U, 7U, 14U);
+    const bool discard_second = GENERATE(false, true);
+    const u32 components = static_cast<u32>(std::popcount(mask));
+    const u32 second = components > 2 && !discard_second ? 2U : 255U;
+    std::array<Instruction, 9> code{{
+        {{0x00047ab9, 0x00805a00, 0x00000800, 0x000fe400}},
+        {{0x00057ab9, 0x00815a00, 0x00000800, 0x000fe400}},
+        {{0x04047292, 0x00000005, 0x0f8efc3f, 0x000fc800}},
+        {{0x00017802, 0x3e000000, 0x00000f00, 0}},
+        {{0x00027802, 0x3e800000, 0x00000f00, 0}},
+        {{0x00037802, 0x3f000000, 0x00000f00, 0}},
+        sample[0], sample[1], sample[2],
+    }};
+    code[7].words[2] = 0x0c9e0000U | (mask << 8) | second;
+    const auto lowered = LowerToMaxwell(code);
+    REQUIRE(static_cast<bool>(lowered));
+    const u32 texture = lowered.source_instruction_offsets[7] + 2;
+    REQUIRE(((lowered.instructions[texture] >> 31) & 15) == mask);
+    const u32 written = second == 255 ? std::min(components, 2U) : components;
+    REQUIRE(lowered.source_instruction_offsets[8] == texture + 1 + written);
+    for (u32 i = 0; i < written; ++i)
+        REQUIRE(lowered.instructions[texture + 1 + i] == Copy(i, 250 + i));
+    TextureEnvironment env{lowered.instructions};
+    Shader::ObjectPool<Shader::IR::Inst> pool;
+    Shader::IR::Block block{pool};
+    Shader::IR::Program program;
+    program.blocks = {&block};
+    program.post_order_blocks = {&block};
+    const u32 last = static_cast<u32>(lowered.instructions.size() - 1);
+    Shader::Maxwell::Translate(env, &block, 0x50, 0x50 + last * 8 + ((last + 1) / 3) * 8);
+    Shader::IR::IREmitter ir{block};
+    std::array<Shader::IR::Inst*, 3> outputs{};
+    for (u32 i = 0; i < outputs.size(); ++i) {
+        ir.WriteShared(32, ir.Imm32(i * 4), ir.GetReg(static_cast<Shader::IR::Reg>(i)));
+        outputs[i] = &block.back();
+    }
+    Shader::Optimization::SsaRewritePass(program);
+    Shader::Optimization::ConstantPropagationPass(env, program);
+    Shader::HostTranslateInfo host_info;
+    host_info.ApplyDescriptorLimitPolicy();
+    Shader::Optimization::TexturePass(env, program, host_info);
+    u32 output = 0;
+    for (u32 component = 0; component < 4 && output < written; ++component) {
+        if (!(mask & (1U << component))) continue;
+        const auto* bits = outputs[output++]->Arg(1).InstRecursive();
+        REQUIRE(bits->GetOpcode() == Shader::IR::Opcode::BitCastU32F32);
+        const auto* extracted = bits->Arg(0).InstRecursive();
+        REQUIRE(extracted->GetOpcode() == Shader::IR::Opcode::CompositeExtractF32x4);
+        REQUIRE(extracted->Arg(1).U32() == component);
+        REQUIRE(extracted->Arg(0).InstRecursive()->GetOpcode() ==
+                Shader::IR::Opcode::ImageSampleExplicitLod);
+    }
+    if (written == 1) REQUIRE(outputs[1]->Arg(1).Resolve().U32() == 0x3e000000);
+    if (second == 255) REQUIRE(outputs[2]->Arg(1).Resolve().U32() == 0x3e800000);
+}
+
+TEST_CASE("Ampere uniform bindless TEX preserves distinct explicit LOD operands",
+          "[video_core][ampere][bindless_tex]") {
+    std::array<Instruction, 9> code{{
+        {{0x00047ab9, 0x00805a00, 0x00000800, 0x000fe400}},
+        {{0x00057ab9, 0x00815a00, 0x00000800, 0x000fe400}},
+        {{0x04047292, 0x00000005, 0x0f8efc3f, 0x000fc800}},
+        {{0x00027802, 0x3e800000, 0x00000f00, 0}},
+        {{0x00037802, 0x3f000000, 0x00000f00, 0}},
+        {{0x00087802, 0x40000000, 0x00000f00, 0}},
+        sample[0], sample[1], sample[2],
+    }};
+    code[7].words[1] = 0x30000408;
+    code[7].words[2] ^= 1U << (88 - 64);
+    const auto lowered = LowerToMaxwell(code);
+    REQUIRE(static_cast<bool>(lowered));
+    const u32 start = lowered.source_instruction_offsets[7];
+    REQUIRE(lowered.instructions[start] == Copy(250, 2));
+    REQUIRE(lowered.instructions[start + 1] == Copy(251, 3));
+    REQUIRE(lowered.instructions[start + 2] == Copy(246, 220));
+    REQUIRE(lowered.instructions[start + 3] == Copy(247, 8));
+    REQUIRE(((lowered.instructions[start + 4] >> 37) & 7) == 3);
+    TextureEnvironment env{lowered.instructions};
+    Shader::ObjectPool<Shader::IR::Inst> pool;
+    Shader::IR::Block block{pool};
+    Shader::IR::Program program;
+    program.blocks = {&block};
+    program.post_order_blocks = {&block};
+    const u32 last = static_cast<u32>(lowered.instructions.size() - 1);
+    Shader::Maxwell::Translate(env, &block, 0x50, 0x50 + last * 8 + ((last + 1) / 3) * 8);
+    Shader::Optimization::SsaRewritePass(program);
+    Shader::Optimization::ConstantPropagationPass(env, program);
+    Shader::HostTranslateInfo host_info;
+    host_info.ApplyDescriptorLimitPolicy();
+    Shader::Optimization::TexturePass(env, program, host_info);
+    u32 samples = 0;
+    for (const auto& inst : block) {
+        if (inst.GetOpcode() != Shader::IR::Opcode::ImageSampleExplicitLod) continue;
+        ++samples;
+        const auto* coords = inst.Arg(1).InstRecursive();
+        REQUIRE(coords->GetOpcode() == Shader::IR::Opcode::CompositeConstructF32x2);
+        REQUIRE(coords->Arg(0).Resolve().F32() == 0.25f);
+        REQUIRE(coords->Arg(1).Resolve().F32() == 0.5f);
+        REQUIRE(inst.Arg(2).Resolve().F32() == 2.0f);
+    }
+    REQUIRE(samples == 1);
+    REQUIRE(program.info.texture_descriptors.size() == 1);
+    REQUIRE(program.info.texture_descriptors.front().has_secondary);
+    REQUIRE(program.info.texture_descriptors.front().cbuf_offset == 0x168);
+    REQUIRE(program.info.texture_descriptors.front().secondary_cbuf_offset == 0x568);
+}
+
+TEST_CASE("Ampere uniform bindless TEX treats WARPSYNC as a provenance scan boundary",
+          "[video_core][ampere][bindless_tex]") {
+    constexpr Instruction sync{{0x00007948, 0, 0x03800000, 0}};
+    const std::array<Instruction, 4> before{{sync, sample[0], sample[1], sample[2]}};
+    const std::array<Instruction, 4> after{{sample[0], sample[1], sync, sample[2]}};
+    for (const auto& code : {before, after}) {
+        const auto lowered = LowerToMaxwell(code);
+        REQUIRE(static_cast<bool>(lowered));
+        REQUIRE(lowered.required_texture_buffer == ~0U);
+        REQUIRE(lowered.source_size == sizeof(code));
+    }
+    const std::array<Instruction, 4> interrupted{{sample[0], sync, sample[1], sample[2]}};
+    const auto rejected = LowerToMaxwell(interrupted);
+    REQUIRE_FALSE(static_cast<bool>(rejected));
+    REQUIRE(rejected.error == "native uniform bindless texture handle provenance");
+    REQUIRE(rejected.error_offset == 32);
+    REQUIRE(rejected.instructions.empty());
 }
 } // namespace

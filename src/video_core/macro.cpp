@@ -1364,8 +1364,12 @@ YUZU_NO_INLINE void MacroEngine::ReadNativeMemory(Engines::Maxwell3D& maxwell3d,
             }
         }
     }
-    if (memory.IsMemoryDirty(source, read_bytes, VideoCommon::CacheType::BufferCache)) {
-        memory.FlushRegion(source, read_bytes, VideoCommon::CacheType::BufferCache);
+    // Query reports count too: the driver implements conditional rendering by DMA-reading an
+    // occlusion query's report into a macro (Mario Tennis Fever's characters), and those results
+    // sit in the query cache until flushed (read as 0 samples, the draws are skipped).
+    constexpr auto flush_caches = VideoCommon::CacheType::BufferCache | VideoCommon::CacheType::QueryCache;
+    if (memory.IsMemoryDirty(source, read_bytes, flush_caches)) {
+        memory.FlushRegion(source, read_bytes, flush_caches);
         static u64 flushes{};
         if (++flushes % 2000 == 1) {
             LOG_INFO(HW_GPU, "Native MME DMA read flushed GPU-written memory ({} times)", flushes);

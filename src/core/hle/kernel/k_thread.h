@@ -359,6 +359,13 @@ public:
         return m_schedule_count;
     }
 
+    // Threads this thread started on its own core at a lower priority (see SendSyncRequestImpl in
+    // svc_ipc.cpp). Only touched by the owning thread itself (and Finalize); each entry holds a
+    // reference.
+    std::vector<KThread*>& GetPendingStartedThreads() {
+        return m_pending_started_threads;
+    }
+
     void SetYieldScheduleCount(s64 count) {
         m_schedule_count = count;
     }
@@ -889,6 +896,7 @@ private:
     SyncObjectBuffer m_sync_object_buffer{};
     s64 m_schedule_count{};
     s64 m_last_scheduled_tick{};
+    std::vector<KThread*> m_pending_started_threads;
     std::array<QueueEntry, Core::Hardware::NUM_CPU_CORES> m_per_core_priority_queue_entry{};
     KThreadQueue* m_wait_queue{};
     LockWithPriorityInheritanceInfoList m_held_lock_info_list{};

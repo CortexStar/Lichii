@@ -674,4 +674,8 @@ void EmitDPdyFine(EmitContext& ctx, IR::Inst& inst, ScalarF32 op_a);
 void EmitDPdxCoarse(EmitContext& ctx, IR::Inst& inst, ScalarF32 op_a);
 void EmitDPdyCoarse(EmitContext& ctx, IR::Inst& inst, ScalarF32 op_a);
 
+// Cooperative matrix (tensor core) operations
+void EmitTensorMulAdd(EmitContext& ctx, IR::Inst& inst, ScalarU32 a0, ScalarU32 a1, ScalarU32 a2,
+                      ScalarU32 a3, ScalarU32 b0, ScalarU32 b1, ScalarU32 c0, ScalarU32 c1);
+
 } // namespace Shader::Backend::GLASM

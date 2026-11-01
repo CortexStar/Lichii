@@ -97,4 +97,10 @@ void EmitGetInBoundsFromOp(EmitContext& ctx) {
     NotImplemented();
 }
 
+void EmitTensorMulAdd(EmitContext& ctx, IR::Inst& inst, std::string_view a0, std::string_view a1,
+                      std::string_view a2, std::string_view a3, std::string_view b0,
+                      std::string_view b1, std::string_view c0, std::string_view c1) {
+    NotImplemented();
+}
+
 } // namespace Shader::Backend::GLSL

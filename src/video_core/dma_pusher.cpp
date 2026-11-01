@@ -852,20 +852,16 @@ void DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
     if (!Tegra::g_nx2_ampere.load(std::memory_order_relaxed) || size == 0) {
         return;
     }
-    // The caches belong to the split's back, and the words may be written by work the front queued
-    // that the back has not run (or marked written) yet: it runs all of it first.
-    auto& split = VideoCommon::GpuSplit::Get();
-    if (split.Active()) {
-        split.Drain();
-    }
-    if (!Nx2HasGpuWrittenPage(address, size, [&](GPUVAddr page) {
-            return memory_manager.GpuToCpuAddress(page);
-        })) {
-        return;
-    }
-    if (memory_manager.IsMemoryDirty(address, size, VideoCommon::CacheType::BufferCache)) {
-        memory_manager.FlushRegion(address, size, VideoCommon::CacheType::BufferCache);
-    }
+    Nx2SynchronizeGpuWrittenCommands(address, size,
+        [] {
+            if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) split.Drain();
+        },
+        [&](GPUVAddr page) { return memory_manager.GpuToCpuAddress(page); },
+        [&] {
+            if (memory_manager.IsMemoryDirty(address, size, VideoCommon::CacheType::BufferCache)) {
+                memory_manager.FlushRegion(address, size, VideoCommon::CacheType::BufferCache);
+            }
+        });
 }
 
 void DmaPusher::ReportUnboundSubchannel() {

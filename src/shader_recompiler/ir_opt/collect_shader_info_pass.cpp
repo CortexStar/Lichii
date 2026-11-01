@@ -492,6 +492,10 @@ void VisitUsages(Info& info, IR::Inst& inst) {
     case IR::Opcode::LaneId:
         info.uses_subgroup_invocation_id = true;
         break;
+    case IR::Opcode::TensorMulAdd:
+        info.uses_tensor_mul_add = true;
+        info.uses_subgroup_invocation_id = true;
+        break;
     case IR::Opcode::ShuffleIndex:
     case IR::Opcode::ShuffleUp:
     case IR::Opcode::ShuffleDown:

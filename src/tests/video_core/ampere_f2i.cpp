@@ -360,7 +360,8 @@ TEST_CASE("Ampere formatted buffer stores preserve descriptors data and predicat
             }};
             const auto lowered = LowerToMaxwell(code);
             REQUIRE(static_cast<bool>(lowered));
-            REQUIRE(lowered.required_texture_buffer == 3);
+            REQUIRE(lowered.required_surface_buffer == 3);
+            REQUIRE(lowered.required_texture_buffer == ~0U);
             REQUIRE(lowered.instructions.size() == 2);
             REQUIRE(lowered.instructions.front() ==
                     (0xeb20000000000000ULL | (u64{guard} << 16) | 4 | (15ULL << 20) |

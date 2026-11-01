@@ -42,11 +42,15 @@ add_executable(tests
     video_core/ampere_returns.cpp
     video_core/ampere_f2i.cpp
     video_core/compute_storage_buffers.cpp
+    video_core/cooperative_matrix.cpp
     video_core/ampere_kirby.cpp
     video_core/ampere_geometry.cpp
     video_core/ampere_geometry_lowering.cpp
     video_core/ampere_geometry_exit.cpp
     video_core/ampere_uniform_lea.cpp
+    video_core/ampere_integer_multiply.cpp
+    video_core/ampere_program_override.cpp
+    video_core/x8d24_conversion.cpp
     video_core/ampere_bindless_tex.cpp
     video_core/ampere_sured.cpp
     video_core/ampere_release_guards.cpp
