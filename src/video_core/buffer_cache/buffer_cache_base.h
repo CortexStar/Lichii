@@ -609,6 +609,7 @@ private:
 
     size_t immediate_buffer_capacity = 0;
     Common::ScratchBuffer<u8> immediate_buffer_alloc;
+    std::vector<u8> guest_uint8_indices;
 
     struct LRUItemParams {
         using ObjectType = BufferId;

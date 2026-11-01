@@ -648,6 +648,15 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
     });
 }
 
+void BufferCacheRuntime::BindHostUint8IndexBuffer(std::span<const u8> indices) {
+    const auto staging = staging_pool.Request(indices.size() * sizeof(u16), MemoryUsage::Upload);
+    u16* const widened = reinterpret_cast<u16*>(staging.mapped_span.data());
+    std::copy(indices.begin(), indices.end(), widened);
+    scheduler.Record([buffer = staging.buffer, offset = staging.offset](vk::CommandBuffer cmdbuf) {
+        cmdbuf.BindIndexBuffer(buffer, offset, VK_INDEX_TYPE_UINT16);
+    });
+}
+
 void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 first, u32 count) {
     if (count == 0) {
         ReserveNullBuffer();
