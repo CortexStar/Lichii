@@ -13,6 +13,7 @@
 #include <thread>
 #include <utility>
 #include <queue>
+#include <source_location>
 
 #include "common/alignment.h"
 #include "common/common_types.h"
@@ -45,10 +46,12 @@ public:
     ~Scheduler();
 
     /// Sends the current execution context to the GPU.
-    u64 Flush(VkSemaphore signal_semaphore = {}, VkSemaphore wait_semaphore = {});
+    u64 Flush(VkSemaphore signal_semaphore = {}, VkSemaphore wait_semaphore = {},
+              std::source_location location = std::source_location::current());
 
     /// Sends the current execution context to the GPU and waits for it to complete.
-    void Finish(VkSemaphore signal_semaphore = {}, VkSemaphore wait_semaphore = {});
+    void Finish(VkSemaphore signal_semaphore = {}, VkSemaphore wait_semaphore = {},
+                std::source_location location = std::source_location::current());
 
     /// Waits for the worker thread to finish executing everything. After this function returns it's
     /// safe to touch worker resources.
@@ -58,7 +61,8 @@ public:
     void DispatchWork();
 
     /// Requests to begin a renderpass.
-    void RequestRenderpass(const Framebuffer* framebuffer);
+    void RequestRenderpass(const Framebuffer* framebuffer,
+                           std::source_location location = std::source_location::current());
 
     /// Defers a full-attachment color clear so it becomes the next render pass.
     bool DeferColorClear(const Framebuffer* framebuffer, u32 rt_slot, const VkClearValue& value);
@@ -71,7 +75,24 @@ public:
 
     /// Requests the current execution context to be able to execute operations only allowed outside
     /// of a renderpass.
-    void RequestOutsideRenderPassOperationContext();
+    void RequestOutsideRenderPassOperationContext(
+        std::source_location location = std::source_location::current());
+
+    void DeferFragmentBarrier() {
+        fragment_barrier_pending = state.renderpass != VK_NULL_HANDLE;
+    }
+
+    bool TakeFragmentBarrier() {
+        return std::exchange(fragment_barrier_pending, false);
+    }
+
+    void NoteRenderPassStores() {
+        render_pass_has_stores = true;
+    }
+
+    bool RenderPassHasStores() const {
+        return render_pass_has_stores;
+    }
 
     /// Returns true when a render pass is currently active in the scheduler state.
     bool IsRenderPassActive() const {
@@ -319,6 +340,8 @@ private:
     StateTracker& state_tracker;
 
     std::unique_ptr<MasterSemaphore> master_semaphore;
+    bool fragment_barrier_pending{};
+    bool render_pass_has_stores{};
     std::unique_ptr<CommandPool> command_pool;
 
     VideoCommon::QueryCacheBase<QueryCacheParams>* query_cache = nullptr;

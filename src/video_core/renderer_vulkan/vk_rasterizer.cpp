@@ -1300,6 +1300,11 @@ void RasterizerVulkan::WaitForIdle() {
 
     query_cache.NotifyWFI();
 
+    if (device.IsMoltenVK() && scheduler.IsRenderPassActive()) {
+        scheduler.DeferFragmentBarrier();
+        fence_manager.SignalOrdering();
+        return;
+    }
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([event = *wfi_event, flags](vk::CommandBuffer cmdbuf) {
         cmdbuf.SetEvent(event, flags);
@@ -1309,6 +1314,10 @@ void RasterizerVulkan::WaitForIdle() {
 }
 
 void RasterizerVulkan::FragmentBarrier() {
+    if (device.IsMoltenVK()) {
+        scheduler.DeferFragmentBarrier();
+        return;
+    }
     // We already put barriers when a render pass finishes
     scheduler.RequestOutsideRenderPassOperationContext();
 }

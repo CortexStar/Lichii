@@ -18,6 +18,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "common/alignment.h"
+#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/slot_vector.h"
 #include "video_core/control/channel_state.h"
@@ -410,13 +411,29 @@ void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
     if (!Settings::values.barrier_feedback_loops.GetValue()) {
         return;
     }
+    const auto& regs = maxwell3d->regs;
+    const bool writes_depth_stencil = regs.depth_write_enabled != 0 || regs.stencil_enable != 0;
+    const auto barrier = [&] {
+        if (feedback_depth_dirty) {
+            runtime.BarrierFeedbackLoop();
+            feedback_depth_dirty = false;
+        }
+    };
+    SCOPE_EXIT {
+        if (writes_depth_stencil) {
+            feedback_depth_dirty = true;
+        }
+    };
 
     if (render_targets_serial == last_feedback_loop_serial &&
         texture_bindings_serial == last_feedback_texture_serial) {
         if (last_feedback_loop_result) {
-            runtime.BarrierFeedbackLoop();
+            barrier();
         }
         return;
+    }
+    if (render_targets_serial != last_feedback_loop_serial) {
+        feedback_depth_dirty = true;
     }
 
     if (rt_active_mask == 0) {
@@ -465,8 +482,31 @@ void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
     last_feedback_texture_serial = texture_bindings_serial;
     last_feedback_loop_result = requires_barrier;
     if (requires_barrier) {
-        runtime.BarrierFeedbackLoop();
+        barrier();
     }
+}
+
+template <class P>
+bool TextureCache<P>::SamplesRenderTarget(std::span<const ImageViewInOut> views) {
+    if (rt_active_mask == 0) {
+        return false;
+    }
+    const bool depth_active = (rt_active_mask & (1u << NUM_RT)) != 0;
+    for (const auto& view : views) {
+        if (!view.id) {
+            continue;
+        }
+        const ImageId image_id = slot_image_views[view.id].image_id;
+        if (depth_active && image_id == rt_depth_image_id) {
+            return true;
+        }
+        for (size_t i = 0; i < NUM_RT; ++i) {
+            if ((rt_active_mask & (1u << i)) != 0 && image_id == rt_image_id[i]) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 template <class P>

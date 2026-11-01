@@ -5,6 +5,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <memory>
+#include <algorithm>
+#include <vector>
+#include <string_view>
+#include <string>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -35,6 +40,20 @@ std::atomic<u64> g_profile_renderpasses{};
 std::atomic<u64> g_profile_finishes{};
 std::atomic<u64> g_profile_finish_ns{};
 std::atomic<u64> g_profile_window_start{};
+std::mutex g_profile_end_mutex;
+std::map<std::string, u64> g_profile_ends;
+
+void CountRenderPassEnd(const char* file, u32 line) {
+    if (!VideoCommon::Nx2Profile::Enabled()) {
+        return;
+    }
+    std::string_view name{file};
+    if (const auto slash = name.find_last_of('/'); slash != std::string_view::npos) {
+        name.remove_prefix(slash + 1);
+    }
+    std::scoped_lock lock{g_profile_end_mutex};
+    ++g_profile_ends[fmt::format("{}:{}", name, line)];
+}
 
 void ReportSubmitCounts() {
     const u64 now = VideoCommon::Nx2Profile::Now();
@@ -55,6 +74,19 @@ void ReportSubmitCounts() {
              static_cast<double>(g_profile_renderpasses.exchange(0)) / seconds,
              static_cast<double>(g_profile_finishes.exchange(0)) / seconds,
              static_cast<double>(g_profile_finish_ns.exchange(0)) / 1e6 / seconds);
+    std::vector<std::pair<u64, std::string>> ends;
+    {
+        std::scoped_lock lock{g_profile_end_mutex};
+        for (const auto& [site, count] : g_profile_ends) {
+            ends.emplace_back(count, site);
+        }
+        g_profile_ends.clear();
+    }
+    std::sort(ends.rbegin(), ends.rend());
+    for (size_t i = 0; i < ends.size() && i < 16; ++i) {
+        LOG_INFO(Render_Vulkan, "Render pass ends {:.0f}/s at {}",
+                 static_cast<double>(ends[i].first) / seconds, ends[i].second);
+    }
 }
 }
 
@@ -85,7 +117,11 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
 
 Scheduler::~Scheduler() = default;
 
-u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
+u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
+                     std::source_location location) {
+    if (state.renderpass) {
+        CountRenderPassEnd(location.file_name(), location.line());
+    }
     if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
         VideoCommon::GpuSplit::CheckOwner("Scheduler::Flush");
     }
@@ -95,7 +131,11 @@ u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
     return signal_value;
 }
 
-void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
+void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
+                       std::source_location location) {
+    if (state.renderpass) {
+        CountRenderPassEnd(location.file_name(), location.line());
+    }
     VideoCommon::ReadbackDiagnostics::Scope diagnostic{
         VideoCommon::ReadbackDiagnostics::Event::DeviceFinish};
     if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
@@ -259,7 +299,7 @@ void Scheduler::FlushDeferredClear() {
     EndRenderPass();
 }
 
-void Scheduler::RequestRenderpass(const Framebuffer* framebuffer) {
+void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_location location) {
     if (deferred_clear.framebuffer == framebuffer) {
         RealizeDeferredClear();
         return;
@@ -272,12 +312,18 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer) {
         render_area.height == state.render_area.height) {
         return;
     }
+    if (state.renderpass) {
+        CountRenderPassEnd(location.file_name(), location.line());
+    }
     // Ends any active pass and realizes a deferred clear
     EndRenderPass();
     BeginRenderPassImpl(framebuffer, renderpass, nullptr, 0);
 }
 
-void Scheduler::RequestOutsideRenderPassOperationContext() {
+void Scheduler::RequestOutsideRenderPassOperationContext(std::source_location location) {
+    if (state.renderpass) {
+        CountRenderPassEnd(location.file_name(), location.line());
+    }
     EndRenderPass();
 }
 
@@ -474,6 +520,8 @@ void Scheduler::EndRenderPass()
         if (!state.renderpass) {
             return;
         }
+        fragment_barrier_pending = false;
+        render_pass_has_stores = false;
 
         query_cache->CounterClose(VideoCommon::QueryType::StreamingByteCount);
 
