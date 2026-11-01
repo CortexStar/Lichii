@@ -40,6 +40,11 @@ EmuWindow_SDL3::EmuWindow_SDL3(InputCommon::InputSubsystem* input_subsystem_, Co
         auto const results = this_->system.GetAndResetPerfStats();
         auto* const title = new std::string(fmt::format("{} | {}-{} | FPS: {:.0f} ({:.0f}%)", Common::g_build_fullname, Common::g_scm_branch, Common::g_scm_desc, results.average_game_fps, results.emulation_speed * 100.0f));
         delete this_->pending_title.exchange(title);
+        static const bool log_fps = std::getenv("EDEN_NX2_FPS_LOG") != nullptr;
+        if (log_fps) {
+            LOG_INFO(Frontend, "FPS: {:.1f} speed: {:.0f}% frametime: {:.2f} ms", results.average_game_fps,
+                     results.emulation_speed * 100.0, results.frametime * 1000.0);
+        }
         return 2000;
     }, this);
     mouse_timer = SDL_AddTimer(100, [](void *userdata, SDL_TimerID, Uint32) -> Uint32 {

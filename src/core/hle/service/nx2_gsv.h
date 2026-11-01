@@ -1479,7 +1479,11 @@ private:
     // nx2-frame-<n>.tga in <dir> (lets hidden test runs check the output; idea from changes.patch).
     void CaptureFrame() {
         static const char* const directory = std::getenv("EDEN_NX2_FRAME_CAPTURE");
-        if (directory == nullptr || (m_presents % 120) != 1 || m_capture_pending->exchange(true)) {
+        static const u64 every = [] {
+            const char* value = std::getenv("EDEN_NX2_FRAME_CAPTURE_EVERY");
+            return value != nullptr ? (std::max)(u64{1}, std::strtoull(value, nullptr, 10)) : u64{120};
+        }();
+        if (directory == nullptr || (m_presents % every) != 1 % every || m_capture_pending->exchange(true)) {
             return;
         }
         const auto layout = Layout::DefaultFrameLayout(1280, 720);
