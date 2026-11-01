@@ -370,16 +370,32 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             flow_auto_widget ? static_cast<ConfigurationShared::Widget*>(flow_auto_widget)->checkbox
                              : nullptr;
 
+        // Disabling a whole Widget would also disable its restore button (Qt disables every child),
+        // and the widget's serializer reads a disabled restore button as "using the global value",
+        // which would drop an existing per-game override. So only the controls are disabled, and
+        // the restore button keeps its own state.
+        const auto set_controls_enabled = [](QWidget* widget, bool enabled) {
+            const QPushButton* const restore_button =
+                static_cast<ConfigurationShared::Widget*>(widget)->restore_button;
+            for (QWidget* const control :
+                 widget->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly)) {
+                if (control != restore_button) {
+                    control->setEnabled(enabled);
+                }
+            }
+        };
         const auto update_frame_gen_enabled = [frame_gen_children, frame_gen_box, flow_auto_box,
-                                               flow_scale_widget,
-                                               flow_scale_initially_enabled]() {
+                                               flow_scale_widget, flow_scale_initially_enabled,
+                                               set_controls_enabled]() {
             const bool enabled = frame_gen_box == nullptr || frame_gen_box->isChecked();
             for (const auto& [child, initially_enabled] : frame_gen_children) {
-                child->setEnabled(initially_enabled && enabled);
+                if (initially_enabled) {
+                    set_controls_enabled(child, enabled);
+                }
             }
-            if (flow_scale_widget != nullptr && flow_auto_box != nullptr) {
-                flow_scale_widget->setEnabled(flow_scale_initially_enabled && enabled &&
-                                              !flow_auto_box->isChecked());
+            if (flow_scale_widget != nullptr && flow_auto_box != nullptr &&
+                flow_scale_initially_enabled) {
+                set_controls_enabled(flow_scale_widget, enabled && !flow_auto_box->isChecked());
             }
         };
         if (frame_gen_box != nullptr) {
