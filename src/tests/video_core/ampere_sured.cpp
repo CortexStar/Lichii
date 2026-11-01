@@ -128,7 +128,7 @@ TEST_CASE("Ampere SURED preserves predicate and register operands",
     code[0].words[1] |= data;
     const auto lowered = LowerToMaxwell(code);
     REQUIRE(static_cast<bool>(lowered));
-    REQUIRE(lowered.instructions.size() == (predicate == 15 ? 1 : 2));
+    REQUIRE(lowered.instructions.size() == (predicate == 15 ? 1U : 2U));
     if (predicate != 15) {
         REQUIRE(lowered.instructions.front() ==
                 (0xeb4800c600000000ULL | (u64{predicate} << 16) | (u64{coordinate} << 8) | data));
