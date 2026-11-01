@@ -345,15 +345,24 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
         QWidget* const frame_gen_widget = find_widget(Settings::values.frame_gen);
         QWidget* const flow_auto_widget = find_widget(Settings::values.frame_gen_flow_scale_auto);
         QWidget* const flow_scale_widget = find_widget(Settings::values.frame_gen_flow_scale);
-        const std::vector<QWidget*> frame_gen_children{
-            find_widget(Settings::values.frame_gen_type),
-            find_widget(Settings::values.frame_gen_multiplier),
-            find_widget(Settings::values.frame_gen_target_rate),
-            flow_auto_widget,
-            flow_scale_widget,
-            find_widget(Settings::values.frame_gen_queue_target),
-            find_widget(Settings::values.frame_gen_dump_flow),
-        };
+        // Remember whether each widget started out enabled: widgets whose setting cannot be changed
+        // while a game is running are disabled by the shared widget code and must stay that way.
+        std::vector<std::pair<QWidget*, bool>> frame_gen_children;
+        for (QWidget* const child : {
+                 find_widget(Settings::values.frame_gen_type),
+                 find_widget(Settings::values.frame_gen_multiplier),
+                 find_widget(Settings::values.frame_gen_target_rate),
+                 flow_auto_widget,
+                 flow_scale_widget,
+                 find_widget(Settings::values.frame_gen_queue_target),
+                 find_widget(Settings::values.frame_gen_dump_flow),
+             }) {
+            if (child != nullptr) {
+                frame_gen_children.emplace_back(child, child->isEnabled());
+            }
+        }
+        const bool flow_scale_initially_enabled =
+            flow_scale_widget != nullptr && flow_scale_widget->isEnabled();
         auto* const frame_gen_box =
             frame_gen_widget ? static_cast<ConfigurationShared::Widget*>(frame_gen_widget)->checkbox
                              : nullptr;
@@ -362,15 +371,15 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
                              : nullptr;
 
         const auto update_frame_gen_enabled = [frame_gen_children, frame_gen_box, flow_auto_box,
-                                               flow_scale_widget]() {
+                                               flow_scale_widget,
+                                               flow_scale_initially_enabled]() {
             const bool enabled = frame_gen_box == nullptr || frame_gen_box->isChecked();
-            for (QWidget* child : frame_gen_children) {
-                if (child != nullptr) {
-                    child->setEnabled(enabled);
-                }
+            for (const auto& [child, initially_enabled] : frame_gen_children) {
+                child->setEnabled(initially_enabled && enabled);
             }
             if (flow_scale_widget != nullptr && flow_auto_box != nullptr) {
-                flow_scale_widget->setEnabled(enabled && !flow_auto_box->isChecked());
+                flow_scale_widget->setEnabled(flow_scale_initially_enabled && enabled &&
+                                              !flow_auto_box->isChecked());
             }
         };
         if (frame_gen_box != nullptr) {
