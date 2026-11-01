@@ -15,10 +15,34 @@ ditto "$build_dir/bin/eglantine.app" "$app"
 rm -f "$app/Contents/MacOS/nx2_switches.txt"
 cp "$build_dir/bin/eden-cli" "$app/Contents/MacOS/eden-cli"
 cp "$source_dir/dist/macos/eglantine.entitlements" "$app/Contents/Resources/"
+mkdir -p "$app/Contents/Resources/licenses"
+cp -R "$source_dir/dist/licenses/." "$app/Contents/Resources/licenses/"
 test -s "$app/Contents/Frameworks/libMoltenVK.dylib"
 
 "${QT_ROOT_DIR:?QT_ROOT_DIR must point to the Qt installation}/bin/macdeployqt" "$app" \
     "-executable=$app/Contents/MacOS/eden-cli" -always-overwrite
+
+rm -f "$app/Contents/PlugIns/platforminputcontexts/libqtvirtualkeyboardplugin.dylib"
+find "$app/Contents" -type f | while IFS= read -r binary; do
+    if ! file -b "$binary" | grep -q 'Mach-O'; then
+        continue
+    fi
+    otool -l "$binary" | awk '/cmd LC_RPATH/ {getline; getline; print $2}' |
+        while IFS= read -r rpath; do
+            case "$rpath" in
+                /opt/homebrew/* | /usr/local/*)
+                    install_name_tool -delete_rpath "$rpath" "$binary"
+                    ;;
+            esac
+        done
+done
+for executable in eglantine eden-cli; do
+    binary="$app/Contents/MacOS/$executable"
+    if ! otool -l "$binary" | awk '/cmd LC_RPATH/ {getline; getline; print $2}' |
+        grep -qx '@executable_path/../Frameworks'; then
+        install_name_tool -add_rpath @executable_path/../Frameworks "$binary"
+    fi
+done
 
 find "$app/Contents/Frameworks" "$app/Contents/PlugIns" -type f | while IFS= read -r binary; do
     if file -b "$binary" | grep -q 'Mach-O'; then
@@ -35,7 +59,10 @@ app="$stage/unpacked/eglantine.app"
 
 plutil -lint "$app/Contents/Info.plist"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")" = eglantine
-test -s "$app/Contents/Resources/eden.icns"
+test -s "$app/Contents/Resources/eglantine.icns"
+for notice in ffmpeg/COPYING.LGPLv2.1 ffmpeg/LICENSE.md dav1d/COPYING README.md; do
+    cmp "$source_dir/dist/licenses/$notice" "$app/Contents/Resources/licenses/$notice"
+done
 test -s "$app/Contents/Resources/nx2_switches.txt"
 test -s "$app/Contents/PlugIns/platforms/libqcocoa.dylib"
 codesign --verify --deep --strict --verbose=2 "$app"
@@ -45,6 +72,15 @@ find "$app" -type f | while IFS= read -r binary; do
         continue
     fi
     lipo "$binary" -verify_arch arm64
+    otool -l "$binary" | awk '/cmd LC_RPATH/ {getline; getline; print $2}' |
+        while IFS= read -r rpath; do
+            case "$rpath" in
+                /opt/homebrew/* | /usr/local/*)
+                    echo "Unbundled search path in $binary: $rpath" >&2
+                    exit 1
+                    ;;
+            esac
+        done
     otool -arch arm64 -L "$binary" | tail -n +2 | awk '{print $1}' | while IFS= read -r dependency; do
         case "$dependency" in
             /System/Library/* | /usr/lib/*) ;;

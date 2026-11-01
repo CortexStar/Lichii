@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <optional>
 #include <set>
 #include <span>
@@ -18,6 +19,7 @@
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "common/settings.h"
+#include "video_core/vulkan_common/sparse_image_policy.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 VK_DEFINE_HANDLE(VmaAllocator)
@@ -336,6 +338,14 @@ public:
         default:
             return false;
         }
+    }
+
+    bool CanUseUnbackedSparseImages() const {
+        static const char forced = [] {
+            const char* value = std::getenv("EDEN_NX2_SPARSE_UNBACKED");
+            return value == nullptr ? '\0' : value[0];
+        }();
+        return Vulkan::CanUseUnbackedSparseImages(GetDriverID(), forced);
     }
 
     /// Returns true for tile-based deferred renderers.

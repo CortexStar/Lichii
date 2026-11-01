@@ -18,6 +18,8 @@ TEST_CASE("Nx2 video MIME configurations retain their codec", "[nx2_video]") {
     const std::array cases{
         std::pair{std::string_view{"video/vp9"}, VideoCodec::VP9},
         std::pair{std::string_view{"video/vp8"}, VideoCodec::VP8},
+        std::pair{std::string_view{"video/av01"}, VideoCodec::AV1},
+        std::pair{std::string_view{"video/av1"}, VideoCodec::AV1},
         std::pair{std::string_view{"video/avc"}, VideoCodec::H264},
         std::pair{std::string_view{"video/h264"}, VideoCodec::H264},
     };

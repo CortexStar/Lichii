@@ -218,6 +218,8 @@ add_library(video_core STATIC
     vulkan_common/vulkan_debug_callback.h
     vulkan_common/vulkan_device.cpp
     vulkan_common/vulkan_device.h
+    vulkan_common/sparse_binding_transaction.h
+    vulkan_common/sparse_image_policy.h
     vulkan_common/cooperative_matrix.h
     vulkan_common/vulkan_instance.cpp
     vulkan_common/vulkan_instance.h
@@ -263,6 +265,7 @@ add_library(video_core STATIC
     texture_cache/image_view_info.h
     texture_cache/render_targets.h
     texture_cache/samples_helper.h
+    texture_cache/sparse_image.h
     texture_cache/texture_cache.cpp
     texture_cache/texture_cache.h
     texture_cache/texture_cache_base.h

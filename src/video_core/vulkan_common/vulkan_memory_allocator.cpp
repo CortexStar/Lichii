@@ -229,7 +229,8 @@ vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicat
     // They take the unbacked sparse fallback below.
     const u64 texels = u64{ci.extent.width} * ci.extent.height * ci.extent.depth * ci.arrayLayers;
     const bool huge = texels > (u64{1} << 28) && ci.samples == VK_SAMPLE_COUNT_1_BIT &&
-                      device.IsSparseResidencyImageSupported(ci.imageType);
+                      device.IsSparseResidencyImageSupported(ci.imageType) &&
+                      device.CanUseUnbackedSparseImages();
     VkResult result = huge ? VK_ERROR_OUT_OF_DEVICE_MEMORY
                            : vmaCreateImage(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
@@ -282,7 +283,7 @@ vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicat
 }
 
 vk::Image MemoryAllocator::CreateUnbackedImage(const VkImageCreateInfo &ci) const {
-    if (ci.samples != VK_SAMPLE_COUNT_1_BIT ||
+    if (!device.CanUseUnbackedSparseImages() || ci.samples != VK_SAMPLE_COUNT_1_BIT ||
         !device.IsSparseResidencyImageSupported(ci.imageType)) {
         return vk::Image{};
     }

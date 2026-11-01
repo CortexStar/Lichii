@@ -6,8 +6,10 @@
 
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 #include <boost/container/small_vector.hpp>
 
@@ -73,6 +75,9 @@ struct OverlapResult {
     Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const ImageInfo& info,
     std::span<const u8> input, std::span<u8> output);
 
+[[nodiscard]] boost::container::small_vector<BufferImageCopy, 16> UnswizzleBlockLinearImage(
+    const ImageInfo& info, std::span<const u8> input, std::span<u8> output, bool native_tiling);
+
 /// Unswizzles only the blocks of a 2D block-linear image that overlap `dirty_ranges` (sorted,
 /// non-overlapping [begin, end) byte offsets from the image start) into `output`. Returns no copies
 /// when the image layout is not one this handles; the caller then uploads the whole image.
@@ -82,6 +87,21 @@ struct OverlapResult {
 
 /// Rewrites `copies` (from UnswizzleImage) to the layout ConvertImage produces, without converting.
 void ConvertedLayout(const ImageInfo& info, std::span<BufferImageCopy> copies);
+
+[[nodiscard]] std::vector<LevelRect> SparseTileRects(
+    const ImageInfo& info, std::span<const std::pair<u64, u64>> ranges, u32 tile_width,
+    u32 tile_height, s32 tail_level);
+
+[[nodiscard]] size_t UnswizzledRectsBytes(const ImageInfo& info, std::span<const LevelRect> rects);
+
+[[nodiscard]] std::vector<BufferImageCopy> UnswizzleImageRects(
+    Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const ImageInfo& info,
+    std::span<const LevelRect> rects, std::span<u8> output);
+
+[[nodiscard]] std::vector<BufferImageCopy> UnswizzleImageRects(
+    const std::function<void(GPUVAddr, std::span<u8>)>& read, GPUVAddr gpu_addr,
+    const ImageInfo& info, std::span<const LevelRect> rects, std::span<u8> output,
+    bool native_tiling);
 
 void ConvertImage(std::span<const u8> input, const ImageInfo& info, std::span<u8> output,
                   std::span<BufferImageCopy> copies);

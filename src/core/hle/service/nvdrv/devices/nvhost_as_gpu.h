@@ -23,6 +23,7 @@
 #include "common/swap.h"
 #include "core/hle/service/nvdrv/core/nvmap.h"
 #include "core/hle/service/nvdrv/devices/nvdevice.h"
+#include "core/hle/service/nvdrv/devices/nx2_gpu_mapping_preparation.h"
 #include "core/hle/service/nvdrv/devices/nx2_gpu_mapping_table.h"
 
 namespace Tegra {
@@ -234,6 +235,8 @@ private:
 
     // Switch 2: maps GPU-accessible process memory (CPU range) at a GPU address.
     void Nx2Map(u64 gpu_address, u64 cpu_address, u64 size);
+    std::optional<Nx2GpuMappingPreparation> Nx2PrepareMap(u64 gpu_address, u64 cpu_address, u64 size,
+                                                        bool acquire_backing);
     void Nx2Unmap(u64 gpu_address, u64 size);
     NvCore::SessionId nx2_session{};
     struct Nx2DeviceRange {

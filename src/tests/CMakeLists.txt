@@ -36,6 +36,10 @@ add_executable(tests
     video_core/nx2_gpu_mappings.cpp
     video_core/nx2_sparse_mappings.cpp
     video_core/nx2_sparse_region.cpp
+    video_core/nx2_sparse_tiles.cpp
+    video_core/nx2_sparse_images.cpp
+    video_core/nx2_sparse_image_layout.cpp
+    video_core/nx2_sparse_image_write.cpp
     video_core/nx2_command_sync.cpp
     video_core/nx2_command_ranges.cpp
     video_core/physical_alias.cpp

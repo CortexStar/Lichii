@@ -7,11 +7,14 @@
 #include "common/string_util.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_client_session.h"
+#include "core/hle/kernel/k_event.h"
+#include "core/hle/kernel/svc_results.h"
 #include "core/hle/result.h"
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/cmif_types.h"
 #include "core/hle/service/cmif_serialization.h"
 #include "core/hle/service/ipc_helpers.h"
+#include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/ngc/ngc.h"
 #include "core/hle/service/server_manager.h"
 #include "core/hle/service/service.h"
@@ -179,9 +182,11 @@ static_assert(sizeof(SaveDataHandle) == 0x08);
 
 class IUserShimScopedObject final : public ServiceFramework<IUserShimScopedObject> {
 public:
-    explicit IUserShimScopedObject(Core::System& system_) : ServiceFramework(system_, "IUserShimScopedObject") {
+    explicit IUserShimScopedObject(Core::System& system_)
+        : ServiceFramework(system_, "IUserShimScopedObject"), service_context{system_, "stpl:u"} {
         // clang-format off
         static const FunctionInfo functions[] = {
+            {300, D<&IUserShimScopedObject::GetEvent>, "GetEvent"},
             {450, nullptr, "InitializeForSaveData"},
             {451, nullptr, "FinalizeForSaveData"},
             {452, D<&IUserShimScopedObject::OpenSaveData>, "OpenSaveData"},
@@ -193,6 +198,17 @@ public:
         };
         // clang-format on
         RegisterHandlers(functions);
+        event = service_context.CreateEvent("IUserShimScopedObject:Event");
+    }
+
+    ~IUserShimScopedObject() override {
+        service_context.CloseEvent(event);
+    }
+
+    Result GetEvent(OutCopyHandle<Kernel::KReadableEvent> out_event) {
+        R_UNLESS(event != nullptr, Kernel::ResultOutOfResource);
+        *out_event = &event->GetReadableEvent();
+        R_SUCCEED();
     }
 
     Result OpenSaveData(Account::Uid unk0, Out<SaveDataHandle> unk1) {
@@ -210,6 +226,10 @@ public:
         // to implement
         R_SUCCEED();
     }
+
+private:
+    KernelHelpers::ServiceContext service_context;
+    Kernel::KEvent* event{};
 };
 
 class IUserService final : public ServiceFramework<IUserService> {

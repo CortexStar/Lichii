@@ -179,7 +179,11 @@ elseif (MANAGARM)
 endif()
 
 if (YUZU_USE_BUNDLED_FFMPEG)
-    AddJsonPackage(ffmpeg-ci)
+    if ((MSVC OR LINUX) AND CPMUTIL_AMD64)
+        AddJsonPackage(ffmpeg-ci-av1)
+    else()
+        AddJsonPackage(ffmpeg-ci)
+    endif()
 
     set(FFmpeg_INCLUDE_DIR
         "${FFmpeg_SOURCE_DIR}/include;${FFmpeg_HWACCEL_INCLUDE_DIRS}"

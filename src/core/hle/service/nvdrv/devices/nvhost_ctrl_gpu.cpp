@@ -6,6 +6,7 @@
 
 #include <array>
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include "common/assert.h"
 #include "common/logging.h"
@@ -207,6 +208,13 @@ void ApplyNx2Characteristics(GC& gc) {
     // Without the flag NvRm fails that call and the texture stays at GPU address 0 (title 1's
     // movie and the passes rendered into compressible pools never showed).
     gc.flags |= 1ULL << 34;
+    static const bool remap = [] {
+        const char* value = std::getenv("EDEN_NX2_SPARSE_REMAP");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (remap) {
+        gc.flags |= 1ULL << 35;
+    }
     gc.flags |= (1ULL << 40) | (1ULL << 41) | (1ULL << 42) | (1ULL << 43);
 
     // The Switch 2 layout keeps nine s16 interface versions at 0x70..0x80 (like nvgpu's
