@@ -89,7 +89,8 @@ vk::Buffer CreateBuffer(const Device& device, const MemoryAllocator& memory_allo
     if (sparse_alignment > 1) {
         return memory_allocator.CreateBuffer(buffer_ci, MemoryUsage::DeviceLocal, sparse_alignment);
     }
-    return memory_allocator.CreateBuffer(buffer_ci, MemoryUsage::DeviceLocal);
+    return memory_allocator.CreateBuffer(
+        buffer_ci, device.IsMoltenVK() ? MemoryUsage::Stream : MemoryUsage::DeviceLocal);
 }
 } // Anonymous namespace
 

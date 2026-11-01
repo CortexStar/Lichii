@@ -71,6 +71,10 @@ public:
         return last_usage_tick;
     }
 
+    [[nodiscard]] std::span<const u8> Mapped() const noexcept {
+        return buffer.Mapped();
+    }
+
     operator VkBuffer() const noexcept {
         return *buffer;
     }
