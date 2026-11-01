@@ -1930,11 +1930,10 @@ private:
             if (release_fence) {
                 m_release_fences[image] = *release_fence;
             }
-            // After the end of a stream nothing fills an image again, so a release comes back at
+            // After the end of a stream nothing fills an image again, so a release completes at
             // once as another end-of-stream frame. Mario Kart World releases its images after a
-            // movie ends and waits for the returned fences: a fence for a frame that never comes
-            // hung it on a black screen after its title movie, and a fence reached without a
-            // frame for 213 made it panic with 2111-3604 (the empty ring code).
+            // movie ends and waits for the returned fences; a fence for a frame that never comes
+            // hung the game on a black screen after its title movie.
             if (release_fence && m_stream_ended && m_inputs.empty() && m_decoded.empty()) {
                 m_free.pop_back();
                 m_release_fences.erase(image);
@@ -2133,8 +2132,6 @@ private:
         }
     }
 
-    // Hands an image back unwritten as another end-of-stream frame, so the client's fence for it
-    // passes with a frame behind it. Returns the syncpoint value that signals it.
     u32 EndOfStreamOutput(u32 image) {
         m_outputs.push_back({image, m_last_output.width, m_last_output.height, m_last_output.pts, true});
         auto& syncpoints = system.Host1x().GetSyncpointManager();
@@ -2269,7 +2266,7 @@ private:
     std::deque<u32> m_free;            ///< Output images, in the order the client acquires them
     std::map<u32, Fence> m_release_fences;
     std::deque<Output> m_outputs;      ///< Finished, for 213
-    Output m_last_output{};            ///< Most recent frame written into an image
+    Output m_last_output{};
     bool m_stream_ended{};             ///< End-of-stream frame handed out, nothing submitted since
     bool m_flush{};
     bool m_quit{};

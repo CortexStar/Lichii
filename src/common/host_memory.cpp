@@ -553,7 +553,6 @@ public:
 #elif defined(__FreeBSD__)
         fd = shm_open(SHM_ANON, O_RDWR, 0600);
 #elif defined(__APPLE__)
-        // A named shared memory object stays in anonymous memory, unlike a temporary file
         char shm_name[32];
         std::snprintf(shm_name, sizeof(shm_name), "/eden_mem_%d", int(getpid()));
         fd = shm_open(shm_name, O_RDWR | O_CREAT | O_EXCL, 0600);
@@ -790,10 +789,6 @@ private:
         }
     }
 
-    /// Host pages larger than guest pages (16 KiB on Apple silicon) can only map backing memory
-    /// for whole host pages. A host page is mapped when its guest pages are mapped to one aligned,
-    /// contiguous backing range, with the permissions all of them share. Any other host page
-    /// stays inaccessible and its accesses take the slow path.
     static constexpr u32 PageRead = 1u << 0;
     static constexpr u32 PageWrite = 1u << 1;
     static constexpr u32 PageExecute = 1u << 2;
@@ -847,8 +842,6 @@ private:
         return {true, host_offset, ProtectionFlags(permissions)};
     }
 
-    /// Applies page_states to the host pages overlapping the range. Without remap only the
-    /// permissions changed, so host pages that aren't mapped are left alone.
     void UpdateHostPages(size_t virtual_offset, size_t length, bool remap) {
         const size_t begin = AlignDown(virtual_offset, host_page_size);
         const size_t end = AlignUp(virtual_offset + length, host_page_size);
