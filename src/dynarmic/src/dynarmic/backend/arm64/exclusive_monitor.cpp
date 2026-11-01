@@ -29,8 +29,19 @@ void ExclusiveMonitor::Unlock() {
     lock.Unlock();
 }
 
+// The reservation slots are only written by their own processor and the operation that follows is
+// a compare-and-swap against the value read, so arm64 hosts take no lock here. One lock for every
+// exclusive access of every core had guest threads spinning on it for most of their time.
 bool ExclusiveMonitor::CheckAndClear(std::size_t processor_id, VAddr address) {
     const VAddr masked_address = address & RESERVATION_GRANULE_MASK;
+
+#ifdef ARCHITECTURE_arm64
+    if (exclusive_addresses[processor_id] != masked_address) {
+        return false;
+    }
+    exclusive_addresses[processor_id] = INVALID_EXCLUSIVE_ADDRESS;
+    return true;
+#endif
 
     Lock();
     if (exclusive_addresses[processor_id] != masked_address) {
@@ -53,9 +64,13 @@ void ExclusiveMonitor::Clear() {
 }
 
 void ExclusiveMonitor::ClearProcessor(std::size_t processor_id) {
+#ifdef ARCHITECTURE_arm64
+    exclusive_addresses[processor_id] = INVALID_EXCLUSIVE_ADDRESS;
+#else
     Lock();
     exclusive_addresses[processor_id] = INVALID_EXCLUSIVE_ADDRESS;
     Unlock();
+#endif
 }
 
 }  // namespace Dynarmic
