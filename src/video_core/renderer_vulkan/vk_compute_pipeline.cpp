@@ -111,7 +111,8 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
                 .pNext =
                     device.IsExtSubgroupSizeControlSupported() ? &subgroup_size_ci : nullptr,
                 .flags = info.uses_tensor_mul_add
-                             ? VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT_EXT
+                             ? VkPipelineShaderStageCreateFlags{
+                                   VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT_EXT}
                              : 0U,
                 .stage = VK_SHADER_STAGE_COMPUTE_BIT,
                 .module = *spv_module,
