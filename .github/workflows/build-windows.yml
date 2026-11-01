@@ -62,7 +62,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .sccache
-          key: objects-windows-x86_64-${{ github.sha }}
+          key: objects-windows-x86_64-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             objects-windows-x86_64-
 
@@ -100,7 +100,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .sccache
-          key: objects-windows-x86_64-${{ github.sha }}
+          key: objects-windows-x86_64-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Package
         shell: pwsh

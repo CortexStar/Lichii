@@ -196,7 +196,7 @@ jobs:
           restore-keys: |
             cpm-${{ runner.os }}-${{ runner.arch }}-
 
-      # The sha in the key makes every run save a fresh cache (actions/cache never saves over an
+      # The run id and attempt in the key make every run (and every re-run) save a fresh cache (actions/cache never saves over an
       # exact hit), and restore-keys seeds it from the newest one of the same platform.
       - name: Restore compiler objects
         uses: actions/cache/restore@v4
@@ -204,7 +204,7 @@ jobs:
           path: |
             .ccache
             .sccache
-          key: objects-${{ matrix.platform }}-${{ github.sha }}
+          key: objects-${{ matrix.platform }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             objects-${{ matrix.platform }}-
 
@@ -299,7 +299,7 @@ jobs:
           ccache --show-stats
 
       # Saved even when the build fails or the run is cancelled, so the objects compiled so far are
-      # not lost. The sha in the key makes every run save a fresh cache.
+      # not lost. The run id and attempt in the key make every run (and every re-run) save a fresh cache.
       - name: Save compiler objects
         if: always()
         uses: actions/cache/save@v4
@@ -307,7 +307,7 @@ jobs:
           path: |
             .ccache
             .sccache
-          key: objects-${{ matrix.platform }}-${{ github.sha }}
+          key: objects-${{ matrix.platform }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Package and verify macOS app
         if: runner.os == 'macOS'
@@ -448,15 +448,17 @@ jobs:
                 --jq '.commits | reverse | .[] | "- \(.commit.message | split("\n")[0]) (\(.sha[0:7]))"'
               echo
             fi
-            cat <<'EOF'
-          ## Install
-
-          Windows: extract the zip and run eglantine.exe, or eden-cli.exe from a terminal.
-          Linux: make the AppImage executable (chmod +x) and run it; it bundles its libraries and needs glibc 2.39 or newer (Ubuntu 24.04, Fedora 40, Debian 13, Arch).
-          macOS: Apple Silicon and macOS 15 or newer. Extract the zip and move eglantine.app to Applications. The CLI is inside eglantine.app/Contents/MacOS/eden-cli. The app bundles Qt and MoltenVK and is ad-hoc signed, not notarized; macOS may require approval in Privacy & Security. macOS support remains experimental and uses the JIT, not NCE.
-
-          Eglantine looks for newer builds of its channel at startup and from Help > Check for Updates.
-          EOF
+            echo "## Install"
+            echo
+            echo "Windows: extract the zip and run eglantine.exe, or eden-cli.exe from a terminal."
+            if compgen -G "dist/*.AppImage" > /dev/null; then
+              echo "Linux: make the AppImage executable (chmod +x) and run it; it bundles its libraries and needs glibc 2.39 or newer (Ubuntu 24.04, Fedora 40, Debian 13, Arch)."
+            fi
+            if compgen -G "dist/*macos*" > /dev/null; then
+              echo "macOS: Apple Silicon and macOS 15 or newer. Extract the zip and move eglantine.app to Applications. The CLI is inside eglantine.app/Contents/MacOS/eden-cli. The app bundles Qt and MoltenVK and is ad-hoc signed, not notarized; macOS may require approval in Privacy & Security. macOS support remains experimental and uses the JIT, not NCE."
+            fi
+            echo
+            echo "Eglantine looks for newer builds of its channel at startup and from Help > Check for Updates."
           } > notes.md
           gh release create "$BUILD_TAG" dist/* \
             --repo "$GITHUB_REPOSITORY" \
