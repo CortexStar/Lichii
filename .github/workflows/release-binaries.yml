@@ -74,7 +74,7 @@ jobs:
         shell: bash
         run: |
           windows='{"platform":"windows-x86_64","runner":"windows-2022"}'
-          others='{"platform":"linux-x86_64","runner":"ubuntu-24.04"},{"platform":"macos-arm64","runner":"macos-15"}'
+          others='{"platform":"linux-x86_64","runner":"ubuntu-24.04"},{"platform":"linux-aarch64","runner":"ubuntu-24.04-arm"},{"platform":"macos-arm64","runner":"macos-15"}'
           if [ '${{ inputs.all_platforms }}' = 'true' ]; then
             echo "matrix={\"include\":[$windows,$others]}" >> "$GITHUB_OUTPUT"
           else
@@ -120,14 +120,25 @@ jobs:
             libboost-dev libboost-fiber-dev libboost-context-dev \
             libopus-dev libasound2-dev ccache
 
-      - name: Install Qt on Linux
-        if: startsWith(matrix.platform, 'linux')
+      - name: Install Qt on Linux x86_64
+        if: startsWith(matrix.platform, 'linux') && runner.arch != 'ARM64'
         uses: jurplel/install-qt-action@v4
         with:
           version: '6.8.3'
           host: linux
           target: desktop
           arch: linux_gcc_64
+          modules: qtcharts
+          cache: true
+
+      - name: Install Qt on Linux ARM64
+        if: startsWith(matrix.platform, 'linux') && runner.arch == 'ARM64'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: linux_arm64
+          target: desktop
+          arch: linux_gcc_arm64
           modules: qtcharts
           cache: true
 
@@ -315,6 +326,24 @@ jobs:
         run: >-
           sh tools/macos/package.sh build/release "$ASSET_NAME.zip"
 
+      - name: Stage third-party license notices
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          mkdir -p build/release/bin/licenses
+          cp -R dist/licenses/. build/release/bin/licenses/
+
+      - name: Package Linux tar.gz
+        if: startsWith(matrix.platform, 'linux')
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x build/release/bin/eglantine
+          test -x build/release/bin/eden-cli
+          strip build/release/bin/eglantine build/release/bin/eden-cli
+          tar -czf "$ASSET_NAME.tar.gz" -C build/release/bin eglantine eden-cli licenses
+          test -s "$ASSET_NAME.tar.gz"
+
       # A self-contained AppImage: linuxdeploy bundles every library the two programs need except
       # the base system ones (glibc, X11/Wayland client libraries, the GPU driver and Vulkan loader),
       # and its Qt plugin adds the Qt libraries and platform plugins. Runs on glibc 2.39+ systems.
@@ -330,10 +359,11 @@ jobs:
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1
           tools="$RUNNER_TEMP/linuxdeploy"
           mkdir -p "$tools"
-          curl -fsSL -o "$tools/linuxdeploy-x86_64.AppImage" \
-            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          curl -fsSL -o "$tools/linuxdeploy-plugin-qt-x86_64.AppImage" \
-            https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          arch=$(uname -m)
+          curl -fsSL -o "$tools/linuxdeploy-$arch.AppImage" \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-$arch.AppImage"
+          curl -fsSL -o "$tools/linuxdeploy-plugin-qt-$arch.AppImage" \
+            "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-$arch.AppImage"
           chmod +x "$tools"/*.AppImage
           # The desktop file names its icon dev.eglantine.eglantine.
           icon="$RUNNER_TEMP/dev.eglantine.eglantine.png"
@@ -342,7 +372,10 @@ jobs:
           export QMAKE="$QT_ROOT_DIR/bin/qmake"
           export LDAI_OUTPUT="$ASSET_NAME.AppImage"
           export OUTPUT="$LDAI_OUTPUT"
-          "$tools/linuxdeploy-x86_64.AppImage" --appdir AppDir \
+          export ARCH="$arch"
+          mkdir -p AppDir/usr/share/licenses/eglantine
+          cp -R dist/licenses/. AppDir/usr/share/licenses/eglantine/
+          "$tools/linuxdeploy-$arch.AppImage" --appdir AppDir \
             --executable build/release/bin/eglantine \
             --executable build/release/bin/eden-cli \
             --desktop-file dist/dev.eden_emu.eden.desktop \
@@ -379,7 +412,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ASSET_NAME }}
-          path: ${{ env.ASSET_NAME }}.AppImage
+          path: |
+            ${{ env.ASSET_NAME }}.tar.gz
+            ${{ env.ASSET_NAME }}.AppImage
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
@@ -419,7 +454,7 @@ jobs:
           for artifact in artifacts/*/; do
             name=$(basename "$artifact")
             if compgen -G "$artifact*.AppImage" > /dev/null; then
-              cp "$artifact"/*.AppImage dist/
+              cp "$artifact"/*.AppImage "$artifact"/*.tar.gz dist/
             elif compgen -G "$artifact*.zip" > /dev/null; then
               cp "$artifact"/*.zip dist/
             else
@@ -452,7 +487,8 @@ jobs:
             echo
             echo "Windows: extract the zip and run eglantine.exe, or eden-cli.exe from a terminal."
             if compgen -G "dist/*.AppImage" > /dev/null; then
-              echo "Linux: make the AppImage executable (chmod +x) and run it; it bundles its libraries and needs glibc 2.39 or newer (Ubuntu 24.04, Fedora 40, Debian 13, Arch)."
+              echo "Linux (AppImage): make it executable (chmod +x) and run it; it bundles its libraries and needs glibc 2.39 or newer (Ubuntu 24.04, Fedora 40, Debian 13, Arch)."
+              echo "Linux (tar.gz): extract it and run ./eglantine or ./eden-cli; it uses your system libraries, so Qt 6 and the usual libraries must be installed."
             fi
             if compgen -G "dist/*macos*" > /dev/null; then
               echo "macOS: Apple Silicon and macOS 15 or newer. Extract the zip and move eglantine.app to Applications. The CLI is inside eglantine.app/Contents/MacOS/eden-cli. The app bundles Qt and MoltenVK and is ad-hoc signed, not notarized; macOS may require approval in Privacy & Security. macOS support remains experimental and uses the JIT, not NCE."
