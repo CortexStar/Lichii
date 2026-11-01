@@ -1163,21 +1163,29 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code, bool geo
             break;
         }
         case 0x23c: { // HMMA.16816.F16: D(16x8) = A(16x16) * B(16x8) + C, f16 fragments.
-            static const char* const env_mode = std::getenv("EDEN_NX2_TENSOR");
-            const char* mode = env_mode ? env_mode : "fast";
+            const char* env_mode = std::getenv("EDEN_NX2_TENSOR");
+            const std::string_view mode = env_mode ? env_mode : "";
             const u32 a = insn.Bits(24, 8), b = insn.Bits(32, 8), c = insn.Bits(64, 8);
             if ((insn.words[1] & ~0xffU) || (insn.words[2] & ~0xffU) != 0x800 || dest + 2 > 246 ||
                 a + 4 > 246 || b + 2 > 246 || (c != 255 && c + 2 > 246))
                 return fail(index, "native matrix multiply mode");
-            if (std::string_view{mode} == "stub") {
+            if (mode == "stub") {
                 for (u32 row = 0; row < 2; ++row) {
                     if (c == 255) mov_imm(static_cast<u32>(dest) + row, 0);
                     else if (c != dest) emit(0x5c98000000000000ULL | predicate | (dest + row) | (u64{15} << 39) | (u64{c + row} << 20));
                 }
                 break;
             }
-            if (!support_cooperative_matrix)
-                return fail(index, "cooperative matrix not supported");
+            if (mode != "fast" || !support_cooperative_matrix)
+                return fail(index, "native matrix multiply cooperative path unavailable");
+            if (insn.Bits(12, 4) != 7)
+                return fail(index, "native matrix multiply requires unconditional participation");
+            const u32 register_limit = uses_uniform_bank ? 216U : 246U;
+            if ((insn.words[3] & 0xc00001ffU) || dest % 2 || a % 4 || b % 2 ||
+                (c != 255 && c % 2) || dest + 2 > register_limit ||
+                a + 4 > register_limit || b + 2 > register_limit ||
+                (c != 255 && c + 2 > register_limit))
+                return fail(index, "native matrix multiply encoding or register span");
             // Emit a single TENSOR_MUL_ADD instruction. The IR/SPIR-V backend stages the
             // fragments through Workgroup memory and lowers it to OpCoopMatrixMulAddNV.
             emit((0x5D3ULL << 52) | predicate |

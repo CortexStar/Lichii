@@ -316,6 +316,7 @@ bool Load(VkInstance instance, InstanceDispatch& dld) noexcept {
     X(vkGetPhysicalDeviceFeatures2);
     X(vkGetPhysicalDeviceFormatProperties2);
     X(vkGetPhysicalDeviceProperties2);
+    X(vkGetPhysicalDeviceCooperativeMatrixPropertiesNV);
     X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR);
     X(vkGetPhysicalDeviceSurfaceFormatsKHR);
     X(vkGetPhysicalDeviceSurfacePresentModesKHR);

@@ -273,17 +273,8 @@
         "repo": "eden-emulator/sirit",
         "version": "v1.0.5",
         "patches": [
-            "0001-cooperative-matrix.patch"
-        ]
-    },
-    "sirit-ci": {
-        "ci": true,
-        "name": "sirit",
-        "package": "sirit",
-        "repo": "eden-emulator/sirit",
-        "version": "v1.0.7",
-        "patches": [
-            "0001-cooperative-matrix.patch"
+            "0001-cooperative-matrix.patch",
+            "0002-compile-options.patch"
         ]
     },
     "spirv-headers": {

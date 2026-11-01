@@ -35,7 +35,9 @@ Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a0, Id a1, Id a2, Id a3
     const auto imm = [&](u32 v) { return ctx.Const(v); };
 
     const auto ptr = [&](Id index) {
-        return ctx.OpAccessChain(ctx.coop_scratch_f16, ctx.coop_scratch, imm(0U), index);
+        return ctx.uses_explicit_workgroup_layout
+                   ? ctx.OpAccessChain(ctx.coop_scratch_f16, ctx.coop_scratch, imm(0U), index)
+                   : ctx.OpAccessChain(ctx.coop_scratch_f16, ctx.coop_scratch, index);
     };
     const auto lo_f16 = [&](Id value) {
         return ctx.OpCompositeExtract(f16, ctx.OpBitcast(f16x2, value), 0U);
@@ -49,8 +51,7 @@ Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a0, Id a1, Id a2, Id a3
         return ctx.OpBitcast(u32ty, ctx.OpCompositeConstruct(f16x2, lo, hi));
     };
     const auto barrier = [&]() {
-        // Execution scope Workgroup, memory scope Workgroup, AcquireRelease | WorkgroupMemory
-        ctx.OpControlBarrier(imm(2U), imm(2U), imm(0x108U));
+        ctx.OpControlBarrier(imm(3U), imm(3U), imm(0x108U));
     };
 
     const Id lane{ctx.OpLoad(u32ty, ctx.subgroup_local_invocation_id)};
@@ -112,10 +113,7 @@ Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a0, Id a1, Id a2, Id a3
         ctx.cooperative_matrix_type_b =
             ctx.TypeCooperativeMatrixNV(f16, imm(3U), imm(16U), imm(8U));
     }
-    if (!Sirit::ValidId(ctx.cooperative_matrix_type_c)) {
-        ctx.cooperative_matrix_type_c =
-            ctx.TypeCooperativeMatrixNV(f16, imm(3U), imm(16U), imm(8U));
-    }
+    ctx.cooperative_matrix_type_c = ctx.cooperative_matrix_type_b;
 
     const Id mat_a =
         ctx.OpCoopMatrixLoadNV(ctx.cooperative_matrix_type_a, ptr(abase), imm(16U),

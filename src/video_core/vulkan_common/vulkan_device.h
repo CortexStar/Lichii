@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <optional>
 #include <set>
@@ -114,7 +115,6 @@ VK_DEFINE_HANDLE(VmaAllocator)
     EXTENSION(NV, VIEWPORT_ARRAY2, viewport_array2)                                                \
     EXTENSION(NV, VIEWPORT_SWIZZLE, viewport_swizzle)                                              \
     EXTENSION(NV, COOPERATIVE_MATRIX, cooperative_matrix)                                             \
-    EXTENSION(KHR, COOPERATIVE_MATRIX, cooperative_matrix_khr)                                         \
     EXTENSION(EXT, FILTER_CUBIC, filter_cubic)                                                         \
     EXTENSION(IMG, FILTER_CUBIC, filter_cubic_img)                                                 \
     EXTENSION(QCOM, FILTER_CUBIC_WEIGHTS, filter_cubic_weights)
@@ -718,7 +718,24 @@ FN_MAX_LIMIT_LIST
 
     /// Returns true if the device supports VK_NV_cooperative_matrix (used for tensor ops).
     bool IsExtCooperativeMatrixSupported() const {
-        return extensions.cooperative_matrix;
+        return extensions.cooperative_matrix &&
+               features.cooperative_matrix_features.cooperativeMatrix &&
+               IsFloat16Supported() && SupportedSpirvVersion() >= 0x00010400 &&
+               cooperative_matrix_shape_supported &&
+               extensions.subgroup_size_control &&
+               features.subgroup_size_control.subgroupSizeControl &&
+               features.subgroup_size_control.computeFullSubgroups &&
+               IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT) &&
+               properties.subgroup_size_control.minSubgroupSize <= 32 &&
+               properties.subgroup_size_control.maxSubgroupSize >= 32 &&
+               (GetSubgroupSupportedStages() & VK_SHADER_STAGE_COMPUTE_BIT) &&
+               IsSubgroupFeatureSupported(VK_SUBGROUP_FEATURE_BASIC_BIT);
+    }
+
+    u32 GetMaxTensorWorkgroupSize() const {
+        return (std::min)({properties.properties.limits.maxComputeWorkGroupSize[0],
+                          properties.properties.limits.maxComputeWorkGroupInvocations,
+                          properties.subgroup_size_control.maxComputeWorkgroupSubgroups * 32U});
     }
 
     /// Returns true if the device supports VK_EXT_transform_feedback.
@@ -1224,6 +1241,7 @@ private:
     struct Properties {
         VkPhysicalDeviceDriverProperties driver{};
         VkPhysicalDeviceSubgroupProperties subgroup_properties{};
+        VkPhysicalDeviceCooperativeMatrixPropertiesNV cooperative_matrix{};
         VkPhysicalDeviceFloatControlsProperties float_controls{};
         VkPhysicalDevicePushDescriptorPropertiesKHR push_descriptor{};
         VkPhysicalDeviceDescriptorBufferPropertiesEXT descriptor_buffer{};
@@ -1239,6 +1257,7 @@ private:
     Extensions extensions{};
     Features features{};
     Properties properties{};
+    bool cooperative_matrix_shape_supported{};
 
     VkPhysicalDeviceFeatures2 features2{};
     VkPhysicalDeviceProperties2 properties2{};

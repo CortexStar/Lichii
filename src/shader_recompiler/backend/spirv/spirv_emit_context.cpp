@@ -446,6 +446,45 @@ Id DescType(EmitContext& ctx, Id sampled_type, Id pointer_type, u32 count) {
         return pointer_type;
     }
 }
+void ValidateCooperativeMatrix(const Profile& profile, const IR::Program& program) {
+    if (!program.info.uses_tensor_mul_add) {
+        return;
+    }
+    if (!profile.support_cooperative_matrix || profile.supported_spirv < 0x00010400 ||
+        program.stage != Stage::Compute) {
+        throw TensorRejected{"host features or shader stage"};
+    }
+    const auto& size = program.workgroup_size;
+    if (size[0] == 0 || size[0] > 1024 || size[0] > profile.max_tensor_workgroup_size ||
+        size[0] % 32 != 0 || size[1] != 1 || size[2] != 1) {
+        throw TensorRejected{"requires full 32-lane subgroups in a one-dimensional workgroup"};
+    }
+    const u64 guest_bytes = (u64{program.shared_memory_size} + 15U) & ~u64{15};
+    const u64 scratch_bytes = u64{size[0] / 32U} * 1280U;
+    if (guest_bytes + scratch_bytes > profile.max_compute_shared_memory_size) {
+        throw TensorRejected{"shared memory limit"};
+    }
+    size_t remaining{};
+    for (const auto* block : program.blocks) {
+        for (const auto& inst : block->Instructions()) {
+            remaining += inst.GetOpcode() == IR::Opcode::TensorMulAdd;
+        }
+    }
+    for (const auto& node : program.syntax_list) {
+        if (remaining == 0) {
+            break;
+        }
+        if (node.type != IR::AbstractSyntaxNode::Type::Block) {
+            throw TensorRejected{"control flow before or around a collective"};
+        }
+        for (const auto& inst : node.data.block->Instructions()) {
+            remaining -= inst.GetOpcode() == IR::Opcode::TensorMulAdd;
+        }
+    }
+    if (remaining != 0) {
+        throw TensorRejected{"collective missing from structured control flow"};
+    }
+}
 } // Anonymous namespace
 
 void VectorTypes::Define(Sirit::Module& sirit_ctx, Id base_type, std::string_view name) {
@@ -471,9 +510,11 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     u32& storage_binding{is_unified ? bindings.unified : bindings.storage_buffer};
     u32& texture_binding{is_unified ? bindings.unified : bindings.texture};
     u32& image_binding{is_unified ? bindings.unified : bindings.image};
+    ValidateCooperativeMatrix(profile, program);
     AddCapability(spv::Capability::Shader);
-    if (profile.support_cooperative_matrix && stage == Stage::Compute) {
+    if (program.info.uses_tensor_mul_add) {
         AddExtension("SPV_NV_cooperative_matrix");
+        AddExtension("SPV_KHR_vulkan_memory_model");
         AddCapability(static_cast<spv::Capability>(5357u));  // CooperativeMatrixNV
     }
     DefineCommonTypes(program.info);
@@ -482,7 +523,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineLocalMemory(program);
     DefineSharedMemory(program);
     DefineSharedMemoryFunctions(program);
-    if (profile.support_cooperative_matrix && stage == Stage::Compute) {
+    if (program.info.uses_tensor_mul_add) {
         DefineCooperativeMatrixScratch(program);
     }
     DefineConstantBuffers(program.info, uniform_binding);
@@ -612,21 +653,24 @@ void EmitContext::DefineCooperativeMatrixScratch(const IR::Program& program) {
         AddCapability(spv::Capability::Float16);
         F16.Define(*this, TypeFloat(16), "f16");
     }
-    // Cooperative matrix is subgroup-scoped: give every subgroup its own staging area
-    // (A 16x16, B 16x8, C 16x8, D 16x8 f16 = 640 elements).
-    const u32 threads{program.workgroup_size[0] * program.workgroup_size[1] *
-                      program.workgroup_size[2]};
-    const u32 max_subgroups{std::max(1u, (threads + 31U) / 32U)};
+    const u32 max_subgroups{program.workgroup_size[0] / 32U};
     const Id f16{F16[1]};
     const Id array{TypeArray(f16, Const(640U * max_subgroups))};
-    Decorate(array, spv::Decoration::ArrayStride, 2U);
-    const Id struct_type{TypeStruct(array)};
-    MemberDecorate(struct_type, 0U, spv::Decoration::Offset, 0U);
-    Decorate(struct_type, spv::Decoration::Block);
-    const Id pointer{TypePointer(spv::StorageClass::Workgroup, struct_type)};
+    Id storage_type{array};
+    if (uses_explicit_workgroup_layout) {
+        AddCapability(spv::Capability::WorkgroupMemoryExplicitLayout16BitAccessKHR);
+        Decorate(array, spv::Decoration::ArrayStride, 2U);
+        storage_type = TypeStruct(array);
+        const u32 offset = (program.shared_memory_size + 15U) & ~15U;
+        MemberDecorate(storage_type, 0U, spv::Decoration::Offset, offset);
+        Decorate(storage_type, spv::Decoration::Block);
+    }
+    const Id pointer{TypePointer(spv::StorageClass::Workgroup, storage_type)};
     coop_scratch_f16 = TypePointer(spv::StorageClass::Workgroup, f16);
     coop_scratch = AddGlobalVariable(pointer, spv::StorageClass::Workgroup);
-    coop_scratch_array = array;
+    if (uses_explicit_workgroup_layout) {
+        Decorate(coop_scratch, spv::Decoration::Aliased);
+    }
     interfaces.push_back(coop_scratch);
 }
 
@@ -634,7 +678,10 @@ void EmitContext::DefineSharedMemory(const IR::Program& program) {
     uses_explicit_workgroup_layout =
         profile.support_explicit_workgroup_layout &&
         (!program.info.uses_int8 || profile.support_workgroup_layout_8bit_access) &&
-        (!program.info.uses_int16 || profile.support_workgroup_layout_16bit_access);
+        (!program.info.uses_int16 || profile.support_workgroup_layout_16bit_access) &&
+        (!program.info.uses_tensor_mul_add ||
+         (program.shared_memory_size != 0 && profile.support_workgroup_layout_16bit_access &&
+          profile.supported_spirv >= 0x00010400));
     if (program.shared_memory_size == 0) {
         return;
     }
@@ -1510,7 +1557,7 @@ void EmitContext::DefineInputs(const IR::Program& program) {
             Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
         }
     }
-    if (stage == Stage::Compute && profile.support_cooperative_matrix) {
+    if (info.uses_tensor_mul_add) {
         AddCapability(spv::Capability::GroupNonUniform);
         subgroup_id = DefineInput(*this, U32[1], false, spv::BuiltIn::SubgroupId);
     }

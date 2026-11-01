@@ -68,7 +68,7 @@ using VideoCommon::FileEnvironment;
 using VideoCommon::GenericEnvironment;
 using VideoCommon::GraphicsEnvironment;
 
-constexpr u32 CACHE_VERSION = 18;
+constexpr u32 CACHE_VERSION = 22;
 constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
 constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
 constexpr std::array<char, 8> VULKAN_CACHE_MAGIC_NUMBER{'y', 'u', 'z', 'u', 'v', 'k', 'c', 'h'};
@@ -434,7 +434,10 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
                            Common::ThreadPlacement::Background),
     translation_workers(num_translation_threads, "VkPipelineTranslator", {},
                         Common::ThreadPlacement::Background) {
-    SetCooperativeMatrixSupported(device.IsExtCooperativeMatrixSupported());
+    const char* tensor_mode = std::getenv("EDEN_NX2_TENSOR");
+    const bool tensor_enabled = tensor_mode && std::string_view{tensor_mode} == "fast" &&
+                                device.IsExtCooperativeMatrixSupported();
+    SetCooperativeMatrixSupported(tensor_enabled);
     if (use_async_translation) {
         LOG_INFO(Render_Vulkan, "Native graphics pipelines are translated on {} worker threads",
                  num_translation_threads);
@@ -522,7 +525,6 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
             device.IsUniformTexelBufferArrayNonUniformIndexingSupported(),
         .support_storage_texel_buffer_array_nonuniform_indexing =
             device.IsStorageTexelBufferArrayNonUniformIndexingSupported(),
-        .support_cooperative_matrix = device.IsExtCooperativeMatrixSupported(),
 
         .warp_size_potentially_larger_than_guest = device.IsWarpSizePotentiallyBiggerThanGuest(),
 
@@ -548,6 +550,9 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
             device.GetDriverVersion() < VK_MAKE_VERSION(512, 672, 0),
         .has_broken_spirv_subgroup_shuffle = driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY,
         .max_subgroup_size = device.GetMaxSubgroupSize(),
+        .support_cooperative_matrix = tensor_enabled,
+        .max_compute_shared_memory_size = device.GetMaxComputeSharedMemorySize(),
+        .max_tensor_workgroup_size = device.GetMaxTensorWorkgroupSize(),
         .has_broken_robust =
             device.IsNvidia() && device.GetNvidiaArch() <= NvidiaArchitecture::Arch_Pascal,
         .min_ssbo_alignment = device.GetStorageBufferAlignment(),
@@ -678,12 +683,22 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
         .shared_memory_size = qmd.shared_alloc,
         .workgroup_size{qmd.block_dim_x, qmd.block_dim_y, qmd.block_dim_z},
     };
+    if (const auto rejected = rejected_tensor_pipelines.find(key);
+        rejected != rejected_tensor_pipelines.end()) {
+        std::rethrow_exception(rejected->second);
+    }
     const auto [pair, is_new]{compute_cache.try_emplace(key)};
     auto& pipeline{pair->second};
     if (!is_new) {
         return pipeline.get();
     }
-    pipeline = CreateComputePipeline(key, shader);
+    try {
+        pipeline = CreateComputePipeline(key, shader);
+    } catch (const Shader::TensorRejected&) {
+        compute_cache.erase(pair);
+        rejected_tensor_pipelines.emplace(key, std::current_exception());
+        throw;
+    }
     return pipeline.get();
 }
 
@@ -1409,7 +1424,7 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
     const GPUVAddr program_base{kepler_compute->regs.code_loc.Address()};
     const auto& qmd{kepler_compute->launch_description};
     ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start,
-                           shader->lowered_native, device.IsExtCooperativeMatrixSupported()};
+                           shader->lowered_native, profile.support_cooperative_matrix};
     env.SetCachedSize(shader->size_bytes);
 
     main_pools.ReleaseContents();
@@ -1491,6 +1506,12 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
                                              &shader_notify, program.info, std::move(spv_module),
                                              key.unique_hash);
 
+} catch (const Shader::TensorRejected& exception) {
+    if (build_in_parallel) {
+        throw;
+    }
+    LOG_WARNING(Render_Vulkan, "Skipping cached tensor shader: {}", exception.what());
+    return nullptr;
 } catch (const Shader::Exception& exception) {
     LOG_ERROR(Render_Vulkan, "{}", exception.what());
     return nullptr;

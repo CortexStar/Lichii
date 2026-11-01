@@ -323,9 +323,7 @@ public:
     Id cooperative_matrix_type_b{};
     Id cooperative_matrix_type_c{};
     Id coop_scratch{};
-    Id coop_scratch_array{};
     Id coop_scratch_f16{};
-    Id coop_matrix_len{};
     u32 rescaling_textures_member_index{};
     u32 rescaling_images_member_index{};
     u32 rescaling_downfactor_member_index{};
