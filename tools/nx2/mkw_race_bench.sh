@@ -7,8 +7,10 @@ Usage: $0 <eden-cli> <exefs main> <sdl config ini> [seconds] [VAR=value...]
 
 Boots Mario Kart World in eden-cli, drives the menus with a key script
 (L+R, then A: Grand Prix, Mario, Mushroom Cup, 50cc, OK), holds A in the
-race and prints the race frame rate. The VAR=value arguments are passed
-to eden-cli as environment variables.
+race and prints the race frame rate: 15-85 s after the cup intro movie
+ends, or the last 70 s of the run when the game skips the movie. Give it
+enough seconds to be racing by then (300 with a warm shader cache). The
+VAR=value arguments are passed to eden-cli as environment variables.
 
 The config needs the default keyboard bindings (A on the A key, L on F,
 R on H). Output goes to ./mkw_race_bench/<timestamp>.
@@ -30,7 +32,7 @@ keys="f780:9,f780:11,f790:-9,f790:-11"
 for ((frame = 850; frame <= 1800; frame += 40)); do
     keys="$keys,f$frame:4,f$((frame + 4)):-4"
 done
-keys="$keys,f3700:4"
+keys="$keys,f1900:4"
 print -r -- $keys > $out/keys.txt
 
 environment=(EDEN_NX2_FPS_LOG=1 EDEN_NX2_AUTO_STUB=1 EDEN_NX2_KEY_SCRIPT=@$out/keys.txt
@@ -58,12 +60,17 @@ movie_end=$(grep -a "2560x1440.*end of stream" $out/log_clean.txt | head -1 |
 if grep -aq "PANIC" $out/log_clean.txt; then
     print "The game panicked, see $out/log_clean.txt"
 fi
-if [[ -z $movie_end ]]; then
-    print "Did not reach the race in ${seconds} s, see $out/frames"
-    exit 1
+if [[ -n $movie_end ]]; then
+    start=$((movie_end + 15))
+    end=$((movie_end + 85))
+else
+    last=$(tail -1 $out/fps.txt | cut -d' ' -f1)
+    start=$((last - 75))
+    end=$((last - 5))
 fi
-awk -v start=$((movie_end + 15)) -v end=$((movie_end + 85)) '
+awk -v start=$start -v end=$end '
     $1 >= start && $1 <= end && $2 > 0 { sum += $2; count++; if (min == "" || $2 < min) min = $2 }
-    END { if (count) printf "Race FPS: %.1f average, %.1f minimum (%d samples)\n", sum / count, min, count }
+    END { if (count) printf "Race FPS: %.1f average, %.1f minimum (%d samples)\n", sum / count, min, count
+          else print "No frame rate samples in the race window" }
 ' $out/fps.txt
 print "Logs and frames: $out"
