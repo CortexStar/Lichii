@@ -12,6 +12,8 @@
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
+#include "common/logging.h"
+#include "video_core/frame_gen/lossless_dll.h"
 #include "common/settings.h"
 #include "video_core/renderer_vulkan/present/frame_gen.h"
 #include "video_core/renderer_vulkan/present/util.h"
@@ -216,12 +218,25 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
         return;
     }
 
-    if (!shaders->IsValid() && Settings::values.frame_gen_type.GetValue() != Settings::FrameGenType::Fsr3) {
-        unavailable = true;
-        return;
+    if (!shaders->IsValid() &&
+        Settings::values.frame_gen_type.GetValue() != Settings::FrameGenType::Fsr3 &&
+        !logged_lsfg_fallback) {
+        LOG_ERROR(Render_Vulkan,
+                  "Lossless Scaling frame generation (LSFG) is not available (status {}): the "
+                  "shaders could not be loaded from '{}' (copy Lossless.dll from your Lossless "
+                  "Scaling install there), or the GPU lacks a required Vulkan feature. Falling "
+                  "back to FSR3 frame generation.",
+                  static_cast<u32>(VideoCore::FrameGen::GetInstalledLosslessStatus()),
+                  VideoCore::FrameGen::GetLosslessDllPath().string());
+        logged_lsfg_fallback = true;
     }
 
     if (!frame->storage_view) {
+        if (!logged_no_storage) {
+            LOG_WARNING(Render_Vulkan,
+                        "Frame generation: presented frame has no storage view, cannot process");
+            logged_no_storage = true;
+        }
         warm_streak = 0;
         return;
     }
@@ -244,7 +259,15 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
     warm_streak = warm ? warm_streak + 1 : 0;
     generated = warm && warm_streak >= LSFG_RECURRENCE_FRAMES && plan.generations > 0;
 
-    const bool use_fsr3 = Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3;
+    const bool use_fsr3 = UseFsr3();
+
+    if (++log_counter % 300 == 1) {
+        LOG_INFO(Render_Vulkan,
+                 "Frame generation: backend={} frames={} planned_generations={} warm={} "
+                 "warm_streak={} generating={}",
+                 use_fsr3 ? "FSR3" : "LSFG", count, plan.generations, plan.warm, warm_streak,
+                 generated);
+    }
 
     if (use_fsr3 && fsr3_chain) {
         scheduler.RequestOutsideRenderPassOperationContext();
@@ -283,7 +306,7 @@ size_t FrameGen::GeneratedFrameCount() const {
 }
 
 void FrameGen::GenerateInto(const Device& device, Frame* destination, size_t generation) {
-    const bool use_fsr3 = Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3;
+    const bool use_fsr3 = UseFsr3();
 
     if (use_fsr3 && fsr3_chain) {
         const f32 blend = static_cast<f32>(generation + 1) / static_cast<f32>(last_generations + 1);
@@ -307,6 +330,11 @@ void FrameGen::GenerateInto(const Device& device, Frame* destination, size_t gen
     }
 }
 
+bool FrameGen::UseFsr3() const {
+    return Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3 ||
+           (shaders && !shaders->IsValid());
+}
+
 void FrameGen::Rebuild(const Device& device, VkExtent2D extent, VkFormat format, f32 flow_scale) {
     scheduler.Finish();
     chain.reset();
@@ -314,7 +342,11 @@ void FrameGen::Rebuild(const Device& device, VkExtent2D extent, VkFormat format,
 
     built_flow_scale = flow_scale;
 
-    if (Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3) {
+    LOG_INFO(Render_Vulkan, "Frame generation: building {} chain at {}x{} (flow scale {:.2f})",
+             UseFsr3() ? "FSR3" : "LSFG",
+             extent.width, extent.height, flow_scale);
+
+    if (UseFsr3()) {
         fsr3_chain.emplace(device, memory_allocator, extent, format);
     } else {
         chain.emplace(device, memory_allocator, *shaders, extent, format, built_flow_scale);
