@@ -36,7 +36,10 @@ clang-cl and 11.46 seconds with MSVC on the validation machine; incremental
 builds did no compilation. These are dependency-only timings, not full-emulator
 build results. Both compilers used the real CPM fetch and patched sources;
 reconfigure left all 44 Sirit source files unchanged without reapplying patches.
-Linux, macOS, Android, and other cross-platform builds were not executed.
+Isolated dependency builds also passed with Linux GCC 13 and Clang 18,
+MinGW x64, and Android arm64 using NDK r28c. Native Linux encoding checks
+passed; the cross-built executables were not run. These checks do not establish
+full-emulator build success. macOS dependency validation remains with CI.
 
 Native lowering accepts only the dense, unpredicated encoding and aligned,
 nonreserved register spans. The SPIR-V backend checks admission again,

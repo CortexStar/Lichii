@@ -373,8 +373,6 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
-add_compile_definitions(_GNU_SOURCE)
-
 find_package(RenderDoc MODULE)
 
 # openssl funniness

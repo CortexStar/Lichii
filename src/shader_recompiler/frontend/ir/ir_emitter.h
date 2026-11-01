@@ -408,7 +408,7 @@ public:
     [[nodiscard]] F32 DPdyCoarse(const F32& a);
 
     template <typename T = Value, typename... Args>
-    [[nodiscard]] T Inst(Opcode op, Args... args) {
+    T Inst(Opcode op, Args... args) {
         auto it{block->PrependNewInst(insertion_point, op, {Value{args}...})};
         return T{Value{&*it}};
     }
@@ -423,7 +423,7 @@ public:
     };
 
     template <typename T = Value, typename FlagType, typename... Args>
-    [[nodiscard]] T Inst(Opcode op, Flags<FlagType> flags, Args... args) {
+    T Inst(Opcode op, Flags<FlagType> flags, Args... args) {
         u32 raw_flags{};
         std::memcpy(&raw_flags, &flags.proxy, sizeof(flags.proxy));
         auto it{block->PrependNewInst(insertion_point, op, {Value{args}...}, raw_flags)};
