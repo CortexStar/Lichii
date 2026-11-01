@@ -35,6 +35,11 @@ public:
         }
     }
 
+    bool Armed(u64 page_begin, u64 page_end) const {
+        const auto it = pages.lower_bound(page_begin);
+        return it != pages.end() && it->first < page_end;
+    }
+
     template <typename Func>
     void ForEach(u64 page_begin, u64 page_end, Func&& func) const {
         for (auto it = pages.lower_bound(page_begin); it != pages.end() && it->first < page_end;

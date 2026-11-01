@@ -587,6 +587,14 @@ struct Memory::Impl {
                Settings::values.cpu_backend.GetValue() != Settings::CpuBackend::Nce;
     }
 
+    bool ReadTrapArmed(u64 vaddr, u64 size) {
+        if (read_traps.Empty()) {
+            return false;
+        }
+        std::scoped_lock lk{read_trap_mutex};
+        return read_traps.Armed(vaddr >> YUZU_PAGEBITS, ((vaddr + size - 1) >> YUZU_PAGEBITS) + 1);
+    }
+
     void RasterizerArmReadTraps(u64 vaddr, u64 size) {
         if (vaddr == 0 || size == 0 || !AddressSpaceContains(*current_page_table, vaddr, size) ||
             !ReadTrapsEnabled()) {
@@ -805,6 +813,10 @@ struct Memory::Impl {
     }
 
     void HandleRasterizerDownload(VAddr v_address, size_t size, ReadbackDiagnostics::Caller caller) {
+        if (caller == ReadbackDiagnostics::Caller::ScalarRead && ReadTrapsEnabled() &&
+            !ReadTrapArmed(v_address, size)) {
+            return;
+        }
         ReadbackDiagnostics::Scope diagnostics{caller, size};
         using ReadbackDiagnostics::Event;
         const auto* p = GetPointerImpl(
