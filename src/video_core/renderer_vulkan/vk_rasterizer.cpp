@@ -1457,20 +1457,26 @@ void RasterizerVulkan::LoadDiskResources(u64 title_id, std::stop_token stop_load
 
 void RasterizerVulkan::FlushWork() {
 #ifdef __ANDROID__
-    static constexpr u32 DRAWS_TO_DISPATCH = 512;
+    static constexpr u32 draws_to_dispatch = 512;
     static constexpr u32 CHECK_MASK = 3;
 #else
     // Every 32 draws (was 8): each dispatch woke the worker thread, and Switch 2 titles make
     // ~55,000 draws a second. A full chunk is dispatched on its own (Scheduler::Record).
-    static constexpr u32 DRAWS_TO_DISPATCH = 4096;
     static constexpr u32 CHECK_MASK = 31;
+    static const u32 forced_draws = [] {
+        const char* value = std::getenv("EDEN_NX2_FLUSH_DRAWS");
+        return value != nullptr
+                   ? static_cast<u32>(std::max(32L, std::strtol(value, nullptr, 10)) & ~31L)
+                   : 0U;
+    }();
+    const u32 draws_to_dispatch =
+        forced_draws != 0 ? forced_draws : (device.IsMoltenVK() ? 128U : 4096U);
 #endif // __ANDROID__
 
-    static_assert(DRAWS_TO_DISPATCH % (CHECK_MASK + 1) == 0);
     if ((++draw_counter & CHECK_MASK) != CHECK_MASK) {
         return;
     }
-    if (draw_counter < DRAWS_TO_DISPATCH) {
+    if (draw_counter < draws_to_dispatch) {
         scheduler.DispatchWork();
         return;
     }
