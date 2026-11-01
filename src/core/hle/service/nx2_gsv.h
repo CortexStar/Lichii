@@ -1930,16 +1930,17 @@ private:
             if (release_fence) {
                 m_release_fences[image] = *release_fence;
             }
-            // After the end of a stream nothing fills an image again, so a release completes at
-            // once: its fence is the syncpoint's current value. Mario Kart World releases its
-            // images after a movie ends and waits for the returned fences; a fence for a frame
-            // that never comes hung the game on a black screen after its title movie.
+            // After the end of a stream nothing fills an image again, so a release comes back at
+            // once as another end-of-stream frame. Mario Kart World releases its images after a
+            // movie ends and waits for the returned fences: a fence for a frame that never comes
+            // hung it on a black screen after its title movie, and a fence reached without a
+            // frame for 213 made it panic with 2111-3604 (the empty ring code).
             if (release_fence && m_stream_ended && m_inputs.empty() && m_decoded.empty()) {
-                const u32 reached = static_cast<u32>(
-                    system.Host1x().GetSyncpointManager().GetGuestSyncpointValue(m_syncpoint));
-                m_sync_base = reached;
+                m_free.pop_back();
+                m_release_fences.erase(image);
+                value = EndOfStreamOutput(image);
+                m_sync_base = value;
                 m_handed = 0;
-                value = reached;
             } else {
                 value = m_sync_base + ++m_handed;
             }
@@ -2082,6 +2083,15 @@ private:
                     m_stream_ended = true;
                 }
                 system.Host1x().GetSyncpointManager().IncrementGuest(m_syncpoint);
+                m_last_output = m_outputs.back();
+                if (frame.end && m_inputs.empty()) {
+                    while (!m_free.empty()) {
+                        const u32 spare = m_free.front();
+                        m_free.pop_front();
+                        m_release_fences.erase(spare);
+                        EndOfStreamOutput(spare);
+                    }
+                }
                 ++m_frames_out;
                 if (m_frames_out == 1 || (m_frames_out % 600) == 0 || frame.end) {
                     LOG_INFO(Service, "{} frame {} ({}x{}, pts {} us{}) in image {}",
@@ -2121,6 +2131,15 @@ private:
                 }
             }
         }
+    }
+
+    // Hands an image back unwritten as another end-of-stream frame, so the client's fence for it
+    // passes with a frame behind it. Returns the syncpoint value that signals it.
+    u32 EndOfStreamOutput(u32 image) {
+        m_outputs.push_back({image, m_last_output.width, m_last_output.height, m_last_output.pts, true});
+        auto& syncpoints = system.Host1x().GetSyncpointManager();
+        syncpoints.IncrementGuest(m_syncpoint);
+        return static_cast<u32>(syncpoints.GetGuestSyncpointValue(m_syncpoint));
     }
 
     // Waits (bounded) until the client's reads of an image it gave back have passed.
@@ -2250,6 +2269,7 @@ private:
     std::deque<u32> m_free;            ///< Output images, in the order the client acquires them
     std::map<u32, Fence> m_release_fences;
     std::deque<Output> m_outputs;      ///< Finished, for 213
+    Output m_last_output{};            ///< Most recent frame written into an image
     bool m_stream_ended{};             ///< End-of-stream frame handed out, nothing submitted since
     bool m_flush{};
     bool m_quit{};
