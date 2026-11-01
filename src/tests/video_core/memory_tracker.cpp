@@ -31,22 +31,14 @@ class RasterizerInterface {
 public:
     void UpdatePagesCachedCount(DAddr addr, size_t size, s32 delta) {
         ++update_calls;
-        calls.emplace_back(addr, size, delta);
-        const u64 page_start{addr >> Core::DEVICE_PAGEBITS};
-        const u64 page_end{(addr + size + Core::DEVICE_PAGESIZE - 1) >> Core::DEVICE_PAGEBITS};
-        for (u64 page = page_start; page < page_end; ++page) {
-            int& value = page_table[page];
-            value += delta;
-            if (value == 0) {
-                page_table.erase(page);
-            } else if (value < 0) {
-                throw std::logic_error{"negative page"};
-            }
-        }
+        Apply(addr, size, delta);
     }
 
     void UpdatePagesCachedBatch(std::span<const std::pair<DAddr, size_t>> ranges, s32 delta) {
-        // TODO: for now assume fine?
+        ++update_calls;
+        for (const auto& [addr, size] : ranges) {
+            Apply(addr, size, delta);
+        }
     }
 
     [[nodiscard]] size_t UpdateCalls() const noexcept { return update_calls; }
@@ -66,6 +58,21 @@ public:
     }
 
 private:
+    void Apply(DAddr addr, size_t size, s32 delta) {
+        calls.emplace_back(addr, size, delta);
+        const u64 page_start{addr >> Core::DEVICE_PAGEBITS};
+        const u64 page_end{(addr + size + Core::DEVICE_PAGESIZE - 1) >> Core::DEVICE_PAGEBITS};
+        for (u64 page = page_start; page < page_end; ++page) {
+            int& value = page_table[page];
+            value += delta;
+            if (value == 0) {
+                page_table.erase(page);
+            } else if (value < 0) {
+                throw std::logic_error{"negative page"};
+            }
+        }
+    }
+
     ::Common::unordered_map<u64, int> page_table;
     std::vector<std::tuple<DAddr, u64, int>> calls;
     size_t update_calls = 0;
@@ -565,13 +572,21 @@ TEST_CASE("MemoryTracker: FlushCachedWrites batching") {
     memory_track->CachedCpuWrite(c + PAGE, PAGE);
     memory_track->CachedCpuWrite(c + PAGE * 2, PAGE);
     memory_track->CachedCpuWrite(c + PAGE * 4, PAGE);
-    REQUIRE(rasterizer.UpdateCalls() == 0);
+    // Cached writes stop tracking their pages right away; tracking them again leaves the
+    // pending cached writes for FlushCachedWrites to report
+    REQUIRE(rasterizer.Count() == WORD * 2 / PAGE - 3);
+    memory_track->UnmarkRegionAsCpuModified(c, WORD * 2);
+    REQUIRE(rasterizer.Count() == WORD * 2 / PAGE);
+    const size_t calls_before_flush = rasterizer.UpdateCalls();
+    const size_t ranges_before_flush = rasterizer.UpdateCallsList().size();
     memory_track->FlushCachedWrites();
     // Now we expect a single batch call (coalesced ranges) to the device memory manager
-    REQUIRE(rasterizer.UpdateCalls() == 1);
+    REQUIRE(rasterizer.UpdateCalls() == calls_before_flush + 1);
     const auto& calls = rasterizer.UpdateCallsList();
-    REQUIRE(std::get<0>(calls[0]) == c + PAGE);
-    REQUIRE(std::get<1>(calls[0]) == PAGE * 3);
+    REQUIRE(calls.size() == ranges_before_flush + 2);
+    REQUIRE(calls[ranges_before_flush] == std::tuple<DAddr, u64, int>{c + PAGE, PAGE * 2, -1});
+    REQUIRE(calls[ranges_before_flush + 1] == std::tuple<DAddr, u64, int>{c + PAGE * 4, PAGE, -1});
+    REQUIRE(rasterizer.Count() == WORD * 2 / PAGE - 3);
 }
 
 TEST_CASE("DeviceMemoryManager: UpdatePagesCachedBatch basic") {
