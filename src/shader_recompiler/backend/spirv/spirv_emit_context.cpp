@@ -472,12 +472,19 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     u32& texture_binding{is_unified ? bindings.unified : bindings.texture};
     u32& image_binding{is_unified ? bindings.unified : bindings.image};
     AddCapability(spv::Capability::Shader);
+    if (profile.support_cooperative_matrix && stage == Stage::Compute) {
+        AddExtension("SPV_NV_cooperative_matrix");
+        AddCapability(static_cast<spv::Capability>(5357u));  // CooperativeMatrixNV
+    }
     DefineCommonTypes(program.info);
     DefineCommonConstants();
     DefineInterfaces(program);
     DefineLocalMemory(program);
     DefineSharedMemory(program);
     DefineSharedMemoryFunctions(program);
+    if (profile.support_cooperative_matrix && stage == Stage::Compute) {
+        DefineCooperativeMatrixScratch(program);
+    }
     DefineConstantBuffers(program.info, uniform_binding);
     DefineConstantBufferIndirectFunctions(program.info);
     DefineStorageBuffers(program.info, storage_binding);
@@ -598,6 +605,26 @@ void EmitContext::DefineLocalMemory(const IR::Program& program) {
     if (profile.supported_spirv >= 0x00010400) {
         interfaces.push_back(local_memory);
     }
+}
+
+void EmitContext::DefineCooperativeMatrixScratch(const IR::Program& program) {
+    if (!Sirit::ValidId(F16[1])) {
+        AddCapability(spv::Capability::Float16);
+        F16.Define(*this, TypeFloat(16), "f16");
+    }
+    // Cooperative matrix is subgroup-scoped: give every subgroup its own staging area
+    // (A 16x16, B 16x8, C 16x8, D 16x8 f16 = 640 elements).
+    const u32 threads{program.workgroup_size[0] * program.workgroup_size[1] *
+                      program.workgroup_size[2]};
+    const u32 max_subgroups{std::max(1u, (threads + 31U) / 32U)};
+    const Id f16{F16[1]};
+    const Id array{TypeArray(f16, Const(640U * max_subgroups))};
+    Decorate(array, spv::Decoration::ArrayStride, 2U);
+    const Id pointer{TypePointer(spv::StorageClass::Workgroup, array)};
+    coop_scratch_f16 = TypePointer(spv::StorageClass::Workgroup, f16);
+    coop_scratch = AddGlobalVariable(pointer, spv::StorageClass::Workgroup);
+    coop_scratch_array = array;
+    interfaces.push_back(coop_scratch);
 }
 
 void EmitContext::DefineSharedMemory(const IR::Program& program) {
@@ -1479,6 +1506,10 @@ void EmitContext::DefineInputs(const IR::Program& program) {
         if (stage == Stage::Fragment) {
             Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
         }
+    }
+    if (stage == Stage::Compute && profile.support_cooperative_matrix) {
+        AddCapability(spv::Capability::GroupNonUniform);
+        subgroup_id = DefineInput(*this, U32[1], false, spv::BuiltIn::SubgroupId);
     }
     if (info.uses_fswzadd) {
         const Id f32_one{Const(1.0f)};

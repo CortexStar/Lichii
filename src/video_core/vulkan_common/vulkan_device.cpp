@@ -1162,6 +1162,12 @@ bool Device::GetSuitability(bool requires_swapchain) {
 #undef EXT_FEATURE
 #undef FEATURE
 
+    if (extensions.cooperative_matrix) {
+        features.cooperative_matrix_features.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_NV;
+        SetNext(next, features.cooperative_matrix_features);
+    }
+
     // Perform the feature test.
     physical.GetFeatures2(features2);
 

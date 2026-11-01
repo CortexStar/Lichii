@@ -104,6 +104,11 @@ protected:
     bool last_shaders_valid = false;
 
     Tegra::MaxwellDeviceMemoryManager& device_memory;
+    bool support_cooperative_matrix = false;
+
+    void SetCooperativeMatrixSupported(bool value) {
+        support_cooperative_matrix = value;
+    }
 
 private:
     /// @brief Tries to obtain a cached shader starting in a given address

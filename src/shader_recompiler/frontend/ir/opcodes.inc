@@ -567,6 +567,9 @@ OPCODE(ImageAtomicOr32,                                     U32,            Opaq
 OPCODE(ImageAtomicXor32,                                    U32,            Opaque,            Opaque,            U32,                                      )
 OPCODE(ImageAtomicExchange32,                               U32,            Opaque,            Opaque,            U32,                                      )
 
+// Cooperative matrix (tensor core) operations
+OPCODE(TensorMulAdd,                                        U32x2,          U32,            U32,            U32,            U32,            U32,            U32,            U32,            U32,            )
+
 // Warp operations
 OPCODE(LaneId,                                              U32,                                                                                            )
 OPCODE(VoteAll,                                             U1,             U1,                                                                             )

@@ -97,4 +97,9 @@ void EmitGetInBoundsFromOp(EmitContext& ctx) {
     NotImplemented();
 }
 
+void EmitTensorMulAdd(EmitContext& ctx, IR::Inst& inst, ScalarU32 a0, ScalarU32 a1, ScalarU32 a2,
+                      ScalarU32 a3, ScalarU32 b0, ScalarU32 b1, ScalarU32 c0, ScalarU32 c1) {
+    NotImplemented();
+}
+
 } // namespace Shader::Backend::GLASM

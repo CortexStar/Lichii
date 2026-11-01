@@ -754,4 +754,9 @@ void EmitDPdyFine(EmitContext& ctx, IR::Inst& inst, std::string_view op_a);
 void EmitDPdxCoarse(EmitContext& ctx, IR::Inst& inst, std::string_view op_a);
 void EmitDPdyCoarse(EmitContext& ctx, IR::Inst& inst, std::string_view op_a);
 
+// Cooperative matrix (tensor core) operations
+void EmitTensorMulAdd(EmitContext& ctx, IR::Inst& inst, std::string_view a0, std::string_view a1,
+                      std::string_view a2, std::string_view a3, std::string_view b0,
+                      std::string_view b1, std::string_view c0, std::string_view c1);
+
 } // namespace Shader::Backend::GLSL

@@ -113,7 +113,9 @@ VK_DEFINE_HANDLE(VmaAllocator)
     EXTENSION(NV, GEOMETRY_SHADER_PASSTHROUGH, geometry_shader_passthrough)                        \
     EXTENSION(NV, VIEWPORT_ARRAY2, viewport_array2)                                                \
     EXTENSION(NV, VIEWPORT_SWIZZLE, viewport_swizzle)                                              \
-    EXTENSION(EXT, FILTER_CUBIC, filter_cubic)                                                     \
+    EXTENSION(NV, COOPERATIVE_MATRIX, cooperative_matrix)                                             \
+    EXTENSION(KHR, COOPERATIVE_MATRIX, cooperative_matrix_khr)                                         \
+    EXTENSION(EXT, FILTER_CUBIC, filter_cubic)                                                         \
     EXTENSION(IMG, FILTER_CUBIC, filter_cubic_img)                                                 \
     EXTENSION(QCOM, FILTER_CUBIC_WEIGHTS, filter_cubic_weights)
 
@@ -714,6 +716,11 @@ FN_MAX_LIMIT_LIST
         return features.host_query_reset.hostQueryReset != VK_FALSE;
     }
 
+    /// Returns true if the device supports VK_NV_cooperative_matrix (used for tensor ops).
+    bool IsExtCooperativeMatrixSupported() const {
+        return extensions.cooperative_matrix;
+    }
+
     /// Returns true if the device supports VK_EXT_transform_feedback.
     bool IsExtTransformFeedbackSupported() const {
         return extensions.transform_feedback;
@@ -1208,6 +1215,8 @@ private:
 
 #undef FEATURE_CORE
 #undef FEATURE_EXT
+
+        VkPhysicalDeviceCooperativeMatrixFeaturesNV cooperative_matrix_features{};
 
         VkPhysicalDeviceFeatures features{};
     };

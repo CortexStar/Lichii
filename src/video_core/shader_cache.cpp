@@ -158,7 +158,8 @@ const ShaderInfo* ShaderCache::ComputeShader() {
     }
     try {
         RethrowIfRejected(*cpu_shader_addr);
-        ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start};
+        ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start,
+                               {}, support_cooperative_matrix};
         return MakeShaderInfo(env, *cpu_shader_addr);
     } catch (const Shader::Exception&) {
         RememberRejection(*cpu_shader_addr);
@@ -204,7 +205,7 @@ void ShaderCache::GetGraphicsEnvironments(GraphicsEnvironments& result,
             ? (static_cast<u64>(config.reserved[0] & 0xff) << 32) | config.reserved[1]
             : base_addr;
         env = GraphicsEnvironment{*maxwell3d, *gpu_memory, program, address, start_address,
-                                  shader_infos[index]->lowered_native};
+                                  shader_infos[index]->lowered_native, support_cooperative_matrix};
         env.SetCachedSize(shader_infos[index]->size_bytes);
         result.env_ptrs[env_index++] = &env;
     }
