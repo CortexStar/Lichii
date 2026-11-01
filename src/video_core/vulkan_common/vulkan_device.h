@@ -718,7 +718,9 @@ FN_MAX_LIMIT_LIST
 
     /// Returns true if the device supports VK_NV_cooperative_matrix (used for tensor ops).
     bool IsExtCooperativeMatrixSupported() const {
-        return extensions.cooperative_matrix;
+        return extensions.cooperative_matrix &&
+               features.cooperative_matrix_features.cooperativeMatrix &&
+               features.shader_float16_int8.shaderFloat16;
     }
 
     /// Returns true if the device supports VK_EXT_transform_feedback.

@@ -472,7 +472,8 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     u32& texture_binding{is_unified ? bindings.unified : bindings.texture};
     u32& image_binding{is_unified ? bindings.unified : bindings.image};
     AddCapability(spv::Capability::Shader);
-    if (profile.support_cooperative_matrix && stage == Stage::Compute) {
+    if (profile.support_cooperative_matrix && stage == Stage::Compute &&
+        program.info.uses_tensor_mul_add) {
         AddExtension("SPV_NV_cooperative_matrix");
         AddCapability(static_cast<spv::Capability>(5357u));  // CooperativeMatrixNV
     }
@@ -482,7 +483,8 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineLocalMemory(program);
     DefineSharedMemory(program);
     DefineSharedMemoryFunctions(program);
-    if (profile.support_cooperative_matrix && stage == Stage::Compute) {
+    if (profile.support_cooperative_matrix && stage == Stage::Compute &&
+        program.info.uses_tensor_mul_add) {
         DefineCooperativeMatrixScratch(program);
     }
     DefineConstantBuffers(program.info, uniform_binding);
@@ -619,13 +621,32 @@ void EmitContext::DefineCooperativeMatrixScratch(const IR::Program& program) {
     const u32 max_subgroups{std::max(1u, (threads + 31U) / 32U)};
     const Id f16{F16[1]};
     const Id array{TypeArray(f16, Const(640U * max_subgroups))};
-    Decorate(array, spv::Decoration::ArrayStride, 2U);
-    const Id struct_type{TypeStruct(array)};
-    MemberDecorate(struct_type, 0U, spv::Decoration::Offset, 0U);
-    Decorate(struct_type, spv::Decoration::Block);
-    const Id pointer{TypePointer(spv::StorageClass::Workgroup, struct_type)};
     coop_scratch_f16 = TypePointer(spv::StorageClass::Workgroup, f16);
-    coop_scratch = AddGlobalVariable(pointer, spv::StorageClass::Workgroup);
+    // A Workgroup Block variable requires WorkgroupMemoryExplicitLayoutKHR. DefineSharedMemory
+    // already declared it when the guest uses explicit layout; otherwise declare it here when
+    // the device supports it. Without support, use a plain array.
+    coop_scratch_uses_block = profile.support_explicit_workgroup_layout;
+    if (coop_scratch_uses_block) {
+        if (!uses_explicit_workgroup_layout || program.shared_memory_size == 0) {
+            AddExtension("SPV_KHR_workgroup_memory_explicit_layout");
+            AddCapability(spv::Capability::WorkgroupMemoryExplicitLayoutKHR);
+        }
+        Decorate(array, spv::Decoration::ArrayStride, 2U);
+        const u32 offset{uses_explicit_workgroup_layout
+                             ? (program.shared_memory_size + 15U) & ~15U
+                             : 0U};
+        const Id struct_type{TypeStruct(array)};
+        MemberDecorate(struct_type, 0U, spv::Decoration::Offset, offset);
+        Decorate(struct_type, spv::Decoration::Block);
+        const Id pointer{TypePointer(spv::StorageClass::Workgroup, struct_type)};
+        coop_scratch = AddGlobalVariable(pointer, spv::StorageClass::Workgroup);
+        if (uses_explicit_workgroup_layout) {
+            Decorate(coop_scratch, spv::Decoration::Aliased);
+        }
+    } else {
+        const Id pointer{TypePointer(spv::StorageClass::Workgroup, array)};
+        coop_scratch = AddGlobalVariable(pointer, spv::StorageClass::Workgroup);
+    }
     coop_scratch_array = array;
     interfaces.push_back(coop_scratch);
 }
@@ -1510,7 +1531,8 @@ void EmitContext::DefineInputs(const IR::Program& program) {
             Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
         }
     }
-    if (stage == Stage::Compute && profile.support_cooperative_matrix) {
+    if (stage == Stage::Compute && profile.support_cooperative_matrix &&
+        program.info.uses_tensor_mul_add) {
         AddCapability(spv::Capability::GroupNonUniform);
         subgroup_id = DefineInput(*this, U32[1], false, spv::BuiltIn::SubgroupId);
     }

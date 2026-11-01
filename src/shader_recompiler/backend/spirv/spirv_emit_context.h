@@ -325,6 +325,7 @@ public:
     Id coop_scratch{};
     Id coop_scratch_array{};
     Id coop_scratch_f16{};
+    bool coop_scratch_uses_block{};
     Id coop_matrix_len{};
     u32 rescaling_textures_member_index{};
     u32 rescaling_images_member_index{};

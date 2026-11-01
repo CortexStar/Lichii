@@ -35,7 +35,10 @@ Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a0, Id a1, Id a2, Id a3
     const auto imm = [&](u32 v) { return ctx.Const(v); };
 
     const auto ptr = [&](Id index) {
-        return ctx.OpAccessChain(ctx.coop_scratch_f16, ctx.coop_scratch, imm(0U), index);
+        if (ctx.coop_scratch_uses_block) {
+            return ctx.OpAccessChain(ctx.coop_scratch_f16, ctx.coop_scratch, imm(0U), index);
+        }
+        return ctx.OpAccessChain(ctx.coop_scratch_f16, ctx.coop_scratch, index);
     };
     const auto lo_f16 = [&](Id value) {
         return ctx.OpCompositeExtract(f16, ctx.OpBitcast(f16x2, value), 0U);
@@ -49,8 +52,9 @@ Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a0, Id a1, Id a2, Id a3
         return ctx.OpBitcast(u32ty, ctx.OpCompositeConstruct(f16x2, lo, hi));
     };
     const auto barrier = [&]() {
-        // Execution scope Workgroup, memory scope Workgroup, AcquireRelease | WorkgroupMemory
-        ctx.OpControlBarrier(imm(2U), imm(2U), imm(0x108U));
+        // Scratch is per subgroup, so a subgroup-scope barrier is sufficient and avoids
+        // deadlocks when only some warps of the workgroup run the tensor instruction.
+        ctx.OpControlBarrier(imm(3U), imm(3U), imm(0x108U));
     };
 
     const Id lane{ctx.OpLoad(u32ty, ctx.subgroup_local_invocation_id)};

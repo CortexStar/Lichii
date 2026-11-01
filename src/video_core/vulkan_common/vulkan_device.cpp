@@ -596,7 +596,8 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 
     if (is_nvidia) {
         const auto arch = GetNvidiaArch();
-        if (arch >= NvidiaArchitecture::Arch_AmpereOrNewer) {
+        if (arch >= NvidiaArchitecture::Arch_AmpereOrNewer &&
+            !extensions.cooperative_matrix) {
             LOG_WARNING(Render_Vulkan, "Ampere and newer have broken float16 math");
             features.shader_float16_int8.shaderFloat16 = false;
         }
