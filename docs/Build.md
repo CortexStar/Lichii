@@ -192,11 +192,15 @@ Your compiled executable will be in:
 
 ## GitHub-hosted builds
 
-The `release-binaries` workflow uses standard GitHub-hosted runners:
+The `release-binaries` workflow uses standard GitHub-hosted runners. By default it builds **Windows x86-64 only** (`windows-2022`). PGO variants are no longer built, so each platform produces a single standard binary.
 
-- `ubuntu-24.04` produces Linux x86-64 AppImages, with and without PGO. These require glibc 2.39 or newer.
-- `macos-15` produces an Apple Silicon app for macOS 15 or newer. The zip contains `eglantine.app`, including the CLI at `Contents/MacOS/eden-cli`.
-- `windows-2022` produces Windows x86-64 builds, with and without PGO.
+To build the other platforms, run the workflow manually (**Actions > release-binaries > Run workflow**) and enable the `all_platforms` input. This adds:
+
+- `ubuntu-24.04` for Linux x86-64 AppImages. These require glibc 2.39 or newer.
+- `ubuntu-24.04-arm` for Linux aarch64.
+- `macos-15` for an Apple Silicon app for macOS 15 or newer. The zip contains `eglantine.app`, including the CLI at `Contents/MacOS/eden-cli`.
+
+Because push builds only produce the Windows binary, a channel release may have no asset for Linux or macOS.
 
 Pull requests targeting `nx2` or `nx2-experimental` trigger builds without publishing a release. Build-input changes pushed to either branch trigger builds and a prerelease. To build another branch, select **Actions > release-binaries > Run workflow** and choose the branch. Clear **Publish the binaries as a GitHub release** to upload artifacts without publishing a release. Manual runs require the workflow to exist on the repository's default branch. Workflow artifacts expire after seven days.
 
