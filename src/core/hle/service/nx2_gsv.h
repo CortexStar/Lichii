@@ -2097,6 +2097,7 @@ private:
             }
             Input input = std::move(m_inputs.front());
             m_inputs.pop_front();
+            m_stream_ended = false;
             m_ready->room.store(m_inputs.size() < MaxQueuedInputs, std::memory_order_relaxed);
             const auto configuration = m_configuration;
             lk.unlock();
