@@ -651,8 +651,11 @@ public:
         AdjustMap(&virtual_offset, &length);
 
         if (page_states) {
+            if (length == 0) {
+                return;
+            }
             std::scoped_lock lk{page_states_mutex};
-            const size_t first = virtual_offset / PageAlignment;
+            const size_t first = StateIndex(virtual_offset);
             const u32 state = PageMapped | PermissionBits(perms);
             for (size_t i = 0; i < length / PageAlignment; ++i) {
                 const u32 host_page = static_cast<u32>(host_offset / PageAlignment + i);
@@ -688,8 +691,11 @@ public:
         AdjustMap(&virtual_offset, &length);
 
         if (page_states) {
+            if (length == 0) {
+                return;
+            }
             std::scoped_lock lk{page_states_mutex};
-            std::fill_n(page_states + virtual_offset / PageAlignment, length / PageAlignment, 0u);
+            std::fill_n(page_states + StateIndex(virtual_offset), length / PageAlignment, 0u);
             UpdateHostPages(virtual_offset, length, true);
             return;
         }
@@ -707,10 +713,13 @@ public:
         AdjustMap(&virtual_offset, &length);
 
         if (page_states) {
+            if (length == 0) {
+                return;
+            }
             const u32 bits = (read ? PageRead : 0u) | (write ? PageWrite : 0u) |
                              (execute ? PageExecute : 0u);
             std::scoped_lock lk{page_states_mutex};
-            u32* const states = page_states + virtual_offset / PageAlignment;
+            u32* const states = page_states + StateIndex(virtual_offset);
             for (size_t i = 0; i < length / PageAlignment; ++i) {
                 states[i] = (states[i] & ~PagePermissionMask) | bits;
             }
@@ -824,8 +833,13 @@ private:
         int prot;
     };
 
+    size_t StateIndex(size_t virtual_offset) const {
+        const size_t base = virtual_base != nullptr ? 0 : reinterpret_cast<size_t>(virtual_map_base);
+        return (virtual_offset - base) / PageAlignment;
+    }
+
     HostPage ResolveHostPage(size_t virtual_offset) const {
-        const u32* const states = page_states + virtual_offset / PageAlignment;
+        const u32* const states = page_states + StateIndex(virtual_offset);
         const u32 first = states[0];
         const size_t host_offset = size_t(first >> PageOffsetShift) * PageAlignment;
         if ((first & PageMapped) == 0 || host_offset % host_page_size != 0) {
