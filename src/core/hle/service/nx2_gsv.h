@@ -2659,9 +2659,7 @@ private:
                 lk.lock();
                 // Even an image written during a flush counts: the client waits for its value.
                 m_outputs.push_back({image, width, height, frame.pts, frame.end});
-                if (frame.end) {
-                    m_stream_ended = true;
-                }
+                m_stream_ended = frame.end;
                 system.Host1x().GetSyncpointManager().IncrementGuest(m_syncpoint);
                 m_last_output = m_outputs.back();
                 if (frame.end && m_inputs.empty() && m_decoded.empty()) {
