@@ -690,11 +690,14 @@ private:
         const auto requests = Nx2ParseSparseMapRequests(data, stride, output_size);
         std::vector<u8> kinds;
         if (requests) {
+            {
+                std::scoped_lock lk{m_region_mutex};
+                FreeReleasedRegions();
+            }
             kinds = GpuCommands::ExecuteOnGpu(system.GPU(), [&] {
                 std::vector<u8> accepted;
                 accepted.reserve(requests->size());
                 std::scoped_lock lk{m_region_mutex};
-                FreeReleasedRegions();
                 for (const auto& request : *requests) {
                     if (!ApplySparseMapRequest(request)) {
                         break;
