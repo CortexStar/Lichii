@@ -55,8 +55,8 @@ kill -9 $pid 2>/dev/null
 LC_ALL=C sed 's/\x1b\[[0-9;]*m//g' $out/log.txt | tr -d '\000' > $out/log_clean.txt
 grep -a "FPS:" $out/log_clean.txt |
     sed -E 's/.*\[ *([0-9]+)\.[0-9]+\].*FPS: ([0-9.]+).*/\1 \2/' > $out/fps.txt
-movie_end=$(grep -a "2560x1440.*end of stream" $out/log_clean.txt | head -1 |
-    sed -E 's/^ *\[ *([0-9]+)\..*/\1/')
+movie_end=$(awk 'match($0, /^ *\[ *[0-9]+\./) { time = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", time) }
+                 /2560x1440.*end of stream/ { print time; exit }' $out/log_clean.txt)
 if grep -aq "PANIC" $out/log_clean.txt; then
     print "The game panicked, see $out/log_clean.txt"
 fi
