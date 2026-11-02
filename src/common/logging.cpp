@@ -231,7 +231,9 @@ struct ColorConsoleBackend final : public Backend {
             std::fwrite("\x1b[0m\n", 1, sizeof("\x1b[0m\n"), stdout);
         }
     }
-    void Flush() noexcept override {}
+    void Flush() noexcept override {
+        std::fflush(stdout);
+    }
     std::atomic_bool enabled = false;
 #endif
 };

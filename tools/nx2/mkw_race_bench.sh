@@ -22,8 +22,12 @@ EOF
 binary=$1
 game=$2
 config=$3
-seconds=${4:-300}
-shift $(( $# < 4 ? $# : 4 ))
+shift 3
+seconds=300
+if [[ $# -gt 0 && $1 == <-> ]]; then
+    seconds=$1
+    shift
+fi
 
 out=./mkw_race_bench/$(date +%Y%m%d-%H%M%S)
 mkdir -p $out/frames
@@ -49,7 +53,10 @@ for ((elapsed = 0; elapsed < seconds; ++elapsed)); do
     sleep 1
 done
 kill $pid 2>/dev/null
-sleep 2
+for ((waited = 0; waited < 15; ++waited)); do
+    kill -0 $pid 2>/dev/null || break
+    sleep 1
+done
 kill -9 $pid 2>/dev/null
 
 LC_ALL=C sed 's/\x1b\[[0-9;]*m//g' $out/log.txt | tr -d '\000' > $out/log_clean.txt
@@ -60,7 +67,9 @@ movie_end=$(awk 'match($0, /^ *\[ *[0-9]+\./) { time = substr($0, RSTART, RLENGT
 if grep -aq "PANIC" $out/log_clean.txt; then
     print "The game panicked, see $out/log_clean.txt"
 fi
-hold=$(grep -a "(frame 1900)" $out/log_clean.txt | head -1 | sed -E 's/^ *\[ *([0-9]+)\..*/\1/')
+hold=$(awk '/Key script: press key 4 at/ && match($0, /\(frame [0-9]+\)/) &&
+                substr($0, RSTART + 7, RLENGTH - 8) + 0 >= 1900 && match($0, /^ *\[ *[0-9]+\./) {
+                time = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", time); print time; exit }' $out/log_clean.txt)
 if [[ -n $movie_end ]]; then
     race_start=$movie_end
 elif [[ -n $hold ]]; then
@@ -72,8 +81,10 @@ fi
 start=$((race_start + 15))
 end=$((race_start + 85))
 awk -v start=$start -v end=$end '
-    $1 >= start && $1 <= end && $2 > 0 { sum += $2; count++; if (min == "" || $2 < min) min = $2 }
-    END { if (count) printf "Race FPS: %.1f average, %.1f minimum (%d samples)\n", sum / count, min, count
-          else print "No frame rate samples in the race window" }
-' $out/fps.txt
+    $1 >= start && $1 <= end { sum += $2; count++; if (min == "" || $2 < min) min = $2 }
+    { last = $1 }
+    END { if (last < end - 2) { printf "The log ends at %d s, before the race window ends at %d s\n", last, end; exit 1 }
+          if (count) printf "Race FPS: %.1f average, %.1f minimum (%d samples)\n", sum / count, min, count
+          else { print "No frame rate samples in the race window"; exit 1 } }
+' $out/fps.txt || { print "Logs and frames: $out"; exit 1 }
 print "Logs and frames: $out"
