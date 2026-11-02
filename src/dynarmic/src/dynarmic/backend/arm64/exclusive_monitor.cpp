@@ -9,6 +9,7 @@
 #include "dynarmic/interface/exclusive_monitor.h"
 
 #include <algorithm>
+#include <atomic>
 
 #include "common/assert.h"
 
@@ -33,10 +34,16 @@ bool ExclusiveMonitor::CheckAndClear(std::size_t processor_id, VAddr address) {
     const VAddr masked_address = address & RESERVATION_GRANULE_MASK;
 
 #ifdef ARCHITECTURE_arm64
-    if (exclusive_addresses[processor_id] != masked_address) {
+    VAddr expected = masked_address;
+    if (!std::atomic_ref<VAddr>{exclusive_addresses[processor_id]}.compare_exchange_strong(
+            expected, INVALID_EXCLUSIVE_ADDRESS, std::memory_order_acq_rel)) {
         return false;
     }
-    exclusive_addresses[processor_id] = INVALID_EXCLUSIVE_ADDRESS;
+    for (VAddr& other_address : exclusive_addresses) {
+        expected = masked_address;
+        std::atomic_ref<VAddr>{other_address}.compare_exchange_strong(
+            expected, INVALID_EXCLUSIVE_ADDRESS, std::memory_order_acq_rel);
+    }
     return true;
 #endif
 
@@ -62,7 +69,7 @@ void ExclusiveMonitor::Clear() {
 
 void ExclusiveMonitor::ClearProcessor(std::size_t processor_id) {
 #ifdef ARCHITECTURE_arm64
-    exclusive_addresses[processor_id] = INVALID_EXCLUSIVE_ADDRESS;
+    std::atomic_ref<VAddr>{exclusive_addresses[processor_id]}.store(INVALID_EXCLUSIVE_ADDRESS, std::memory_order_release);
 #else
     Lock();
     exclusive_addresses[processor_id] = INVALID_EXCLUSIVE_ADDRESS;
