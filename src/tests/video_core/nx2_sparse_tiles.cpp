@@ -140,7 +140,7 @@ TEST_CASE("Nx2 216 detaches lazy backing before mapping and retiring it", "[nx2_
     REQUIRE(registry.MapSparseTile(0x401000, 0, 0x1000));
     CHECK(capture.events == std::vector<std::array<u64, 4>>{{'v', 0x401000, 0, 0x1000}});
     capture.events.clear();
-    int late_owner;
+    int late_owner{};
     registry.AddListener(&late_owner,
         [&](u64 gpu, u64 cpu, u64 size) { capture.events.push_back({'m', gpu, cpu, size}); },
         [](u64, u64) {}, {},
@@ -554,7 +554,7 @@ TEST_CASE("Nx2 tile preparation rolls back a failed address space without losing
     CHECK(allocated[1] == allocated[0]);
     CHECK(capture.events.empty());
     std::vector<std::array<u64, 3>> replay;
-    int observer;
+    int observer{};
     registry.AddListener(&observer, [&](u64 gpu, u64 cpu, u64 size) {
         replay.push_back({gpu, cpu, size});
     }, [](u64, u64) {});
