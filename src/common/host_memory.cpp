@@ -22,6 +22,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include "common/scope_exit.h"
+#include "common/settings.h"
 
 #if defined(__linux__)
 #include <sys/random.h>
@@ -544,6 +545,12 @@ public:
             LOG_WARNING(Common_Memory, "Host page size {:#x} does not support fastmem", page_size);
             return false;
         }
+#ifdef HAS_NCE
+        if (page_size != static_cast<long>(PageAlignment) && Settings::IsNceEnabled()) {
+            LOG_WARNING(Common_Memory, "Host page size {:#x} does not support fastmem with NCE", page_size);
+            return false;
+        }
+#endif
         host_page_size = static_cast<size_t>(page_size);
         // Backing memory initialization
 #if defined(__sun__) || defined(__HAIKU__) || defined(__NetBSD__) || defined(__DragonFly__)
