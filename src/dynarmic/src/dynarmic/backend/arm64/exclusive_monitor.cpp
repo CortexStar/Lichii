@@ -62,9 +62,15 @@ bool ExclusiveMonitor::CheckAndClear(std::size_t processor_id, VAddr address) {
 }
 
 void ExclusiveMonitor::Clear() {
+#ifdef ARCHITECTURE_arm64
+    for (VAddr& address : exclusive_addresses) {
+        std::atomic_ref<VAddr>{address}.store(INVALID_EXCLUSIVE_ADDRESS, std::memory_order_release);
+    }
+#else
     Lock();
     std::fill(exclusive_addresses.begin(), exclusive_addresses.end(), INVALID_EXCLUSIVE_ADDRESS);
     Unlock();
+#endif
 }
 
 void ExclusiveMonitor::ClearProcessor(std::size_t processor_id) {
