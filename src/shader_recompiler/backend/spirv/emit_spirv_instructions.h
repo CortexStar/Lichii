@@ -61,6 +61,12 @@ Id EmitGetAttributeIndexed(EmitContext& ctx, Id offset, Id vertex);
 void EmitSetAttributeIndexed(EmitContext& ctx, Id offset, Id value, Id vertex);
 Id EmitGetPatch(EmitContext& ctx, IR::Patch patch);
 void EmitSetPatch(EmitContext& ctx, IR::Patch patch, Id value);
+Id EmitIsbeRead(EmitContext& ctx, Id address);
+void EmitIsbeWriteAttribute(EmitContext& ctx, Id address, Id value);
+void EmitIsbeWriteMapU8(EmitContext& ctx, Id address, Id value);
+void EmitIsbeWriteMapU32(EmitContext& ctx, const IR::Value& address, Id value);
+void EmitMeshPrologue(EmitContext& ctx);
+void EmitMeshEpilogue(EmitContext& ctx);
 void EmitSetFragColor(EmitContext& ctx, u32 index, u32 component, Id value);
 void EmitSetSampleMask(EmitContext& ctx, Id value);
 void EmitSetFragDepth(EmitContext& ctx, Id value);
@@ -630,8 +636,6 @@ Id EmitDPdyFine(EmitContext& ctx, Id op_a);
 Id EmitDPdxCoarse(EmitContext& ctx, Id op_a);
 Id EmitDPdyCoarse(EmitContext& ctx, Id op_a);
 
-// Cooperative matrix (tensor core) operations
-Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a0, Id a1, Id a2, Id a3, Id b0, Id b1,
-                    Id c0, Id c1);
+Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a, Id b, Id c);
 
 } // namespace Shader::Backend::SPIRV

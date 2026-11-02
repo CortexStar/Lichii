@@ -32,7 +32,6 @@
 #include "video_core/texture_cache/decode_bc.h"
 #include "video_core/texture_cache/format_lookup_table.h"
 #include "video_core/texture_cache/formatter.h"
-#include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/util.h"
 #include "video_core/textures/astc.h"
@@ -556,7 +555,8 @@ void SwizzleBlockLinearImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr
     const std::array sizes = CalculateLevelSizes(level_info, num_levels);
     size_t guest_offset = CalculateLevelBytes(sizes, level);
     const size_t layer_stride =
-        info.layer_stride != 0 ? info.layer_stride : CalculateLayerStride(info);
+        AlignLayerSize(CalculateLevelBytes(sizes, num_levels), size, level_info.block,
+                       tile_size.height, info.tile_width_spacing);
     const size_t subresource_size = sizes[level];
 
     for (s32 layer = 0; layer < info.resources.layers; ++layer) {
@@ -567,10 +567,7 @@ void SwizzleBlockLinearImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr
                 dst(gpu_memory, gpu_addr + guest_offset, subresource_size, &tmp_buffer);
 
             SwizzleTexture(dst, src, bytes_per_block, num_tiles.width, num_tiles.height,
-                           num_tiles.depth, block.height, block.depth,
-                           StrideAlignment(num_tiles, info.block, BytesPerBlockLog2(info.format),
-                                           info.tile_width_spacing),
-                           gpu_memory.UsesNativeTiling());
+                           num_tiles.depth, block.height, block.depth, 1, gpu_memory.UsesNativeTiling());
         }
 
         host_offset += host_bytes_per_layer;
@@ -848,7 +845,7 @@ bool IsValidEntry(const Tegra::MemoryManager& gpu_memory, const TICEntry& config
     if (gpu_memory.GpuToCpuAddress(address).has_value()) {
         return true;
     }
-    const ImageInfo info{TextureViewHeader(config, gpu_memory.UsesNativeTiling())};
+    const ImageInfo info{config};
     const size_t guest_size_bytes = CalculateGuestSizeInBytes(info);
     return gpu_memory.GpuToCpuAddress(address, guest_size_bytes).has_value();
 }
@@ -883,21 +880,14 @@ boost::container::small_vector<BufferImageCopy, 16> UnswizzleImage(Tegra::Memory
             .image_extent = size,
         }};
     }
-    return UnswizzleBlockLinearImage(info, input, output, gpu_memory.UsesNativeTiling());
-}
-
-boost::container::small_vector<BufferImageCopy, 16> UnswizzleBlockLinearImage(
-    const ImageInfo& info, std::span<const u8> input, std::span<u8> output, bool native_tiling) {
-    const u32 bpp_log2 = BytesPerBlockLog2(info.format);
-    const Extent2D tile_size = DefaultBlockSize(info.format);
-    const Extent3D size = info.size;
     const LevelInfo level_info = MakeLevelInfo(info);
     const s32 num_layers = info.resources.layers;
     const s32 num_levels = info.resources.levels;
     const std::array level_sizes = CalculateLevelSizes(level_info, num_levels);
     const Extent2D gob = GobSize(bpp_log2, info.block.height, info.tile_width_spacing);
-    const u32 layer_stride =
-        info.layer_stride != 0 ? info.layer_stride : CalculateLayerStride(info);
+    const u32 layer_size = CalculateLevelBytes(level_sizes, num_levels);
+    const u32 layer_stride = AlignLayerSize(layer_size, size, level_info.block, tile_size.height,
+                                            info.tile_width_spacing);
     size_t guest_offset = 0;
     u32 host_offset = 0;
     boost::container::small_vector<BufferImageCopy, 16> copies(num_levels);
@@ -930,129 +920,11 @@ boost::container::small_vector<BufferImageCopy, 16> UnswizzleBlockLinearImage(
             const std::span<u8> dst = output.subspan(host_offset);
             const std::span<const u8> src = input.subspan(guest_offset + guest_layer_offset);
             UnswizzleTexture(dst, src, 1U << bpp_log2, num_tiles.width, num_tiles.height,
-                             num_tiles.depth, block.height, block.depth, stride_alignment, native_tiling);
+                             num_tiles.depth, block.height, block.depth, stride_alignment, gpu_memory.UsesNativeTiling());
             guest_layer_offset += layer_stride;
             host_offset += host_bytes_per_layer;
         }
         guest_offset += level_sizes[level];
-    }
-    return copies;
-}
-
-boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageRows(
-    Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const ImageInfo& info,
-    std::span<const std::pair<u64, u64>> dirty_ranges, std::vector<u8>& output) {
-    boost::container::small_vector<BufferImageCopy, 16> copies;
-    if (info.type != ImageType::e2D || info.size.depth != 1 || info.block.depth != 0 ||
-        info.num_samples != 1 || dirty_ranges.empty()) {
-        return copies;
-    }
-    const u32 bpp_log2 = BytesPerBlockLog2(info.format);
-    const Extent2D tile_size = DefaultBlockSize(info.format);
-    const LevelInfo level_info = MakeLevelInfo(info);
-    const s32 num_levels = info.resources.levels;
-    const std::array level_sizes = CalculateLevelSizes(level_info, num_levels);
-    const Extent2D gob = GobSize(bpp_log2, info.block.height, info.tile_width_spacing);
-    const u32 layer_stride =
-        info.layer_stride != 0 ? info.layer_stride : CalculateLayerStride(info);
-    // Tiles across one GOB (64 bytes). Runs of blocks are unswizzled one GOB aligned: tile width
-    // spacing only pads the end of each block row.
-    const u32 gob_tiles = 1U << (GOB_SIZE_X_SHIFT - bpp_log2);
-    const u32 run_alignment = GOB_SIZE_X_SHIFT - bpp_log2;
-    std::vector<u8> run;
-    std::vector<bool> dirty_blocks;
-    u32 level_offset = 0;
-    for (s32 level = 0; level < num_levels; ++level) {
-        const Extent3D level_size = AdjustMipSize(info.size, level);
-        const Extent3D num_tiles = AdjustTileSize(level_size, tile_size);
-        const Extent3D block =
-            AdjustMipBlockSize(num_tiles, level_info.block, level, level_info.num_levels);
-        // Each block (one GOB wide, GOB height << block height tall) is contiguous, and blocks are
-        // stored left to right, one block row after the other.
-        const u32 rows_per_band = GOB_SIZE_Y << block.height;
-        const u32 block_bytes = GOB_SIZE << block.height;
-        const u32 num_bands = Common::DivCeil(num_tiles.height, rows_per_band);
-        const u32 stride_alignment = StrideAlignment(num_tiles, info.block, gob, bpp_log2);
-        const u32 row_bytes = Common::AlignUpLog2(num_tiles.width, stride_alignment) << bpp_log2;
-        const u32 blocks_per_band = Common::DivCeilLog2(row_bytes, GOB_SIZE_X_SHIFT);
-        const u32 band_bytes = blocks_per_band * block_bytes;
-        if (num_bands == 0 || u64{num_bands} * band_bytes > level_sizes[level]) {
-            return {};
-        }
-        for (s32 layer = 0; layer < info.resources.layers; ++layer) {
-            const u64 segment_begin = static_cast<u64>(layer) * layer_stride + level_offset;
-            const u64 segment_end = segment_begin + u64{num_bands} * band_bytes;
-            bool any = false;
-            for (const auto& [begin, end] : dirty_ranges) {
-                if (end <= segment_begin || begin >= segment_end) {
-                    continue;
-                }
-                if (!any) {
-                    dirty_blocks.assign(size_t{num_bands} * blocks_per_band, false);
-                    any = true;
-                }
-                const u64 low = std::max(begin, segment_begin) - segment_begin;
-                const u64 high = std::min(end, segment_end) - segment_begin;
-                const u64 last = Common::DivCeil(high, u64{block_bytes});
-                for (u64 index = low / block_bytes; index < last; ++index) {
-                    dirty_blocks[index] = true;
-                }
-            }
-            if (!any) {
-                continue;
-            }
-            for (u32 band = 0; band < num_bands; ++band) {
-                const u32 first_row = band * rows_per_band;
-                const u32 tile_rows = std::min(rows_per_band, num_tiles.height - first_row);
-                for (u32 first = 0; first < blocks_per_band;) {
-                    if (!dirty_blocks[size_t{band} * blocks_per_band + first]) {
-                        ++first;
-                        continue;
-                    }
-                    u32 last = first;
-                    while (last < blocks_per_band && dirty_blocks[size_t{band} * blocks_per_band + last]) {
-                        ++last;
-                    }
-                    const u32 first_tile = first * gob_tiles;
-                    if (first_tile >= num_tiles.width) {
-                        break; // padding blocks past the image's width
-                    }
-                    // A run of consecutive blocks is laid out like an image that many GOBs wide.
-                    const u32 run_tiles = (last - first) * gob_tiles;
-                    const size_t guest_bytes = size_t{last - first} * block_bytes;
-                    run.resize(guest_bytes);
-                    gpu_memory.ReadBlockUnsafe(gpu_addr + segment_begin + u64{band} * band_bytes +
-                                                   u64{first} * block_bytes,
-                                               run.data(), guest_bytes);
-                    const size_t host_offset = output.size();
-                    const size_t host_bytes = (size_t{tile_rows} * run_tiles) << bpp_log2;
-                    output.resize(host_offset + host_bytes);
-                    Tegra::Texture::UnswizzleTexture(std::span<u8>{output}.subspan(host_offset, host_bytes),
-                                                     run, 1U << bpp_log2, run_tiles, tile_rows, 1,
-                                                     block.height, block.depth, run_alignment,
-                                                     gpu_memory.UsesNativeTiling());
-                    const u32 x = first_tile * tile_size.width;
-                    const u32 y = first_row * tile_size.height;
-                    copies.push_back(BufferImageCopy{
-                        .buffer_offset = host_offset,
-                        .buffer_size = host_bytes,
-                        .buffer_row_length = run_tiles * tile_size.width,
-                        .buffer_image_height = tile_rows * tile_size.height,
-                        .image_subresource =
-                            {
-                                .base_level = level,
-                                .base_layer = layer,
-                                .num_layers = 1,
-                            },
-                        .image_offset = {static_cast<s32>(x), static_cast<s32>(y), 0},
-                        .image_extent = {std::min(run_tiles * tile_size.width, level_size.width - x),
-                                         std::min(tile_rows * tile_size.height, level_size.height - y), 1},
-                    });
-                    first = last;
-                }
-            }
-        }
-        level_offset += level_sizes[level];
     }
     return copies;
 }
@@ -1216,17 +1088,6 @@ std::vector<BufferImageCopy> UnswizzleImageRects(Tegra::MemoryManager& gpu_memor
                                                  GPUVAddr gpu_addr, const ImageInfo& info,
                                                  std::span<const LevelRect> rects,
                                                  std::span<u8> output) {
-    return UnswizzleImageRects(
-        [&](GPUVAddr address, std::span<u8> bytes) {
-            gpu_memory.ReadBlockUnsafe(address, bytes.data(), bytes.size());
-        },
-        gpu_addr, info, rects, output, gpu_memory.UsesNativeTiling());
-}
-
-std::vector<BufferImageCopy> UnswizzleImageRects(
-    const std::function<void(GPUVAddr, std::span<u8>)>& read, GPUVAddr gpu_addr,
-    const ImageInfo& info, std::span<const LevelRect> rects, std::span<u8> output,
-    bool native_tiling) {
     const std::vector<BlockLinearLevel> levels = BlockLinearLevels(info);
     const u32 bpp_log2 = BytesPerBlockLog2(info.format);
     std::vector<BufferImageCopy> copies;
@@ -1245,10 +1106,10 @@ std::vector<BufferImageCopy> UnswizzleImageRects(
                                       u64{row} * level.blocks_per_row * level.block_bytes +
                                       u64{blocks.first_block} * level.block_bytes;
             swizzled.assign(row_bytes, 0);
-            read(row_addr, swizzled);
+            gpu_memory.ReadBlockUnsafe(row_addr, swizzled.data(), row_bytes);
             UnswizzleTexture(output.subspan(output_offset, bytes), swizzled, 1U << bpp_log2, width,
                              texel_rows, 1, level.block_height, 0, 0,
-                             native_tiling);
+                             gpu_memory.UsesNativeTiling());
             const u32 row_y = row * level.block_rows;
             const u32 y0 = (std::max)(rect.y, row_y);
             const u32 y1 = (std::min)(rect.y + rect.height, row_y + texel_rows);
@@ -1394,6 +1255,7 @@ boost::container::small_vector<BufferImageCopy, 16> FullDownloadCopies(const Ima
             .image_extent = size,
         }};
     }
+    UNIMPLEMENTED_IF(info.tile_width_spacing > 0);
 
     const s32 num_layers = info.resources.layers;
     const s32 num_levels = info.resources.levels;

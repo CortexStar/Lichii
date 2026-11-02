@@ -103,13 +103,6 @@ protected:
     std::array<const ShaderInfo*, NUM_PROGRAMS> shader_infos{};
     bool last_shaders_valid = false;
 
-    Tegra::MaxwellDeviceMemoryManager& device_memory;
-    bool support_cooperative_matrix = false;
-
-    void SetCooperativeMatrixSupported(bool value) {
-        support_cooperative_matrix = value;
-    }
-
 private:
     /// @brief Tries to obtain a cached shader starting in a given address
     /// @note Doesn't check for ranges, the given address has to be the start of the shader
@@ -160,6 +153,10 @@ private:
     bool IsRejected(VAddr addr);
     /// Remembers the exception being handled as this address's rejection.
     void RememberRejection(VAddr addr);
+    /// Hash of the state task and mesh programs are translated with.
+    u64 MeshStateHash() const;
+
+    Tegra::MaxwellDeviceMemoryManager& device_memory;
 
     mutable std::mutex lookup_mutex;
     std::mutex invalidation_mutex;

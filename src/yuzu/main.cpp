@@ -2,14 +2,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <QApplication>
-
-#include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <map>
-#include <string>
-#include <utility>
-
 #include "startup_checks.h"
 
 #if YUZU_ROOM
@@ -85,65 +77,7 @@ static Qt::HighDpiScaleFactorRoundingPolicy GetHighDpiRoundingPolicy() {
 #endif
 }
 
-static void ParseSwitchFile(const std::filesystem::path& path,
-                            std::map<std::string, std::string>& switches) {
-    std::ifstream file{path};
-    if (!file) {
-        return;
-    }
-    std::string line;
-    while (std::getline(file, line)) {
-        line.erase(0, line.find_first_not_of(" \t\r\""));
-        line.erase(line.find_last_not_of(" \t\r\"") + 1);
-        if (line.empty() || line[0] == '#') {
-            continue;
-        }
-        const auto eq = line.find('=');
-        if (eq == std::string::npos) {
-            continue;
-        }
-        std::string name = line.substr(0, eq);
-        std::string value = line.substr(eq + 1);
-        name.erase(name.find_last_not_of(" \t") + 1);
-        value.erase(0, value.find_first_not_of(" \t\""));
-        if (!name.empty()) {
-            switches.insert_or_assign(std::move(name), std::move(value));
-        }
-    }
-}
-
-static void LoadNx2Switches(const char* argv0) {
-    std::map<std::string, std::string> switches;
-#ifdef __APPLE__
-    ParseSwitchFile(Common::FS::GetBundleDirectory() / "Contents/Resources/nx2_switches.txt",
-                    switches);
-#endif
-    std::error_code ec;
-    const std::filesystem::path exe = std::filesystem::absolute(argv0, ec);
-    if (!ec) {
-        ParseSwitchFile(exe.parent_path() / "nx2_switches.txt", switches);
-    }
-    if (const char* appdata = std::getenv("APPDATA")) {
-        ParseSwitchFile(std::filesystem::path{appdata} / "eden" / "nx2_switches.txt", switches);
-    } else if (const char* home = std::getenv("HOME")) {
-        ParseSwitchFile(std::filesystem::path{home} / ".config" / "eden" / "nx2_switches.txt",
-                        switches);
-    }
-    for (const auto& [name, value] : switches) {
-        if (std::getenv(name.c_str()) != nullptr) {
-            continue;
-        }
-#ifdef _WIN32
-        _putenv_s(name.c_str(), value.c_str());
-#else
-        setenv(name.c_str(), value.c_str(), 1);
-#endif
-    }
-}
-
 int main(int argc, char* argv[]) {
-    LoadNx2Switches(argv[0]);
-
 #if YUZU_ROOM
     bool launch_room = false;
     for (int i = 1; i < argc; i++) {
@@ -175,7 +109,7 @@ int main(int argc, char* argv[]) {
 
     // Init settings params
     QCoreApplication::setOrganizationName(QStringLiteral("eden"));
-    QCoreApplication::setApplicationName(QStringLiteral("Eglantine"));
+    QCoreApplication::setApplicationName(QStringLiteral("Lichii"));
 
     // Increases the maximum open file limit.
     // TODO: This should be common to all frontends.
@@ -227,7 +161,7 @@ int main(int argc, char* argv[]) {
 
     // Fix the Wayland appId. This needs to match the name of the .desktop file without the .desktop
     // suffix.
-    QGuiApplication::setDesktopFileName(QStringLiteral("dev.eglantine.eglantine"));
+    QGuiApplication::setDesktopFileName(QStringLiteral("io.github.zortos293.lichii"));
 #endif
 
     auto rounding_policy = GetHighDpiRoundingPolicy();

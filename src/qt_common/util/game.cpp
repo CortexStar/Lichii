@@ -243,9 +243,9 @@ void RemoveTransferableShaderCache(u64 program_id, GameListRemoveTarget target) 
     const auto target_file_name = [target] {
         switch (target) {
         case GameListRemoveTarget::GlShaderCache:
-            return "opengl.bin";
+            return "opengl.fork-v40.bin";
         case GameListRemoveTarget::VkShaderCache:
-            return "vulkan.bin";
+            return "vulkan.fork-v40.bin";
         default:
             return "";
         }
@@ -269,7 +269,7 @@ void RemoveTransferableShaderCache(u64 program_id, GameListRemoveTarget target) 
 }
 
 void RemoveVulkanDriverPipelineCache(u64 program_id) {
-    static constexpr std::string_view target_file_name = "vulkan_pipelines.bin";
+    static constexpr std::string_view target_file_name = "vulkan_pipelines.fork-v40.bin";
 
     const auto shader_cache_dir = Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir);
     const auto shader_cache_folder_path = shader_cache_dir / fmt::format("{:016x}", program_id);

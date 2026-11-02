@@ -5,86 +5,45 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
-#include <charconv>
-#include <optional>
-#include <string_view>
+#ifdef NIGHTLY_BUILD
+#include <boost/algorithm/string/classification.hpp>
+#include <boost/algorithm/string/split.hpp>
+#endif
 
-#include "common/logging.h"
+#include <fmt/format.h>
 #include "common/net/net.h"
 #include "common/scm_rev.h"
 #include "update_checker.h"
 
-namespace UpdateChecker {
+#include "common/logging.h"
 
-namespace {
+std::optional<Common::Net::Release> UpdateChecker::GetUpdate() {
+    const auto latest = Common::Net::GetLatestRelease();
+    if (!latest) return std::nullopt;
 
-constexpr u32 max_changes = 100;
+    LOG_INFO(Frontend, "Received update {}", latest->title);
 
-// Release tags are <channel>-build-<number>, where the channel is the branch CI built.
-struct BuildTag {
-    std::string_view channel;
-    u64 number;
-};
+#ifdef NIGHTLY_BUILD
+    std::vector<std::string> result;
 
-std::optional<BuildTag> ParseBuildTag(std::string_view tag) {
-    constexpr std::string_view marker = "-build-";
-    const auto pos = tag.rfind(marker);
-    if (pos == std::string_view::npos || pos == 0)
+    boost::split(result, latest->tag, boost::is_any_of("."));
+    if (result.size() != 2)
         return std::nullopt;
 
-    const auto digits = tag.substr(pos + marker.size());
-    u64 number{};
-    const auto [end, error] = std::from_chars(digits.data(), digits.data() + digits.size(), number);
-    if (digits.empty() || error != std::errc{} || end != digits.data() + digits.size())
+    const std::string tag = result[1];
+
+    boost::split(result, std::string{Common::g_build_version}, boost::is_any_of("-"));
+    if (result.empty())
         return std::nullopt;
 
-    return BuildTag{tag.substr(0, pos), number};
+    const std::string build = result[0];
+#else
+    const std::string tag = latest->tag;
+    const std::string build = Common::g_build_version;
+#endif
+
+    if (tag != build)
+        return latest;
+
+    return std::nullopt;
 }
-
-} // namespace
-
-Result Check() {
-    const auto current = ParseBuildTag(Common::g_build_release_tag);
-    if (!current)
-        return Failure::NotReleaseBuild;
-
-    const auto releases = Common::Net::GetReleases();
-    if (!releases)
-        return Failure::Unreachable;
-
-    std::optional<Common::Net::Release> latest;
-    u64 latest_number = current->number;
-    for (const auto& release : *releases) {
-        const auto tag = ParseBuildTag(release.tag);
-        if (tag && tag->channel == current->channel && tag->number > latest_number) {
-            latest = release;
-            latest_number = tag->number;
-        }
-    }
-
-    if (!latest)
-        return UpToDate{};
-
-    LOG_INFO(Frontend, "Update available: {}", latest->tag);
-
-    Update update{
-        .release = *latest,
-        .changes = {},
-        .changes_complete = false,
-        .compare_url = Common::Net::GetCompareUrl(Common::g_scm_rev, latest->commit),
-    };
-
-    if (auto commits = Common::Net::GetCommits(latest->commit, max_changes)) {
-        for (auto& commit : *commits) {
-            if (commit.sha == Common::g_scm_rev) {
-                update.changes_complete = true;
-                break;
-            }
-            update.changes.push_back(std::move(commit));
-        }
-    }
-
-    return update;
-}
-
-} // namespace UpdateChecker

@@ -355,15 +355,12 @@ public:
 
     Result Sleep(KernelCore& kernel, s64 timeout);
 
+    // The starting thread owns these references; Finalize also releases unconsumed entries.
+    void RecordStartupThread(KernelCore& kernel, KThread* thread);
+    void WaitForStartupThreads(KernelCore& kernel);
+
     s64 GetYieldScheduleCount() const {
         return m_schedule_count;
-    }
-
-    // Threads this thread started on its own core at a lower priority (see SendSyncRequestImpl in
-    // svc_ipc.cpp). Only touched by the owning thread itself (and Finalize); each entry holds a
-    // reference.
-    std::vector<KThread*>& GetPendingStartedThreads() {
-        return m_pending_started_threads;
     }
 
     void SetYieldScheduleCount(s64 count) {

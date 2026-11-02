@@ -329,6 +329,22 @@ void IREmitter::SetPatch(Patch patch, const F32& value) {
     Inst(Opcode::SetPatch, patch, value);
 }
 
+U32 IREmitter::IsbeRead(const U32& address) {
+    return Inst<U32>(Opcode::IsbeRead, address);
+}
+
+void IREmitter::IsbeWriteAttribute(const U32& address, const U32& value) {
+    Inst(Opcode::IsbeWriteAttribute, address, value);
+}
+
+void IREmitter::IsbeWriteMapU8(const U32& address, const U32& value) {
+    Inst(Opcode::IsbeWriteMapU8, address, value);
+}
+
+void IREmitter::IsbeWriteMapU32(const U32& address, const U32& value) {
+    Inst(Opcode::IsbeWriteMapU32, address, value);
+}
+
 void IREmitter::SetFragColor(u32 index, u32 component, const F32& value) {
     Inst(Opcode::SetFragColor, Imm32(index), Imm32(component), value);
 }
@@ -553,6 +569,16 @@ F16F32F64 IREmitter::FPAdd(const F16F32F64& a, const F16F32F64& b, FpControl con
     default:
         ThrowInvalidType(a.Type());
     }
+}
+
+Value IREmitter::TensorMulAdd(const Value& a, const Value& b, const Value& c, u32 depth) {
+    if (a.Type() != Type::U32x4 || b.Type() != Type::U32x2 || c.Type() != Type::U32x2 ||
+        (depth != 8 && depth != 16)) {
+        throw InvalidArgument("Invalid software matrix operands");
+    }
+    const Value result = Inst(Opcode::TensorMulAdd, a, b, c);
+    result.Inst()->SetFlags<u32>(depth);
+    return result;
 }
 
 Value IREmitter::CompositeConstruct(const Value& e1, const Value& e2) {
@@ -847,6 +873,26 @@ F32 IREmitter::FPCos(const F32& value) {
 
 F32 IREmitter::FPSin(const F32& value) {
     return Inst<F32>(Opcode::FPSin, value);
+}
+
+F32 IREmitter::FPTanh(const F32& value) {
+    // Adapted from Duck912's stable TANH expansion. Express it in existing IR so all
+    // backends share the same approximation. Preserve signed zero and tiny/subnormal inputs.
+    const auto bits = BitCast<U32>(value);
+    const auto absolute_bits = BitwiseAnd(bits, Imm32(0x7fffffffU));
+    const auto absolute = BitCast<F32>(absolute_bits);
+    const F32 square{FPMul(absolute, absolute)};
+    const F32 fifth{FPAdd(Imm32(2.0f / 15.0f), FPMul(square, Imm32(-17.0f / 315.0f)))};
+    const F32 third{FPAdd(Imm32(-1.0f / 3.0f), FPMul(square, fifth))};
+    const F32 polynomial{FPAdd(absolute, FPMul(FPMul(absolute, square), third))};
+    const auto exponential = FPExp2(F32{FPMul(absolute, Imm32(-2.8853900817779268f))});
+    const F32 magnitude{FPMul(FPAdd(Imm32(1.0f), FPNeg(exponential)),
+                              FPRecip(F32{FPAdd(Imm32(1.0f), exponential)}))};
+    const F32 selected{Select(ILessThan(absolute_bits, Imm32(0x3d800000U), false),
+                              polynomial, magnitude)};
+    const U32 preserved{Select(ILessThan(absolute_bits, Imm32(0x39800000U), false),
+                               absolute_bits, BitCast<U32>(selected))};
+    return BitCast<F32>(BitwiseOr(preserved, BitwiseAnd(bits, Imm32(0x80000000U))));
 }
 
 F32 IREmitter::FPExp2(const F32& value) {

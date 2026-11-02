@@ -10,7 +10,6 @@
 #include <boost/container/small_vector.hpp>
 #include <fmt/format.h>
 
-#include "shader_recompiler/exception.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
@@ -19,6 +18,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
+#include "video_core/shader_handle_program.h"
 #include "video_core/shader_notify.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -44,15 +44,6 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
       pipeline_cache(pipeline_cache_), guest_descriptor_queue{guest_descriptor_queue_},
       descriptor_buffer_ring{descriptor_buffer_ring_}, info{info_},
       shader_hash{shader_hash_}, spv_module(std::move(spv_module_)) {
-    const u32 storage_buffers = Shader::NumDescriptors(info.storage_buffers_descriptors);
-    const u32 storage_buffer_limit =
-        (std::min)(device.GetMaxPerStageDescriptorStorageBuffers(),
-                   device.GetMaxDescriptorSetStorageBuffers());
-    if (storage_buffers > storage_buffer_limit) {
-        throw Shader::NotImplementedException(
-            "Compute shader {:016X} needs {} storage buffers, device supports {}",
-            shader_hash, storage_buffers, storage_buffer_limit);
-    }
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
     }
@@ -110,10 +101,7 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
                 .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 .pNext =
                     device.IsExtSubgroupSizeControlSupported() ? &subgroup_size_ci : nullptr,
-                .flags = info.uses_tensor_mul_add
-                             ? VkPipelineShaderStageCreateFlags{
-                                   VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT_EXT}
-                             : 0U,
+                .flags = 0,
                 .stage = VK_SHADER_STAGE_COMPUTE_BIT,
                 .module = *spv_module,
                 .pName = "main",
@@ -147,6 +135,9 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
         if (pipeline_statistics) {
             pipeline_statistics->Collect(device, *pipeline);
         }
+        // Nothing reads the module once the pipeline exists; the driver keeps its SPIR-V while it
+        // lives.
+        spv_module.reset();
         std::scoped_lock lock{build_mutex};
         is_built = true;
         build_condvar.notify_one();
@@ -185,6 +176,20 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     const auto& cbufs{qmd.const_buffer_config};
     const bool via_header_index{qmd.linked_tsc != 0};
     const auto read_handle{[&](const auto& desc, u32 index) {
+        if constexpr (std::is_same_v<decltype(desc), const Shader::TextureDescriptor&>) {
+            if (desc.handle_program != ~0U) {
+                // Read by the shader from a storage buffer: computed for this dispatch.
+                return TexturePair(VideoCommon::EvaluateTextureHandle(
+                                       info, desc.handle_program, gpu_memory,
+                                       [&](u32 cbuf) -> GPUVAddr {
+                                           return cbuf < cbufs.size() &&
+                                                          ((qmd.const_buffer_enable_mask >> cbuf) & 1) != 0
+                                                      ? cbufs[cbuf].Address()
+                                                      : GPUVAddr{};
+                                       }),
+                                   via_header_index);
+            }
+        }
         ASSERT(((qmd.const_buffer_enable_mask >> desc.cbuf_index) & 1) != 0);
         const u32 index_offset{index << desc.size_shift};
         const u32 offset{desc.cbuf_offset + index_offset};
@@ -270,6 +275,12 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     const VideoCommon::ImageViewInOut* views_it{views.data()};
     PushImageDescriptors(texture_cache, guest_descriptor_queue, info, rescaling, samplers_it,
                          views_it);
+
+    if (guest_descriptor_queue.UpdateCount() != num_descriptor_entries) {
+        LOG_CRITICAL(Render_Vulkan, "Compute descriptor count mismatch: expected {}, got {}",
+                     num_descriptor_entries, guest_descriptor_queue.UpdateCount());
+        return false;
+    }
 
     if (!is_built.load(std::memory_order::relaxed)) {
         // Wait for the pipeline to be built

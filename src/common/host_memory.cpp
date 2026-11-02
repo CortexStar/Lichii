@@ -54,8 +54,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
-#include <new>
 #include <random>
 
 #include "common/alignment.h"
@@ -134,8 +134,7 @@ public:
         , kernelbase_dll("Kernelbase")
     {}
 
-    bool Init(bool defer_commit) {
-        deferred_commit = defer_commit;
+    bool Init() {
         if (!kernelbase_dll.IsOpen()) {
             LOG_CRITICAL(HW_Memory, "Failed to load Kernelbase.dll");
             return false;
@@ -151,7 +150,7 @@ public:
         }
 
         // Allocate backing file map
-        backing_handle = pfn_CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_WRITE | FILE_MAP_READ, PAGE_READWRITE, deferred_commit ? SEC_RESERVE : SEC_COMMIT, backing_size, nullptr, nullptr, 0);
+        backing_handle = pfn_CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_WRITE | FILE_MAP_READ, PAGE_READWRITE, SEC_COMMIT, backing_size, nullptr, nullptr, 0);
         if (!backing_handle) {
             LOG_CRITICAL(HW_Memory, "Failed to allocate {} MiB of backing memory", backing_size >> 20);
             return false;
@@ -190,13 +189,6 @@ public:
             LOG_CRITICAL(HW_Memory, "Failed to allocate fallback buffer with size {:#x}, error {}", size, GetLastError());
         }
         return ptr;
-    }
-
-    void Commit(size_t physical_offset, size_t length) {
-        if (deferred_commit &&
-            !VirtualAlloc(backing_base + physical_offset, length, MEM_COMMIT, PAGE_READWRITE)) {
-            throw std::bad_alloc{};
-        }
     }
 
     void Map(size_t virtual_offset, size_t host_offset, size_t length, MemoryPermission perms) {
@@ -266,14 +258,11 @@ private:
                 }
             }
             Coalesce(0, virtual_size);
-            placeholders.clear();
-            placeholder_host_pointers.clear();
         }
         if (virtual_base) {
             if (!VirtualFree(virtual_base, 0, MEM_RELEASE)) {
                 LOG_CRITICAL(HW_Memory, "Failed to free virtual memory");
             }
-            virtual_base = nullptr;
         }
         if (backing_base) {
             if (!pfn_UnmapViewOfFile2(process, backing_base, MEM_PRESERVE_PLACEHOLDER)) {
@@ -282,13 +271,9 @@ private:
             if (!VirtualFreeEx(process, backing_base, 0, MEM_RELEASE)) {
                 LOG_CRITICAL(HW_Memory, "Failed to free backing memory");
             }
-            backing_base = nullptr;
         }
-        if (backing_handle) {
-            if (!CloseHandle(backing_handle)) {
-                LOG_CRITICAL(HW_Memory, "Failed to free backing memory file handle");
-            }
-            backing_handle = nullptr;
+        if (!CloseHandle(backing_handle)) {
+            LOG_CRITICAL(HW_Memory, "Failed to free backing memory file handle");
         }
     }
 
@@ -409,7 +394,6 @@ private:
 
     HANDLE process{};        ///< Current process handle
     HANDLE backing_handle{}; ///< File based backing memory
-    bool deferred_commit{};
 
     DynamicLibrary kernelbase_dll;
     PFN_CreateFileMapping2 pfn_CreateFileMapping2{};
@@ -538,7 +522,15 @@ public:
         , virtual_size{virtual_size_}
     {}
 
-    bool Init([[maybe_unused]] bool defer_commit) {
+#ifdef __linux__
+    bool PunchHole(size_t offset, size_t length) {
+        return fd >= 0 &&
+               fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, static_cast<off_t>(offset),
+                         static_cast<off_t>(length)) == 0;
+    }
+#endif
+
+    bool Init() {
         const long page_size = sysconf(_SC_PAGESIZE);
         if (page_size < static_cast<long>(PageAlignment) ||
             page_size % static_cast<long>(PageAlignment) != 0) {
@@ -912,8 +904,7 @@ private:
 
 #endif // ^^^ POSIX ^^^
 
-HostMemory::HostMemory(size_t backing_size_, size_t virtual_size_,
-                       [[maybe_unused]] BackingMode backing_mode)
+HostMemory::HostMemory(size_t backing_size_, size_t virtual_size_)
     : backing_size(backing_size_)
     , virtual_size(virtual_size_)
     , num_granules(Common::DivCeil(backing_size_, size_t{1} << GranuleShift))
@@ -926,7 +917,7 @@ HostMemory::HostMemory(size_t backing_size_, size_t virtual_size_,
 #else
     // Try to allocate a fastmem arena.
     impl = std::make_unique<HostMemory::Impl>(AlignUp(backing_size, PageAlignment), AlignUp(virtual_size, PageAlignment) + HugePageSize);
-    if (impl->Init(backing_mode == BackingMode::Deferred)) {
+    if (impl->Init()) {
         backing_base = impl->backing_base;
         virtual_base = impl->virtual_base;
         if (virtual_base) {
@@ -947,7 +938,7 @@ HostMemory::HostMemory(size_t backing_size_, size_t virtual_size_,
 HostMemory::~HostMemory() {
 #ifdef _WIN32
     if (fallback_buffer) {
-        VirtualFree(backing_base, 0, MEM_RELEASE);
+        VirtualFree(backing_base, backing_size, MEM_RELEASE);
     }
 #else
     if (fallback_buffer) {
@@ -1001,6 +992,27 @@ void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission 
 #endif
 }
 
+void HostMemory::HintCold(size_t physical_offset, size_t length,
+                          std::optional<size_t> virtual_offset) const {
+    if (length == 0 || backing_base == nullptr) {
+        return;
+    }
+    const auto hint = [length](u8* address) {
+#ifdef _WIN32
+        // Unlocking pages that are not locked takes them out of the working set.
+        VirtualUnlock(address, length);
+#elif defined(__linux__) && defined(MADV_PAGEOUT)
+        madvise(address, length, MADV_PAGEOUT);
+#else
+        static_cast<void>(address);
+#endif
+    };
+    hint(backing_base + physical_offset);
+    if (virtual_offset && virtual_base != nullptr && *virtual_offset + length <= virtual_size) {
+        hint(virtual_base + *virtual_offset);
+    }
+}
+
 void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 fill_value) {
     if (length == 0) {
         return;
@@ -1014,6 +1026,13 @@ void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 f
     // Fresh backing memory is zero and the host gives it no RAM until it's touched: clear only
     // the granules that may hold data (title 1's heap made the host commit every page of it).
     // A granule cleared in full is zero again.
+#ifdef __linux__
+    // Handing a whole granule back to the kernel frees its RAM; a memset would commit it.
+    static const bool punch = [] {
+        const char* value = std::getenv("EDEN_PUNCH_HOLE");
+        return value == nullptr || value[0] != '0';
+    }();
+#endif
     const size_t end = physical_offset + length;
     for (size_t offset = physical_offset; offset < end;) {
         const size_t index = offset >> GranuleShift;
@@ -1021,8 +1040,15 @@ void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 f
         const size_t granule_end = granule_begin + (size_t{1} << GranuleShift);
         const size_t clear_end = (std::min)(granule_end, end);
         if ((granules[index].load(std::memory_order_acquire) & GranuleDirty) != 0) {
-            std::memset(backing_base + offset, 0, clear_end - offset);
-            if (offset == granule_begin && clear_end == granule_end) {
+            const bool whole = offset == granule_begin && clear_end == granule_end;
+            bool cleared = false;
+#ifdef __linux__
+            cleared = whole && punch && impl && impl->PunchHole(granule_begin, granule_end - granule_begin);
+#endif
+            if (!cleared) {
+                std::memset(backing_base + offset, 0, clear_end - offset);
+            }
+            if (whole) {
                 granules[index].fetch_and(static_cast<u8>(~GranuleDirty), std::memory_order_release);
             }
         }
@@ -1034,26 +1060,10 @@ void HostMemory::MarkUsed(size_t physical_offset, size_t length) {
     if (length == 0) {
         return;
     }
-    ASSERT(physical_offset <= backing_size && length <= backing_size - physical_offset);
     const size_t last = (physical_offset + length - 1) >> GranuleShift;
-    for (size_t index = physical_offset >> GranuleShift; index <= last;) {
-        if ((granules[index].load(std::memory_order_acquire) & GranuleUsed) != 0) {
-            ++index;
-            continue;
-        }
-        const size_t first = index++;
-        while (index <= last &&
-               (granules[index].load(std::memory_order_acquire) & GranuleUsed) == 0) {
-            ++index;
-        }
-#ifdef _WIN32
-        if (impl) {
-            const size_t start = first << GranuleShift;
-            impl->Commit(start, (std::min)(backing_size, index << GranuleShift) - start);
-        }
-#endif
-        for (size_t current = first; current < index; ++current) {
-            granules[current].fetch_or(GranuleUsed, std::memory_order_release);
+    for (size_t index = physical_offset >> GranuleShift; index <= last; ++index) {
+        if ((granules[index].load(std::memory_order_relaxed) & GranuleUsed) == 0) {
+            granules[index].fetch_or(GranuleUsed, std::memory_order_release);
         }
     }
 }

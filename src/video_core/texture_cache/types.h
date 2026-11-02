@@ -134,7 +134,6 @@ struct ImageCopy {
 
 /// A rectangle of one mip level, in texels.
 struct LevelRect {
-    bool operator==(const LevelRect&) const = default;
     s32 level;
     u32 x;
     u32 y;

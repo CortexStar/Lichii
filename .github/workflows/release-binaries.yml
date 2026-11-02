@@ -1,10 +1,6 @@
 name: release-binaries
 
 on:
-  pull_request:
-    branches:
-      - nx2
-      - nx2-experimental
   workflow_dispatch:
     inputs:
       publish_release:
@@ -41,47 +37,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Every build is named <channel>-build-<run number>: its release tag, its version string, and the
-  # prefix of its release files. The channel is the branch, or pr-<number> for pull requests, which
-  # are never released. The update checker only offers releases from the build's own channel.
-  name:
-    name: Name the build
-    runs-on: ubuntu-24.04
-    outputs:
-      channel: ${{ steps.name.outputs.channel }}
-      tag: ${{ steps.name.outputs.tag }}
-    steps:
-      - id: name
-        shell: bash
-        env:
-          PR_NUMBER: ${{ github.event.number }}
-        run: |
-          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            channel="pr-$PR_NUMBER"
-          else
-            channel="${GITHUB_REF_NAME//\//-}"
-          fi
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-          echo "tag=$channel-build-$GITHUB_RUN_NUMBER" >> "$GITHUB_OUTPUT"
-
   build:
     name: ${{ matrix.platform }} binary
-    needs: name
     runs-on: ${{ matrix.runner }}
     env:
-      BUILD_TAG: ${{ needs.name.outputs.tag }}
-      ASSET_NAME: eglantine-${{ needs.name.outputs.tag }}-${{ matrix.platform }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_MAXSIZE: 1500M
+      CCACHE_MAXSIZE: 3000M
       SCCACHE_DIR: ${{ github.workspace }}/.sccache
+      SCCACHE_CACHE_SIZE: 3G
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: linux-x86_64
             runner: ubuntu-24.04
-          - platform: macos-arm64
-            runner: macos-15
           # The two -pgo builds are the same programs compiled by clang against Eden's periodically
           # updated profile (https://github.com/Eden-CI/PGO). Windows uses MSYS2's MinGW clang like
           # Eden does; MSVC cannot read an LLVM .profdata file.
@@ -99,10 +68,12 @@ jobs:
           - platform: linux-aarch64-pgo
             runner: ubuntu-24.04-arm
             pgo: true
+          - platform: macos-arm64
+            runner: macos-15
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Linux dependencies
         if: startsWith(matrix.platform, 'linux')
@@ -117,7 +88,20 @@ jobs:
             libswscale-dev pkg-config zlib1g-dev libva-dev libvdpau-dev \
             spirv-tools spirv-headers libusb-1.0-0-dev \
             libboost-dev libboost-fiber-dev libboost-context-dev \
-            libopus-dev libasound2-dev ccache
+            libopus-dev libasound2-dev ccache \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1
+
+      # The packages docs/Deps.md lists for macOS, plus ccache.
+      - name: Install macOS dependencies
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        env:
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+        run: |
+          brew install autoconf automake boost ffmpeg fmt glslang hidapi libtool libusb lz4 ninja \
+            nlohmann-json openssl pkg-config qt@6 sdl3 speexdsp zlib zstd cmake catch2 molten-vk \
+            vulkan-loader spirv-tools vulkan-utility-libraries ccache
 
       - name: Install Qt on Linux x86_64
         if: startsWith(matrix.platform, 'linux') && runner.arch != 'ARM64'
@@ -138,26 +122,6 @@ jobs:
           host: linux_arm64
           target: desktop
           arch: linux_gcc_arm64
-          modules: qtcharts
-          cache: true
-
-      - name: Install macOS dependencies
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          test "$(uname -m)" = arm64
-          brew install autoconf automake boost ccache cmake ffmpeg fmt glslang \
-            libtool libusb lz4 ninja nlohmann-json openssl@3 pkgconf sdl3 \
-            speexdsp zlib zstd
-
-      - name: Install Qt on macOS
-        if: runner.os == 'macOS'
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.8.3'
-          host: mac
-          target: desktop
-          arch: clang_64
           modules: qtcharts
           cache: true
 
@@ -235,6 +199,7 @@ jobs:
         with:
           msystem: UCRT64
           update: true
+          cache: true
           install: >-
             git make autoconf libtool automake-wrapper patch jq pactoys ninja
           pacboy: >-
@@ -246,17 +211,17 @@ jobs:
             lerc:p graphite2:p libwebp:p libtiff:p brotli:p ccache:p
 
       - name: Cache CPM downloads
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .cache/cpm
-          key: cpm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('cpmfile.json', 'CMakeLists.txt', 'src/**/CMakeLists.txt') }}
+          key: cpm-${{ runner.os }}-${{ hashFiles('cpmfile.json', 'CMakeLists.txt', 'src/**/CMakeLists.txt') }}
           restore-keys: |
-            cpm-${{ runner.os }}-${{ runner.arch }}-
+            cpm-${{ runner.os }}-
 
       # The sha in the key makes every run save a fresh cache (actions/cache never saves over an
       # exact hit), and restore-keys seeds it from the newest one of the same platform.
       - name: Cache compiler objects
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             .ccache
@@ -282,10 +247,7 @@ jobs:
             -DYUZU_USE_BUNDLED_SDL3=ON
             -DVulkanHeaders_FORCE_BUNDLED=ON
             -DVulkanUtilityLibraries_FORCE_BUNDLED=ON
-            -DENABLE_UPDATE_CHECKER=ON
-            "-DEGLANTINE_UPDATE_REPO=$GITHUB_REPOSITORY"
-            "-DEGLANTINE_BUILD_TAG=$BUILD_TAG"
-            "-DEGLANTINE_BUILD_PLATFORM=${{ matrix.platform }}"
+            -DENABLE_UPDATE_CHECKER=OFF
             -DUSE_DISCORD_PRESENCE=OFF
             -DUSE_CCACHE=ON
           )
@@ -303,33 +265,6 @@ jobs:
           fi
           cmake -S . -B build/release -G Ninja "${flags[@]}"
 
-      - name: Configure macOS ARM
-        if: runner.os == 'macOS'
-        shell: bash
-        run: >-
-          cmake -S . -B build/release -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_OSX_ARCHITECTURES=arm64
-          -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0
-          -DBUILD_TESTING=OFF
-          -DYUZU_TESTS=OFF
-          -DYUZU_CMD=ON
-          -DYUZU_ROOM=OFF
-          -DYUZU_ROOM_STANDALONE=OFF
-          -DYUZU_USE_BUNDLED_QT=OFF
-          "-DCMAKE_PREFIX_PATH=$QT_ROOT_DIR;$(brew --prefix)"
-          "-DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)"
-          -DYUZU_USE_BUNDLED_SDL3=OFF
-          -DYUZU_USE_BUNDLED_MOLTENVK=ON
-          -DVulkanHeaders_FORCE_BUNDLED=ON
-          -DVulkanUtilityLibraries_FORCE_BUNDLED=ON
-          -DENABLE_UPDATE_CHECKER=ON
-          "-DEGLANTINE_UPDATE_REPO=$GITHUB_REPOSITORY"
-          "-DEGLANTINE_BUILD_TAG=$BUILD_TAG"
-          "-DEGLANTINE_BUILD_PLATFORM=${{ matrix.platform }}"
-          -DUSE_DISCORD_PRESENCE=OFF
-          -DUSE_CCACHE=ON
-
       - name: Configure Windows
         if: matrix.platform == 'windows-x86_64'
         shell: bash
@@ -343,13 +278,31 @@ jobs:
           -DYUZU_ROOM_STANDALONE=OFF
           -DYUZU_USE_BUNDLED_QT=OFF
           -DYUZU_USE_BUNDLED_SDL3=ON
-          -DENABLE_UPDATE_CHECKER=ON
-          "-DEGLANTINE_UPDATE_REPO=$GITHUB_REPOSITORY"
-          "-DEGLANTINE_BUILD_TAG=$BUILD_TAG"
-          "-DEGLANTINE_BUILD_PLATFORM=${{ matrix.platform }}"
+          -DENABLE_UPDATE_CHECKER=OFF
           -DUSE_DISCORD_PRESENCE=OFF
           -DCMAKE_C_COMPILER_LAUNCHER=sccache
           -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+
+      - name: Configure macOS
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build/release -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF \
+            -DYUZU_TESTS=OFF \
+            -DYUZU_CMD=ON \
+            -DYUZU_ROOM=OFF \
+            -DYUZU_ROOM_STANDALONE=OFF \
+            -DYUZU_USE_BUNDLED_QT=OFF \
+            "-DCMAKE_PREFIX_PATH=$(brew --prefix qt@6);$(brew --prefix zlib)" \
+            "-DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" \
+            -DVulkanHeaders_FORCE_BUNDLED=ON \
+            -DVulkanUtilityLibraries_FORCE_BUNDLED=ON \
+            -DENABLE_UPDATE_CHECKER=OFF \
+            -DUSE_DISCORD_PRESENCE=OFF \
+            -DUSE_CCACHE=ON
 
       # MinGW build: system Qt and libraries from MSYS2, clang plus Eden's PGO profile. The profile
       # path is converted to its Windows form because clang runs with the MSYS mount underneath.
@@ -372,10 +325,7 @@ jobs:
             -DYUZU_USE_BUNDLED_FFMPEG=ON \
             -DVulkanHeaders_FORCE_BUNDLED=ON \
             -DVulkanUtilityLibraries_FORCE_BUNDLED=ON \
-            -DENABLE_UPDATE_CHECKER=ON \
-            "-DEGLANTINE_UPDATE_REPO=$GITHUB_REPOSITORY" \
-            "-DEGLANTINE_BUILD_TAG=$BUILD_TAG" \
-            "-DEGLANTINE_BUILD_PLATFORM=${{ matrix.platform }}" \
+            -DENABLE_UPDATE_CHECKER=OFF \
             -DUSE_DISCORD_PRESENCE=OFF \
             -DUSE_CCACHE=ON \
             -DCMAKE_C_COMPILER=clang \
@@ -385,24 +335,11 @@ jobs:
             "-DCMAKE_CXX_FLAGS=$profile"
 
       - name: Build
-        if: ${{ ! matrix.mingw && runner.os != 'macOS' }}
+        if: ${{ ! matrix.mingw }}
         shell: bash
         run: |
           cmake --build build/release --target yuzu yuzu-cmd --parallel
           if command -v ccache > /dev/null; then ccache --show-stats; else sccache --show-stats; fi
-
-      - name: Build macOS ARM
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          cmake --build build/release --target yuzu yuzu-cmd --parallel 2 -- -k 0
-          ccache --show-stats
-
-      - name: Package and verify macOS app
-        if: runner.os == 'macOS'
-        shell: bash
-        run: >-
-          sh tools/macos/package.sh build/release "$ASSET_NAME.zip"
 
       - name: Build MinGW PGO
         if: matrix.mingw
@@ -411,13 +348,9 @@ jobs:
           cmake --build build/release --target yuzu yuzu-cmd --parallel
           ccache --show-stats
 
-      - name: Stage third-party license notices
-        if: runner.os != 'macOS'
-        shell: bash
-        run: |
-          mkdir -p build/release/bin/licenses
-          cp -R dist/licenses/. build/release/bin/licenses/
-
+      # Plain tar.gz with the two programs. GitHub artifacts drop the executable bit, so a tar is
+      # what keeps it. This one is not self-contained: it needs Qt 6 and the usual libraries
+      # installed on the system.
       - name: Package Linux tar.gz
         if: startsWith(matrix.platform, 'linux')
         shell: bash
@@ -426,8 +359,9 @@ jobs:
           test -x build/release/bin/eglantine
           test -x build/release/bin/eden-cli
           strip build/release/bin/eglantine build/release/bin/eden-cli
-          tar -czf "$ASSET_NAME.tar.gz" -C build/release/bin eglantine eden-cli licenses
-          test -s "$ASSET_NAME.tar.gz"
+          tar -czf "eglantine-${GITHUB_SHA}-${{ matrix.platform }}.tar.gz" \
+            -C build/release/bin eglantine eden-cli
+          ls -la "eglantine-${GITHUB_SHA}-${{ matrix.platform }}.tar.gz"
 
       # A self-contained AppImage: linuxdeploy bundles every library the two programs need except
       # the base system ones (glibc, X11/Wayland client libraries, the GPU driver and Vulkan loader),
@@ -439,27 +373,22 @@ jobs:
           set -euo pipefail
           test -x build/release/bin/eglantine
           test -x build/release/bin/eden-cli
-          # Libraries Qt's xcb platform plugin needs, so linuxdeploy can resolve and bundle them.
-          sudo apt-get install -y --no-install-recommends libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
-            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1
           tools="$RUNNER_TEMP/linuxdeploy"
           mkdir -p "$tools"
-          arch=$(uname -m)
+          arch=$(uname -m)   # aarch64 or x86_64
           curl -fsSL -o "$tools/linuxdeploy-$arch.AppImage" \
-            "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-$arch.AppImage"
+          https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-$arch.AppImage
           curl -fsSL -o "$tools/linuxdeploy-plugin-qt-$arch.AppImage" \
-            "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-$arch.AppImage"
+          https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-$arch.AppImage
           chmod +x "$tools"/*.AppImage
           # The desktop file names its icon dev.eglantine.eglantine.
           icon="$RUNNER_TEMP/dev.eglantine.eglantine.png"
           cp dist/Eglantine.png "$icon"
           export APPIMAGE_EXTRACT_AND_RUN=1
           export QMAKE="$QT_ROOT_DIR/bin/qmake"
-          export LDAI_OUTPUT="$ASSET_NAME.AppImage"
+          export LDAI_OUTPUT="eglantine-${GITHUB_SHA}-${{ matrix.platform }}.AppImage"
           export OUTPUT="$LDAI_OUTPUT"
           export ARCH="$arch"
-          mkdir -p AppDir/usr/share/licenses/eglantine
-          cp -R dist/licenses/. AppDir/usr/share/licenses/eglantine/
           "$tools/linuxdeploy-$arch.AppImage" --appdir AppDir \
             --executable build/release/bin/eglantine \
             --executable build/release/bin/eden-cli \
@@ -517,72 +446,126 @@ jobs:
             deps "$dll"
           done
 
+      # A self-contained app bundle: macdeployqt copies Qt and every other Homebrew library both
+      # programs load into the bundle, then the leftover Homebrew search paths are removed so a
+      # machine with Homebrew still uses the bundled copies. Ad-hoc signed, not notarized.
+      - name: Package macOS app
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=build/release/bin/eglantine.app
+          test -x "$app/Contents/MacOS/eglantine"
+          test -x build/release/bin/eden-cli
+          cp build/release/bin/eden-cli "$app/Contents/MacOS/eden-cli"
+          "$(brew --prefix qt@6)/bin/macdeployqt" "$app" \
+            -executable="$app/Contents/MacOS/eden-cli" -libpath="$(brew --prefix)/lib" \
+            -always-overwrite -verbose=1
+          # Qt's virtual keyboard input plugin pulls in the QML stack, which the emulator doesn't use.
+          rm -f "$app/Contents/PlugIns/platforminputcontexts/libqtvirtualkeyboardplugin.dylib"
+          binaries=$(find "$app/Contents" -type f \( -perm -u+x -o -name '*.dylib' \) \
+            -exec sh -c 'file -b "$1" | grep -q Mach-O' _ {} \; -print)
+          for binary in $binaries; do
+            otool -l "$binary" | awk '/cmd LC_RPATH/ {getline; getline; print $2}' |
+              { grep -E '^/(opt/homebrew|usr/local)/' || true; } | while read -r rpath; do
+                install_name_tool -delete_rpath "$rpath" "$binary" 2> /dev/null
+              done
+          done
+          # Libraries that load their dependencies through @rpath find them in the bundle.
+          for program in eglantine eden-cli; do
+            install_name_tool -add_rpath @executable_path/../Frameworks \
+              "$app/Contents/MacOS/$program" 2> /dev/null
+          done
+          leaks=$(for binary in $binaries; do
+            otool -L "$binary" | grep -E '^\s+/(opt/homebrew|usr/local)/'
+            otool -l "$binary" | awk '/cmd LC_RPATH/ {getline; getline; print $2}' |
+              grep -E '^/(opt/homebrew|usr/local)/'
+          done || true)
+          if [ -n "$leaks" ]; then
+            echo "References still pointing outside the bundle:"
+            echo "$leaks" | sort -u
+            exit 1
+          fi
+          # macdeployqt invalidates the signatures. The programs get the entitlements when the
+          # tree has them (the Hypervisor CPU backend needs com.apple.security.hypervisor).
+          codesign --force --deep --sign - "$app"
+          if [ -f dist/eglantine.entitlements ]; then
+            codesign --force --sign - --entitlements dist/eglantine.entitlements \
+              "$app/Contents/MacOS/eden-cli"
+            codesign --force --sign - --entitlements dist/eglantine.entitlements "$app"
+          fi
+          codesign --verify --deep --strict "$app"
+          ditto -c -k --keepParent "$app" "eglantine-${GITHUB_SHA}-${{ matrix.platform }}.zip"
+          ls -la "eglantine-${GITHUB_SHA}-${{ matrix.platform }}.zip"
+          # Also ship a .dmg (drag eglantine.app onto Applications).
+          dmgdir=$(mktemp -d)
+          ditto "$app" "$dmgdir/eglantine.app"
+          ln -s /Applications "$dmgdir/Applications"
+          hdiutil create -volname "Eglantine" -srcfolder "$dmgdir" -ov -format UDZO \
+            "eglantine-${GITHUB_SHA}-${{ matrix.platform }}.dmg"
+          ls -la "eglantine-${GITHUB_SHA}-${{ matrix.platform }}.dmg"
+
       # The artifact is the bin folder itself: GitHub zips artifacts on download, and uploading a
       # zip gave a zip inside a zip. The release job zips it once for the release.
       - name: Upload Windows binary
         if: matrix.platform == 'windows-x86_64'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.ASSET_NAME }}
+          name: eglantine-${{ matrix.platform }}-${{ github.sha }}
           path: build/release/bin/
           if-no-files-found: error
           retention-days: 7
 
       - name: Upload MinGW binary
         if: matrix.mingw
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.ASSET_NAME }}
+          name: eglantine-${{ matrix.platform }}-${{ github.sha }}
           path: build/release/bin/
           if-no-files-found: error
           retention-days: 7
 
+      # Both Linux files go in one artifact: the tar.gz and the AppImage.
       - name: Upload Linux binary
         if: startsWith(matrix.platform, 'linux')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.ASSET_NAME }}
+          name: eglantine-${{ matrix.platform }}-${{ github.sha }}
           path: |
-            ${{ env.ASSET_NAME }}.tar.gz
-            ${{ env.ASSET_NAME }}.AppImage
+            eglantine-${{ github.sha }}-${{ matrix.platform }}.tar.gz
+            eglantine-${{ github.sha }}-${{ matrix.platform }}.AppImage
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
 
-      - name: Upload macOS binary
-        if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v4
+      # Zipped with ditto beforehand: the bundle's framework symlinks don't survive artifact zipping.
+      - name: Upload macOS app
+        if: startsWith(matrix.platform, 'macos')
+        uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.ASSET_NAME }}
-          path: ${{ env.ASSET_NAME }}.zip
+          name: eglantine-${{ matrix.platform }}-${{ github.sha }}
+          path: |
+            eglantine-${{ github.sha }}-${{ matrix.platform }}.zip
+            eglantine-${{ github.sha }}-${{ matrix.platform }}.dmg
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
-
-      - name: Save macOS compiler cache after failure
-        if: failure() && runner.os == 'macOS'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            .ccache
-            .sccache
-          key: objects-${{ matrix.platform }}-${{ github.sha }}
 
   # Publishes every binary as a GitHub pre-release once every platform built: on pushes to nx2
   # and nx2-experimental, and on manual runs unless "Publish the binaries as a GitHub release" is
   # unticked.
   release:
     name: Publish release
-    needs: [name, build]
+    needs: build
     if: github.event_name == 'push' || inputs.publish_release
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - name: Download binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
-          pattern: eglantine-${{ needs.name.outputs.tag }}-*
+          pattern: eglantine-*-${{ github.sha }}
           path: artifacts
 
       - name: Package release files
@@ -593,50 +576,43 @@ jobs:
           for artifact in artifacts/*/; do
             name=$(basename "$artifact")
             if compgen -G "$artifact*.AppImage" > /dev/null; then
+              # Linux: ship the AppImage and the tar.gz as they are.
               cp "$artifact"/*.AppImage "$artifact"/*.tar.gz dist/
             elif compgen -G "$artifact*.zip" > /dev/null; then
               cp "$artifact"/*.zip dist/
+              cp "$artifact"/*.dmg dist/ 2>/dev/null || true
             else
               (cd "$artifact" && zip -qr "${GITHUB_WORKSPACE}/dist/${name}.zip" .)
             fi
           done
 
-      # The notes list the commits since the channel's previous release; the app shows users the
-      # commits since their own build.
       - name: Create release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          CHANNEL: ${{ needs.name.outputs.channel }}
-          BUILD_TAG: ${{ needs.name.outputs.tag }}
         run: |
-          set -euo pipefail
           ls -la dist
-          previous=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq \
-            '[.[] | select(.tag_name | startswith(env.CHANNEL + "-build-"))][0].tag_name // empty')
-          {
-            if [ -n "$previous" ]; then
-              echo "## Changes since $previous"
-              echo
-              gh api "repos/$GITHUB_REPOSITORY/compare/$previous...$GITHUB_SHA" \
-                --jq '.commits | reverse | .[] | "- \(.commit.message | split("\n")[0]) (\(.sha[0:7]))"'
-              echo
-            fi
-            cat <<'EOF'
-          ## Install
+          gh release create "build-${GITHUB_RUN_NUMBER}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --prerelease \
+            --title "Eglantine ${GITHUB_REF_NAME} build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7})" \
+            --notes "Automatic build of ${GITHUB_REF_NAME} at ${GITHUB_SHA}.
 
           Windows: extract the zip and run eglantine.exe, or eden-cli.exe from a terminal.
           Linux (AppImage): make it executable (chmod +x) and run it; it bundles its libraries and needs glibc 2.39 or newer (Ubuntu 24.04, Fedora 40, Debian 13, Arch).
           Linux (tar.gz): extract it and run ./eglantine or ./eden-cli; it uses your system libraries, so Qt 6 and the usual libraries must be installed.
-          macOS: Apple Silicon and macOS 15 or newer. Extract the zip and move eglantine.app to Applications. The CLI is inside eglantine.app/Contents/MacOS/eden-cli. The app bundles Qt and MoltenVK and is ad-hoc signed, not notarized; macOS may require approval in Privacy & Security. macOS support remains experimental and uses the JIT, not NCE.
-          The -pgo builds are the same programs compiled with profile-guided optimization (clang plus Eden's profile); prefer them when your CPU supports it. The Windows PGO build is a MinGW build, so it carries its own DLLs and needs no Visual C++ redistributable.
+          macOS: Apple Silicon and macOS 15 or newer. Unzip and move eglantine.app to Applications; eden-cli is inside it, in Contents/MacOS. The app is not notarized, so the first time right-click it and choose Open (or run xattr -dr com.apple.quarantine eglantine.app).
+          The -pgo builds are the same programs compiled with profile-guided optimization (clang plus Eden's profile); prefer them when your CPU supports it. The Windows PGO build is a MinGW build, so it carries its own DLLs and needs no Visual C++ redistributable."
 
-          Eglantine looks for newer builds of its channel at startup and from Help > Check for Updates.
-          EOF
-          } > notes.md
-          gh release create "$BUILD_TAG" dist/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --prerelease \
-            --title "Eglantine $CHANNEL build $GITHUB_RUN_NUMBER (${GITHUB_SHA::7})" \
-            --notes-file notes.md
+      - name: Ping Discord
+        shell: bash
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/build-${GITHUB_RUN_NUMBER}"
+          MSG=$(printf '## <@&1566184315178713190> Eglantine %s build %s (%s)\n%s' \
+            "$GITHUB_REF_NAME" "$GITHUB_RUN_NUMBER" "${GITHUB_SHA::7}" "$URL")
+          jq -n --arg content "$MSG" \
+            '{content: $content, allowed_mentions: {roles: ["1566184315178713190"]}}' \
+          | curl -fsS -H "Content-Type: application/json" -d @- "$WEBHOOK"

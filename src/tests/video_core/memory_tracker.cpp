@@ -12,7 +12,6 @@
 
 #include "common/common_types.h"
 #include "video_core/buffer_cache/memory_tracker_base.h"
-#include "video_core/nx2.h"
 #include "core/device_memory.h"
 #include "core/memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
@@ -602,36 +601,4 @@ TEST_CASE("DeviceMemoryManager: UpdatePagesCachedBatch basic") {
     ranges.emplace_back(Core::Memory::YUZU_PAGESIZE, Core::Memory::YUZU_PAGESIZE);
     manager.UpdatePagesCachedBatch(ranges, 1);
     SUCCEED("UpdatePagesCachedBatch executed without error");
-}
-
-TEST_CASE("MemoryTracker: repeated indirect rewrites keep historical command-page tracking",
-          "[video_core][nx2_command_sync][mkw_sync]") {
-    Tegra::Nx2ClearGpuWrittenPages();
-    RasterizerInterface rasterizer;
-    auto tracker = std::make_unique<MemoryTracker>(rasterizer);
-    tracker->UnmarkRegionAsCpuModified(c, PAGE);
-    const auto translate = [](GPUVAddr address) -> std::optional<DAddr> {
-        return c + address - 0x8600000000ULL;
-    };
-    REQUIRE_FALSE(Tegra::Nx2HasGpuWrittenPage(0x8600000000ULL, 5 * sizeof(u32), translate));
-    for (u32 frame = 0; frame < 3; ++frame) {
-        tracker->MarkRegionAsGpuModified(c, 5 * sizeof(u32));
-        Tegra::Nx2MarkGpuWritten(c, 5 * sizeof(u32));
-        REQUIRE(Tegra::Nx2HasGpuWrittenPage(0x8600000000ULL, 5 * sizeof(u32), translate));
-        REQUIRE(tracker->IsRegionGpuModified(c, 5 * sizeof(u32)));
-        std::vector<Range> downloads;
-        tracker->ForEachDownloadRangeAndClear(c, PAGE, [&](u64 address, u64 size) {
-            downloads.emplace_back(address, size);
-        });
-        REQUIRE(downloads == std::vector<Range>{{c, PAGE}});
-        REQUIRE_FALSE(tracker->IsRegionGpuModified(c, 5 * sizeof(u32)));
-        REQUIRE(Tegra::Nx2HasGpuWrittenPage(0x8600000000ULL, 5 * sizeof(u32), translate));
-        downloads.clear();
-        tracker->ForEachDownloadRangeAndClear(c, PAGE, [&](u64 address, u64 size) {
-            downloads.emplace_back(address, size);
-        });
-        REQUIRE(downloads.empty());
-    }
-    tracker->MarkRegionAsCpuModified(c, PAGE);
-    REQUIRE(rasterizer.Count() == 0);
 }

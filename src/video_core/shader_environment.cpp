@@ -29,6 +29,7 @@
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/exception.h"
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
+#include "shader_recompiler/frontend/ampere/trap_guards.h"
 #include "shader_recompiler/frontend/ampere/program_override.h"
 #include "shader_recompiler/frontend/ampere/program_capture.h"
 #include "shader_recompiler/frontend/ampere/program_address_map.h"
@@ -130,9 +131,8 @@ static void DumpImpl(u64 /*pipeline_hash*/, u64 shader_hash, std::span<const u64
 }
 
 GenericEnvironment::GenericEnvironment(Tegra::MemoryManager& gpu_memory_, GPUVAddr program_base_,
-                                       u32 start_address_, bool support_cooperative_matrix_)
-    : gpu_memory{&gpu_memory_}, program_base{program_base_},
-      support_cooperative_matrix{support_cooperative_matrix_} {
+                                       u32 start_address_)
+    : gpu_memory{&gpu_memory_}, program_base{program_base_} {
     start_address = start_address_;
 }
 
@@ -140,10 +140,6 @@ GenericEnvironment::~GenericEnvironment() = default;
 
 u32 GenericEnvironment::TextureBoundBuffer() const {
     return texture_bound;
-}
-
-u32 GenericEnvironment::SurfaceBoundBuffer() const {
-    return surface_bound != ~0U ? surface_bound : texture_bound;
 }
 
 u32 GenericEnvironment::LocalMemorySize() const {
@@ -220,7 +216,15 @@ size_t GenericEnvironment::ReadSizeBytes() const noexcept {
 }
 
 bool GenericEnvironment::CanBeSerialized() const noexcept {
-    return !has_unbound_instructions;
+    return !has_unbound_instructions && (!lowered_native || lowered_native->trap_prefix.empty());
+}
+
+bool GenericEnvironment::HasNativeInstructions() const {
+    return native_source_size || Shader::Ampere::HasNativeAddressMap(code);
+}
+
+bool FileEnvironment::HasNativeInstructions() const {
+    return Shader::Ampere::HasNativeAddressMap(code);
 }
 
 u64 GenericEnvironment::CalculateHash() const {
@@ -250,7 +254,6 @@ void GenericEnvironment::Serialize(std::ofstream& file) const {
                sizeof(num_cbuf_replacement_values))
         .write(reinterpret_cast<const char*>(&local_memory_size), sizeof(local_memory_size))
         .write(reinterpret_cast<const char*>(&texture_bound), sizeof(texture_bound))
-        .write(reinterpret_cast<const char*>(&surface_bound), sizeof(surface_bound))
         .write(reinterpret_cast<const char*>(&start_address), sizeof(start_address))
         .write(reinterpret_cast<const char*>(&cached_lowest), sizeof(cached_lowest))
         .write(reinterpret_cast<const char*>(&cached_highest), sizeof(cached_highest))
@@ -322,8 +325,9 @@ std::optional<u64> GenericEnvironment::TryFindSize() {
 Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, u32 tic_limit,
                                                              bool via_header_index, u32 raw) {
     const auto handle{Tegra::Texture::TexturePair(raw, via_header_index)};
-    ASSERT(handle.first <= tic_limit);
-    const GPUVAddr descriptor_addr{tic_addr + handle.first * sizeof(Tegra::Texture::TICEntry)};
+    const u32 index{Tegra::Texture::TextureHeaderIndex(handle.first, tic_limit)};
+    ASSERT(index <= tic_limit);
+    const GPUVAddr descriptor_addr{tic_addr + index * sizeof(Tegra::Texture::TICEntry)};
     Tegra::Texture::TICEntry entry;
     gpu_memory->ReadBlock(descriptor_addr, &entry, sizeof(entry));
     return entry;
@@ -385,16 +389,17 @@ private:
 // A native program is captured and lowered once, when the shader cache first meets it. The
 // environments built later for its pipelines receive that result instead of lowering again.
 void GenericEnvironment::InitializeNativeCode(std::shared_ptr<const LoweredNativeCode> lowered,
-                                              u32 source_header_size) {
+                                              u32 source_header_size, bool geometry_stage) {
     if (!lowered) {
-        lowered = LowerNativeCode(source_header_size);
+        lowered = LowerNativeCode(source_header_size, geometry_stage);
     }
+    if (!Shader::Ampere::VerifyTrapGuards(lowered->trap_prefix, [&](u32 bank, u32 offset) {
+            return ReadTrapGuardConstant(bank, offset);
+        }))
+        throw Shader::Ampere::TrapGuardError{};
     if (lowered->texture_bound != ~0U) {
         // Native TEX carries its cbuf index explicitly; TEXS obtains it from the environment.
         texture_bound = lowered->texture_bound;
-    }
-    if (lowered->surface_bound != ~0U) {
-        surface_bound = lowered->surface_bound;
     }
     native_source_size = lowered->source_size;
     code = lowered->code;
@@ -403,7 +408,8 @@ void GenericEnvironment::InitializeNativeCode(std::shared_ptr<const LoweredNativ
     lowered_native = std::move(lowered);
 }
 
-std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32 source_header_size) {
+std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32 source_header_size,
+                                                                         bool geometry_stage) {
     using Shader::Ampere::Instruction;
     const u32 native_header_size = source_header_size;
     constexpr u32 maximum_instructions = Shader::Ampere::ProgramCaptureState::MaximumInstructions;
@@ -441,9 +447,18 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
         }
         if (status == Shader::Ampere::ProgramCaptureState::Result::Complete) break;
     }
-    auto lowered = Shader::Ampere::LowerToMaxwell(native, stage == Shader::Stage::Geometry,
-                                                  support_cooperative_matrix &&
-                                                      stage == Shader::Stage::Compute);
+    std::vector<u32> verified_traps;
+    for (u32 i = 0; i < native.size(); ++i)
+        if (native[i].Bits(0, 12) == 0x95c)
+            verified_traps.push_back(i * sizeof(Instruction));
+    const size_t trap_count = verified_traps.empty() ? 0 : verified_traps.back() / sizeof(Instruction) + 1;
+    if (trap_count && (stage != Shader::Stage::Compute ||
+                      !Shader::Ampere::VerifyTrapGuards(std::span{native}.first(trap_count),
+                                                       [&](u32 bank, u32 offset) {
+                                                           return ReadTrapGuardConstant(bank, offset);
+                                                       })))
+        throw Shader::Ampere::TrapGuardError{};
+    auto lowered = Shader::Ampere::LowerToMaxwell(native, geometry_stage, true, verified_traps);
     // EDEN_NX2_REJECT=<hex address>,...: treat these programs as rejected (to find which newly
     // lowered program changes a game's behaviour without rebuilding).
     if (static const std::string reject_list = [] {
@@ -456,26 +471,6 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
     }
     // EDEN_NX2_SHADER_DUMP=<dir>: keep every captured native program (named by its key) so the
     // lowering can be tested offline against all of a game's shaders.
-    const auto dump_mapped = [&](const std::filesystem::path& path) {
-        std::ofstream mapped(path, std::ios::binary);
-        if (!mapped) return 0U;
-        std::array<u8, 0x1000> block{};
-        u32 offset = 0;
-        while (offset < 0x10000) {
-            const size_t size = std::min<size_t>(
-                block.size() - ((program_base + offset) % block.size()), 0x10000 - offset);
-            if (!gpu_memory->IsWithinGPUAddressRange(program_base + offset) ||
-                !gpu_memory->IsWithinGPUAddressRange(program_base + offset + size - 1) ||
-                !gpu_memory->IsContinuousRange(program_base + offset, size)) {
-                break;
-            }
-            gpu_memory->ReadBlock(program_base + offset, block.data(), size);
-            mapped.write(reinterpret_cast<const char*>(block.data()), size);
-            if (!mapped) break;
-            offset += static_cast<u32>(size);
-        }
-        return offset;
-    };
     if (static const char* const dump_directory = std::getenv("EDEN_NX2_SHADER_DUMP");
         dump_directory != nullptr) {
         const auto folder = std::filesystem::path{dump_directory};
@@ -486,13 +481,6 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
             std::ofstream dump(path, std::ios::binary);
             dump.write(reinterpret_cast<const char*>(native.data()),
                        native.size() * sizeof(Shader::Ampere::Instruction));
-        }
-        if (!lowered && std::getenv("EDEN_NX2_SHADER_DUMP_MAPPED")) {
-            auto mapped_path = path;
-            mapped_path.replace_extension(".mapped.bin");
-            const u32 size = dump_mapped(mapped_path);
-            LOG_INFO(Shader, "Mapped native shader dump at {:#x}: {} bytes in {}", program_base,
-                     size, mapped_path.string());
         }
     }
     if (!lowered) {
@@ -509,14 +497,18 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
             {
                 // Retain mapped bytes beyond the first EXIT for investigating
                 // native CALL targets in compiler library subroutines.
-                dump_mapped(folder / (key + ".mapped.bin"));
+                std::ofstream mapped(folder / (key + ".mapped.bin"), std::ios::binary);
+                std::array<u8, 0x1000> block{};
+                for (u32 offset = 0; offset < 0x10000; offset += 0x1000) {
+                    if (!gpu_memory->IsFullyMappedRange(program_base + offset, block.size())) break;
+                    gpu_memory->ReadBlock(program_base + offset, block.data(), block.size());
+                    mapped.write(reinterpret_cast<const char*>(block.data()), block.size());
+                }
             }
             LOG_WARNING(Shader, "Native shader paused: key={}, offset={:#x}, reason={}, source={}",
                         key, lowered.error_offset, lowered.error, source_path.string());
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes{30};
-            const bool wait_for_override = std::getenv("EDEN_NATIVE_SHADER_OVERRIDE_NO_WAIT") == nullptr;
-            while (!gpu_memory->IsShuttingDown() && std::chrono::steady_clock::now() < deadline &&
-                   (wait_for_override || std::filesystem::exists(override_path))) {
+            while (!gpu_memory->IsShuttingDown() && std::chrono::steady_clock::now() < deadline) {
                 if (std::filesystem::exists(override_path)) {
                     std::ifstream file(override_path, std::ios::binary | std::ios::ate);
                     const auto length = file.tellg();
@@ -553,8 +545,8 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
     }
     auto result = std::make_shared<LoweredNativeCode>();
     result->texture_bound = lowered.required_texture_buffer;
-    result->surface_bound = lowered.required_surface_buffer;
     result->source_size = native_header_size + lowered.source_size;
+    result->trap_prefix.assign(native.begin(), native.begin() + trap_count);
     auto& lowered_code = result->code;
     lowered_code.resize(sizeof(sph) / sizeof(u64));
     std::memcpy(lowered_code.data(), &sph, sizeof(sph));
@@ -577,13 +569,37 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
                                          Tegra::MemoryManager& gpu_memory_,
                                          Maxwell::ShaderType program, GPUVAddr program_base_,
                                          u32 start_address_,
-                                         std::shared_ptr<const LoweredNativeCode> lowered_native_,
-                                         bool support_cooperative_matrix_)
-    : GenericEnvironment{gpu_memory_, program_base_, start_address_, support_cooperative_matrix_},
-      maxwell3d{&maxwell3d_} {
+                                         std::shared_ptr<const LoweredNativeCode> lowered_native_)
+    : GenericEnvironment{gpu_memory_, program_base_, start_address_}, maxwell3d{&maxwell3d_} {
     gpu_memory->ReadBlock(program_base + start_address, &sph, sizeof(sph));
     initial_offset = sizeof(sph);
     texture_bound = maxwell3d->regs.bindless_texture_const_buffer_slot;
+    const auto& regs{maxwell3d->regs};
+    const bool native{maxwell3d->GetNativeMacroEngine().native_turing};
+    // Task and mesh programs: the task in the vertex slot, its mesh program in the tessellation
+    // slot (without a task, the mesh program is in the vertex slot).
+    const bool mesh_slot{native && regs.IsMeshEnabled() &&
+                         (program == Maxwell::ShaderType::VertexB ||
+                          program == Maxwell::ShaderType::Tessellation)};
+    if (native) {
+        if (program != Maxwell::ShaderType::VertexB && program != Maxwell::ShaderType::Pixel &&
+            program != Maxwell::ShaderType::Geometry && !mesh_slot) {
+            throw Shader::RuntimeError("Unsupported native graphics shader stage {}", static_cast<u32>(program));
+        }
+        if (std::getenv("EDEN_NATIVE_DRAW_DIAGNOSTICS")) {
+            const u32 native_stage = program == Maxwell::ShaderType::Pixel ? 4 :
+                                     program == Maxwell::ShaderType::Geometry ? 3 : 0;
+            const auto& table = maxwell3d->state.shader_stages[native_stage].const_buffers[1];
+            if (table.enabled && table.size && table.size <= Tegra::Engines::Maxwell3D::Regs::MaxConstBufferSize) {
+                std::vector<u8> bytes(table.size);
+                gpu_memory->ReadBlock(table.address, bytes.data(), bytes.size());
+                std::ofstream dump(fmt::format("native-graphics-cbuf-{}-1.bin", static_cast<u32>(program)), std::ios::binary);
+                dump.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+            }
+        }
+        InitializeNativeCode(std::move(lowered_native_), 128,
+                             program == Maxwell::ShaderType::Geometry);
+    }
     gp_passthrough_mask = maxwell3d->regs.post_vtg_shader_attrib_skip_mask;
     switch (program) {
     case Maxwell::ShaderType::VertexA:
@@ -614,95 +630,18 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
         ASSERT_MSG(false, "Invalid program={}", program);
         break;
     }
-    if (maxwell3d->GetNativeMacroEngine().native_turing) {
-        if (program != Maxwell::ShaderType::VertexB && program != Maxwell::ShaderType::Geometry &&
-            program != Maxwell::ShaderType::Pixel) {
-            if (std::getenv("EDEN_NX2_SHADER_DUMP")) {
-                InitializeNativeCode(nullptr);
-            }
-            throw Shader::RuntimeError("Unsupported native graphics shader stage {}", static_cast<u32>(program));
+    if (mesh_slot) {
+        const bool has_task{regs.IsShaderConfigEnabled(Maxwell::ShaderType::Tessellation)};
+        stage = program == Maxwell::ShaderType::VertexB && has_task ? Shader::Stage::Task
+                                                                    : Shader::Stage::Mesh;
+        mesh_registers = {regs.reg_array[Maxwell::MeshShaderA], regs.reg_array[Maxwell::MeshShaderB],
+                          regs.reg_array[Maxwell::MeshInitShader]};
+        if (stage == Shader::Stage::Mesh && regs.IsShaderConfigEnabled(Maxwell::ShaderType::Geometry)) {
+            const auto& geometry{regs.pipelines[static_cast<size_t>(Maxwell::ShaderType::Geometry)]};
+            const GPUVAddr address{(static_cast<u64>(geometry.reserved[0] & 0xff) << 32) |
+                                   geometry.reserved[1]};
+            gpu_memory->ReadBlock(address, &mesh_primitive_header, sizeof(mesh_primitive_header));
         }
-        if (std::getenv("EDEN_NATIVE_DRAW_DIAGNOSTICS")) {
-            const u32 native_stage = program == Maxwell::ShaderType::Pixel ? 4 :
-                                     program == Maxwell::ShaderType::Geometry ? 3 : 0;
-            const auto& table = maxwell3d->state.shader_stages[native_stage].const_buffers[1];
-            if (table.enabled && table.size && table.size <= Tegra::Engines::Maxwell3D::Regs::MaxConstBufferSize) {
-                std::vector<u8> bytes(table.size);
-                gpu_memory->ReadBlock(table.address, bytes.data(), bytes.size());
-                std::ofstream dump(fmt::format("native-graphics-cbuf-{}-1.bin", static_cast<u32>(program)), std::ios::binary);
-                dump.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-            }
-        }
-        if (program == Maxwell::ShaderType::Pixel && std::getenv("EDEN_NX2_SHADER_DUMP")) {
-            static u32 gather_probes{};
-            const auto mapped = [&](GPUVAddr address, u64 size) {
-                return size != 0 && size - 1 <= std::numeric_limits<GPUVAddr>::max() - address &&
-                       gpu_memory->IsWithinGPUAddressRange(address) &&
-                       gpu_memory->IsWithinGPUAddressRange(address + size - 1) &&
-                       gpu_memory->IsFullyMappedRange(address, size);
-            };
-            if (gather_probes < 8 && mapped(program_base, 0xc0)) {
-                Shader::Ampere::Instruction gather;
-                gpu_memory->ReadBlock(program_base + 0xb0, &gather, sizeof(gather));
-                if (gather.Bits(0, 12) == 0xb63 && gather.Bits(79, 2) == 1) {
-                    ++gather_probes;
-                    const u32 bank = gather.Bits(54, 5);
-                    const auto& regs = maxwell3d->regs;
-                    const auto& buffers = maxwell3d->state.shader_stages[4].const_buffers;
-                    LOG_WARNING(Shader, "Native gather provenance: program={:#x} stage=4 "
-                                "bound_bank={} encoded_bank={} words={:08x} {:08x} {:08x} {:08x}",
-                                program_base, texture_bound, bank, gather.words[0], gather.words[1],
-                                gather.words[2], gather.words[3]);
-                    if (bank >= buffers.size()) {
-                        LOG_WARNING(Shader, "Native gather provenance: invalid bank {}", bank);
-                    } else {
-                        const auto& buffer = buffers[bank];
-                        for (const u32 offset : {gather.Bits(40, 14) * 4, 0x170U}) {
-                            if (!buffer.enabled || offset > buffer.size || buffer.size - offset < 4 ||
-                                !mapped(buffer.address, u64{offset} + 4)) {
-                                LOG_WARNING(Shader, "Native gather provenance: program={:#x} "
-                                            "bank={} offset={:#x} unavailable enabled={} base={:#x} size={:#x}",
-                                            program_base, bank, offset, buffer.enabled,
-                                            buffer.address, buffer.size);
-                                continue;
-                            }
-                            const u32 raw = gpu_memory->Read<u32>(buffer.address + offset);
-                            const auto pair = Tegra::Texture::TexturePair(
-                                raw, regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding);
-                            const GPUVAddr pool = regs.tex_header.Address();
-                            const u64 descriptor_offset = u64{pair.first} * sizeof(Tegra::Texture::TICEntry);
-                            if (pair.first > regs.tex_header.limit ||
-                                descriptor_offset > std::numeric_limits<GPUVAddr>::max() - pool ||
-                                !mapped(pool + descriptor_offset, sizeof(Tegra::Texture::TICEntry))) {
-                                LOG_WARNING(Shader, "Native gather provenance: program={:#x} "
-                                            "bank={} offset={:#x} handle={:#x} tic={} tsc={} "
-                                            "unavailable pool={:#x} limit={}", program_base, bank,
-                                            offset, raw, pair.first, pair.second, pool, regs.tex_header.limit);
-                                continue;
-                            }
-                            Tegra::Texture::TICEntry entry;
-                            gpu_memory->ReadBlock(pool + descriptor_offset, &entry, sizeof(entry));
-                            LOG_WARNING(Shader, "Native gather provenance: program={:#x} bank={} "
-                                        "base={:#x} size={:#x} offset={:#x} handle={:#x} tic={} tsc={} "
-                                        "pool={:#x} limit={} raw={:016x} {:016x} {:016x} {:016x} "
-                                        "format={} types={},{},{},{} swizzles={},{},{},{} srgb={} "
-                                        "type={} header={} dimensions={}x{} texture={:#x}",
-                                        program_base, bank, buffer.address, buffer.size, offset, raw,
-                                        pair.first, pair.second, pool, regs.tex_header.limit,
-                                        entry.raw[0], entry.raw[1], entry.raw[2], entry.raw[3],
-                                        static_cast<u32>(entry.format.Value()), static_cast<u32>(entry.r_type.Value()),
-                                        static_cast<u32>(entry.g_type.Value()), static_cast<u32>(entry.b_type.Value()),
-                                        static_cast<u32>(entry.a_type.Value()), static_cast<u32>(entry.x_source.Value()),
-                                        static_cast<u32>(entry.y_source.Value()), static_cast<u32>(entry.z_source.Value()),
-                                        static_cast<u32>(entry.w_source.Value()), entry.srgb_conversion.Value(),
-                                        static_cast<u32>(entry.texture_type.Value()), static_cast<u32>(entry.header_version.Value()),
-                                        entry.Width(), entry.Height(), entry.Address());
-                        }
-                    }
-                }
-            }
-        }
-        InitializeNativeCode(std::move(lowered_native_));
     }
     const u64 local_size{sph.LocalMemorySize()};
     ASSERT(local_size <= (std::numeric_limits<u32>::max)());
@@ -713,19 +652,11 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
 }
 
 u32 GraphicsEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
+    const auto& cbuf{maxwell3d->state.shader_stages[stage_index].const_buffers[cbuf_index]};
+    ASSERT(cbuf.enabled);
     u32 value{};
-    if (snapshot) {
-        const auto& cbuf{snapshot->const_buffers[cbuf_index]};
-        ASSERT(cbuf.enabled);
-        if (cbuf_offset < cbuf.size) {
-            std::memcpy(&value, cbuf.bytes.data() + cbuf_offset, sizeof(value));
-        }
-    } else {
-        const auto& cbuf{maxwell3d->state.shader_stages[stage_index].const_buffers[cbuf_index]};
-        ASSERT(cbuf.enabled);
-        if (cbuf_offset < cbuf.size) {
-            value = gpu_memory->Read<u32>(cbuf.address + cbuf_offset);
-        }
+    if (cbuf_offset < cbuf.size) {
+        value = gpu_memory->Read<u32>(cbuf.address + cbuf_offset);
     }
     cbuf_values.emplace(MakeCbufKey(cbuf_index, cbuf_offset), value);
     return value;
@@ -737,9 +668,8 @@ std::optional<Shader::ReplaceConstant> GraphicsEnvironment::GetReplaceConstBuffe
         return std::nullopt;
     }
     const u64 key = (static_cast<u64>(bank) << 32) | static_cast<u64>(offset);
-    const auto& replace_table{snapshot ? snapshot->replace_table : maxwell3d->replace_table};
-    auto it = replace_table.find(key);
-    if (it == replace_table.end()) {
+    auto it = maxwell3d->replace_table.find(key);
+    if (it == maxwell3d->replace_table.end()) {
         return std::nullopt;
     }
     const auto converted_value = [](Tegra::Engines::Maxwell3D::HLEReplacementAttributeType name) {
@@ -759,14 +689,20 @@ std::optional<Shader::ReplaceConstant> GraphicsEnvironment::GetReplaceConstBuffe
 }
 
 Shader::TextureType GraphicsEnvironment::ReadTextureType(u32 handle) {
-    const auto entry{ReadTextureDescriptor(handle)};
+    const auto& regs{maxwell3d->regs};
+    const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
+    auto entry =
+        ReadTextureInfo(regs.tex_header.Address(), regs.tex_header.limit, via_header_index, handle);
     const Shader::TextureType result{ConvertTextureType(entry)};
     texture_types.emplace(handle, result);
     return result;
 }
 
 Shader::TexturePixelFormat GraphicsEnvironment::ReadTexturePixelFormat(u32 handle) {
-    const auto entry{ReadTextureDescriptor(handle)};
+    const auto& regs{maxwell3d->regs};
+    const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
+    auto entry =
+        ReadTextureInfo(regs.tex_header.Address(), regs.tex_header.limit, via_header_index, handle);
     const Shader::TexturePixelFormat result(ConvertTexturePixelFormat(entry));
     texture_pixel_formats.emplace(handle, result);
     return result;
@@ -778,90 +714,17 @@ bool GraphicsEnvironment::IsTexturePixelFormatInteger(u32 handle) {
 }
 
 u32 GraphicsEnvironment::ReadViewportTransformState() {
-    viewport_transform_state = snapshot ? snapshot->viewport_scale_offset_enabled
-                                        : maxwell3d->regs.viewport_scale_offset_enabled;
-    return viewport_transform_state;
-}
-
-Tegra::Texture::TICEntry GraphicsEnvironment::ReadTextureDescriptor(u32 handle) {
-    if (!snapshot) {
-        const auto& regs{maxwell3d->regs};
-        const bool via_header_index{regs.sampler_binding ==
-                                    Maxwell::SamplerBinding::ViaHeaderBinding};
-        return ReadTextureInfo(regs.tex_header.Address(), regs.tex_header.limit,
-                               via_header_index, handle);
-    }
-    const u32 index{Tegra::Texture::TexturePair(handle, snapshot->via_header_index).first};
-    ASSERT(index < snapshot->texture_pool.size());
-    if (index >= snapshot->texture_pool.size()) {
-        return {};
-    }
-    return snapshot->texture_pool[index];
-}
-
-// Runs on the GPU thread, before the environment is handed to a translation worker.
-// - Constant buffers are copied whole: translation folds some of their values into the shader
-//   (driver constants in bank 1, texture handles, indirect branch tables), and games reuse
-//   uniform memory once the GPU is past the draw, so a later read could see another draw's data.
-// - The texture pool is copied up to its limit, read like the attached path reads entries.
-// - The viewport transform flag and the HLE macro replacements are copied.
-bool GraphicsEnvironment::Detach() {
-    constexpr u32 MaxTexturePoolEntries = 1U << 15;
     const auto& regs{maxwell3d->regs};
-    if (regs.tex_header.limit >= MaxTexturePoolEntries) {
-        return false;
-    }
-    const GPUVAddr pool_address{regs.tex_header.Address()};
-    const size_t pool_entries{size_t{regs.tex_header.limit} + 1};
-    const size_t pool_size{pool_entries * sizeof(Tegra::Texture::TICEntry)};
-    if (!gpu_memory->IsFullyMappedRange(pool_address, pool_size)) {
-        return false;
-    }
-    EngineSnapshot copy;
-    copy.texture_pool.resize(pool_entries);
-    gpu_memory->ReadBlock(pool_address, copy.texture_pool.data(), pool_size);
-    const auto& live_buffers{maxwell3d->state.shader_stages[stage_index].const_buffers};
-    for (size_t index = 0; index < live_buffers.size(); ++index) {
-        const auto& live{live_buffers[index]};
-        auto& copied{copy.const_buffers[index]};
-        copied.enabled = live.enabled;
-        if (!live.enabled || live.size == 0) {
-            continue;
-        }
-        // The size register can exceed what a constant buffer holds; never copy more than that.
-        copied.size = (std::min)(live.size, static_cast<u32>(Maxwell::MaxConstBufferSize));
-        copied.bytes.resize(copied.size + sizeof(u32));
-        gpu_memory->ReadBlockUnsafe(live.address, copied.bytes.data(), copied.bytes.size());
-    }
-    copy.via_header_index = regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding;
-    copy.viewport_scale_offset_enabled = regs.viewport_scale_offset_enabled;
-    if (has_hle_engine_state) {
-        copy.replace_table = maxwell3d->replace_table;
-    }
-    snapshot = std::move(copy);
-    maxwell3d = nullptr;
-    return true;
-}
-
-size_t GraphicsEnvironment::SnapshotSizeBytes() const noexcept {
-    if (!snapshot) {
-        return 0;
-    }
-    size_t total{};
-    for (const auto& cbuf : snapshot->const_buffers) {
-        total += cbuf.bytes.size();
-    }
-    return total + snapshot->texture_pool.size() * sizeof(Tegra::Texture::TICEntry);
+    viewport_transform_state = regs.viewport_scale_offset_enabled;
+    return viewport_transform_state;
 }
 
 ComputeEnvironment::ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_compute_,
                                        Tegra::MemoryManager& gpu_memory_, GPUVAddr program_base_,
                                        u32 start_address_,
-                                       std::shared_ptr<const LoweredNativeCode> lowered_native_,
-                                       bool support_cooperative_matrix_)
-    : GenericEnvironment{gpu_memory_, program_base_, start_address_, support_cooperative_matrix_},
-      kepler_compute{
-                                                                      &kepler_compute_} {
+                                       std::shared_ptr<const LoweredNativeCode> lowered_native_)
+    : GenericEnvironment{gpu_memory_, program_base_, start_address_}, kepler_compute{
+                                                                          &kepler_compute_} {
     const auto& qmd{kepler_compute->launch_description};
     stage = Shader::Stage::Compute;
     local_memory_size = qmd.local_pos_alloc + qmd.local_crs_alloc;
@@ -875,6 +738,26 @@ ComputeEnvironment::ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_com
         InitializeNativeCode(std::move(lowered_native_), 0);
         start_address = sizeof(sph);
     }
+}
+
+std::optional<u32> ReadNativeGuardConstant(Tegra::Engines::KeplerCompute& compute,
+                                         Tegra::MemoryManager& memory, u32 bank, u32 offset) {
+    const auto& qmd = compute.launch_description;
+    if (bank >= qmd.const_buffer_config.size() ||
+        !(qmd.const_buffer_enable_mask.Value() & (1U << bank)))
+        return std::nullopt;
+    const auto& buffer = qmd.const_buffer_config[bank];
+    const GPUVAddr address = buffer.Address() + offset;
+    if (offset % 4 || offset > buffer.size || buffer.size - offset < sizeof(u32) ||
+        address < buffer.Address() || !memory.IsFullyMappedRange(address, sizeof(u32)))
+        return std::nullopt;
+    u32 value{};
+    memory.ReadBlock(address, &value, sizeof(value));
+    return value;
+}
+
+std::optional<u32> ComputeEnvironment::ReadTrapGuardConstant(u32 bank, u32 offset) {
+    return ReadNativeGuardConstant(*kepler_compute, *gpu_memory, bank, offset);
 }
 
 u32 ComputeEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
@@ -931,7 +814,6 @@ void FileEnvironment::Deserialize(std::ifstream& file) {
               sizeof(num_cbuf_replacement_values))
         .read(reinterpret_cast<char*>(&local_memory_size), sizeof(local_memory_size))
         .read(reinterpret_cast<char*>(&texture_bound), sizeof(texture_bound))
-        .read(reinterpret_cast<char*>(&surface_bound), sizeof(surface_bound))
         .read(reinterpret_cast<char*>(&start_address), sizeof(start_address))
         .read(reinterpret_cast<char*>(&read_lowest), sizeof(read_lowest))
         .read(reinterpret_cast<char*>(&read_highest), sizeof(read_highest))
@@ -1043,10 +925,6 @@ u32 FileEnvironment::SharedMemorySize() const {
 
 u32 FileEnvironment::TextureBoundBuffer() const {
     return texture_bound;
-}
-
-u32 FileEnvironment::SurfaceBoundBuffer() const {
-    return surface_bound != ~0U ? surface_bound : texture_bound;
 }
 
 std::array<u32, 3> FileEnvironment::WorkgroupSize() const {

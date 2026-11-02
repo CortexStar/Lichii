@@ -28,7 +28,6 @@
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "video_core/vulkan_common/nsight_aftermath_tracker.h"
-#include "video_core/vulkan_common/cooperative_matrix.h"
 #include "video_core/vulkan_common/vma.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -621,6 +620,9 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     }
 
     sets_per_pool = 64;
+    // AMD GCN4 and older are told apart by their lack of float16, read before float16 is turned
+    // off for newer AMD drivers below: checked after that, every AMD GPU looked like GCN4 and lost
+    // VK_EXT_sampler_filter_minmax (an RDNA3 Radeon 780M logged it).
     const bool amd_gcn4_or_older = is_amd && !features.shader_float16_int8.shaderFloat16;
     if (is_amd_driver) {
         // AMD drivers need a higher amount of Sets per Pool in certain circumstances like in XC2.
@@ -777,10 +779,14 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
             .flags = flags,
             .physicalDevice = physical,
             .device = *logical,
-            // 64 MiB blocks on discrete GPUs too: with 256 MiB ones, Switch 2 titles' mix of
+            // 16 MiB blocks on discrete GPUs too: with 256 MiB ones, Switch 2 titles' mix of
             // texture sizes left ~38% of the image blocks empty (2 GB of an 8 GB card in title
-            // 1), which the texture cache counted as used and kept evicting textures for.
-            .preferredLargeHeapBlockSize = 64u * 1024u * 1024u,
+            // 1), which the texture cache counted as used and kept evicting textures for. With
+            // 64 MiB ones textures created and deleted by the thousand still left ~1.7 GB of holes
+            // after ten minutes, with 32 MiB ones ~0.5 GB: a block drains only once all of its
+            // images are gone, and fewer per block drain sooner. VMA gives allocations over half a
+            // block (8 MiB) their own memory, which goes back to the driver when they are freed.
+            .preferredLargeHeapBlockSize = 16u * 1024u * 1024u,
             .pAllocationCallbacks = nullptr,
             .pDeviceMemoryCallbacks = nullptr,
             .pHeapSizeLimit = heap_size_limit != 0 ? heap_size_limits.data() : nullptr,
@@ -802,7 +808,35 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 Device::~Device() {
     SaveStaticPipelineCache();
     ShutdownGPULogging();
+    for (auto& pools : separate_pools) {
+        for (VmaPool pool : pools) {
+            if (pool != VK_NULL_HANDLE) {
+                vmaDestroyPool(allocator, pool);
+            }
+        }
+    }
     vmaDestroyAllocator(allocator);
+}
+
+VmaPool Device::GetSeparatePool(SeparatePool kind, u32 memory_type) const {
+    std::scoped_lock lk{separate_pools_mutex};
+    VmaPool& pool = separate_pools[static_cast<u32>(kind)][memory_type];
+    if (pool == VK_NULL_HANDLE) {
+        const VmaPoolCreateInfo ci{
+            .memoryTypeIndex = memory_type,
+            .flags = 0,
+            .blockSize = SeparatePoolBlockSize,
+            .minBlockCount = 0,
+            .maxBlockCount = 0,
+            .priority = 0.f,
+            .minAllocationAlignment = 0,
+            .pMemoryAllocateNext = nullptr,
+        };
+        if (vmaCreatePool(allocator, &ci, &pool) != VK_SUCCESS) {
+            pool = VK_NULL_HANDLE;
+        }
+    }
+    return pool;
 }
 
 void Device::LoadStaticPipelineCache() {
@@ -1164,12 +1198,6 @@ bool Device::GetSuitability(bool requires_swapchain) {
 #undef EXT_FEATURE
 #undef FEATURE
 
-    if (extensions.cooperative_matrix) {
-        features.cooperative_matrix_features.sType =
-            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_NV;
-        SetNext(next, features.cooperative_matrix_features);
-    }
-
     // Perform the feature test.
     physical.GetFeatures2(features2);
 
@@ -1219,11 +1247,6 @@ bool Device::GetSuitability(bool requires_swapchain) {
     // Retrieve subgroup properties.
     properties.subgroup_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
     SetNext(next, properties.subgroup_properties);
-    if (extensions.cooperative_matrix) {
-        properties.cooperative_matrix.sType =
-            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_PROPERTIES_NV;
-        SetNext(next, properties.cooperative_matrix);
-    }
 
     // Retrieve relevant extension properties.
     if (extensions.shader_float_controls) {
@@ -1269,24 +1292,6 @@ bool Device::GetSuitability(bool requires_swapchain) {
 
     // Perform the property fetch.
     physical.GetProperties2(properties2);
-
-    if (extensions.cooperative_matrix && dld.vkGetPhysicalDeviceCooperativeMatrixPropertiesNV &&
-        (properties.cooperative_matrix.cooperativeMatrixSupportedStages &
-         VK_SHADER_STAGE_COMPUTE_BIT)) {
-        u32 count{};
-        const auto query = dld.vkGetPhysicalDeviceCooperativeMatrixPropertiesNV;
-        if (query(physical, &count, nullptr) == VK_SUCCESS && count != 0) {
-            std::vector<VkCooperativeMatrixPropertiesNV> matrices(count);
-            for (auto& matrix : matrices) {
-                matrix.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_NV;
-            }
-            if (query(physical, &count, matrices.data()) == VK_SUCCESS) {
-                matrices.resize(count);
-                cooperative_matrix_shape_supported =
-                    std::ranges::any_of(matrices, IsTensorMatrixShape);
-            }
-        }
-    }
 
     // Store base properties
     properties.properties = properties2.properties;
@@ -1542,8 +1547,25 @@ void Device::RemoveUnsuitableExtensions() {
                                VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
     }
 
+    // VK_EXT_mesh_shader: Switch 2 titles draw some geometry with task and mesh programs. Only
+    // the two stages are used; the multiview, shading rate and query features need more.
+    features.mesh_shader.multiviewMeshShader = VK_FALSE;
+    features.mesh_shader.primitiveFragmentShadingRateMeshShader = VK_FALSE;
+    features.mesh_shader.meshShaderQueries = VK_FALSE;
+    extensions.mesh_shader = features.mesh_shader.taskShader && features.mesh_shader.meshShader;
+    RemoveExtensionFeatureIfUnsuitable(extensions.mesh_shader, features.mesh_shader,
+                                       VK_EXT_MESH_SHADER_EXTENSION_NAME);
+
     // VK_KHR_shader_quad_control
-    extensions.shader_quad_control = features.shader_quad_control.shaderQuadControl;
+    // Quad control depends on maximal reconvergence; advertise neither unless
+    // the dependency is enabled on the logical device too.
+    extensions.shader_maximal_reconvergence =
+        features.shader_maximal_reconvergence.shaderMaximalReconvergence;
+    RemoveExtensionFeatureIfUnsuitable(extensions.shader_maximal_reconvergence,
+                                       features.shader_maximal_reconvergence,
+                                       VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME);
+    extensions.shader_quad_control = features.shader_quad_control.shaderQuadControl &&
+                                     extensions.shader_maximal_reconvergence;
     RemoveExtensionFeatureIfUnsuitable(extensions.shader_quad_control, features.shader_quad_control,
                                        VK_KHR_SHADER_QUAD_CONTROL_EXTENSION_NAME);
 
@@ -1670,6 +1692,16 @@ u64 Device::GetDeviceMemoryUsage() const {
     return result;
 }
 
+u64 Device::GetDeviceMemorySlack() const {
+    if (allocator == nullptr) {
+        return 0;
+    }
+    std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> heap_budgets{};
+    vmaGetHeapBudgets(allocator, heap_budgets.data());
+    const VmaStatistics& statistics = heap_budgets[main_heap].statistics;
+    return statistics.blockBytes - (std::min)(statistics.blockBytes, statistics.allocationBytes);
+}
+
 u64 Device::GetDeviceMemoryBudget() const {
     if (!extensions.memory_budget) {
         return 0;
@@ -1695,6 +1727,10 @@ u64 Device::GetDeviceMemoryBudget() const {
         }
     }
     if (is_integrated && !IsMoltenVK()) {
+        // An integrated GPU's device-local heap is system memory (a Radeon 780M reported a 21 GB
+        // budget): following it let the texture cache fill that much RAM before collecting, and
+        // kept ASTC uncompressed. Its budget is at most the share CollectPhysicalMemoryInfo
+        // gives it (4 GiB, 6 GiB with aggressive VRAM use).
         result = (std::min)(result, device_access_memory);
     }
     return result;

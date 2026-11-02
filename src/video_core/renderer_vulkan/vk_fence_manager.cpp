@@ -17,16 +17,13 @@ InnerFence::InnerFence(Scheduler& scheduler_, bool is_stubbed_)
 
 InnerFence::~InnerFence() = default;
 
-void InnerFence::Queue(VideoCore::RasterizerInterface& rasterizer) {
+void InnerFence::Queue() {
     if (is_stubbed) {
         return;
     }
     // Get the current tick so we can wait for it
     wait_tick = scheduler.CurrentTick();
-    rasterizer.FlushCommands();
-    if (scheduler.CurrentTick() == wait_tick) {
-        scheduler.Flush();
-    }
+    scheduler.Flush();
 }
 
 bool InnerFence::IsSignaled() const {
@@ -54,7 +51,7 @@ Fence FenceManager::CreateFence(bool is_stubbed) {
 }
 
 void FenceManager::QueueFence(Fence& fence) {
-    fence->Queue(rasterizer);
+    fence->Queue();
 }
 
 bool FenceManager::IsFenceSignaled(Fence& fence) const {

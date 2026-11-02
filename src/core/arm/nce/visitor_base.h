@@ -717,6 +717,7 @@ public:
         return false;
     }
 
+    // ARMv8.1+ forms decoded for Switch 2 code (must match TranslatorVisitor in dynarmic's impl.h)
     virtual bool AtomicMemOp(Imm<2> size, bool A, bool R, Reg Rs, Imm<4> op, Reg Rn, Reg Rt) {
         return false;
     }

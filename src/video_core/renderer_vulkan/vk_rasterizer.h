@@ -94,7 +94,6 @@ public:
     void ResetCounter(VideoCommon::QueryType type) override;
     void Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) override;
-    std::optional<u32> PendingSemaphoreRelease(DAddr addr) override;
     void BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr, u32 size) override;
     void DisableGraphicsUniformBuffer(size_t stage, u32 index) override;
     void FlushAll() override;
@@ -107,7 +106,6 @@ public:
                           VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
     void InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences) override;
     void OnCacheInvalidation(DAddr addr, u64 size) override;
-    void OnCachedWrite(DAddr addr, u64 size) override;
     bool TryCacheInvalidation(DAddr addr, u64 size) override;
     bool OnCPUWrite(DAddr addr, u64 size) override;
     void InvalidateGPUCache() override;
@@ -130,6 +128,11 @@ public:
     bool AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surface& src,
                                const Tegra::Engines::Fermi2D::Surface& dst,
                                const Tegra::Engines::Fermi2D::Config& copy_config) override;
+    bool AccelerateTemporalUpscale(const Tegra::Engines::Fermi2D::Surface& src,
+                                   const Tegra::Engines::Fermi2D::Surface& dst,
+                                   const Tegra::Engines::Fermi2D::Surface& motion_vectors,
+                                   std::array<f32, 2> jitter,
+                                   std::array<f32, 2> motion_scale) override;
     Tegra::Engines::AccelerateDMAInterface& AccessAccelerateDMA() override;
     void AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
                                   std::span<const u8> memory) override;
@@ -161,6 +164,8 @@ private:
     void PrepareDraw(bool is_indexed, Func&&);
 
     void FlushWork();
+
+    bool TryNativeIndirectReset(bool is_indexed, u32 instance_count);
 
     void UpdateDynamicStates();
 
@@ -232,6 +237,7 @@ private:
     boost::container::static_vector<VkSampler, MAX_TEXTURES> sampler_handles;
 
     u32 draw_counter = 0;
+    bool mesh_draw{}; ///< the draw being prepared uses a task/mesh pipeline
 };
 
 } // namespace Vulkan

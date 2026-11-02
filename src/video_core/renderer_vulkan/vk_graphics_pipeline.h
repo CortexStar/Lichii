@@ -10,7 +10,6 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
-#include <memory>
 #include <mutex>
 #include <type_traits>
 #include <vector>
@@ -66,11 +65,6 @@ struct hash<Vulkan::GraphicsPipelineCacheKey> {
 
 namespace Vulkan {
 
-/// SPIR-V modules of the graphics stages, null for unused stages. Shared by the pipelines whose
-/// keys differ only in state the shaders do not see (ShaderReuseCache).
-using GraphicsShaderModules =
-    std::array<vk::ShaderModule, Tegra::Engines::Maxwell3D::Regs::MaxShaderStage>;
-
 class Device;
 class PipelineStatistics;
 class RenderPassCache;
@@ -89,8 +83,7 @@ public:
         GuestDescriptorQueue& guest_descriptor_queue,
         DescriptorBufferRing& descriptor_buffer_ring, Common::ThreadWorker* worker_thread,
         PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
-        const GraphicsPipelineCacheKey& key,
-        std::shared_ptr<const GraphicsShaderModules> modules,
+        const GraphicsPipelineCacheKey& key, std::array<vk::ShaderModule, NUM_STAGES> stages,
         const std::array<const Shader::Info*, NUM_STAGES>& infos);
 
     bool HasDynamicVertexInput() const noexcept { return key.state.dynamic_vertex_input; }
@@ -104,6 +97,11 @@ public:
 
     bool UsesExtendedDynamicState() const noexcept {
         return key.state.extended_dynamic_state != 0;
+    }
+
+    /// Switch 2 task/mesh pipeline: drawn with vkCmdDrawMeshTasksEXT.
+    [[nodiscard]] bool IsMeshPipeline() const noexcept {
+        return stage_infos[0].is_task || stage_infos[0].is_mesh;
     }
     GraphicsPipeline& operator=(GraphicsPipeline&&) noexcept = delete;
     GraphicsPipeline(GraphicsPipeline&&) noexcept = delete;
@@ -124,6 +122,21 @@ public:
         const auto it{std::find(transition_keys.begin(), transition_keys.end(), current_key)};
         return it != transition_keys.end() ? transitions[std::distance(transition_keys.begin(), it)]
                                            : nullptr;
+    }
+
+    /// The frame the pipeline cache last handed this pipeline out (evicts long unused ones).
+    void MarkUsed(u64 frame) noexcept {
+        last_use_frame = frame;
+    }
+
+    [[nodiscard]] u64 LastUse() const noexcept {
+        return last_use_frame;
+    }
+
+    /// Forgets the transitions, which may point to pipelines the cache evicted.
+    void ClearTransitions() noexcept {
+        transition_keys.clear();
+        transitions.clear();
     }
 
     [[nodiscard]] bool IsBuilt() const noexcept {
@@ -166,8 +179,9 @@ private:
 
     std::vector<GraphicsPipelineCacheKey> transition_keys;
     std::vector<GraphicsPipeline*> transitions;
+    u64 last_use_frame{};
 
-    std::shared_ptr<const GraphicsShaderModules> spv_modules;
+    std::array<vk::ShaderModule, NUM_STAGES> spv_modules;
 
     std::array<Shader::Info, NUM_STAGES> stage_infos;
     std::array<u32, 5> enabled_uniform_buffer_masks{};

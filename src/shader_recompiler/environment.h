@@ -66,6 +66,7 @@ struct ConstBufferAddr {
     IR::U32 dynamic_offset;
     u32 count;
     bool has_secondary;
+    u32 handle_program{~0U}; ///< index in Info::handle_programs for a handle computed per draw
 };
 
 class Environment {
@@ -88,10 +89,6 @@ public:
 
     [[nodiscard]] virtual u32 TextureBoundBuffer() const = 0;
 
-    /// Constant buffer holding the surface (image write) descriptors; the texture one unless the
-    /// program needs both from different buffers.
-    [[nodiscard]] virtual u32 SurfaceBoundBuffer() const { return TextureBoundBuffer(); }
-
     [[nodiscard]] virtual u32 LocalMemorySize() const = 0;
 
     [[nodiscard]] virtual u32 SharedMemorySize() const = 0;
@@ -99,6 +96,8 @@ public:
     [[nodiscard]] virtual std::array<u32, 3> WorkgroupSize() const = 0;
 
     [[nodiscard]] virtual bool HasHLEMacroState() const = 0;
+
+    [[nodiscard]] virtual bool HasNativeInstructions() const { return false; }
 
     [[nodiscard]] virtual std::optional<ReplaceConstant> GetReplaceConstBuffer(u32 bank,
                                                                                u32 offset) = 0;
@@ -125,9 +124,22 @@ public:
         return is_proprietary_driver;
     }
 
+    /// Task and mesh programs: SET_MESH_SHADER_A, SET_MESH_SHADER_B and SET_MESH_INIT_SHADER.
+    [[nodiscard]] const std::array<u32, 3>& MeshRegisters() const noexcept {
+        return mesh_registers;
+    }
+
+    /// Mesh programs: the header of the pass-through geometry program bound with them, whose
+    /// output map lists the per-primitive outputs.
+    [[nodiscard]] const ProgramHeader& MeshPrimitiveHeader() const noexcept {
+        return mesh_primitive_header;
+    }
+
 protected:
     ProgramHeader sph{};
     std::array<u32, 8> gp_passthrough_mask{};
+    std::array<u32, 3> mesh_registers{};
+    ProgramHeader mesh_primitive_header{};
     Stage stage{};
     u32 start_address{};
     bool is_proprietary_driver{};

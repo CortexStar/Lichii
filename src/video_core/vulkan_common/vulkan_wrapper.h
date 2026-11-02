@@ -185,7 +185,6 @@ struct InstanceDispatch {
     PFN_vkGetPhysicalDeviceMemoryProperties2 vkGetPhysicalDeviceMemoryProperties2{};
     PFN_vkGetPhysicalDeviceProperties vkGetPhysicalDeviceProperties{};
     PFN_vkGetPhysicalDeviceProperties2 vkGetPhysicalDeviceProperties2{};
-    PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesNV vkGetPhysicalDeviceCooperativeMatrixPropertiesNV{};
     PFN_vkGetPhysicalDeviceToolProperties vkGetPhysicalDeviceToolProperties{};
     PFN_vkGetPhysicalDeviceQueueFamilyProperties vkGetPhysicalDeviceQueueFamilyProperties{};
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR vkGetPhysicalDeviceSurfaceCapabilitiesKHR{};
@@ -233,6 +232,7 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkCmdDrawIndirectCount vkCmdDrawIndirectCount{};
     PFN_vkCmdDrawIndexedIndirectCount vkCmdDrawIndexedIndirectCount{};
     PFN_vkCmdDrawIndirectByteCountEXT vkCmdDrawIndirectByteCountEXT{};
+    PFN_vkCmdDrawMeshTasksEXT vkCmdDrawMeshTasksEXT{};
     PFN_vkCmdEndConditionalRenderingEXT vkCmdEndConditionalRenderingEXT{};
     PFN_vkCmdEndDebugUtilsLabelEXT vkCmdEndDebugUtilsLabelEXT{};
     PFN_vkCmdEndQuery vkCmdEndQuery{};
@@ -736,6 +736,15 @@ public:
     [[nodiscard]] VkImageUsageFlags UsageFlags() const noexcept {
         return usage;
     }
+
+    /// Where the image's memory lies: the block (0 when the image has no memory or a block of
+    /// its own), the block's size and the image's part of it.
+    struct MemoryBlock {
+        u64 block;
+        u64 block_size;
+        u64 size;
+    };
+    [[nodiscard]] MemoryBlock GetMemoryBlock() const noexcept;
 
 private:
     void Release() const noexcept;
@@ -1318,6 +1327,10 @@ public:
     void DrawIndexedIndirect(VkBuffer src_buffer, VkDeviceSize src_offset, u32 draw_count,
                              u32 stride) const noexcept {
         dld->vkCmdDrawIndexedIndirect(handle, src_buffer, src_offset, draw_count, stride);
+    }
+
+    void DrawMeshTasksEXT(u32 group_count_x, u32 group_count_y, u32 group_count_z) const noexcept {
+        dld->vkCmdDrawMeshTasksEXT(handle, group_count_x, group_count_y, group_count_z);
     }
 
     void DrawIndirectCount(VkBuffer src_buffer, VkDeviceSize src_offset, VkBuffer count_buffer,

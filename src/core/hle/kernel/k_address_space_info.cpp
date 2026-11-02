@@ -9,7 +9,6 @@
 #include "common/assert.h"
 #include "common/literals.h"
 #include "core/hle/kernel/k_address_space_info.h"
-#include "core/hle/kernel/k_memory_layout.h"
 
 namespace Kernel {
 
@@ -36,7 +35,8 @@ constexpr std::array<KAddressSpaceInfo, 13> AddressSpaceInfos{{
    { .bit_width = 39, .address = 128_MiB     , .size = 512_GiB - 128_MiB, .type = KAddressSpaceInfo::Type::Map39Bit, },
 #endif
    { .bit_width = 39, .address = Size_Invalid, .size = 64_GiB           , .type = KAddressSpaceInfo::Type::MapSmall  },
-   { .bit_width = 39, .address = Size_Invalid, .size = 8_GiB            , .type = KAddressSpaceInfo::Type::Heap,     },
+   // Switch 2 titles size their heap from up to 12 GiB of memory, which doesn't fit Switch 1's 8 GiB.
+   { .bit_width = 39, .address = Size_Invalid, .size = 16_GiB           , .type = KAddressSpaceInfo::Type::Heap,     },
    { .bit_width = 39, .address = Size_Invalid, .size = 64_GiB           , .type = KAddressSpaceInfo::Type::Alias,    },
    { .bit_width = 39, .address = Size_Invalid, .size = 2_GiB            , .type = KAddressSpaceInfo::Type::Stack,    },
 }};
@@ -57,11 +57,7 @@ std::size_t KAddressSpaceInfo::GetAddressSpaceStart(size_t width, KAddressSpaceI
     return GetAddressSpaceInfo(width, type).address;
 }
 
-std::size_t KAddressSpaceInfo::GetAddressSpaceSize(size_t width, KAddressSpaceInfo::Type type,
-                                               bool is_switch2) {
-    if (is_switch2 && width == 39 && type == Type::Heap) {
-        return MainMemorySizeMaxSwitch2;
-    }
+std::size_t KAddressSpaceInfo::GetAddressSpaceSize(size_t width, KAddressSpaceInfo::Type type) {
     return GetAddressSpaceInfo(width, type).size;
 }
 

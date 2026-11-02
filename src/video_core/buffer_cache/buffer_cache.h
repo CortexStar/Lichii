@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include "video_core/buffer_cache/uniform_cache_history.h"
+
 #include <algorithm>
 #include <memory>
 #include <numeric>
@@ -15,11 +17,11 @@
 
 #include "common/range_sets.inc"
 #include "video_core/buffer_cache/buffer_cache_base.h"
+#include "video_core/buffer_cache/multi_range_refresh.h"
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_profile.h"
-#include "video_core/cache_tracking_diagnostics.h"
 #include "video_core/texture_cache/util.h"
 
 namespace VideoCommon {
@@ -102,6 +104,12 @@ void BufferCache<P>::TickFrame() {
         return;
     }
     runtime.TickFrame(slot_buffers);
+    if (frame_tick % 600 == 0 && !uploaded_buffer_ranges.empty()) {
+        for (const auto& [address, size] : uploaded_buffer_ranges) {
+            device_memory.HintCold(address, size);
+        }
+        uploaded_buffer_ranges.clear();
+    }
     if (static u64 frames{}; ++frames % 600 == 0) {
         u64 total{};
         size_t count{};
@@ -122,14 +130,8 @@ void BufferCache<P>::TickFrame() {
                                  channel_state->uniform_cache_hits.end());
     const u32 shots = std::reduce(channel_state->uniform_cache_shots.begin(),
                                   channel_state->uniform_cache_shots.end());
-    std::copy_n(channel_state->uniform_cache_hits.begin(),
-                channel_state->uniform_cache_hits.size() - 1,
-                channel_state->uniform_cache_hits.begin() + 1);
-    std::copy_n(channel_state->uniform_cache_shots.begin(),
-                channel_state->uniform_cache_shots.size() - 1,
-                channel_state->uniform_cache_shots.begin() + 1);
-    channel_state->uniform_cache_hits[0] = 0;
-    channel_state->uniform_cache_shots[0] = 0;
+    AdvanceUniformCacheHistory(channel_state->uniform_cache_hits);
+    AdvanceUniformCacheHistory(channel_state->uniform_cache_shots);
 
     const bool skip_preferred = hits * 256 < shots * 251;
     channel_state->uniform_buffer_skip_cache_size = skip_preferred ? DEFAULT_SKIP_CACHE_SIZE : 0;
@@ -143,9 +145,10 @@ void BufferCache<P>::TickFrame() {
         // title 1's buffers were ~200 MiB of an 8 GB GPU's ~6.8 GB in use, yet this collector
         // ran aggressively every frame on the device-wide figure, evicting up to 64 buffers (and
         // downloading the GPU-written ones, ~5% of the GPU thread) that were recreated later.
-        // Collect when the buffers themselves are large.
-        if (buffer_bytes >= 1_GiB) {
-            RunGarbageCollector(buffer_bytes >= 2_GiB);
+        // Collect when the buffers themselves are large. At 1 GiB it held geometry of scenes
+        // long gone: title 1's title screen grew to ~0.9 GB of buffers in ten minutes.
+        if (buffer_bytes >= 512_MiB) {
+            RunGarbageCollector(buffer_bytes >= 1_GiB);
         }
     } else if (total_used_memory >= minimum_memory) {
         RunGarbageCollector(total_used_memory >= critical_memory);
@@ -168,8 +171,6 @@ void BufferCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t size
 
 template <class P>
 void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size) {
-    CacheTrackingDiagnostics::Record(CacheTrackingDiagnostics::Event::BufferCpuMark,
-                                      device_addr, size);
     if (IsRegionGpuModified(device_addr, size)) {
         ClearDownload(device_addr, size);
         gpu_modified_ranges.Subtract(device_addr, size);
@@ -193,8 +194,6 @@ void BufferCache<P>::CachedWriteMemory(DAddr device_addr, u64 size) {
     tmp_buffer.resize_destructive(size);
     device_memory.ReadBlockUnsafe(device_addr, tmp_buffer.data(), size);
 
-    CacheTrackingDiagnostics::Record(CacheTrackingDiagnostics::Event::BufferInlineRetain,
-                                      device_addr, size, aligned_start, aligned_end - aligned_start);
     InlineMemoryImplementation(device_addr, size, tmp_buffer);
 }
 
@@ -285,7 +284,11 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
         const DAddr diff = base_address - *cpu_src_address;
         const DAddr new_base_address = *cpu_dest_address + diff;
         tmp_intervals.push_back({new_base_address, size});
-        QueueDownload(new_base_address, size);
+        if (DownloadsAtFence(new_base_address, size)) {
+            uncommitted_gpu_modified_ranges.Add(new_base_address, size);
+        } else {
+            ArmReadTraps(new_base_address, size);
+        }
     };
     gpu_modified_ranges.ForEachInRange(*cpu_src_address, amount, mirror);
     // This subtraction in this order is important for overlapping copies.
@@ -385,6 +388,10 @@ template <class P>
 void BufferCache<P>::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr,
                                                u32 size) {
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
+    if (!device_addr) {
+        channel_state->uniform_buffers[stage][index] = NULL_BINDING;
+        return;
+    }
     const Binding binding{
         .device_addr = *device_addr,
         .size = size,
@@ -395,7 +402,11 @@ void BufferCache<P>::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr
 
 template <class P>
 void BufferCache<P>::DisableGraphicsUniformBuffer(size_t stage, u32 index) {
-    channel_state->uniform_buffers[stage][index] = NULL_BINDING;
+    auto& current = channel_state->uniform_buffers[stage][index];
+    if (current.device_addr == 0 && current.size == 0 && !current.buffer_id) [[likely]] {
+        return;
+    }
+    current = NULL_BINDING;
 }
 
 template <class P>
@@ -487,6 +498,11 @@ void BufferCache<P>::UnbindGraphicsStorageBuffers(size_t stage) {
 template <class P>
 bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, u32 cbuf_index,
                                                u32 cbuf_offset, bool is_written) {
+    if (stage >= NUM_STAGES || ssbo_index >= NUM_STORAGE_BUFFERS) {
+        LOG_ERROR(HW_GPU, "Invalid graphics storage buffer binding: stage {}, index {}",
+                  stage, ssbo_index);
+        return false;
+    }
     const bool already_enabled =
         ((channel_state->enabled_storage_buffers[stage] >> ssbo_index) & 1U) != 0;
     if constexpr (requires { runtime.ShouldLimitDynamicStorageBuffers(); }) {
@@ -771,12 +787,6 @@ void BufferCache<P>::PopAsyncBuffers() {
                                            end - start);
         });
         async_downloads.Subtract(device_addr, copy.size, [&](DAddr start, DAddr end) {
-            if (uncommitted_gpu_modified_ranges.Intersects(start, end - start) ||
-                std::ranges::any_of(committed_gpu_modified_ranges, [&](const auto& ranges) {
-                    return ranges.Intersects(start, end - start);
-                })) {
-                return;
-            }
             gpu_modified_ranges.Subtract(start, end - start);
         });
     }
@@ -790,26 +800,6 @@ bool BufferCache<P>::IsRegionGpuModified(DAddr addr, size_t size) {
     // One lookup instead of visiting every range inside (~4% of the GPU thread for title 1's
     // inline uploads once GPU-written ranges are no longer cleared by downloads).
     return gpu_modified_ranges.Intersects(addr, size);
-}
-
-template <class P>
-void BufferCache<P>::NoteCpuRead(DAddr addr, size_t size) {
-    if (AsyncBufferDownloads()) {
-        return;
-    }
-    size_t covered = 0;
-    cpu_read_ranges.ForEachInRange(addr, size,
-                                   [&](DAddr start, DAddr end) { covered += end - start; });
-    if (covered >= size) {
-        return;
-    }
-    cpu_read_ranges.Add(addr, size);
-    if (Nx2Profile::Enabled()) {
-        static u64 noted{};
-        if ((++noted & 255) == 1) {
-            LOG_INFO(HW_GPU, "CPU-read buffer pages noted: {} (latest {:#x})", noted, addr);
-        }
-    }
 }
 
 template <class P>
@@ -1046,6 +1036,26 @@ void BufferCache<P>::BindHostGraphicsUniformBuffers(size_t stage) {
 template <class P>
 void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 binding_index, bool needs_bind) {
     ++channel_state->uniform_cache_shots[0];
+    // Bank 24 (root table 0, NVN2's push constants) is read from bank 17, which such games do not
+    // bind: stream the table's current words as that buffer.
+    if (index == 17 && maxwell3d->root_tables.loaded && channel_state->uniform_buffers[stage][index].size == 0) {
+        const auto& words = maxwell3d->root_tables.tables[0];
+        const u32 size = (*channel_state->uniform_buffer_sizes)[stage][index];
+        const u32 copied = (std::min)(size, static_cast<u32>(sizeof(words)));
+        if constexpr (IS_OPENGL) {
+            std::array<u8, sizeof(words)> data{};
+            std::memcpy(data.data(), words.data(), copied);
+            runtime.BindFastUniformBuffer(stage, binding_index, copied);
+            runtime.PushFastUniformBuffer(stage, binding_index, std::span<const u8>(data.data(), copied));
+        } else {
+            const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
+            std::memset(span.data(), 0, span.size());
+            std::memcpy(span.data(), words.data(), copied);
+        }
+        channel_state->fast_bound_uniform_buffers[stage] |= 1u << binding_index;
+        channel_state->uniform_buffer_binding_sizes[stage][binding_index] = size;
+        return;
+    }
     const Binding& binding = channel_state->uniform_buffers[stage][index];
     const DAddr device_addr = binding.device_addr;
     const u32 size = (std::min)(binding.size, (*channel_state->uniform_buffer_sizes)[stage][index]);
@@ -1088,11 +1098,6 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         channel_state->fast_bound_uniform_buffers[stage] |= 1u << binding_index;
         channel_state->uniform_buffer_binding_sizes[stage][binding_index] = size;
         // Stream buffer path to avoid stalling on non-Nvidia drivers or Vulkan
-        if constexpr (!IS_OPENGL) {
-            if (runtime.BindSmallUniformReusing(device_memory, stage, index, device_addr, size)) {
-                return;
-            }
-        }
         const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
         device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
         return;
@@ -1125,6 +1130,17 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         runtime.BindUniformBuffer(buffer, offset, size);
     }
     channel_state->fast_bound_uniform_buffers[stage] &= ~(1u << binding_index);
+}
+
+template <class P>
+void BufferCache<P>::RefreshMultiRangeSegments(std::vector<MultiRangeSegment>& pool) {
+    if constexpr (requires { runtime.BindMultiRangeStorageBuffer(u64{}, bool{}); }) {
+        VideoCommon::RefreshMultiRangeSegments(
+            std::span{pool}, [this](BufferId id) { return slot_buffers.contains(id); },
+            [this](DAddr address, u32 size) {
+                return FindBuffer(address, size, runtime.PrefersSparseSources());
+            });
+    }
 }
 
 template <class P>
@@ -1172,7 +1188,13 @@ bool BufferCache<P>::BindMultiRangeStorage(const Binding& binding, bool is_writt
         if (binding.segment_count < 2) {
             return false;
         }
-        if (binding.segment_first + binding.segment_count > pool.size()) {
+        if (binding.segment_first > pool.size() ||
+            binding.segment_count > pool.size() - binding.segment_first) {
+            return false;
+        }
+        const auto segments = pool.subspan(binding.segment_first, binding.segment_count);
+        if (!MultiRangeSegmentsLive(segments,
+                                    [this](BufferId id) { return slot_buffers.contains(id); })) {
             return false;
         }
         const u64 key = (static_cast<u64>(gpu_memory->GetID()) << 48) ^ binding.gpu_addr;
@@ -1189,8 +1211,7 @@ bool BufferCache<P>::BindMultiRangeStorage(const Binding& binding, bool is_writt
             }
             runtime.PushMultiRangeSource(buffer, offset, segment.size);
         }
-        runtime.InvalidateMultiRange(key);
-        return runtime.BindMultiRangeStorageBuffer(key, is_written);
+        return BindFreshMultiRangeStorage(runtime, key, is_written);
     } else {
         return false;
     }
@@ -1419,6 +1440,7 @@ void BufferCache<P>::DoUpdateGraphicsBuffers(bool is_indexed) {
         if (current_draw_indirect) {
             UpdateDrawIndirect();
         }
+        RefreshMultiRangeSegments(graphics_segments);
     });
 }
 
@@ -1429,6 +1451,7 @@ void BufferCache<P>::DoUpdateComputeBuffers() {
         UpdateComputeUniformBuffers();
         UpdateComputeStorageBuffers();
         UpdateComputeTextureBuffers();
+        RefreshMultiRangeSegments(compute_segments);
     });
 }
 
@@ -1550,6 +1573,9 @@ void BufferCache<P>::UpdateDrawIndirect() {
 
 template <class P>
 void BufferCache<P>::UpdateUniformBuffers(size_t stage) {
+    if (channel_state->enabled_uniform_buffer_masks[stage] == 0) [[likely]] {
+        return;
+    }
     ForEachEnabledBit(channel_state->enabled_uniform_buffer_masks[stage], [&](u32 index) {
         Binding& binding = channel_state->uniform_buffers[stage][index];
         if (binding.buffer_id) {
@@ -1567,6 +1593,9 @@ void BufferCache<P>::UpdateUniformBuffers(size_t stage) {
 
 template <class P>
 void BufferCache<P>::UpdateStorageBuffers(size_t stage) {
+    if (channel_state->enabled_storage_buffers[stage] == 0) [[likely]] {
+        return;
+    }
     ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
         // Resolve buffer
         Binding& binding = channel_state->storage_buffers[stage][index];
@@ -1579,6 +1608,9 @@ void BufferCache<P>::UpdateStorageBuffers(size_t stage) {
 
 template <class P>
 void BufferCache<P>::UpdateTextureBuffers(size_t stage) {
+    if (channel_state->enabled_texture_buffers[stage] == 0) [[likely]] {
+        return;
+    }
     ForEachEnabledBit(channel_state->enabled_texture_buffers[stage], [&](u32 index) {
         Binding& binding = channel_state->texture_buffers[stage][index];
         binding.buffer_id = FindBuffer(binding.device_addr, binding.size, false);
@@ -1661,7 +1693,11 @@ void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u3
     }
     memory_tracker.MarkRegionAsGpuModified(device_addr, size);
     gpu_modified_ranges.Add(device_addr, size);
-    QueueDownload(device_addr, size);
+    if (DownloadsAtFence(device_addr, size)) {
+        uncommitted_gpu_modified_ranges.Add(device_addr, size);
+    } else {
+        ArmReadTraps(device_addr, size);
+    }
     if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
         Tegra::Nx2MarkGpuWritten(device_addr, size);
     }
@@ -1669,10 +1705,10 @@ void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u3
 
 template <class P>
 BufferId BufferCache<P>::FindBuffer(DAddr device_addr, u32 size, bool sparse_compatible) {
-    if (device_addr == 0) {
+    const u64 page = device_addr >> CACHING_PAGEBITS;
+    if (device_addr == 0 || page >= page_table.size()) {
         return NULL_BUFFER_ID;
     }
-    const u64 page = device_addr >> CACHING_PAGEBITS;
     const BufferId buffer_id = page_table[page];
     if (buffer_id) {
         Buffer& buffer = slot_buffers[buffer_id];
@@ -1982,6 +2018,11 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
             u8* const src_pointer = staging_pointer.data() + copy.src_offset;
             const DAddr device_addr = buffer.CpuAddr() + copy.dst_offset;
             device_memory.ReadBlockUnsafe(device_addr, src_pointer, copy.size);
+            // Large uploads are mostly geometry the host GPU now has its own copy of: TickFrame
+            // marks their guest memory cold (see TextureCache::RefreshContents).
+            if (copy.size >= 256_KiB) {
+                uploaded_buffer_ranges.emplace_back(device_addr, copy.size);
+            }
             // Apply the staging offset
             copy.src_offset += upload_staging.offset;
         }
@@ -2190,6 +2231,10 @@ void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
     replace(channel_state->transform_feedback_buffers);
     replace(channel_state->compute_uniform_buffers);
     replace(channel_state->compute_storage_buffers);
+
+    // Adapted from the pre-refresh branch: merged buffers invalidate segment references too.
+    InvalidateMultiRangeSegments(std::span{graphics_segments}, buffer_id);
+    InvalidateMultiRangeSegments(std::span{compute_segments}, buffer_id);
 
     // Mark the whole buffer as CPU written to stop tracking CPU writes
     if (!do_not_mark) {

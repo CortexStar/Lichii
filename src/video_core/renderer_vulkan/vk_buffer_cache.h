@@ -6,9 +6,7 @@
 
 #pragma once
 
-#include <array>
 #include <limits>
-#include <memory>
 
 #include <boost/container/small_vector.hpp>
 
@@ -116,6 +114,12 @@ public:
 
     void TickFrame(Common::SlotVector<Buffer>& slot_buffers) noexcept;
 
+    u32 SetVertexRepackLayout(const Tegra::Engines::Maxwell3D::Regs& regs, bool dynamic_input);
+
+    bool IsVertexRepacked(u32 binding) const {
+        return (vertex_repack_mask & (1U << binding)) != 0;
+    }
+
     u64 CurrentTick();
 
     bool IsFree(u64 tick);
@@ -170,9 +174,6 @@ public:
     void BindTransformFeedbackBuffer(u32 index, VkBuffer buffer, u32 offset, u32 size);
 
     void BindTransformFeedbackBuffers(VideoCommon::HostBindings<Buffer>& bindings);
-
-    bool BindSmallUniformReusing(Tegra::MaxwellDeviceMemoryManager& device_memory,
-                                size_t stage, u32 index, DAddr device_addr, u32 size);
 
     std::span<u8> BindMappedUniformBuffer([[maybe_unused]] size_t stage,
                                           [[maybe_unused]] u32 binding_index,
@@ -234,13 +235,9 @@ public:
 
     void BindTextureBuffer(Buffer& buffer, u32 offset, u32 size,
                            VideoCore::Surface::PixelFormat format) {
-        if (guest_descriptor_queue.UsesDescriptorBuffer()) {
-            const VkDeviceAddress address = buffer.DeviceAddress();
-            const VkFormat vk_format = address == 0 ? VK_FORMAT_UNDEFINED : TexelBufferFormat(format);
-            guest_descriptor_queue.AddTexelBuffer(VK_NULL_HANDLE, address, offset, size, vk_format);
-        } else {
-            guest_descriptor_queue.AddTexelBuffer(buffer.View(offset, size, format));
-        }
+        guest_descriptor_queue.AddTexelBuffer(buffer.View(offset, size, format),
+                                              buffer.DeviceAddress(), offset, size,
+                                              TexelBufferFormat(format));
     }
 
     bool ShouldLimitDynamicStorageBuffers() const {
@@ -278,24 +275,13 @@ private:
     vk::Buffer null_buffer;
 
     std::unique_ptr<Uint8Pass> uint8_pass;
+    std::unique_ptr<VertexRepackPass> vertex_repack_pass;
+    u32 vertex_repack_mask{};
     QuadIndexedPass quad_index_pass;
 
     MultiRangeBufferCache multi_range_buffers;
     boost::container::small_vector<MultiRangeSource, 16> multi_range_sources;
     VkDeviceSize multi_range_total{};
-
-    struct UniformStreamReuse {
-        static constexpr u32 MaxBytes = 4096;
-        struct Slot {
-            StagingBufferRef ref{};
-            u64 tick{};
-            u32 size{};
-            std::array<u8, MaxBytes> bytes{};
-        };
-        std::array<std::array<Slot, 18>, 5> slots{};
-        std::array<u8, MaxBytes> scratch{};
-    };
-    std::unique_ptr<UniformStreamReuse> uniform_stream_reuse;
 
     bool limit_dynamic_storage_buffers = false;
     u32 max_dynamic_storage_buffers = (std::numeric_limits<u32>::max)();

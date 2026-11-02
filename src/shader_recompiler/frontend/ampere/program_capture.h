@@ -44,6 +44,8 @@ public:
             const s64 target = s64{index} * 16 + 16 + relative;
             if (target < 0 || target % 16 || target >= MaximumInstructions * 16)
                 return Result::InvalidTarget;
+            // CALL.REL.NOINC (bit 86) pushes no return address: the compiler uses it as a jump
+            // (the lowering treats it as one), so it never pairs with a RET.
             const bool noinc_call = opcode == 0x944 && (instruction.words[2] & 0x400000) != 0;
             if (opcode == 0x944 && !noinc_call) {
                 last_call_target = std::max(last_call_target, static_cast<u32>(target / 16));

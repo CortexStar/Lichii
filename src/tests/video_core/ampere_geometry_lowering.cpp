@@ -18,8 +18,6 @@ TEST_CASE("Ampere geometry instructions require an explicit geometry stage",
     for (const Instruction instruction : std::array{
              Final,
              Instruction{{0x030c7923, 0, 0, 0x000e2800}},
-             Instruction{{0x00027919, 0, 0x1100, 0x000fe400}},
-             Instruction{{0x00027919, 0, 0x1d00, 0x000fe400}},
              Instruction{{0x0000734e, 0, 0, 0x000fe400}}}) {
         REQUIRE_FALSE(LowerToMaxwell(std::array{instruction, Exit}));
     }

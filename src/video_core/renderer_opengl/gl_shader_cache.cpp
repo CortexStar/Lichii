@@ -54,7 +54,7 @@ using VideoCommon::LoadPipelines;
 using VideoCommon::SerializePipeline;
 using Context = ShaderContext::Context;
 
-constexpr u32 CACHE_VERSION = 21;
+constexpr u32 CACHE_VERSION = 40;
 
 template <typename Container>
 auto MakeSpan(Container& container) {
@@ -289,7 +289,7 @@ void ShaderCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading,
         LOG_ERROR(Common_Filesystem, "Failed to create shader cache directories");
         return;
     }
-    shader_cache_filename = base_dir / "opengl.bin";
+    shader_cache_filename = base_dir / "opengl.fork-v40.bin";
 
     if (!workers && !strict_context_required) {
         workers = CreateWorkers();
@@ -579,7 +579,7 @@ std::unique_ptr<ComputePipeline> ShaderCache::CreateComputePipeline(
     const GPUVAddr program_base{kepler_compute->regs.code_loc.Address()};
     const auto& qmd{kepler_compute->launch_description};
     ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start,
-                           shader->lowered_native, false};
+                           shader->lowered_native};
     env.SetCachedSize(shader->size_bytes);
 
     main_pools.ReleaseContents();

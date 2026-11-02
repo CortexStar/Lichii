@@ -74,9 +74,6 @@ endif()
 option(ENABLE_QT "Enable the Qt frontend" ON)
 option(ENABLE_QT_TRANSLATION "Enable translations for the Qt frontend" OFF)
 option(ENABLE_UPDATE_CHECKER "Enable update checker (for Qt and Android)" OFF)
-set(EGLANTINE_UPDATE_REPO "Djihads80/Eglantine" CACHE STRING "GitHub repository (owner/name) whose releases the update checker and news feed read")
-set(EGLANTINE_BUILD_TAG "" CACHE STRING "Release tag CI publishes this build under, <channel>-build-<number>. Empty for local builds, which never report updates")
-set(EGLANTINE_BUILD_PLATFORM "" CACHE STRING "Platform suffix of this build's release file, such as linux-x86_64-pgo, so the updater downloads the same variant")
 cmake_dependent_option(YUZU_USE_QT_MULTIMEDIA "Use QtMultimedia for Camera"  OFF "NOT YUZU_USE_BUNDLED_QT" OFF)
 cmake_dependent_option(YUZU_USE_QT_WEB_ENGINE "Use QtWebEngine for web applet implementation" OFF "NOT YUZU_USE_BUNDLED_QT" OFF)
 set(YUZU_QT_MIRROR "" CACHE STRING "What mirror to use for downloading the bundled Qt libraries")
@@ -85,17 +82,25 @@ cmake_dependent_option(YUZU_USE_BUNDLED_QT "Download bundled Qt binaries" "${MSV
 option(ENABLE_DEBUG_TOOLS "Enable debugging tools (maxwell disassembler, SPIRV translator, etc)" OFF)
 option(ENABLE_WERROR "Enable -Werror diagnostics" ON)
 
-if (ENABLE_WERROR)
-    if (MSVC)
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /wd4100 /wd4101")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4100 /wd4101")
-    elseif (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        string(REPLACE "-Werror=unused" "-Wno-error=unused" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
-        string(REPLACE "-Werror=unused" "-Wno-error=unused" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+# Handle specific -Werror downgrades safely across platforms
+if(ENABLE_WERROR)
+    if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        if(CMAKE_C_FLAGS MATCHES "-Werror=unused")
+            string(REPLACE "-Werror=unused" "-Wno-error=unused" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
+        endif()
+        if(CMAKE_CXX_FLAGS MATCHES "-Werror=unused")
+            string(REPLACE "-Werror=unused" "-Wno-error=unused" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+        endif()
+
         set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-error=unused -Wno-error=unused-function")
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=unused -Wno-error=unused-function")
+    elseif(MSVC)
+        # Windows Specifically
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /wd4100 /wd4101")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4100 /wd4101")
     endif()
 endif()
+
 
 # Lossless Scaling frame generation. Only Android.
 option(ENABLE_LSFG "Enable frame generation (LSFG and FSR 3 Fluid Motion)" ON)
@@ -244,6 +249,14 @@ option(YUZU_USE_BUNDLED_SDL3 "Download bundled SDL3 build" ${EXT_DEFAULT})
 # ffmpeg
 option(YUZU_USE_BUNDLED_FFMPEG "Download bundled FFmpeg" ${EXT_DEFAULT})
 cmake_dependent_option(YUZU_USE_EXTERNAL_FFMPEG "Build FFmpeg from external source" "${SOLARIS}" "NOT WIN32 AND NOT ANDROID" OFF)
+
+# sirit
+set(BUNDLED_SIRIT_DEFAULT OFF)
+if (MSVC AND NOT (CMAKE_BUILD_TYPE MATCHES "Deb") OR ANDROID)
+    set(BUNDLED_SIRIT_DEFAULT ON)
+endif()
+
+option(YUZU_USE_BUNDLED_SIRIT "Download bundled sirit" ${BUNDLED_SIRIT_DEFAULT})
 
 # FreeBSD 15+ has libusb, versions below should disable it
 cmake_dependent_option(ENABLE_LIBUSB "Enable the use of LibUSB" ON "WIN32 OR LINUX OR FREEBSD OR APPLE" OFF)
@@ -450,6 +463,9 @@ if (lz4_ADDED)
 endif()
 
 # zstd
+# Always bundled: NUP archives are only byte-identical across platforms when every build
+# compresses with the same zstd version.
+set(zstd_FORCE_BUNDLED ON)
 AddJsonPackage(zstd)
 
 if (zstd_ADDED)
@@ -736,15 +752,16 @@ endif()
 
 # TODO: Icon/install handling n such should be put into dist/CMakeLists.txt
 if(ENABLE_QT AND UNIX AND NOT APPLE)
-    install(FILES "dist/dev.eden_emu.eden.desktop"
+    install(FILES "dist/io.github.zortos293.lichii.desktop"
         DESTINATION "share/applications")
-    install(FILES "dist/dev.eden_emu.eden.svg"
-        DESTINATION "share/icons/hicolor/scalable/apps")
+    install(FILES "dist/lichii.png"
+        DESTINATION "share/icons/hicolor/256x256/apps"
+        RENAME "io.github.zortos293.lichii.png")
 
     # TODO: these files need to be updated.
     install(FILES "dist/dev.eden_emu.eden.xml"
         DESTINATION "share/mime/packages")
-    install(FILES "dist/dev.eden_emu.eden.metainfo.xml"
+    install(FILES "dist/io.github.zortos293.lichii.metainfo.xml"
         DESTINATION "share/metainfo")
 endif()
 

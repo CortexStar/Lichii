@@ -4,10 +4,12 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <cstdlib>
 
 #include "core/core.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/k_system_control.h"
 #include "core/hle/kernel/svc.h"
 
 namespace Kernel::Svc {
@@ -16,16 +18,18 @@ namespace Kernel::Svc {
 Result SetHeapSize(Core::System& system, u64* out_address, u64 size) {
     LOG_TRACE(Kernel_SVC, "called, heap_size={:#x}", size);
 
-    auto& process = GetCurrentProcess(system.Kernel());
-    const auto memory_size_max = process.IsSwitch2() ? MainMemorySizeMaxSwitch2 : MainMemorySizeMax;
-
     // Validate size.
     R_UNLESS(Common::IsAligned(size, HeapSizeAlignment), ResultInvalidSize);
-    R_UNLESS(size < memory_size_max, ResultInvalidSize);
+    // Switch 2 titles size their heap from the total memory, which exceeds Switch 1's 8 GiB.
+    const size_t max_heap_size =
+        (std::max)(MainMemorySizeMax, KSystemControl::Init::GetIntendedMemorySize());
+    R_UNLESS(size < max_heap_size, ResultInvalidSize);
 
     // Set the heap size.
     KProcessAddress address{};
-    R_TRY(process.GetPageTable().SetHeapSize(std::addressof(address), size));
+    R_TRY(GetCurrentProcess(system.Kernel())
+              .GetPageTable()
+              .SetHeapSize(std::addressof(address), size));
 
     // We succeeded.
     *out_address = GetInteger(address);

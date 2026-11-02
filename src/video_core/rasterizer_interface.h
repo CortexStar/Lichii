@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <array>
 #include <functional>
 #include <optional>
 #include <span>
@@ -114,17 +115,6 @@ public:
     /// Notify rasterizer that any caches of the specified region are desync with guest
     virtual void OnCacheInvalidation(PAddr addr, u64 size) = 0;
 
-    /// A guest CPU write to GPU-written memory, held back until now (InvalidateGPUCache, on the
-    /// GPU thread): only those bytes changed.
-    virtual void OnCachedWrite(DAddr addr, u64 size) {
-        OnCacheInvalidation(addr, size);
-    }
-
-    /// Value of a release the GPU already processed whose write may still be in flight on the host.
-    virtual std::optional<u32> PendingSemaphoreRelease(DAddr addr) {
-        return std::nullopt;
-    }
-
     virtual bool TryCacheInvalidation(DAddr addr, u64 size) {
         if (MustFlushRegion(addr, size, VideoCommon::CacheType::BufferCache)) return false;
         OnCacheInvalidation(addr, size);
@@ -170,6 +160,16 @@ public:
     [[nodiscard]] virtual bool AccelerateSurfaceCopy(
         const Tegra::Engines::Fermi2D::Surface& src, const Tegra::Engines::Fermi2D::Surface& dst,
         const Tegra::Engines::Fermi2D::Config& copy_config) {
+        return false;
+    }
+
+    /// Stand-in for a DLSS evaluation: temporal upscale of src into dst along motion_vectors
+    /// (jitter in src pixels; motion_scale turns a motion vector into a UV offset to the previous
+    /// frame). False when unsupported; the caller then falls back to AccelerateSurfaceCopy.
+    [[nodiscard]] virtual bool AccelerateTemporalUpscale(
+        const Tegra::Engines::Fermi2D::Surface& src, const Tegra::Engines::Fermi2D::Surface& dst,
+        const Tegra::Engines::Fermi2D::Surface& motion_vectors, std::array<f32, 2> jitter,
+        std::array<f32, 2> motion_scale) {
         return false;
     }
 

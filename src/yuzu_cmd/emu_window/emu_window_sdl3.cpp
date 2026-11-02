@@ -39,6 +39,8 @@ EmuWindow_SDL3::EmuWindow_SDL3(InputCommon::InputSubsystem* input_subsystem_, Co
         auto* this_ = (EmuWindow_SDL3*)userdata;
         auto const results = this_->system.GetAndResetPerfStats();
         auto* const title = new std::string(fmt::format("{} | {}-{} | FPS: {:.0f} ({:.0f}%)", Common::g_build_fullname, Common::g_scm_branch, Common::g_scm_desc, results.average_game_fps, results.emulation_speed * 100.0f));
+        // Timers run on their own thread and AppKit throws when a title is set off the main
+        // thread: ApplyPendingTitle sets it from the main loop.
         delete this_->pending_title.exchange(title);
         static const bool log_fps = std::getenv("EDEN_NX2_FPS_LOG") != nullptr;
         if (log_fps) {
@@ -160,15 +162,15 @@ bool EmuWindow_SDL3::IsOpen() const {
     return is_open;
 }
 
-bool EmuWindow_SDL3::IsShown() const {
-    return is_shown;
-}
-
 void EmuWindow_SDL3::ApplyPendingTitle() {
     if (std::string* const title = pending_title.exchange(nullptr)) {
         SDL_SetWindowTitle(render_window, title->c_str());
         delete title;
     }
+}
+
+bool EmuWindow_SDL3::IsShown() const {
+    return is_shown;
 }
 
 void EmuWindow_SDL3::OnResize() {
