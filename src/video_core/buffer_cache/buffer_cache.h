@@ -367,6 +367,7 @@ std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainCPUBuffer(
     switch (post_op) {
     case ObtainBufferOperation::MarkAsWritten:
         MarkWrittenBuffer(buffer_id, device_addr, size);
+        buffer.MarkUsage(buffer.Offset(device_addr), size);
         break;
     case ObtainBufferOperation::DiscardWrite: {
         ClearDownload(device_addr, size);

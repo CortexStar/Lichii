@@ -652,7 +652,7 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
 void BufferCacheRuntime::BindHostUint8IndexBuffer(std::span<const u8> indices) {
     const auto staging = staging_pool.Request(indices.size() * sizeof(u16), MemoryUsage::Upload);
     u16* const widened = reinterpret_cast<u16*>(staging.mapped_span.data());
-    std::copy(indices.begin(), indices.end(), widened);
+    std::ranges::transform(indices, widened, [](u8 index) -> u16 { return index == 0xff ? 0xffff : index; });
     scheduler.Record([buffer = staging.buffer, offset = staging.offset](vk::CommandBuffer cmdbuf) {
         cmdbuf.BindIndexBuffer(buffer, offset, VK_INDEX_TYPE_UINT16);
     });

@@ -72,7 +72,7 @@ public:
     }
 
     [[nodiscard]] std::span<const u8> Mapped() const noexcept {
-        return buffer.Mapped();
+        return buffer.IsHostCoherent() ? buffer.Mapped() : std::span<const u8>{};
     }
 
     operator VkBuffer() const noexcept {
