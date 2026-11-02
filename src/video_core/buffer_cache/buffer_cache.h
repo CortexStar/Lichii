@@ -841,12 +841,17 @@ void BufferCache<P>::BindHostIndexBuffer() {
             draw_state.topology != Maxwell::PrimitiveTopology::QuadStrip &&
             runtime.WidensUint8IndicesOnHost()) {
             std::span<const u8> indices;
+            const auto& index_buffer = draw_state.index_buffer;
+            const u32 guest_size = (std::min)(
+                static_cast<u32>(index_buffer.EndAddress() - index_buffer.StartAddress()),
+                index_buffer.first + index_buffer.count);
             if (!draw_state.inline_index_draw_indexes.empty()) {
                 indices = std::span{draw_state.inline_index_draw_indexes.data(), size};
-            } else if (!IsRegionGpuModified(channel_state->index_buffer.device_addr, size)) {
-                guest_uint8_indices.resize(size);
+            } else if (guest_size != 0 &&
+                       !IsRegionGpuModified(channel_state->index_buffer.device_addr, guest_size)) {
+                guest_uint8_indices.resize(guest_size);
                 device_memory.ReadBlockUnsafe(channel_state->index_buffer.device_addr,
-                                              guest_uint8_indices.data(), size);
+                                              guest_uint8_indices.data(), guest_size);
                 indices = guest_uint8_indices;
             }
             if (!indices.empty()) {
