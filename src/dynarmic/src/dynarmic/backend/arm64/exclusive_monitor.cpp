@@ -34,15 +34,19 @@ bool ExclusiveMonitor::CheckAndClear(std::size_t processor_id, VAddr address) {
     const VAddr masked_address = address & RESERVATION_GRANULE_MASK;
 
 #ifdef ARCHITECTURE_arm64
+    std::atomic_ref<VAddr> own{exclusive_addresses[processor_id]};
     VAddr expected = masked_address;
-    if (!std::atomic_ref<VAddr>{exclusive_addresses[processor_id]}.compare_exchange_strong(
-            expected, INVALID_EXCLUSIVE_ADDRESS, std::memory_order_acq_rel)) {
+    if (own.load(std::memory_order_relaxed) != masked_address ||
+        !own.compare_exchange_strong(expected, INVALID_EXCLUSIVE_ADDRESS, std::memory_order_acq_rel)) {
         return false;
     }
     for (VAddr& other_address : exclusive_addresses) {
-        expected = masked_address;
-        std::atomic_ref<VAddr>{other_address}.compare_exchange_strong(
-            expected, INVALID_EXCLUSIVE_ADDRESS, std::memory_order_acq_rel);
+        std::atomic_ref<VAddr> other{other_address};
+        if (other.load(std::memory_order_relaxed) == masked_address) {
+            expected = masked_address;
+            other.compare_exchange_strong(expected, INVALID_EXCLUSIVE_ADDRESS,
+                                          std::memory_order_acq_rel);
+        }
     }
     return true;
 #endif
