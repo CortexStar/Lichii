@@ -1484,7 +1484,7 @@ private:
         static const char* const directory = std::getenv("EDEN_NX2_FRAME_CAPTURE");
         static const u64 every = [] {
             const char* value = std::getenv("EDEN_NX2_FRAME_CAPTURE_EVERY");
-            return value != nullptr ? (std::max)(u64{1}, std::strtoull(value, nullptr, 10)) : u64{120};
+            return value != nullptr ? (std::max)(u64{1}, static_cast<u64>(std::strtoull(value, nullptr, 10))) : u64{120};
         }();
         if (directory == nullptr || (m_presents % every) != 1 % every || m_capture_pending->exchange(true)) {
             return;
@@ -1938,9 +1938,7 @@ private:
             // movie ends and waits for the returned fences; a fence for a frame that never comes
             // hung the game on a black screen after its title movie.
             if (release_fence && m_stream_ended && m_inputs.empty() && m_decoded.empty()) {
-                m_free.pop_back();
-                m_release_fences.erase(image);
-                value = EndOfStreamOutput(image);
+                value = DrainFreeAsEndOfStream();
                 m_sync_base = value;
                 m_handed = 0;
             } else {
@@ -2086,13 +2084,8 @@ private:
                 }
                 system.Host1x().GetSyncpointManager().IncrementGuest(m_syncpoint);
                 m_last_output = m_outputs.back();
-                if (frame.end && m_inputs.empty()) {
-                    while (!m_free.empty()) {
-                        const u32 spare = m_free.front();
-                        m_free.pop_front();
-                        m_release_fences.erase(spare);
-                        EndOfStreamOutput(spare);
-                    }
+                if (frame.end && m_inputs.empty() && m_decoded.empty()) {
+                    DrainFreeAsEndOfStream();
                 }
                 ++m_frames_out;
                 if (m_frames_out == 1 || (m_frames_out % 600) == 0 || frame.end) {
@@ -2135,10 +2128,15 @@ private:
         }
     }
 
-    u32 EndOfStreamOutput(u32 image) {
-        m_outputs.push_back({image, m_last_output.width, m_last_output.height, m_last_output.pts, true});
+    u32 DrainFreeAsEndOfStream() {
         auto& syncpoints = system.Host1x().GetSyncpointManager();
-        syncpoints.IncrementGuest(m_syncpoint);
+        while (!m_free.empty()) {
+            const u32 image = m_free.front();
+            m_free.pop_front();
+            m_release_fences.erase(image);
+            m_outputs.push_back({image, m_last_output.width, m_last_output.height, m_last_output.pts, true});
+            syncpoints.IncrementGuest(m_syncpoint);
+        }
         return static_cast<u32>(syncpoints.GetGuestSyncpointValue(m_syncpoint));
     }
 
