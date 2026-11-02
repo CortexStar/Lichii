@@ -1694,7 +1694,7 @@ u64 Device::GetDeviceMemoryBudget() const {
             result += AllocatedUsage(budget.heapUsage[heap], heap_budgets[heap]);
         }
     }
-    if (is_integrated) {
+    if (is_integrated && !IsMoltenVK()) {
         result = (std::min)(result, device_access_memory);
     }
     return result;
