@@ -814,7 +814,7 @@ struct Memory::Impl {
 
     void HandleRasterizerDownload(VAddr v_address, size_t size, ReadbackDiagnostics::Caller caller) {
         if (caller == ReadbackDiagnostics::Caller::ScalarRead && ReadTrapsEnabled() &&
-            !ReadTrapArmed(v_address, size)) {
+            !ReadTrapArmed(v_address & 0xffffffffffffULL, size)) {
             return;
         }
         ReadbackDiagnostics::Scope diagnostics{caller, size};
