@@ -30,8 +30,9 @@ public:
 
     /// Arms the page in this generation, or moves an armed page up to it.
     void Arm(u64 page, u64 page_generation) {
-        if (pages.insert_or_assign(page, page_generation).second) {
-            count.fetch_add(1, std::memory_order_relaxed);
+        count.fetch_add(1, std::memory_order_relaxed);
+        if (!pages.insert_or_assign(page, page_generation).second) {
+            count.fetch_sub(1, std::memory_order_relaxed);
         }
     }
 
