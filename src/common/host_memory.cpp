@@ -655,7 +655,11 @@ public:
 
     void Map(size_t virtual_offset, size_t host_offset, size_t length, MemoryPermission perms) {
         // Intersect the range with our address space.
+        const size_t intended_offset = virtual_offset;
         AdjustMap(&virtual_offset, &length);
+        if (length != 0) {
+            host_offset += virtual_offset - intended_offset;
+        }
 
         if (page_states) {
             if (length == 0) {
