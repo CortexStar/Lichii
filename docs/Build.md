@@ -197,7 +197,7 @@ The `release-binaries` workflow uses standard GitHub-hosted runners. By default 
 To build the other platforms, run the workflow manually (**Actions > release-binaries > Run workflow**) and enable the `all_platforms` input. This adds:
 
 - `ubuntu-24.04` for Linux x86-64 AppImages. These require glibc 2.39 or newer.
-- `ubuntu-24.04-arm` for Linux aarch64.
+- `ubuntu-24.04-arm` for Linux aarch64 AppImages. These require glibc 2.39 or newer.
 - `macos-15` for an Apple Silicon app for macOS 15 or newer. The zip contains `eglantine.app`, including the CLI at `Contents/MacOS/eden-cli`.
 
 Because push builds only produce the Windows binary, a channel release may have no asset for Linux or macOS.
