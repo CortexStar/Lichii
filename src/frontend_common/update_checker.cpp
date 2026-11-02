@@ -56,7 +56,9 @@ Result Check() {
     u64 latest_number = current->number;
     for (const auto& release : *releases) {
         const auto tag = ParseBuildTag(release.tag);
-        if (tag && tag->channel == current->channel && tag->number > latest_number) {
+        // Push builds only publish some platforms, so skip releases this build cannot download.
+        if (tag && tag->channel == current->channel && tag->number > latest_number &&
+            release.GetPlatformAsset()) {
             latest = release;
             latest_number = tag->number;
         }
