@@ -884,7 +884,6 @@ void KeplerCompute::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuS
 
 void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split,
                                   FrontState& fs) {
-#ifdef ARCHITECTURE_x86_64
     const auto positions = FrontMacroPositions(fs);
     const u32 start = positions[((*fs.executing_macro - 0xe00) / 2) % positions.size()];
     fs.executing_macro.reset();
@@ -893,31 +892,33 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
         macro.native_interpreter.active_dram = native_data_ram;
     }
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Macro};
+    const auto read = [&fs](u32 address) {
+        return address < fs.registers.size() ? fs.registers[address] : 0U;
+    };
+    const auto emit = [&](u32 address, u32 value) {
+        if (address >= 0xe00) {
+            return false;
+        }
+        FrontApply(fs, address, value);
+        split.MacroWrite(this, address, value);
+        return true;
+    };
+#ifdef ARCHITECTURE_x86_64
     if (!macro.native_jit) {
         macro.native_jit = std::make_shared<TuringMacroJit>();
     }
     macro.native_jit->Prepare(macro.native_code, macro.native_code_generation);
     const auto result = macro.native_jit->Execute(
-        start, fs.parameters, std::span<u32>{*macro.native_interpreter.active_dram},
-        [&fs](u32 address) {
-            return address < fs.registers.size() ? fs.registers[address] : 0U;
-        },
-        [&](u32 address, u32 value) {
-            if (address >= 0xe00) {
-                return false;
-            }
-            FrontApply(fs, address, value);
-            split.MacroWrite(this, address, value);
-            return true;
-        });
+        start, fs.parameters, std::span<u32>{*macro.native_interpreter.active_dram}, read, emit);
+#else
+    const auto result =
+        macro.native_interpreter.Execute(macro.native_code, start, fs.parameters, read, emit);
+#endif
     if (!result.success) {
         macro.native_execution_failed = true;
-        LOG_ERROR(HW_GPU, "Native MME (JIT, split front) failed: compute start={:#x}, consumed={}, error={}",
+        LOG_ERROR(HW_GPU, "Native MME (split front) failed: compute start={:#x}, consumed={}, error={}",
                   start, result.consumed, result.error);
     }
-#else
-    fs.executing_macro.reset();
-#endif
     fs.parameters.clear();
 }
 

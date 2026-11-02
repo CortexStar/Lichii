@@ -114,11 +114,8 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     ring = std::make_unique<u64[]>(RingWords);
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
-#ifdef ARCHITECTURE_x86_64
-    // Front macros run compiled (macro_turing_jit.h) only.
     const char* jit = std::getenv("EDEN_NX2_MME_JIT");
     front_macros = mode == '2' && (jit == nullptr || jit[0] != '0');
-#endif
     LOG_INFO(HW_GPU, "GPU thread split: engine methods run on a second thread{}",
              front_macros ? ", macros on the first" : "");
 }
