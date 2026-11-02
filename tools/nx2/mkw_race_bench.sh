@@ -7,10 +7,10 @@ Usage: $0 <eden-cli> <exefs main> <sdl config ini> [seconds] [VAR=value...]
 
 Boots Mario Kart World in eden-cli, drives the menus with a key script
 (L+R, then A: Grand Prix, Mario, Mushroom Cup, 50cc, OK), holds A in the
-race and prints the race frame rate: 15-85 s after the cup intro movie
-ends, or the last 70 s of the run when the game skips the movie. Give it
-enough seconds to be racing by then (300 with a warm shader cache). The
-VAR=value arguments are passed to eden-cli as environment variables.
+race and prints the race frame rate from 15 to 85 s into the race (the race
+starts when the cup intro movie ends, or about 10 s after the menus when
+the game skips the movie). 300 seconds is enough with a warm shader cache.
+The VAR=value arguments are passed to eden-cli as environment variables.
 
 The config needs the default keyboard bindings (A on the A key, L on F,
 R on H). Output goes to ./mkw_race_bench/<timestamp>.
@@ -60,14 +60,17 @@ movie_end=$(grep -a "2560x1440.*end of stream" $out/log_clean.txt | head -1 |
 if grep -aq "PANIC" $out/log_clean.txt; then
     print "The game panicked, see $out/log_clean.txt"
 fi
+hold=$(grep -a "(frame 1900)" $out/log_clean.txt | head -1 | sed -E 's/^ *\[ *([0-9]+)\..*/\1/')
 if [[ -n $movie_end ]]; then
-    start=$((movie_end + 15))
-    end=$((movie_end + 85))
+    race_start=$movie_end
+elif [[ -n $hold ]]; then
+    race_start=$((hold + 10))
 else
-    last=$(tail -1 $out/fps.txt | cut -d' ' -f1)
-    start=$((last - 75))
-    end=$((last - 5))
+    print "Did not reach the race in ${seconds} s, see $out/frames"
+    exit 1
 fi
+start=$((race_start + 15))
+end=$((race_start + 85))
 awk -v start=$start -v end=$end '
     $1 >= start && $1 <= end && $2 > 0 { sum += $2; count++; if (min == "" || $2 < min) min = $2 }
     END { if (count) printf "Race FPS: %.1f average, %.1f minimum (%d samples)\n", sum / count, min, count
