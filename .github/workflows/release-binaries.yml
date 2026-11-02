@@ -488,7 +488,7 @@ jobs:
             echo "Windows: extract the zip and run eglantine.exe, or eden-cli.exe from a terminal."
             if compgen -G "dist/*.AppImage" > /dev/null; then
               echo "Linux (AppImage): make it executable (chmod +x) and run it; it bundles its libraries and needs glibc 2.39 or newer (Ubuntu 24.04, Fedora 40, Debian 13, Arch)."
-              echo "Linux (tar.gz): extract it and run ./eglantine or ./eden-cli; it uses your system libraries, so Qt 6 and the usual libraries must be installed."
+              echo "Linux (tar.gz): extract it and run ./eglantine or ./eden-cli; it uses your system libraries, so Qt 6.8 or newer (with the Charts module) and the usual libraries must be installed."
             fi
             if compgen -G "dist/*macos*" > /dev/null; then
               echo "macOS: Apple Silicon and macOS 15 or newer. Extract the zip and move eglantine.app to Applications. The CLI is inside eglantine.app/Contents/MacOS/eden-cli. The app bundles Qt and MoltenVK and is ad-hoc signed, not notarized; macOS may require approval in Privacy & Security. macOS support remains experimental and uses the JIT, not NCE."
