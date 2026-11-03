@@ -546,6 +546,23 @@ bool NupContainer::ValidateDirTree() const {
         u32 dir;
         u32 next;
     };
+    // BuildDirTree expands every reference to a directory, so a directory listed by two parents
+    // (or twice by one) lets a chain of them grow exponentially. Each one may have one parent.
+    std::vector<bool> listed(dirs.size(), false);
+    for (const DirNode& node : dirs) {
+        for (u32 slot = 0; slot < node.child_count; ++slot) {
+            const u32 child = children[static_cast<std::size_t>(node.first_child) + slot];
+            if (child >= dirs.size()) {
+                continue;
+            }
+            if (listed[child]) {
+                LOG_ERROR(Loader, "NUP directory is listed more than once");
+                return false;
+            }
+            listed[child] = true;
+        }
+    }
+
     std::vector<u8> state(dirs.size(), Unvisited);
     std::vector<u32> height(dirs.size(), 0);
     std::vector<Frame> stack;

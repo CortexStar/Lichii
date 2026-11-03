@@ -369,6 +369,26 @@ TEST_CASE("NUP rejects a directory that contains its own ancestor", "[nup]") {
             }) == Loader::ResultStatus::ErrorNUPBadFormat);
 }
 
+TEST_CASE("NUP rejects a directory listed by more than one parent", "[nup]") {
+    TempDir t;
+    const auto root = t.path / "Game";
+    MakeDump(root);
+    const auto archive = t.path / "Game.nup";
+    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+
+    // Point the base ExeFS directory at the RomFS directory's children. No cycle, but a chain of
+    // such shared directories would make BuildDirTree expand exponentially.
+    REQUIRE(StatusAfterPatch(ReadAll(archive), [](std::string& buf, u64 toc) {
+                const u64 dirs = toc + 0x30 + Le(buf, toc + 0x04, 4) * 0x40;
+                const u64 exefs_dir = Le(buf, toc + 0x30 + 0x0C, 4);
+                const u64 romfs_dir = Le(buf, toc + 0x30 + 0x10, 4);
+                const u64 exefs_record = dirs + exefs_dir * 0x18;
+                const u64 romfs_record = dirs + romfs_dir * 0x18;
+                SetLe(buf, exefs_record + 0x08, Le(buf, romfs_record + 0x08, 4), 4);
+                SetLe(buf, exefs_record + 0x0C, Le(buf, romfs_record + 0x0C, 4), 4);
+            }) == Loader::ResultStatus::ErrorNUPBadFormat);
+}
+
 TEST_CASE("NUP marks updates standalone when the dump has no base", "[nup]") {
     TempDir t;
     const auto root = t.path / "Game";
