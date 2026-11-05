@@ -1581,20 +1581,23 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                  (u64{operation} << 29) | (u64{dimension} << 33) | (u64{offset} << 36));
             break;
         }
-        case 0x59f: { // SURED.D.ADD.STRONG.GPU.IGN U32, direct descriptor, buffer or 2D.
+        case 0x59f: { // SURED.D.{ADD..XOR}.STRONG.GPU.IGN U32, direct descriptor, buffer or 2D.
             const u32 binding = insn.Bits(54, 5), offset = insn.Bits(40, 14);
             const u32 data = insn.Bits(32, 8), coordinate = insn.Bits(24, 8);
             const u32 dimension = insn.Bits(61, 3);
-            if (insn.words[2] != 0x0010e000 || (dimension != 1 && dimension != 3) || binding >= 18 ||
-                offset > 0x1fff || insn.Bits(59, 2) || coordinate > 253)
+            // The op in bits 87-89 (Eglantine 19e25d0cfb: Ocarina of Time uses more than ADD).
+            if ((insn.words[2] & ~0x03800000U) != 0x0010e000 || (dimension != 1 && dimension != 3) ||
+                binding >= 18 || offset > 0x1fff || insn.Bits(59, 2) || coordinate > 253)
                 return fail(index, "native surface reduction mode");
             if (result.required_texture_buffer != ~0U && result.required_texture_buffer != binding)
                 return fail(index, "native surface descriptor buffer conflict");
             result.required_texture_buffer = binding;
-            // Maxwell SURED (as the frontend decodes it): operand 0-7, coordinates 8-15, ADD and
-            // U32 are zero at 24 and 20, type 33 (1 = buffer, 3 = 2D), bound offset 36, bound 51.
+            // Maxwell SURED (as the frontend decodes it): operand 0-7, coordinates 8-15, op 24 (the
+            // same ADD..XOR order), U32 zero at 20, type 33 (1 = buffer, 3 = 2D), bound offset 36,
+            // bound 51.
             emit(0xeb40000000000000ULL | predicate | data | (u64{coordinate} << 8) |
-                (u64{dimension} << 33) | (u64{offset} << 36) | (u64{1} << 51));
+                (u64{insn.Bits(87, 3)} << 24) | (u64{dimension} << 33) | (u64{offset} << 36) |
+                (u64{1} << 51));
             break;
         }
         case 0x301: // BREV register.
@@ -3308,7 +3311,9 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 const bool extended = insn.Bits(74, 1) != 0;
                 const u32 high = insn.Bits(64, 8);
                 if (insn.Bits(72, 1) || insn.Bits(81, 3) != 7 ||
-                    (high != 255 && insn.Bits(73, 1)) || ((opcode == 0x211 || opcode == 0xa11) && insn.Bits(62, 2)) ||
+                    (high != 255 && insn.Bits(73, 1)) ||
+                    (opcode == 0x211 && (insn.Bits(62, 1) || (insn.Bits(63, 1) && extended))) ||
+                    (opcode == 0xa11 && insn.Bits(62, 2)) ||
                     (opcode == 0xc11 && (insn.words[1] & ~0x3fU)))
                     return fail(index, "native high effective address mode");
                 u32 b = opcode == 0xc11 ? uniform_register(insn.Bits(32, 8)) : insn.Bits(32, 8);
@@ -3335,7 +3340,9 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                              (u64{insn.Bits(87, 3)} << 39) | (u64{insn.Bits(90, 1)} << 42));
                         emit(0x5c10000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{252} << 20));
                     }
-                    emit(base(0x5c10000000000000ULL) | (u64{250} << 8) | (u64{b} << 20));
+                    // 0x211 bit 63: -Rb, Maxwell IADD's negated second source (bit 48).
+                    emit(base(0x5c10000000000000ULL) | (u64{250} << 8) | (u64{b} << 20) |
+                         (u64{opcode == 0x211 ? insn.Bits(63, 1) : 0U} << 48));
                 }
                 break;
             }
@@ -3447,9 +3454,8 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 const bool carry_in = insn.Bits(74, 1) != 0;
                 const u32 carry_out = insn.Bits(81, 3);
                 const u32 a = insn.Bits(24, 8);
-                if ((carry_in && carry_out != 7) || (opcode == 0x210 && (insn.words[1] & ~0xffU)) ||
-                    (rewritten_uniform && carry_out != 7 && carry_out > 1) ||
-                    (rewritten_uniform && carry_in && insn.Bits(87, 3) > 1 && insn.Bits(87, 3) != 7))
+                // A uniform carry goes through P(6-n) and R239 bit 6-n, so any UPn works.
+                if ((carry_in && carry_out != 7) || (opcode == 0x210 && (insn.words[1] & ~0xffU)))
                     return fail(index, "native integer carry mode");
                 if (opcode == 0x810) {
                     emit(0x1c00000000000000ULL | predicate | 250 | (u64{a} << 8) | (u64{insn.words[1]} << 20));
