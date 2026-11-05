@@ -261,6 +261,10 @@ public:
     [[nodiscard]] bool UpscaleInsteadOfNativeProgram();
     void TraceDlssContract(u64 native_key, bool warn_unvalidated = true);
 
+    /// Whether the matrix multiplies (tensor-core instructions) of native compute programs are
+    /// emulated; rejected ones get UpscaleInsteadOfNativeProgram.
+    [[nodiscard]] bool EmulatesNativeTensorPrograms() const;
+
     /// GPU thread split with macros on its front half (gpu_split.h, EDEN_NX2_SPLIT=2), called by
     /// the front instead of CallMethod for native compute engines: runs their macros and macro
     /// uploads against a copy of the registers and sends the register writes to the back.
