@@ -1,0 +1,85 @@
+name: Ocarina Windows test build
+
+on:
+  push:
+    branches:
+      - oot-windows-build
+    paths:
+      - ".github/workflows/oot-windows-build.yml"
+      - "src/**"
+      - "CMakeLists.txt"
+      - "CMakeModules/**"
+      - "externals/**"
+      - "dist/**"
+      - "tools/**"
+      - "cpmfile.json"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtcharts
+          cache: true
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: ./tools/windows/install-vulkan-sdk.ps1
+
+      - name: Verify Vulkan tools
+        shell: pwsh
+        run: glslangValidator --version
+
+      - name: Configure
+        shell: bash
+        run: >-
+          cmake -S . -B build/release -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_TESTING=OFF
+          -DYUZU_TESTS=OFF
+          -DYUZU_CMD=ON
+          -DYUZU_ROOM=OFF
+          -DYUZU_ROOM_STANDALONE=OFF
+          -DYUZU_USE_BUNDLED_QT=OFF
+          -DYUZU_USE_BUNDLED_SDL3=ON
+          -DENABLE_UPDATE_CHECKER=ON
+          -DLICHII_BUILD_TAG=oot-test
+          -DLICHII_BUILD_PLATFORM=windows-x86_64
+          -DUSE_DISCORD_PRESENCE=OFF
+
+      - name: Build
+        shell: bash
+        run: cmake --build build/release --target yuzu yuzu-cmd --parallel
+
+      - name: Package Qt runtime
+        shell: pwsh
+        run: |
+          foreach ($exe in 'lichii.exe', 'eden-cli.exe') {
+            if (-not (Test-Path "build/release/bin/$exe")) {
+              throw "build/release/bin/$exe was not produced"
+            }
+          }
+          windeployqt --release --no-translations build/release/bin/lichii.exe
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v7
+        with:
+          name: lichii-oot-windows-x86_64
+          path: build/release/bin/
+          if-no-files-found: error
+          retention-days: 7
