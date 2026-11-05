@@ -221,7 +221,9 @@ bool Swapchain::AcquireNextImage(bool may_flush) {
 
     resource_ticks[image_index] = scheduler.CurrentTick();
 
-    return is_suboptimal || is_outdated;
+    // A suboptimal acquire still acquired an image and signals its semaphore: present it, and let
+    // NeedsRecreation() recreate at the next frame. Out of date acquired nothing.
+    return is_outdated;
 }
 
 void Swapchain::Present(VkSemaphore render_semaphore) {
