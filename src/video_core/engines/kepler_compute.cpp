@@ -1009,9 +1009,21 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         for (const u32 store : stores) add('w', store);
         return text;
     };
+    // Logged once per program and set of images: the same programs run on other images later
+    // (Ocarina of Time's intro video, then gameplay).
+    const auto handles_key = [&] {
+        u64 key = program;
+        for (const auto* list : {&reads, &stores}) {
+            for (const u32 offset : *list) {
+                const auto tic = image(offset);
+                key = key * 31 + (tic ? tic->Address() : 0);
+            }
+        }
+        return key;
+    };
     const auto skip = [&](std::string_view reason) {
-        static std::unordered_set<GPUVAddr> reported;
-        if (reported.insert(program).second && reported.size() <= 64) {
+        static std::unordered_set<u64> reported;
+        if (reported.size() < 64 && reported.insert(handles_key()).second) {
             LOG_INFO(HW_GPU, "Upscale fallback for program {:#x} skipped: {}; handles:{}", program,
                      reason, describe_handles());
         }
@@ -1081,6 +1093,10 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
             }
         }
         known->second = threshold && exponent;
+    }
+    static std::unordered_set<u64> logged_pairs;
+    if (logged_pairs.size() < 64 &&
+        logged_pairs.insert((program * 31 + input->Address()) * 31 + output->Address()).second) {
         LOG_INFO(HW_GPU,
                  "Upscale fallback for program {:#x}: {} +{:#x} {}x{} fmt{:#x} @{:#x} -> +{:#x} "
                  "{}x{} fmt{:#x} @{:#x}, {}; handles:{}",
@@ -1111,6 +1127,13 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
     }
     const bool done = rasterizer->AccelerateSurfaceCopy(source, surface(*output), config);
     VideoCommon::g_blit_source_format.reset();
+    if (!done) {
+        static std::unordered_set<u64> failed;
+        if (failed.size() < 16 && failed.insert(input->Address() ^ output->Address()).second) {
+            LOG_WARNING(HW_GPU, "Upscale fallback blit {:#x} -> {:#x} failed", input->Address(),
+                        output->Address());
+        }
+    }
     return done;
 }
 
