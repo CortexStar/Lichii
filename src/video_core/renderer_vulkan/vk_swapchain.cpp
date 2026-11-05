@@ -149,6 +149,12 @@ void Swapchain::Create(
         return;
     }
 
+    // Submitted work may still wait on the old acquire/present semaphores; destroying them under
+    // it loses the device on MoltenVK (window moved to a display with a different scale).
+    if (swapchain) {
+        std::scoped_lock lock{scheduler.submit_mutex};
+        void(device.GetLogical().WaitIdle());
+    }
     Destroy();
 
     CreateSwapchain(capabilities);
