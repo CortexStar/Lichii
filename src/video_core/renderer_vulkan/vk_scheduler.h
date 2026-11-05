@@ -64,6 +64,8 @@ public:
     /// once); otherwise it goes with the next one. The back submits deferred work before it
     /// sleeps and when another thread asks (WaitSubmitted). True when the flush was deferred.
     bool DeferFlush();
+    /// Whether DeferFlush would defer a flush made now (no side effect).
+    [[nodiscard]] bool InFlushWindow() const;
     /// Submits deferred work (the split's back, from its idle hook).
     void FlushDeferred();
     /// Threads other than the split's back: waits until tick is submitted, asking the back to

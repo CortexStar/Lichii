@@ -62,6 +62,7 @@ protected:
     void QueueFence(Fence& fence) override;
     bool IsFenceSignaled(Fence& fence) const override;
     void WaitFence(Fence& fence) override;
+    bool InFlushWindow() const override;
 
 private:
     Scheduler& scheduler;

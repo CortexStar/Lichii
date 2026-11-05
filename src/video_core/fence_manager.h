@@ -80,12 +80,40 @@ public:
     }
 
     void SignalFence(std::function<void()>&& func) {
+        SignalFenceImpl(std::move(func), false);
+    }
+
+    /// EDEN_NX2_DOWNLOAD_COALESCE=1 (default off): at low GPU accuracy, a fence made on the split's
+    /// back while its submission is deferred anyway (Scheduler::DeferFlush, ~500 us windows)
+    /// leaves the buffer downloads uncommitted; the next fence past the window commits them all
+    /// at once, before that submission. Syncpoint fences, forced waits (WaitPendingFences) and
+    /// the back's idle hook (CommitCoalescedDownloads) always commit.
+    static bool CoalesceDownloads() {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_DOWNLOAD_COALESCE");
+            return value != nullptr && value[0] != '0';
+        }();
+        return enabled;
+    }
+
+    /// Commits the buffer downloads fences left for later (CoalesceDownloads) with a fence of
+    /// their own. The split's back calls it before it submits deferred work and sleeps.
+    void CommitCoalescedDownloads() {
+        if (coalesced_downloads) {
+            SignalFenceImpl([] {}, true);
+        }
+    }
+
+private:
+    void SignalFenceImpl(std::function<void()>&& func, bool commit_downloads) {
         Nx2Profile::Scope profile_scope{Nx2Profile::Zone::Fence};
         const bool delay_fence = Settings::IsGPUFenceBehaviorDefault() ? Settings::IsGPULevelHigh() : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
         if constexpr (!can_async_check) {
             TryReleasePendingFences<false>();
         }
-        auto [should_flush, committed_flushes] = CommitCacheFlushes();
+        const bool defer_downloads = CoalesceDownloads() && !commit_downloads && !delay_fence &&
+                                     !Settings::IsGPULevelHigh() && InFlushWindow();
+        auto [should_flush, committed_flushes] = CommitCacheFlushes(defer_downloads);
         if (!delay_fence && committed_flushes == 0 && SkipEmptyFence()) {
             Nx2Profile::Scope skipped_scope{Nx2Profile::Zone::FenceSkipped};
             func();
@@ -123,6 +151,7 @@ public:
         rasterizer.InvalidateGPUCache();
     }
 
+public:
     void SignalSyncPoint(u32 value) {
         // The id comes from a command list (the 3D engine's sync method, the puller's fence
         // action). Past the syncpoint table, the increment would walk memory after it as an
@@ -133,7 +162,8 @@ public:
         }
         syncpoint_manager.IncrementGuest(value);
         std::function<void()> func([this, value] { syncpoint_manager.IncrementHost(value); });
-        SignalFence(std::move(func));
+        // The guest CPU waits on syncpoints: their fences carry every pending download.
+        SignalFenceImpl(std::move(func), true);
     }
 
     void WaitPendingFences([[maybe_unused]] bool force) {
@@ -151,7 +181,7 @@ public:
                 wait_finished.store(true, std::memory_order_relaxed);
                 wait_cv.notify_all();
             });
-            SignalFence(std::move(func));
+            SignalFenceImpl(std::move(func), true);
             std::unique_lock lk(wait_mutex);
             wait_cv.wait(
                 lk, [&wait_finished] { return wait_finished.load(std::memory_order_relaxed); });
@@ -187,6 +217,10 @@ protected:
     virtual bool IsFenceSignaled(TFence& fence) const = 0;
     /// Waits until a fence has been signalled by the host GPU.
     virtual void WaitFence(TFence& fence) = 0;
+    /// Whether a fence made now is submitted only with later work (CoalesceDownloads).
+    virtual bool InFlushWindow() const {
+        return false;
+    }
 
     VideoCore::RasterizerInterface& rasterizer;
     Tegra::GPU& gpu;
@@ -337,7 +371,7 @@ private:
     /// lock is taken once, alone, and the fencing thread later takes only the lock of the cache
     /// with work, instead of holding both while it copies (the GPU thread's draws and uploads
     /// waited for it).
-    CacheFlushes CommitCacheFlushes() {
+    CacheFlushes CommitCacheFlushes(bool defer_buffer_downloads) {
         CacheFlushes flushes{};
         {
             std::scoped_lock lock{texture_cache.mutex};
@@ -350,9 +384,16 @@ private:
         {
             std::scoped_lock lock{buffer_cache.mutex};
             if (buffer_cache.HasUncommittedFlushes()) {
-                buffer_cache.CommitAsyncFlushes();
-                flushes.should_flush = true;
-                flushes.committed |= BufferFlushes;
+                if (defer_buffer_downloads) {
+                    coalesced_downloads = true;
+                } else {
+                    buffer_cache.CommitAsyncFlushes();
+                    flushes.should_flush = true;
+                    flushes.committed |= BufferFlushes;
+                }
+            }
+            if (!defer_buffer_downloads) {
+                coalesced_downloads = false;
             }
         }
         return flushes;
@@ -386,6 +427,7 @@ private:
     std::deque<std::deque<std::function<void()>>> pending_operations;
     std::deque<u8> pending_flushes; ///< Per fence: the caches that committed downloads
     u32 skipped_fences{}; ///< Empty fences skipped since the last one made (GPU thread only)
+    bool coalesced_downloads{}; ///< Buffer downloads left uncommitted (CoalesceDownloads)
 
     std::mutex guard;
     std::mutex ring_guard;

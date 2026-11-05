@@ -74,4 +74,8 @@ void FenceManager::WaitFence(Fence& fence) {
     fence->Wait();
 }
 
+bool FenceManager::InFlushWindow() const {
+    return scheduler.InFlushWindow();
+}
+
 } // namespace Vulkan

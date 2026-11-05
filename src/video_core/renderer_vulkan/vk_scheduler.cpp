@@ -179,12 +179,13 @@ u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
     return signal_value;
 }
 
-bool Scheduler::DeferFlush() {
-    // Fences come one per compute release: ~11,500 a second in Hyrule Warriors: Age of
-    // Imprisonment fights, each a queue submission (~22,000 a second with the others), which
-    // kept the Vulkan worker busy submitting. Batched within 500 us: ~10-15% more fps there.
-    // Command list copies after dispatches were ~9,000 more a second, of which the front waited
-    // for about 5%.
+namespace {
+// Fences come one per compute release: ~11,500 a second in Hyrule Warriors: Age of
+// Imprisonment fights, each a queue submission (~22,000 a second with the others), which
+// kept the Vulkan worker busy submitting. Batched within 500 us: ~10-15% more fps there.
+// Command list copies after dispatches were ~9,000 more a second, of which the front waited
+// for about 5%.
+s64 FenceFlushIntervalUs() {
     static const s64 interval_us = [] {
         const char* value = std::getenv("EDEN_NX2_FENCE_FLUSH_US");
         if (value != nullptr) {
@@ -192,8 +193,18 @@ bool Scheduler::DeferFlush() {
         }
         return s64{5000};
     }();
-    if (interval_us <= 0 || !VideoCommon::GpuSplit::OnBackThread() ||
-        std::chrono::steady_clock::now() - last_flush >= std::chrono::microseconds{interval_us}) {
+    return interval_us;
+}
+} // Anonymous namespace
+
+bool Scheduler::InFlushWindow() const {
+    const s64 interval_us = FenceFlushIntervalUs();
+    return interval_us > 0 && VideoCommon::GpuSplit::OnBackThread() &&
+           std::chrono::steady_clock::now() - last_flush < std::chrono::microseconds{interval_us};
+}
+
+bool Scheduler::DeferFlush() {
+    if (!InFlushWindow()) {
         return false;
     }
     flush_pending = true;
