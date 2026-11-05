@@ -165,6 +165,13 @@ bool FenceManager::InFlushWindowAt(std::chrono::steady_clock::time_point now) co
     return scheduler.InFlushWindow(now);
 }
 
+void FenceManager::SubmitDeferredWork() {
+    // Only the split's back defers (Scheduler::DeferFlush) and submits.
+    if (VideoCommon::GpuSplit::OnBackThread()) {
+        scheduler.FlushDeferred();
+    }
+}
+
 std::pair<u64, u64> FenceManager::TakeLightFenceObjects() {
     return {light_stubs_shared.exchange(0, std::memory_order_relaxed),
             light_fences_pooled.exchange(0, std::memory_order_relaxed)};

@@ -247,9 +247,17 @@ bool Scheduler::WaitSubmitted(u64 tick) {
         }
         if (const auto now = std::chrono::steady_clock::now(); now >= next_log) {
             next_log = now + std::chrono::seconds{2};
-            LOG_WARNING(Render_Vulkan, "Waited {} s for the GPU thread to submit tick {}",
+            // The back serves the request between entries: one that never does is blocked in
+            // an entry. Name the wait when it is a tracked one (BackWaitScope).
+            const char* const back_site = VideoCommon::back_wait_site.load(std::memory_order_relaxed);
+            LOG_WARNING(Render_Vulkan,
+                        "Waited {} s for the GPU thread to submit tick {} (submitted up to {}); "
+                        "GPU back thread blocked in: {}",
                         std::chrono::duration_cast<std::chrono::seconds>(now - start).count(),
-                        tick);
+                        tick, master_semaphore->CurrentTick() - 1,
+                        back_site != nullptr ? back_site
+                                             : "no tracked wait (an untracked lock or wait, or "
+                                               "a long entry)");
             split.RequestIdleHook();
         }
         if (spins < 64) {

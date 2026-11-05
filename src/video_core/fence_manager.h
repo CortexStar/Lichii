@@ -26,6 +26,7 @@
 #include "common/thread.h"
 #include "video_core/delayed_destruction_ring.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_wait_site.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/nx2_profile.h"
@@ -145,14 +146,17 @@ public:
 private:
     void SignalFenceImpl(std::function<void()>&& func, bool commit_downloads) {
         Nx2Profile::Scope profile_scope{Nx2Profile::Zone::Fence};
-        const bool delay_fence = Settings::IsGPUFenceBehaviorDefault() ? Settings::IsGPULevelHigh() : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
+        // The accuracy can change while the game runs (settings dialog, Settings::UpdateGPUAccuracy
+        // at each command list end): read once, every decision of this fence uses one value.
+        const bool level_high = Settings::IsGPULevelHigh();
+        const bool delay_fence = Settings::IsGPUFenceBehaviorDefault() ? level_high : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
         if constexpr (!can_async_check) {
             TryReleasePendingFences<false>();
         }
         const bool light = FenceLight();
         const auto now = light ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         const bool defer_downloads = CoalesceDownloads() && !commit_downloads && !delay_fence &&
-                                     !Settings::IsGPULevelHigh() &&
+                                     !level_high &&
                                      (light ? InFlushWindowAt(now) : InFlushWindow());
         auto [should_flush, committed_flushes] = CommitCacheFlushes(defer_downloads);
         if (!delay_fence && committed_flushes == 0 && SkipEmptyFence()) {
@@ -202,6 +206,13 @@ private:
             if (light) {
                 LightCount(wake ? light_stats.notifies : light_stats.notifies_skipped);
             }
+        }
+        if (delay_fence) {
+            // Its callback runs on the fencing thread once the fence's work is done, and the
+            // guest or WaitPendingFences may block on that callback: a submission left for
+            // later (Scheduler::DeferFlush) would wait for the back to go idle, which it then
+            // never does (GPU accuracy switched to High while the game ran, 24 s and more).
+            SubmitDeferredWork();
         }
         if (!light || LightGatherDue(now, commit_downloads || delay_fence || committed_flushes != 0)) {
             rasterizer.InvalidateGPUCache();
@@ -291,6 +302,13 @@ public:
                 wait_cv.notify_all();
             });
             SignalFenceImpl(std::move(func), true);
+            if (wait_finished.load(std::memory_order_relaxed)) {
+                return; // The callback ran at once (undelayed fences)
+            }
+            // The fencing thread runs it after every earlier fence, waiting for their work to
+            // be submitted: work deferred by this thread is submitted before it blocks.
+            SubmitDeferredWork();
+            BackWaitScope wait_scope{"FenceManager::WaitPendingFences (fencing thread callback)"};
             std::unique_lock lk(wait_mutex);
             wait_cv.wait(
                 lk, [&wait_finished] { return wait_finished.load(std::memory_order_relaxed); });
@@ -338,6 +356,8 @@ protected:
     virtual void QueueFenceAt(TFence& fence, [[maybe_unused]] std::chrono::steady_clock::time_point now) {
         QueueFence(fence);
     }
+    /// Submits work the calling thread deferred (Vulkan: the split's back, Scheduler::DeferFlush).
+    virtual void SubmitDeferredWork() {}
     /// FenceLight counters of the backend, reset: (stubbed fences shared, fences reused).
     virtual std::pair<u64, u64> TakeLightFenceObjects() {
         return {};

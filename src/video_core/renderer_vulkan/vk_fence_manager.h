@@ -71,6 +71,7 @@ protected:
     bool InFlushWindowAt(std::chrono::steady_clock::time_point now) const override;
     void QueueFenceAt(Fence& fence, std::chrono::steady_clock::time_point now) override;
     std::pair<u64, u64> TakeLightFenceObjects() override;
+    void SubmitDeferredWork() override;
 
 private:
     Scheduler& scheduler;
