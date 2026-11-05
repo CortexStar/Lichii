@@ -927,10 +927,15 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         return from_width >= 64 && to_width > from_width && to_width <= from_width * 4 &&
                (cross_a > cross_b ? cross_a - cross_b : cross_b - cross_a) * 32 <= cross_a;
     };
+    const auto handles = NativeImageHandles(regs.code_loc.Address());
+    const std::vector<u32>& reads = handles.first;
+    const std::vector<u32>& stores = handles.second;
     std::optional<Texture::TICEntry> input = image(0x90), output = image(0xa0);
+    std::string_view rule = "title 4 slots";
+    u32 input_offset = 0x90, output_offset = 0xa0;
     if (!upscale_pair(input, output)) {
         // The input is the largest read image that the output upscales, the output's format first.
-        const auto [reads, stores] = NativeImageHandles(regs.code_loc.Address());
+        rule = "program handles";
         input.reset();
         output.reset();
         for (const u32 store : stores) {
@@ -943,6 +948,8 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
                                        u64{input->Width()} * input->Height())) {
                         input = from;
                         output = to;
+                        input_offset = read;
+                        output_offset = store;
                     }
                 }
                 if (input) break;
@@ -951,6 +958,7 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         }
     }
     if (!upscale_pair(input, output, false)) {
+        rule = "cbuf0 scan";
         input.reset();
         output.reset();
         for (u32 first = 0x80; first < 0x120 && !input; first += 4) {
@@ -962,16 +970,33 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
                 if (upscale_pair(from, to)) {
                     input = from;
                     output = to;
+                    input_offset = first;
+                    output_offset = second;
                     break;
                 }
             }
         }
     }
     const GPUVAddr program = regs.code_loc.Address();
+    // The images behind the program's own handles, for the log (once per program).
+    const auto describe_handles = [&] {
+        std::string text;
+        const auto add = [&](char kind, u32 offset) {
+            if (const auto tic = image(offset)) {
+                text += fmt::format(" {}+{:#x}={}x{}/fmt{:#x}@{:#x}", kind, offset, tic->Width(),
+                                    tic->Height(), static_cast<u32>(tic->format.Value()),
+                                    tic->Address());
+            }
+        };
+        for (const u32 read : reads) add('r', read);
+        for (const u32 store : stores) add('w', store);
+        return text;
+    };
     const auto skip = [&](std::string_view reason) {
         static std::unordered_set<GPUVAddr> reported;
         if (reported.insert(program).second && reported.size() <= 64) {
-            LOG_INFO(HW_GPU, "Upscale fallback for program {:#x} skipped: {}", program, reason);
+            LOG_INFO(HW_GPU, "Upscale fallback for program {:#x} skipped: {}; handles:{}", program,
+                     reason, describe_handles());
         }
         return false;
     };
@@ -1031,9 +1056,14 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
             }
         }
         known->second = threshold && exponent;
-        LOG_INFO(HW_GPU, "Upscale fallback for program {:#x}: {}x{} -> {}x{}, {}", program,
-                 input->Width(), input->Height(), output->Width(), output->Height(),
-                 known->second ? "decodes sRGB like the program" : "plain copy");
+        LOG_INFO(HW_GPU,
+                 "Upscale fallback for program {:#x}: {} +{:#x} {}x{} fmt{:#x} @{:#x} -> +{:#x} "
+                 "{}x{} fmt{:#x} @{:#x}, {}; handles:{}",
+                 program, rule, input_offset, input->Width(), input->Height(),
+                 static_cast<u32>(input->format.Value()), input->Address(), output_offset,
+                 output->Width(), output->Height(), static_cast<u32>(output->format.Value()),
+                 output->Address(), known->second ? "decodes sRGB like the program" : "plain copy",
+                 describe_handles());
     }
     const Fermi2D::Config config{
         .operation = known->second ? Fermi2D::Operation::SrcCopySrgbToLinear
