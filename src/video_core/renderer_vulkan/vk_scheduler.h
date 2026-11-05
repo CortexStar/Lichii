@@ -118,10 +118,17 @@ public:
     void RequestOutsideRenderPassOperationContext(
         std::source_location location = std::source_location::current());
 
+    /// Defers a fragment barrier until a subsequent draw in the active render pass depends on it.
     void DeferFragmentBarrier() {
         fragment_barrier_pending = state.renderpass != VK_NULL_HANDLE;
     }
 
+    /// Returns true if a deferred fragment barrier is currently pending on the active render pass.
+    [[nodiscard]] bool HasFragmentBarrier() const noexcept {
+        return fragment_barrier_pending;
+    }
+
+    /// Clears and returns the pending deferred fragment barrier state.
     bool TakeFragmentBarrier() {
         return std::exchange(fragment_barrier_pending, false);
     }
@@ -208,6 +215,11 @@ public:
     /// Returns the current command buffer tick.
     [[nodiscard]] u64 CurrentTick() const noexcept {
         return master_semaphore->CurrentTick();
+    }
+
+    /// Monotonic counter incremented whenever command-buffer or render-pass state resets.
+    [[nodiscard]] u64 RecordingEpoch() const noexcept {
+        return recording_epoch;
     }
 
     /// Returns true when a tick has been triggered by the GPU.
@@ -489,6 +501,7 @@ private:
     std::function<void()> on_submit;
 
     State state;
+    u64 recording_epoch = 0;
 
     u32 num_renderpass_images = 0;
     std::array<VkImage, 9> renderpass_images{};
