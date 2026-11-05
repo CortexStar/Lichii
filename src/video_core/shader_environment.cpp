@@ -1028,6 +1028,13 @@ void FileEnvironment::Deserialize(std::ifstream& file) {
         .read(reinterpret_cast<char*>(&read_highest), sizeof(read_highest))
         .read(reinterpret_cast<char*>(&viewport_transform_state), sizeof(viewport_transform_state))
         .read(reinterpret_cast<char*>(&stage), sizeof(stage));
+    // A record damaged on disk (the drive filled up while the cache was written) asked for
+    // gigabytes here and threw std::bad_alloc, which LoadPipelines did not catch. Fail it as a
+    // read error so the cache is deleted and rebuilt.
+    constexpr u64 max_code_size = 64ULL << 20;
+    if (code_size > max_code_size) {
+        throw std::ios_base::failure("Pipeline cache record with an implausible code size");
+    }
     code.resize(Common::DivCeil(code_size, sizeof(u64)));
     file.read(reinterpret_cast<char*>(code.data()), code_size);
     for (size_t i = 0; i < num_texture_types; ++i) {
@@ -1239,6 +1246,10 @@ void LoadPipelines(
         }
         u32 num_envs{};
         file.read(reinterpret_cast<char*>(&num_envs), sizeof(num_envs));
+        // A compute record has one environment, a graphics one at most one per stage.
+        if (num_envs == 0 || num_envs > 8) {
+            throw std::ios_base::failure("Pipeline cache record with an implausible stage count");
+        }
         std::vector<FileEnvironment> envs(num_envs);
         for (FileEnvironment& env : envs) {
             env.Deserialize(file);
@@ -1250,8 +1261,10 @@ void LoadPipelines(
         }
     }
 
-} catch (const std::ios_base::failure& e) {
-    LOG_ERROR(Common_Filesystem, "{}", e.what());
+} catch (const std::exception& e) {
+    // A read error, or a damaged record that asked for more memory than exists: the file is
+    // corrupt, so delete it and let the pipelines be built again.
+    LOG_ERROR(Common_Filesystem, "Corrupt pipeline cache, deleting it: {}", e.what());
     if (!Common::FS::RemoveFile(filename)) {
         LOG_ERROR(Common_Filesystem, "Failed to delete pipeline cache file {}",
                   Common::FS::PathToUTF8String(filename));
