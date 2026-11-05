@@ -206,6 +206,31 @@ void GpuSplit::Publish() {
         wake.fetch_add(1, std::memory_order_seq_cst);
         wake.notify_one();
     }
+    if (macro_sink && (++publishes & 1023) == 0) [[unlikely]] {
+        ReportBatched();
+    }
+}
+
+void GpuSplit::ReportBatched() {
+    const auto now = std::chrono::steady_clock::now();
+    if (batched_since == std::chrono::steady_clock::time_point{}) {
+        batched_since = now;
+        batched.fill(0);
+        return;
+    }
+    const std::chrono::duration<double> elapsed = now - batched_since;
+    if (elapsed.count() < 10.0) {
+        return;
+    }
+    const auto rate = [&](Batched counter) {
+        return static_cast<double>(batched[static_cast<size_t>(counter)]) / elapsed.count();
+    };
+    LOG_INFO(HW_GPU,
+             "GPU split batched writes per second: split_batch.macro_sunk {:.0f}, "
+             "split_batch.compute_sunk {:.0f}, split_batch.compute_same {:.0f}",
+             rate(Batched::MacroSunk), rate(Batched::ComputeSunk), rate(Batched::ComputeSame));
+    batched.fill(0);
+    batched_since = now;
 }
 
 void GpuSplit::Drain(DrainSite site) {
@@ -384,6 +409,9 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
             Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
             engine->ConsumeSink(*system);
             engine->CallMethod(*system, method, argument, true);
+        } else if ((head & Sink) != 0) {
+            engine->method_sink.emplace_back(
+                method | Tegra::Engines::EngineInterface::SplitPlainTag, argument);
         } else if (!engine->execution_mask[method]) {
             engine->method_sink.emplace_back(method, argument);
         } else {

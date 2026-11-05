@@ -79,6 +79,11 @@ void KeplerCompute::BindRasterizer(VideoCore::RasterizerInterface* rasterizer_) 
 
 void KeplerCompute::ConsumeSinkImpl(Core::System& system) {
     for (auto [method, value] : method_sink) {
+        if ((method & SplitPlainTag) != 0) {
+            // GpuSplit::SinkMethod (EDEN_NX2_MACRO_SINK): as CallMethod's native plain path.
+            method &= ~SplitPlainTag;
+            native_registers[method] = value;
+        }
         if (method < Regs::NUM_REGS) {
             regs.reg_array[method] = value;
         }
@@ -1110,7 +1115,23 @@ struct KeplerCompute::FrontState {
     bool compute_uploaded{};
     u32 bind_pointer{};
     MacroEngine* macro{}; ///< Without a native context: the one macro engine
+    /// EDEN_NX2_MACRO_SINK: plain registers (native_plain_methods) this front sent a write to.
+    /// The back stored that value in both native_registers and regs, so `registers` holds what
+    /// both hold and a later write of the same value can be dropped.
+    std::bitset<0xe00> plain_sent;
+    u64 calls{}; ///< Macro calls, for EDEN_NX2_SPLIT_VERIFY
 };
+
+namespace {
+
+// EDEN_NX2_SPLIT_VERIFY=1: every 4096 front macro calls, wait for the back and compare the
+// front's compute registers with the back's (logs and resynchronizes differences).
+bool ComputeFrontVerifyEnabled() {
+    static const bool verify = std::getenv("EDEN_NX2_SPLIT_VERIFY") != nullptr;
+    return verify;
+}
+
+} // Anonymous namespace
 
 KeplerCompute::FrontState& KeplerCompute::Front(VideoCommon::GpuSplit& split) {
     if (!front) [[unlikely]] {
@@ -1197,8 +1218,32 @@ void KeplerCompute::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit&
         }
         return;
     }
+    if (FrontPlainWrite(split, fs, method, argument)) {
+        return;
+    }
     FrontApply(fs, method, argument);
     split.Method(this, method, argument, is_last_call, segment);
+}
+
+bool KeplerCompute::FrontPlainWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 method,
+                                    u32 argument) {
+    // EDEN_NX2_MACRO_SINK: a write that only stores its value (CallMethod's native_plain_methods
+    // path, which writes native_registers and regs) is dropped when both hold it already, else
+    // sunk on the back and applied before the engine's next other write. The segment does not
+    // matter: only data_upload reads current_dma_segment, and it is never plain.
+    if (!VideoCommon::GpuSplit::MacroSink() || method >= native_plain_methods.size() ||
+        !native_plain_methods[method]) {
+        return false;
+    }
+    if (fs.plain_sent[method] && fs.registers[method] == argument) {
+        split.CountBatched(VideoCommon::GpuSplit::Batched::ComputeSame);
+        return true;
+    }
+    fs.plain_sent[method] = true;
+    fs.registers[method] = argument; // All FrontApply does for a plain register
+    split.SinkMethod(this, method, argument);
+    split.CountBatched(VideoCommon::GpuSplit::Batched::ComputeSunk);
+    return true;
 }
 
 void KeplerCompute::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit& split,
@@ -1236,6 +1281,9 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
         if (address >= 0xe00) {
             return false;
         }
+        if (FrontPlainWrite(split, fs, address, value)) {
+            return true;
+        }
         FrontApply(fs, address, value);
         split.MacroWrite(this, address, value);
         return true;
@@ -1257,6 +1305,50 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
                   start, result.consumed, result.error);
     }
     fs.parameters.clear();
+    if (VideoCommon::GpuSplit::MacroSink() && ComputeFrontVerifyEnabled() &&
+        (++fs.calls & 4095) == 0) [[unlikely]] {
+        FrontVerify(split, fs);
+    }
+}
+
+void KeplerCompute::FrontVerify(VideoCommon::GpuSplit& split, FrontState& fs) {
+    split.Drain(VideoCommon::DrainSite::FrontVerify);
+    static u64 checks{};
+    static u64 differences{};
+    ++checks;
+    // Writes the back still holds in its method sink count as done (SinkMethod's are tagged).
+    std::array<u32, 0x1000> expected = native_registers;
+    std::array<u32, Regs::NUM_REGS> expected_regs;
+    std::memcpy(expected_regs.data(), regs.reg_array.data(), sizeof(expected_regs));
+    for (auto [method, value] : method_sink) {
+        if ((method & SplitPlainTag) != 0) {
+            method &= ~SplitPlainTag;
+            expected[method] = value;
+        }
+        if (method < Regs::NUM_REGS) {
+            expected_regs[method] = value;
+        }
+    }
+    for (u32 i = 0; i < 0xe00; ++i) {
+        // Dropped same-value writes rely on regs holding what native_registers holds.
+        const bool regs_differ =
+            fs.plain_sent[i] && i < Regs::NUM_REGS && expected_regs[i] != expected[i];
+        if (fs.registers[i] == expected[i] && !regs_differ) {
+            continue;
+        }
+        if (differences++ < 64) {
+            LOG_WARNING(HW_GPU, "Split front compute register {:#x}: front {:#x}, back {:#x}{}", i,
+                        fs.registers[i], expected[i],
+                        regs_differ ? fmt::format(" (back regs {:#x})", expected_regs[i])
+                                    : std::string{});
+        }
+        fs.registers[i] = expected[i];
+        fs.plain_sent[i] = false;
+    }
+    if ((checks & 63) == 1) {
+        LOG_INFO(HW_GPU, "Split front compute register checks: {} done, {} differences", checks,
+                 differences);
+    }
 }
 
 } // namespace Tegra::Engines
