@@ -245,7 +245,9 @@ VkResult MemoryAllocator::CreateInAnyMemoryType(
             }
         }
     }
-    return result;
+    // Types the resource cannot use answer VK_ERROR_FEATURE_NOT_PRESENT; the caller's fallbacks
+    // (an unbacked sparse image) expect out of memory.
+    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 }
 
 vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicated) const
@@ -286,6 +288,10 @@ vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicat
                         "budget; allocating it anyway",
                         ci.extent.width, ci.extent.height, ci.extent.depth, ci.mipLevels,
                         ci.arrayLayers, static_cast<u32>(ci.format));
+            // The first times: what the heaps hold when the budget runs out.
+            if (logged <= 2) {
+                LogMemoryStatistics(device);
+            }
         }
         pressure_events.fetch_add(1, std::memory_order_relaxed);
         VmaAllocationCreateInfo relaxed = alloc_ci;
