@@ -2519,25 +2519,24 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                     source_b + 1 >= register_limit || (dest != 255 && dest + 1 >= register_limit) ||
                     (second_dest != 255 && second_dest + 1 >= register_limit))
                     return fail(index, "native per-tap gather operands");
-                // The backward scan below is only sound for straight-line programs: every
-                // instruction up to the terminal EXIT must be one of these non-branching forms.
-                bool terminal = false;
                 for (const auto& instruction : code) {
                     if (instruction.Bits(12, 4) == 15) continue;
                     const u32 op = instruction.Bits(0, 12);
-        uses_uniform_bank |= op == 0x83b && instruction.Bits(91, 1);
-                    if (op == 0x94d && instruction.Bits(12, 4) == 7) {
-                        terminal = true;
-                        break;
-                    }
-                    if (op != 0x326 && op != 0x802 && op != 0x307 && op != 0x421 &&
-                        op != 0xa20 && op != 0xb63 && op != 0x221 && op != 0x823 &&
-                        op != 0x423 && op != 0x223 && op != 0x308 && op != 0x220 && op != 0x820)
-                        return fail(index, "native per-tap gather control-flow proof");
+                    uses_uniform_bank |= op == 0x83b && instruction.Bits(91, 1);
+                    if (op == 0x94d && instruction.Bits(12, 4) == 7) break;
                 }
-                if (!terminal) return fail(index, "native per-tap gather terminal proof");
+                // The offsets are traced back through the code that falls through to the gather.
+                // With every control transfer known (bounded_control), a definition is the one the
+                // gather sees when no branch enters anywhere between it and the gather.
+                if (!bounded_control) return fail(index, "native per-tap gather control-flow proof");
+                // A definition under the gather's own predicate also counts while nothing after it
+                // names that predicate as an output (bits 81-83 and 84-86 on every form scanned).
+                const u32 gather_predicate = insn.Bits(12, 4);
+                bool predicate_kept = (gather_predicate & 7) != 7;
                 std::array<std::optional<u32>, 2> packed_offsets;
                 for (u32 cursor = index; cursor > 0 && (!packed_offsets[0] || !packed_offsets[1]);) {
+                    for (const auto& edge : control_edges)
+                        if (edge.second == cursor) return fail(index, "native per-tap gather control-flow proof");
                     const auto& definition = code[--cursor];
                     if (definition.Bits(12, 4) == 15) continue;
                     const u32 op = definition.Bits(0, 12), target = definition.Bits(16, 8);
@@ -2552,17 +2551,37 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                                 (high != 255 && count > 2 && reg >= high && reg < high + count - 2))
                                 return fail(index, "native per-tap gather offset clobber");
                         }
+                        predicate_kept &= definition.Bits(81, 3) != (gather_predicate & 7); // sparse output
                         continue;
                     }
-                    if (op != 0x802 && op != 0x307 && op != 0x421 && op != 0xa20)
-                        return fail(index, "native per-tap gather offset proof");
+                    // IMAD (0x224, 0x624), IMAD.HI with an immediate (0x827), HFMA2/HMUL2 with an
+                    // immediate (0x831, 0x832) and LEA with a constant (0xa11) write only Rd; CS2R
+                    // (0x805) is taken as the 64-bit pair. BRA, the reconvergence markers and DEPBAR
+                    // write no register: the scan follows their fall-through, which no branch enters.
+                    const auto count =
+                        op == 0x307 || op == 0x224 || op == 0x624 || op == 0x827 || op == 0x831 ||
+                                op == 0x832 || op == 0xa11
+                            ? std::optional<u32>{1U}
+                        : op == 0x805 ? std::optional<u32>{2U}
+                        : op == 0x947 || op == 0x941 || op == 0x945 || op == 0x948 || op == 0x91a
+                            ? std::optional<u32>{0U}
+                            : write_count(definition);
+                    if (!count) return fail(index, "native per-tap gather offset proof");
+                    // MOV Rd, imm or IMAD.MOV.U32 Rd, RZ, RZ, imm.
+                    const u32 definition_predicate = definition.Bits(12, 4);
+                    const bool constant =
+                        (definition_predicate == 7 || (definition_predicate == gather_predicate && predicate_kept)) &&
+                        ((op == 0x802 && !definition.Bits(24, 8) && definition.words[2] == 0x00000f00) ||
+                         (op == 0x424 && definition.Bits(24, 8) == 255 && definition.words[2] == 0x078e00ff));
                     for (u32 i = 0; i < 2; ++i) {
-                        if (packed_offsets[i] || target != source_b + i) continue;
-                        if (op != 0x802 || definition.Bits(12, 4) != 7 || definition.Bits(24, 8) ||
-                            definition.words[2] != 0x00000f00)
+                        const u32 reg = source_b + i;
+                        if (packed_offsets[i] || reg < target || reg >= target + *count) continue;
+                        if (!constant || *count != 1)
                             return fail(index, "native per-tap gather nonconstant offsets");
                         packed_offsets[i] = definition.words[1];
                     }
+                    predicate_kept &= definition.Bits(81, 3) != (gather_predicate & 7) &&
+                                      definition.Bits(84, 3) != (gather_predicate & 7);
                 }
                 for (const auto& packed : packed_offsets) {
                     if (!packed) return fail(index, "native per-tap gather missing offsets");
