@@ -9,9 +9,11 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <deque>
 #include <filesystem>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <memory>
@@ -168,13 +170,38 @@ private:
 
     [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) const noexcept;
 
+    /// The slow path's end: graphics_cache[graphics_key]'s pipeline becomes the current one.
+    [[nodiscard]] GraphicsPipeline* MakeCurrent(GraphicsPipeline* pipeline);
+
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline();
+
+    /// EDEN_NX2_PIPELINE_ASYNC: what a build off the GPU thread takes in place of maxwell3d.
+    struct AsyncBuildContext;
 
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline(
         ShaderPools& pools, const GraphicsPipelineCacheKey& key,
         std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
         bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools = nullptr,
-        std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr);
+        std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr,
+        const AsyncBuildContext* async = nullptr);
+
+    /// Stores a pipeline built at run time in the disk cache (unless it is there already).
+    void StoreRuntimePipeline(const GraphicsPipelineCacheKey& key, const GraphicsPipeline& pipeline,
+                              GraphicsEnvironments& environments);
+
+    // EDEN_NX2_PIPELINE_ASYNC: graphics pipelines translated and built on the workers.
+    struct AsyncGraphicsJob;
+    [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipelineAsync();
+    [[nodiscard]] bool CanDiscardAsyncDraw() const;
+    /// Queues graphics_key's build; false when it has to be built on the GPU thread.
+    [[nodiscard]] bool QueueAsyncGraphicsPipeline();
+    void BuildAsyncGraphicsPipeline(const std::shared_ptr<AsyncGraphicsJob>& job,
+                                    bool on_gpu_thread);
+    /// Runs the job on the GPU thread if no worker took it yet, else waits for the worker.
+    void FinishAsyncGraphicsPipeline(const std::shared_ptr<AsyncGraphicsJob>& job);
+    /// Moves the finished builds into graphics_cache (GPU thread).
+    void DrainAsyncPipelines();
+    void ReportAsyncPipelines(std::chrono::steady_clock::time_point now);
 
     ComputePipelineCacheEntry CreateComputePipeline(const ComputePipelineCacheKey& key,
                                                      const ShaderInfo* shader);
@@ -244,6 +271,33 @@ private:
     std::chrono::steady_clock::time_point last_flush{};
     std::atomic<size_t> last_cache_size{};
     std::atomic_bool flush_in_flight{};
+
+    // EDEN_NX2_PIPELINE_ASYNC state, declared before workers so a job still running while the
+    // cache is destroyed (workers joins it) never sees it destroyed.
+    u32 async_pipelines{}; ///< 0 off, 1 on, 2 on with native draws skipped while pending too
+    /// Builds queued or running (GPU thread only); their graphics_cache entries are null.
+    ::Common::unordered_map<GraphicsPipelineCacheKey, std::shared_ptr<AsyncGraphicsJob>>
+        async_pending;
+    /// Key hashes whose build on a worker failed: built on the GPU thread at their next draw.
+    std::unordered_set<u64> async_sync_keys;
+    std::mutex async_mutex;
+    std::condition_variable async_idle;
+    std::vector<std::shared_ptr<AsyncGraphicsJob>> async_completed; ///< Under async_mutex
+    std::atomic<size_t> async_completed_count{};
+    size_t async_running{}; ///< Jobs running on workers, under async_mutex
+    bool async_stopping{};  ///< Under async_mutex: the cache is being destroyed
+    struct AsyncStats {
+        u32 queued{};
+        u32 inline_built{};
+        u32 waited{};
+        u32 sync_built{};
+        u32 fallback{};
+        u64 skipped{};
+        u64 snapshot_bytes{};
+        std::atomic<u32> worker_built{};
+        std::chrono::steady_clock::duration gpu_time{};
+        std::chrono::steady_clock::time_point window{};
+    } async_stats;
 
     Common::ThreadWorker workers;
     Common::ThreadWorker serialization_thread;
