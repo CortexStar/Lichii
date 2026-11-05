@@ -17,6 +17,7 @@
 #include "common/settings_enums.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "core/gpu_dirty_memory_manager.h"
 #include "core/frontend/emu_window.h"
 #include "core/frontend/graphics_context.h"
 #include "core/hle/service/nvdrv/nvdata.h"
@@ -32,6 +33,7 @@
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/gpu.h"
+#include "video_core/pending_maps.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/gpu_timestamp.h"
 #include "video_core/host1x/host1x.h"
@@ -206,8 +208,18 @@ struct GPU::Impl {
         gpu_thread.Run(std::move(func), is_async);
     }
 
-    void MapInOrder(std::function<void()>&& func) {
-        gpu_thread.Run(std::move(func), is_async, true);
+    void MapInOrder(GPUVAddr gpu_addr, u64 size, std::function<void()>&& func) {
+        const u64 id = pending_maps.Add(gpu_addr, size);
+        gpu_thread.Run(
+            [this, id, func = std::move(func)] {
+                func();
+                pending_maps.Remove(id);
+            },
+            is_async, true);
+    }
+
+    bool IsMapPending(GPUVAddr gpu_addr, u64 size) const {
+        return pending_maps.Overlaps(gpu_addr, size);
     }
 
     /// Notify rasterizer that any caches of the specified region should be flushed to Switch memory
@@ -354,6 +366,8 @@ struct GPU::Impl {
     std::list<std::function<void()>> sync_requests;
     std::atomic<u64> current_sync_fence{};
     u64 last_sync_fence{};
+
+    VideoCommon::PendingMaps pending_maps;
     std::mutex sync_request_mutex;
     std::condition_variable sync_request_cv;
 
@@ -408,6 +422,15 @@ void GPU::FlushCommands() {
 
 void GPU::InvalidateGPUCache() {
     impl->InvalidateGPUCache();
+}
+
+bool GPU::HasPendingCPUWrites(DAddr addr, u64 size) {
+    for (auto& manager : impl->system.GetGPUDirtyMemoryManager()) {
+        if (manager.Overlaps(addr, size)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void GPU::OnCommandListEnd() {
@@ -555,8 +578,12 @@ void GPU::RunInOrder(std::function<void()>&& func) {
     impl->RunInOrder(std::move(func));
 }
 
-void GPU::MapInOrder(std::function<void()>&& func) {
-    impl->MapInOrder(std::move(func));
+void GPU::MapInOrder(GPUVAddr gpu_addr, u64 size, std::function<void()>&& func) {
+    impl->MapInOrder(gpu_addr, size, std::move(func));
+}
+
+bool GPU::IsMapPending(GPUVAddr gpu_addr, u64 size) const {
+    return impl->IsMapPending(gpu_addr, size);
 }
 
 void GPU::InvalidateRegion(DAddr addr, u64 size, bool preserve_gpu_writes) {

@@ -767,7 +767,7 @@ void KeplerCompute::CheckDlssNetwork() {
                 probe->mismatched, probe->blocks, probe->worst, probe->invalid_samples);
 }
 
-// Tells the Graphics tab what draws the game's DLSS evaluation, when that changes.
+// Logs what draws the game's DLSS evaluation, when that changes.
 void KeplerCompute::UpdateGameDlssStatus(bool complete, VideoCore::GameDlssReason blocker) {
     using VideoCore::GameDlssReason;
     using VideoCore::GameDlssState;
@@ -801,7 +801,6 @@ void KeplerCompute::UpdateGameDlssStatus(bool complete, VideoCore::GameDlssReaso
                  VideoCore::GameDlssReasonText(shown.reason));
     }
     dlss_chain.status = shown;
-    VideoCore::SetGameDlssStatus(shown);
 }
 
 // Ends this frame's DLSS evaluation at its output pass: either the network's own result stays,
@@ -1478,7 +1477,42 @@ void KeplerCompute::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit&
         return;
     }
     FrontApply(fs, method, argument);
-    split.Method(this, method, argument, is_last_call, segment);
+    split.Method(this, method, argument, is_last_call, segment, FrontEffect(method));
+    FrontNoteWrites(split, fs, method);
+}
+
+VideoCommon::SplitWriteTracker::Effect KeplerCompute::FrontEffect(u32 method) const {
+    using Effect = VideoCommon::SplitWriteTracker::Effect;
+    if (method < native_plain_methods.size() && native_plain_methods[method]) {
+        return Effect::None;
+    }
+    switch (method) {
+    case 0x45:
+    case 0x46:
+    case 0x47:
+    case 0x48:
+        return Effect::None; // Macros: loaded and bound by the front
+    case 0xae:
+    case 0xaf:
+    case 0xb0:
+    case 0x107:
+    case 0x6c3:
+        return Effect::Gpu; // QMD launches and the semaphore releases after them
+    default:
+        return Effect::Unknown; // Inline uploads among them
+    }
+}
+
+void KeplerCompute::FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& fs, u32 method) {
+    if (method == 0x107) {
+        // An inline QMD is written to memory before it launches.
+        const GPUVAddr qmd = ((GPUVAddr{fs.registers[0xc6]} << 32) | fs.registers[0xc7]) << 8;
+        split.NoteWrite(memory_manager, qmd, 256);
+    } else if (method == 0x6c3) {
+        split.NoteWrite(memory_manager,
+                        (GPUVAddr{fs.registers[0x6c0] & 0x1ffffff} << 32) | fs.registers[0x6c1],
+                        16);
+    }
 }
 
 void KeplerCompute::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit& split,
@@ -1491,12 +1525,16 @@ void KeplerCompute::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuS
         }
         return;
     }
-    if (method < fs.registers.size()) {
-        for (u32 i = 0; i < amount; ++i) {
-            FrontApply(fs, method, base_start[i]);
-        }
+    if (method >= fs.registers.size() || amount == 0) {
+        split.MultiMethod(this, method, base_start, amount, methods_pending, segment);
+        return;
     }
-    split.MultiMethod(this, method, base_start, amount, methods_pending, segment);
+    for (u32 i = 0; i < amount; ++i) {
+        FrontApply(fs, method, base_start[i]);
+    }
+    split.MultiMethod(this, method, base_start, amount, methods_pending, segment,
+                      FrontEffect(method));
+    FrontNoteWrites(split, fs, method);
 }
 
 void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split,
@@ -1517,7 +1555,8 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
             return false;
         }
         FrontApply(fs, address, value);
-        split.MacroWrite(this, address, value);
+        split.MacroWrite(this, address, value, FrontEffect(address));
+        FrontNoteWrites(split, fs, address);
         return true;
     };
 #ifdef ARCHITECTURE_x86_64
