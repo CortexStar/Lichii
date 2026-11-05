@@ -86,6 +86,18 @@ public:
     [[nodiscard]] u8* GetPointer(GPUVAddr addr);
     [[nodiscard]] const u8* GetPointer(GPUVAddr addr) const;
 
+    /// EDEN_NX2_HANDLE_PTR_CACHE=1 (default off): the texture handle words and the texture and
+    /// sampler descriptor entries every draw reads go through this thread's host pointers of the
+    /// 16 device pages (4 KiB) it read last, instead of a page table walk each. They are dropped
+    /// when this manager maps, remaps or unmaps anything, or the device memory does. The value
+    /// is still read from guest memory every time.
+    [[nodiscard]] static bool HandlePointerCacheEnabled();
+    /// Read<u32> through the cached page pointers when HandlePointerCacheEnabled.
+    [[nodiscard]] u32 ReadHandleWord(GPUVAddr addr) const;
+    /// GetPointer through the cached page pointers when HandlePointerCacheEnabled (callers read
+    /// within the page of `addr` only).
+    [[nodiscard]] const u8* GetPointerForDescriptor(GPUVAddr addr) const;
+
     template <typename T>
     [[nodiscard]] inline T* GetPointer(GPUVAddr addr) noexcept {
         const auto address = GpuToCpuAddress(addr);
@@ -232,7 +244,11 @@ private:
         GPUVAddr gpu_addr, std::size_t size,
         boost::container::small_vector<std::pair<std::conditional_t<is_gpu_address, GPUVAddr, DAddr>, std::size_t>, 32>& result) const;
 
+    /// Host pointer of `addr` through this thread's cached page pointers (HandlePointerCacheEnabled).
+    const u8* CachedPagePointer(GPUVAddr addr) const;
+
     std::atomic<GPUVAddr> native_syncpoint_shim{};
+    std::atomic<u64> map_generation{1}; ///< Bumped by PageTableOp and BigPageTableOp
     Core::System& system;
     MaxwellDeviceMemoryManager& memory;
 

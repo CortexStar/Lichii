@@ -160,6 +160,8 @@ enum class Counter : u32 {
     AcquireWaits,   ///< Of AcquireChecks: not met yet (the channel waits)
     DmaReadsFast,   ///< EDEN_NX2_DMA_READ_FAST: MME DMA reads made without draining the split
     AcquiresFast,   ///< EDEN_NX2_ACQUIRE_PRECHECK: acquires met without draining the split
+    PtrCacheHits,   ///< EDEN_NX2_HANDLE_PTR_CACHE: handle/descriptor reads, page pointer cached
+    PtrCacheMisses, ///< EDEN_NX2_HANDLE_PTR_CACHE: handle/descriptor reads, page looked up
     Count,
 };
 static_assert(static_cast<size_t>(Counter::Count) <= std::tuple_size_v<decltype(ThreadData::counters)>);
@@ -299,6 +301,13 @@ inline void Report(const char* thread_name = "GPU thread") {
     if (const u64 fast = data.counters[static_cast<size_t>(Counter::AcquiresFast)]; fast != 0) {
         line += fmt::format(" | acquires without a drain {:.0f}",
                             static_cast<double>(fast) * 1e9 / window);
+    }
+    if (const u64 hits = data.counters[static_cast<size_t>(Counter::PtrCacheHits)],
+        misses = data.counters[static_cast<size_t>(Counter::PtrCacheMisses)];
+        hits != 0 || misses != 0) {
+        line += fmt::format(" | handle page pointers {:.0f} cached, {:.0f} looked up",
+                            static_cast<double>(hits) * 1e9 / window,
+                            static_cast<double>(misses) * 1e9 / window);
     }
     std::string drains;
     for (size_t i = 0; i < data.drain_count.size(); ++i) {
