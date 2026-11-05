@@ -201,6 +201,8 @@ class CliTests(unittest.TestCase):
             (0x00037305, 0x80000013, 0x0021f100, 0x000fe200),
             (0x0e0e7819, 0x00000015, 0x00001211, 0x020fe200),
             (0x000573c4, 0, 0x00010200, 0x001e2400),
+            (0x04077899, 0x18, 0x08001206, 0x002fc400),
+            (0x032b7219, 0x2c, 0x0000122d, 0x000fe200),
         ):
             with self.subTest(instruction=instruction):
                 source = self.write("oot-arithmetic.bin", struct.pack(
@@ -226,6 +228,25 @@ class CliTests(unittest.TestCase):
                 self.assertEqual((reduction >> 20) & 7, 3 if instruction[2] == 0x0c10e704 else 0)
                 self.assertEqual((reduction >> 28) & 0xfffff,
                                  0 if instruction[2] == 0x0c10e704 else 0xffff0)
+
+    def test_oot_call_proof_accepts_discard_and_ignored_register_writes(self):
+        instructions = [
+            (0x00107802, 0x30, 0x00000f00, 0),
+            (0x1f1f7212, 6, 0x078e3cff, 0),
+            (0x00007944, 0x20, 0x03c00000, 0),
+            (0x0000095b, 0, 0x03800000, 0),
+            (0x0000794d, 0, 0x03800000, 0),
+            (0x00027919, 0, 0x00003900, 0),
+            (0x02ff7c12, 4, 0x0f80c0ff, 0),
+            (0x00067202, 16, 0x00000f00, 0),
+            (0x06007950, 0xffffff70, 0x03c3ffff, 0),
+        ]
+        source = self.write("oot-call.bin", b"".join(struct.pack("<4I", *op) for op in instructions))
+        self.run_cli(source, "--lower-only", self.output)
+        instructions[1] = (0x00107802, 0, 0x00000f00, 0)
+        source.write_bytes(b"".join(struct.pack("<4I", *op) for op in instructions))
+        result = self.run_cli(source, "--lower-only", self.output, code=1)
+        self.assertEqual(result["error"]["message"], "native call linkage mode")
 
     def test_instruction_only_requires_stage(self):
         source = self.write("native.bin", NATIVE_EXIT)

@@ -240,6 +240,8 @@ private:
     void UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs);
 
     void FrameDumpPass(const Framebuffer* framebuffer);
+    /// Records the uniform and storage buffers of the current draw or dispatch for the frame dump.
+    bool FrameDumpBuffers(bool compute, std::span<const u64> shader_hashes);
 
     Tegra::GPU& gpu;
     Tegra::MaxwellDeviceMemoryManager& device_memory;

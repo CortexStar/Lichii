@@ -432,6 +432,20 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         }
     }
 
+    static const bool record_sampled = [] {
+        const char* const value = std::getenv("EDEN_NX2_FRAME_DUMP_SAMPLED");
+        return value && *value != '\0' && *value != '0';
+    }();
+    if (record_sampled) {
+        sampled_images.clear();
+        const size_t first = Shader::NumDescriptors(info.texture_buffer_descriptors) +
+                             Shader::NumDescriptors(info.image_buffer_descriptors);
+        for (size_t index = first; index < first + Shader::NumDescriptors(info.texture_descriptors);
+             ++index) {
+            sampled_images.push_back({views[index].index, views[index].id, samplers[index - first]});
+        }
+    }
+
     std::optional<size_t> shadow_index;
     size_t image_index{Shader::NumDescriptors(info.texture_buffer_descriptors) +
                        Shader::NumDescriptors(info.image_buffer_descriptors) +

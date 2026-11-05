@@ -245,7 +245,7 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
                      gpu.ShaderNotify()),
       accelerate_dma(buffer_cache, texture_cache, scheduler),
       fence_manager(*this, gpu, texture_cache, buffer_cache, query_cache, device, scheduler),
-      frame_dump(memory_allocator, scheduler), wfi_event(device.GetLogical().CreateEvent()) {
+      frame_dump(device, memory_allocator, scheduler), wfi_event(device.GetLogical().CreateEvent()) {
     dynamic_state_flags = DynamicStateFlags();
     scheduler.SetQueryCache(query_cache);
     VideoCommon::GpuSplit::Get().SetIdleHook(
@@ -734,6 +734,18 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     if (frame_dump.Capturing()) {
         FrameDumpPass(texture_cache.GetFramebuffer());
         frame_dump.NoteDraw(pipeline->ShaderHashes());
+        if (frame_dump.CapturingSampled()) {
+            boost::container::small_vector<FrameDump::Sampled, 16> sampled;
+            for (const auto& image : pipeline->SampledImages()) {
+                sampled.push_back({image.stage, image.tic, &texture_cache.GetImageView(image.id),
+                                   &texture_cache.GetSampler(image.sampler)});
+            }
+            bool recorded = frame_dump.NoteSampled(sampled);
+            recorded |= FrameDumpBuffers(false, pipeline->ShaderHashes());
+            if (recorded) {
+                scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
+            }
+        }
     }
     if (VideoCommon::RenderTrace::SampleFrame(render_trace_frame) && render_trace_draws <= 2048) {
         LOG_DEBUG(Render_Vulkan,
@@ -1638,9 +1650,30 @@ void RasterizerVulkan::DispatchCompute() {
         }
         frame_dump.CaptureDispatch(pipeline->ShaderHash(), written);
     };
+    if (frame_dump.CapturingSampled()) {
+        boost::container::small_vector<FrameDump::Sampled, 16> sampled;
+        for (const auto& image : pipeline->SampledImages()) {
+            sampled.push_back({5, image.tic, &texture_cache.GetImageView(image.id),
+                               &texture_cache.GetSampler(image.sampler)});
+        }
+        frame_dump.NoteDispatchSampled(pipeline->ShaderHash(), sampled);
+        FrameDumpBuffers(true, std::array{pipeline->ShaderHash()});
+    }
 
     const auto& qmd{kepler_compute->launch_description};
     auto indirect_address = kepler_compute->GetIndirectComputeAddress();
+    if (frame_dump.CapturingSampled()) {
+        std::optional<std::array<u32, 3>> indirect_grid;
+        if (indirect_address) {
+            indirect_grid = std::array{gpu_memory->Read<u32>(*indirect_address),
+                                       gpu_memory->Read<u32>(*indirect_address + 4),
+                                       gpu_memory->Read<u32>(*indirect_address + 8)};
+        }
+        frame_dump.NoteLaunch(pipeline->ShaderHash(),
+                              {qmd.grid_dim_x, qmd.grid_dim_y, qmd.grid_dim_z},
+                              {qmd.block_dim_x, qmd.block_dim_y, qmd.block_dim_z},
+                              indirect_address, indirect_grid);
+    }
     if (indirect_address) {
         // DispatchIndirect
         static constexpr auto sync_info = VideoCommon::ObtainBufferSynchronize::FullSynchronize;
@@ -2158,6 +2191,36 @@ void RasterizerVulkan::TraceRenderState(bool is_indexed, const char* outcome,
     LOG_DEBUG(Render_Vulkan, "Render trace condition: address={:#x} mode={} override={}",
               regs.render_enable.Address(), static_cast<u32>(regs.render_enable.mode),
               static_cast<u32>(regs.render_enable_override));
+}
+
+bool RasterizerVulkan::FrameDumpBuffers(bool compute, std::span<const u64> shader_hashes) {
+    static constexpr u32 BUFFER_CAP = 4U << 20;
+    std::vector<FrameDump::BoundBuffer> buffers;
+    buffer_cache.ForEachBoundBuffer(compute, [&](u32 stage, bool storage, u32 index, bool written,
+                                                 const auto& binding, u32 bound_size,
+                                                 const auto* host, u32 host_offset) {
+        const u32 size = std::min(bound_size, BUFFER_CAP);
+        const bool gpu_modified = buffer_cache.IsRegionGpuModified(binding.device_addr, size);
+        FrameDump::BoundBuffer& buffer = buffers.emplace_back(FrameDump::BoundBuffer{
+            .stage = stage,
+            .storage = storage,
+            .index = index,
+            .written = written,
+            .gpu_addr = binding.gpu_addr,
+            .device_addr = binding.device_addr,
+            .bound_size = bound_size,
+            .size = size,
+            .gpu_modified = gpu_modified,
+            .host = host ? host->Handle() : VK_NULL_HANDLE,
+            .host_offset = host_offset,
+            .guest = {},
+        });
+        if (!gpu_modified || !host) {
+            buffer.guest.resize(size);
+            device_memory.ReadBlockUnsafe(binding.device_addr, buffer.guest.data(), size);
+        }
+    });
+    return frame_dump.NoteBuffers(compute, shader_hashes, buffers);
 }
 
 void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {

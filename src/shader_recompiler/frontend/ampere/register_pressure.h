@@ -79,6 +79,7 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     case 0xa24:
     case 0xa23:
     case 0x623:
+    case 0x423:
         operand(16);
         operand(24);
         operand(64);
@@ -171,6 +172,7 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         break;
     case 0x210:
     case 0x211:
+    case 0x212:
         operand(16);
         operand(24);
         operand(32);

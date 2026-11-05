@@ -62,7 +62,7 @@ TEST_CASE("Yoshi UPOPC preserves inverted sources and reserves uniform registers
                 (0x5c08000000070000ULL | 218 | (u64{219} << 20) | (u64{invert} << 40)));
     }
     for (const auto [bit, count, value] : std::array{
-             std::array{16U, 8U, 16U}, std::array{32U, 8U, 16U},
+             std::array{16U, 8U, 63U}, std::array{40U, 8U, 1U},
              std::array{12U, 4U, 0U}, std::array{64U, 1U, 1U}}) {
         auto invalid = Popcount;
         Set(invalid, bit, count, value);
