@@ -930,6 +930,23 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
     const auto handles = NativeImageHandles(regs.code_loc.Address());
     const std::vector<u32>& reads = handles.first;
     const std::vector<u32>& stores = handles.second;
+    // Images a rejected pass would have written at the size of an image it reads (Ocarina of
+    // Time's video network: 0x216f0c4000 -> 0x216f941000, which its last pass then upscales).
+    // Rejected, it writes nothing; the last pass's stand-in follows these back to an image that
+    // something else wrote.
+    static std::unordered_map<GPUVAddr, Texture::TICEntry> skipped_pass_sources;
+    for (const u32 store : stores) {
+        const auto to = image(store);
+        if (!to || to->Address() == 0) continue;
+        for (const u32 read : reads) {
+            const auto from = image(read);
+            if (from && from->Address() != 0 && from->Address() != to->Address() &&
+                from->Width() == to->Width() && from->Height() == to->Height()) {
+                skipped_pass_sources.insert_or_assign(to->Address(), *from);
+                break;
+            }
+        }
+    }
     std::optional<Texture::TICEntry> input = image(0x90), output = image(0xa0);
     std::string_view rule = "title 4 slots";
     u32 input_offset = 0x90, output_offset = 0xa0;
@@ -1002,6 +1019,14 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
     };
     if (!input || !output) {
         return skip("no input/output image pair in the program's handles or cbuf0+0x80..0x11c");
+    }
+    for (u32 hops = 0; hops < 16; ++hops) {
+        const auto source = skipped_pass_sources.find(input->Address());
+        if (source == skipped_pass_sources.end() || source->second.Address() == output->Address()) {
+            break;
+        }
+        input = source->second;
+        rule = "followed back through skipped passes";
     }
     using RTFormat = Tegra::RenderTargetFormat;
     const auto blit_format = [](const Texture::TICEntry& tic) -> std::optional<RTFormat> {
