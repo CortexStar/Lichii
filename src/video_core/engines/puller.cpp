@@ -62,6 +62,29 @@ void DrainBack() {
     VideoCommon::GpuSplit::Get().Drain(VideoCommon::DrainSite::Acquire);
 }
 
+// EDEN_NX2_ACQUIRE_PRECHECK=1: a GEQUAL acquire whose word already holds the value continues
+// without draining the split, if no GPU work ever wrote the word's page (then no cache holds a
+// newer word than guest memory). It counts as a host sync for later GPU-written command lists,
+// as the drain did. Equal and mask acquires always drain.
+bool GequalMetWithoutDrain(DmaPusher& dma_pusher, GPUVAddr address, u32 value) {
+    static const bool enabled = [] {
+        const char* setting = std::getenv("EDEN_NX2_ACQUIRE_PRECHECK");
+        return setting != nullptr && setting[0] != '0';
+    }();
+    auto& split = VideoCommon::GpuSplit::Get();
+    if (!enabled || !split.Active()) {
+        return false;
+    }
+    const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address);
+    if (!device || Nx2IsGpuWritten(*device) ||
+        dma_pusher.memory_manager.Read<u32>(address) < value) {
+        return false;
+    }
+    split.NoteSync();
+    VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquiresFast, 1);
+    return true;
+}
+
 // EDEN_NX2_DMA_READ_FAST (GpuSplit::TracksMemoryWrites): a release just sent to the back writes
 // up to 16 bytes at `address`.
 void NoteRelease(DmaPusher& dma_pusher, GPUVAddr address) {
@@ -103,6 +126,11 @@ bool Puller::PendingAcquire::Matches(u32 current) const {
 
 bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     if (!pending_acquire) {
+        return true;
+    }
+    if (static_cast<GpuSemaphoreOperation>(pending_acquire->operation) ==
+            GpuSemaphoreOperation::AcquireGequal &&
+        GequalMetWithoutDrain(dma_pusher, pending_acquire->address, pending_acquire->value)) {
         return true;
     }
     // The release may still be queued for the split GPU thread's back half (and the caches
@@ -273,6 +301,10 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             return;
         }
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireChecks, 1);
+        if (op == GpuSemaphoreOperation::AcquireGequal &&
+            GequalMetWithoutDrain(dma_pusher, acquire.address, acquire.value)) {
+            return;
+        }
         DrainBack();
         if (acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
             return;

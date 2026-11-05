@@ -159,6 +159,7 @@ enum class Counter : u32 {
     AcquireChecks,  ///< Semaphore acquires evaluated
     AcquireWaits,   ///< Of AcquireChecks: not met yet (the channel waits)
     DmaReadsFast,   ///< EDEN_NX2_DMA_READ_FAST: MME DMA reads made without draining the split
+    AcquiresFast,   ///< EDEN_NX2_ACQUIRE_PRECHECK: acquires met without draining the split
     Count,
 };
 static_assert(static_cast<size_t>(Counter::Count) <= std::tuple_size_v<decltype(ThreadData::counters)>);
@@ -293,6 +294,10 @@ inline void Report(const char* thread_name = "GPU thread") {
                         static_cast<double>(data.counters[7]) * 1e9 / window);
     if (const u64 fast = data.counters[static_cast<size_t>(Counter::DmaReadsFast)]; fast != 0) {
         line += fmt::format(" | MME DMA reads without a drain {:.0f}",
+                            static_cast<double>(fast) * 1e9 / window);
+    }
+    if (const u64 fast = data.counters[static_cast<size_t>(Counter::AcquiresFast)]; fast != 0) {
+        line += fmt::format(" | acquires without a drain {:.0f}",
                             static_cast<double>(fast) * 1e9 / window);
     }
     std::string drains;
