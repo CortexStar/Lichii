@@ -162,6 +162,8 @@ enum class Counter : u32 {
     AcquiresFast,   ///< EDEN_NX2_ACQUIRE_PRECHECK: acquires met without draining the split
     PtrCacheHits,   ///< EDEN_NX2_HANDLE_PTR_CACHE: handle/descriptor reads, page pointer cached
     PtrCacheMisses, ///< EDEN_NX2_HANDLE_PTR_CACHE: handle/descriptor reads, page looked up
+    UboInPlaceSame, ///< EDEN_NX2_UBO_INPLACE: small uniform buffers unchanged, nothing copied
+    UboInPlaceChanged, ///< EDEN_NX2_UBO_INPLACE: small uniform buffers changed, copied once
     Count,
 };
 static_assert(static_cast<size_t>(Counter::Count) <= std::tuple_size_v<decltype(ThreadData::counters)>);
@@ -308,6 +310,13 @@ inline void Report(const char* thread_name = "GPU thread") {
         line += fmt::format(" | handle page pointers {:.0f} cached, {:.0f} looked up",
                             static_cast<double>(hits) * 1e9 / window,
                             static_cast<double>(misses) * 1e9 / window);
+    }
+    if (const u64 same = data.counters[static_cast<size_t>(Counter::UboInPlaceSame)],
+        changed = data.counters[static_cast<size_t>(Counter::UboInPlaceChanged)];
+        same != 0 || changed != 0) {
+        line += fmt::format(" | uniform buffers compared in place {:.0f} unchanged, {:.0f} changed",
+                            static_cast<double>(same) * 1e9 / window,
+                            static_cast<double>(changed) * 1e9 / window);
     }
     std::string drains;
     for (size_t i = 0; i < data.drain_count.size(); ++i) {
