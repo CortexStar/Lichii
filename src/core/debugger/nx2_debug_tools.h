@@ -7,6 +7,8 @@
 #include <string>
 #include <string_view>
 
+#include <nlohmann/json.hpp>
+
 #include "common/common_types.h"
 
 namespace Core {
@@ -37,6 +39,10 @@ private:
 
 /// A reject_shaders hash: exactly 16 hex digits, optionally after 0x. Throws std::runtime_error.
 [[nodiscard]] u64 ParseShaderHash(std::string_view text);
+
+/// Guest-present intervals within [begin_ns, end_ns], using only retained ring timestamps.
+[[nodiscard]] nlohmann::json ReadFrameTimes(u64 before, u64 after, u64 begin_ns, u64 end_ns,
+                                          double refresh_hz);
 
 /// The service when EDEN_NX2_DEBUG_SERVER is set and it can listen, otherwise null.
 [[nodiscard]] std::unique_ptr<Service> MaybeStartService(System& system, std::string title,

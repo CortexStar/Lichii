@@ -35,6 +35,19 @@ TOOLS = [
         },
     },
     {
+        "name": "frame_times",
+        "description": "Guest-present frame intervals over seconds (default 5, max 60): mean, "
+                       "fps, percentiles, VSync interval shares (refresh_hz defaults to 60), "
+                       "stutters and the last 120 intervals. Reports ring overflow as truncated.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 60, "default": 5},
+                "refresh_hz": {"type": "number", "exclusiveMinimum": 0, "default": 60},
+            },
+        },
+    },
+    {
         "name": "screenshot",
         "description": "PNG of the next presented frame (16:9, default 720 lines). Fails when no "
                        "frame is presented within timeout_s (paused or loading).",
@@ -192,6 +205,8 @@ class Adapter:
         params = dict(arguments)
         index = params.pop("index", False)
         timeout = max(int(params.get("timeout_s", 120 if name == "capture_frame" else 5)), 1) + 30
+        if name == "frame_times":
+            timeout = int(params.get("seconds", 5)) + 31
         result = self.emulator.call(name, params, timeout)
         if name == "screenshot":
             png = result.pop("png_base64", None)

@@ -35,6 +35,8 @@ class FakeEmulator:
         method = request["method"]
         if method == "status":
             return {"result": {"title": "Test", "presents": 3}}
+        if method == "frame_times":
+            return {"result": {"frames": 2, "intervals_ms": [16.7, 33.3], "truncated": False}}
         if method == "screenshot":
             return {"result": {"width": 1280, "height": 720, "png_base64": PNG}}
         if method == "capture_frame":
@@ -90,9 +92,17 @@ class AdapterTest(unittest.TestCase):
         self.assertIsNone(self.adapter.handle({"method": "notifications/initialized"}))
         names = [tool["name"] for tool in self.adapter.handle({"id": 2, "method": "tools/list"})
                  ["result"]["tools"]]
-        self.assertEqual(names, ["status", "screenshot", "log_tail", "log_filter", "capture_frame",
+        self.assertEqual(names, ["status", "frame_times", "screenshot", "log_tail", "log_filter", "capture_frame",
                                  "capture_image", "reject_shaders"])
         self.assertEqual(self.adapter.handle({"id": 3, "method": "bogus"})["error"]["code"], -32601)
+
+    def test_frame_times_is_forwarded(self):
+        arguments = {"seconds": 0.5, "refresh_hz": 59.94}
+        result = self.call("frame_times", arguments)
+        self.assertFalse(result["isError"])
+        self.assertEqual(json.loads(result["content"][0]["text"]),
+                         {"frames": 2, "intervals_ms": [16.7, 33.3], "truncated": False})
+        self.assertEqual(self.fake.requests[-1]["params"], arguments)
 
     def test_status_is_forwarded(self):
         result = self.call("status", {"fps_window_ms": 0})
