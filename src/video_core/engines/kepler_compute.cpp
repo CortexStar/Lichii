@@ -913,9 +913,11 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
     };
     // An upscale keeps the aspect ratio and scales by at most 4: anything else (a 4x4 lookup
     // table, a 120x67 luminance image) is another image the program happens to use.
+    // A program's own read and store may also be the same size: Ocarina of Time's gameplay network
+    // reads the 2560x1440 scene at +0xc0 and writes 2560x1440 at +0xd0.
     const auto upscale_pair = [](const std::optional<Texture::TICEntry>& from,
                                  const std::optional<Texture::TICEntry>& to,
-                                 bool same_format = true) {
+                                 bool same_format = true, bool same_size = false) {
         if (!from || !to || (same_format && from->format != to->format) || from->Address() == 0 ||
             to->Address() == 0 || from->Address() == to->Address() || !from->IsBlockLinear() ||
             !to->IsBlockLinear())
@@ -923,7 +925,9 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         const u64 from_width = from->Width(), from_height = from->Height();
         const u64 to_width = to->Width(), to_height = to->Height();
         const u64 cross_a = to_width * from_height, cross_b = to_height * from_width;
-        return from_width >= 64 && to_width > from_width && to_width <= from_width * 4 &&
+        return from_width >= 64 &&
+               (to_width > from_width || (same_size && to_width == from_width)) &&
+               to_width <= from_width * 4 &&
                (cross_a > cross_b ? cross_a - cross_b : cross_b - cross_a) * 32 <= cross_a;
     };
     const auto handles = NativeImageHandles(regs.code_loc.Address());
@@ -959,7 +963,7 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
             for (const bool same_format : {true, false}) {
                 for (const u32 read : reads) {
                     const auto from = image(read);
-                    if (upscale_pair(from, to, same_format) &&
+                    if (upscale_pair(from, to, same_format, true) &&
                         (!input || u64{from->Width()} * from->Height() >
                                        u64{input->Width()} * input->Height())) {
                         input = from;
@@ -973,7 +977,7 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
             if (input) break;
         }
     }
-    if (!upscale_pair(input, output, false)) {
+    if (!upscale_pair(input, output, false, rule == "program handles")) {
         rule = "cbuf0 scan";
         input.reset();
         output.reset();
