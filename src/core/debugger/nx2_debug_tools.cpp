@@ -436,12 +436,14 @@ Service::Service(System& system, std::string title, u64 program_id, const Endpoi
         VideoCore::Nx2Debug::EndSession();
         throw;
     }
+    g_nx2_present_time_services.fetch_add(1, std::memory_order_relaxed);
     LOG_INFO(Debug, "Debug server listening on {}:{}, dump dir {}", endpoint.host, server->Port(),
              state->dump_directory.generic_string());
 }
 
 Service::~Service() {
     state->stopping.store(true, std::memory_order_relaxed);
+    g_nx2_present_time_services.fetch_sub(1, std::memory_order_relaxed);
     VideoCore::Nx2Debug::EndSession();
     server.reset();
 }
@@ -462,10 +464,8 @@ std::unique_ptr<Service> MaybeStartService(System& system, std::string title, u6
         ? std::string{directory}
         : (Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "debug-server").generic_string();
     try {
-        auto service = std::make_unique<Service>(system, std::move(title), program_id, *endpoint,
-                                                 std::move(dump_directory));
-        g_nx2_present_times_enabled.store(true, std::memory_order_relaxed);
-        return service;
+        return std::make_unique<Service>(system, std::move(title), program_id, *endpoint,
+                                         std::move(dump_directory));
     } catch (const std::exception& failure) {
         LOG_ERROR(Debug, "Debug server cannot listen on {}:{}: {}", endpoint->host, endpoint->port,
                   failure.what());

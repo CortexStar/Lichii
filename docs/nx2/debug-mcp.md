@@ -99,7 +99,7 @@ shutdown waits at most about 50 ms for a handler.
 Cost when unused: if `EDEN_NX2_DEBUG_SERVER` is unset, `MaybeStartService` returns at its first
 `getenv`. No thread, no socket, no log ring. The per-frame check is one relaxed atomic load,
 and each guest present checks one more relaxed flag: only a running server
-(`g_nx2_present_times_enabled`) makes it store a steady-clock timestamp in the 4096-entry ring
+(`g_nx2_present_time_services`, counted by `Service`) makes it store a steady-clock timestamp in the 4096-entry ring
 `frame_times` reads. The runtime reject check in the lowering is one relaxed atomic load per lowered program. When the
 server is on but idle, its thread sleeps in `epoll`/IOCP.
 
