@@ -896,11 +896,12 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         output = image(0x348);
         fortunes_weave = upscale_pair(input, output);
     }
+    bool rgb9e5_pair = false;
     if (!upscale_pair(input, output)) {
         input.reset();
         output.reset();
-        // Ocarina of Time's gameplay network reads the frame packed as RGB9E5 and writes a
-        // B10G11R11 image at least as wide. Its constant buffer keeps stale handles (a bloom level
+        // Ocarina of Time's gameplay network reads the frame packed as RGB9E5, each channel the
+        // square root of the tonemapped value, and writes a B10G11R11 image at least as wide. Its constant buffer keeps stale handles (a bloom level
         // at +0xa0) that the scan below pairs with the output, so this pair goes first: the widest
         // B10G11R11 image when nothing in the pass is wider, from the widest RGB9E5 image of the
         // same aspect at most 4x narrower.
@@ -920,7 +921,7 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
                 input = tic;
             }
         }
-        const bool rgb9e5_pair = [&] {
+        rgb9e5_pair = [&] {
             if (!input || !output || output->Width() != widest || input->Width() > widest ||
                 4 * input->Width() < widest) {
                 return false;
@@ -1002,8 +1003,9 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
                  known->second ? "decodes sRGB like the program" : "plain copy");
     }
     const Fermi2D::Config config{
-        .operation = known->second ? Fermi2D::Operation::SrcCopySrgbToLinear
-                                   : Fermi2D::Operation::SrcCopy,
+        .operation = rgb9e5_pair      ? Fermi2D::Operation::SrcCopySquare
+                     : known->second ? Fermi2D::Operation::SrcCopySrgbToLinear
+                                     : Fermi2D::Operation::SrcCopy,
         .filter = Fermi2D::Filter::Bilinear,
         .must_accelerate = true,
         .dst_x0 = 0,
