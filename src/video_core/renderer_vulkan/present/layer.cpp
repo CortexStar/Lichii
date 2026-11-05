@@ -54,6 +54,8 @@ VkFormat GetFormat(const Tegra::FramebufferConfig& framebuffer) {
         return VK_FORMAT_B8G8R8A8_UNORM;
     case Service::android::PixelFormat::Rgba1010102:
         return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+    case Service::android::PixelFormat::RgbaFp16:
+        return VK_FORMAT_R16G16B16A16_SFLOAT;
     default:
         UNIMPLEMENTED_MSG("Unknown framebuffer pixel format: {}",
                           static_cast<u32>(framebuffer.pixel_format));
@@ -91,7 +93,7 @@ void Layer::ConfigureDraw(const Device& device, PresentPushConstants* out_push_c
                           VkDescriptorSet* out_descriptor_set, RasterizerVulkan& rasterizer,
                           VkSampler sampler, size_t image_index,
                           const Tegra::FramebufferConfig& framebuffer,
-                          const Layout::FramebufferLayout& layout) {
+                          const Layout::FramebufferLayout& layout, bool hdr_output) {
     const auto texture_info = rasterizer.AccelerateDisplay(
         framebuffer, framebuffer.address + framebuffer.offset, framebuffer.stride);
     const u32 texture_width = texture_info ? texture_info->width : framebuffer.width;
@@ -104,9 +106,11 @@ void Layer::ConfigureDraw(const Device& device, PresentPushConstants* out_push_c
                                             Service::Nvnflinger::LayerStackId::Recording)) == 0;
 
     RefreshResources(device, framebuffer);
-    SetAntiAliasPass(device);
+    if (!hdr_output) {
+        SetAntiAliasPass(device);
+    }
 #ifdef HAS_RESHADE
-    SetPostProcessPass(device, is_applet);
+    SetPostProcessPass(device, is_applet || hdr_output);
 #endif
 
     // Finish any pending renderpass
@@ -127,7 +131,7 @@ void Layer::ConfigureDraw(const Device& device, PresentPushConstants* out_push_c
     const bool already_upscaled = texture_info && texture_info->already_upscaled;
     // FXAA or SMAA on top of NVIDIA DLSS's image only blurs it.
     const bool anti_aliased = already_upscaled || (texture_info && texture_info->anti_aliased);
-    if (!anti_aliased) {
+    if (!anti_aliased && !hdr_output) {
         if (auto* fxaa = std::get_if<FXAA>(&anti_alias)) {
             fxaa->Draw(device, scheduler, image_index, &source_image, &source_image_view);
         } else if (auto* smaa = std::get_if<SMAA>(&anti_alias)) {
@@ -147,7 +151,7 @@ void Layer::ConfigureDraw(const Device& device, PresentPushConstants* out_push_c
         .height = scaled_height,
     };
 
-    if (!already_upscaled) {
+    if (!already_upscaled && !hdr_output) {
         if (auto* fsr = std::get_if<FSR>(&sr_filter)) {
             source_image_view = fsr->Draw(device, scheduler, image_index, source_image, source_image_view, render_extent, crop_rect);
             crop_rect = {0, 0, 1, 1};
