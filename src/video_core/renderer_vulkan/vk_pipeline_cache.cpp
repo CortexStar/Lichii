@@ -383,6 +383,10 @@ struct DeferredStages {
 };
 
 size_t GetTotalPipelineWorkers() {
+    if (const char* const text = std::getenv("EDEN_NX2_TRANSLATION_WORKERS")) {
+        const auto val = std::strtoul(text, nullptr, 10);
+        if (val > 0) return val;
+    }
     const size_t max_core_threads =
         std::max<size_t>(static_cast<size_t>(std::thread::hardware_concurrency()), 2ULL) - 1ULL;
 #ifdef __ANDROID__
@@ -862,6 +866,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     size_t skipped_pipelines = 0;
     size_t deferred_pipelines = 0;
     size_t queued_graphics = 0;
+    std::unordered_set<u64> covered_shader_units;
 
     if (use_vulkan_pipeline_cache) {
         vulkan_pipeline_cache_filename =
@@ -946,7 +951,13 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         if (!disk_pipelines.insert(hash).second) {
             return;
         }
-        if (!PreloadAllPipelines() &&
+        bool unit_cover_needed = false;
+        for (const u64 stage_hash : key.unique_hashes) {
+            if (stage_hash != 0 && covered_shader_units.insert(stage_hash).second) {
+                unit_cover_needed = true;
+            }
+        }
+        if (!PreloadAllPipelines() && !unit_cover_needed &&
             (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
                                     : !used_pipelines.contains(hash))) {
             ++skipped_pipelines;
