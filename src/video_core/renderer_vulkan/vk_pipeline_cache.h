@@ -137,6 +137,35 @@ public:
 private:
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipelineSlowPath();
 
+    /// EDEN_NX2_PIPELINE_CLEAN: CurrentGraphicsPipeline without FixedPipelineState::Refresh nor
+    /// the key comparison while nothing Refresh reads changed since the last lookup.
+    [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipelineClean();
+    /// The registers Refresh reads with these features, as (first word, words) ranges.
+    void BuildCleanWatch();
+    [[nodiscard]] bool CleanInputsUnchanged() const;
+    void TakeCleanSnapshot();
+
+    struct CleanLookup {
+        struct Range {
+            u32 first;
+            u32 count;
+        };
+        bool built{};
+        std::vector<Range> ranges;     ///< Read by every Refresh
+        std::vector<Range> xfb_ranges; ///< Read while transform feedback is enabled
+        std::vector<u32> snapshot;     ///< ranges' words at the last Refresh
+        std::vector<u32> xfb_snapshot;
+        std::array<u64, 6> hashes{};   ///< graphics_key.unique_hashes at the last Refresh
+        const Tegra::Engines::Maxwell3D* maxwell3d{};
+        Maxwell::PrimitiveTopology topology{};
+        Tegra::Engines::Maxwell3D::EngineHint engine_state{};
+        /// current_pipeline when its key was graphics_key after the last Refresh, else null.
+        GraphicsPipeline* pipeline{};
+        u64 hits{};
+        u64 misses{};
+        std::chrono::steady_clock::time_point last_log{};
+    } clean;
+
     [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) const noexcept;
 
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline();
