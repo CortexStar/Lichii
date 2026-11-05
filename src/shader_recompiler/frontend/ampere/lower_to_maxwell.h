@@ -3402,8 +3402,12 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 // bit 73 sign-extends Ra (Rc is RZ) and .X (bit 74) adds the carry predicate in bits 87-90.
                 const bool extended = insn.Bits(74, 1) != 0;
                 const u32 high = insn.Bits(64, 8);
+                // Bit 63 negates register Rb ("LEA.HI R1, R1, -R0, RZ, 0x1e"); only without .X,
+                // where a negated operand would be the bitwise complement instead.
+                const bool negate_b = opcode == 0x211 && insn.Bits(62, 2) == 2 && !extended;
                 if (insn.Bits(72, 1) || insn.Bits(81, 3) != 7 ||
-                    (high != 255 && insn.Bits(73, 1)) || ((opcode == 0x211 || opcode == 0xa11) && insn.Bits(62, 2)) ||
+                    (high != 255 && insn.Bits(73, 1)) ||
+                    ((opcode == 0x211 || opcode == 0xa11) && insn.Bits(62, 2) && !negate_b) ||
                     (opcode == 0xc11 && (insn.words[1] & ~0x3fU)))
                     return fail(index, "native high effective address mode");
                 u32 b = opcode == 0xc11 ? uniform_register(insn.Bits(32, 8)) : insn.Bits(32, 8);
@@ -3430,7 +3434,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                              (u64{insn.Bits(87, 3)} << 39) | (u64{insn.Bits(90, 1)} << 42));
                         emit(0x5c10000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{252} << 20));
                     }
-                    emit(base(0x5c10000000000000ULL) | (u64{250} << 8) | (u64{b} << 20));
+                    emit(base(0x5c10000000000000ULL) | (u64{250} << 8) | (u64{b} << 20) | (u64{negate_b} << 48));
                 }
                 break;
             }
