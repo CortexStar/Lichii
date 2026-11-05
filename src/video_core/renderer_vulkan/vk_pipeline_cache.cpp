@@ -1281,6 +1281,21 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 }
 
 namespace {
+// Whether compute programs with software HMMA (emulated tensor-core matrix multiplies) are built.
+// Ocarina of Time's upscaling network has hundreds per program: host drivers take minutes on each
+// (AMD's then fail with VK_ERROR_OUT_OF_HOST_MEMORY), so it is rejected and
+// KeplerCompute::UpscaleInsteadOfNativeProgram draws in its place, as Eglantine does. Checked after
+// translation so programs from the disk cache are rejected too. EDEN_NX2_TENSOR=1 emulates it
+// anyway, EDEN_NX2_TENSOR=0 rejects it for every title.
+bool EmulatesSoftwareMatrix() {
+    static const char* const forced = std::getenv("EDEN_NX2_TENSOR");
+    if (forced != nullptr && *forced != '\0') {
+        return *forced != '0';
+    }
+    constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
+    return Settings::GetCurrentProgramID() != OcarinaOfTimeProgramId;
+}
+
 // Pipelines built on the GPU thread at run time (shader translation; the driver compile is on
 // workers): the first 400 over 2 ms and every one over 100 ms are logged, and the total every
 // 10 s, to tell how much of the stutter on new content is translation.
@@ -1417,6 +1432,10 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     }
 
     auto program{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
+    if (program.info.uses_software_matrix && !EmulatesSoftwareMatrix()) {
+        return {.failure = "native matrix multiply is not emulated for this title (set "
+                           "EDEN_NX2_TENSOR=1 to emulate)"};
+    }
     const VkDriverIdKHR driver_id = device.GetDriverID();
     const bool needs_shared_mem_clamp =
         driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||

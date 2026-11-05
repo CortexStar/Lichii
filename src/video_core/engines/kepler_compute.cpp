@@ -35,6 +35,7 @@
 #include "video_core/macro_turing_jit.h"
 #endif
 #include "video_core/rasterizer_interface.h"
+#include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/textures/decoders.h"
 
 namespace Tegra::Engines {
@@ -593,7 +594,8 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
         } else if (std::string_view{error.what()}.find("matrix multiply") !=
                    std::string_view::npos) {
             DescribeNativeResources(qmd);
-            LOG_ERROR(HW_GPU, "Native tensor dispatch is unsupported; no validated replacement was available");
+            // The console runs this on tensor cores; stand in with a plain upscale of its input.
+            dispatched = UpscaleInsteadOfNativeProgram();
         }
     }
     if (dlss_chain.output_pass) {
@@ -856,6 +858,205 @@ bool KeplerCompute::FinishDlssEvaluation() {
         return false;
     }
     return TryFireEmblemUpscale();
+}
+
+// The cbuf0 byte offsets of the texture handles a native program reads (TEX, TLD, TLD4, TXD) and
+// the surface handles it stores to (SUST.P), from its code up to the first unconditional EXIT.
+std::pair<std::vector<u32>, std::vector<u32>> KeplerCompute::NativeImageHandles(GPUVAddr program) {
+    static std::unordered_map<GPUVAddr, std::pair<std::vector<u32>, std::vector<u32>>> cache;
+    if (const auto it = cache.find(program); it != cache.end()) {
+        return it->second;
+    }
+    std::pair<std::vector<u32>, std::vector<u32>> handles;
+    const auto add = [](std::vector<u32>& list, u32 offset) {
+        if (std::find(list.begin(), list.end(), offset) == list.end()) list.push_back(offset);
+    };
+    std::array<u32, 0x400> block{};
+    bool exited = false;
+    for (u64 offset = 0; offset < 0x40000 && !exited; offset += sizeof(block)) {
+        if (!memory_manager.IsFullyMappedRange(program + offset, sizeof(block))) break;
+        memory_manager.ReadBlock(program + offset, block.data(), sizeof(block));
+        for (size_t word = 0; word < block.size() && !exited; word += 4) {
+            const u32 opcode = block[word] & 0xfff;
+            const u32 binding = (block[word + 1] >> 22) & 0x1f;
+            const u32 handle = ((block[word + 1] >> 8) & 0x3fff) * 4;
+            switch (opcode) {
+            case 0xb60: case 0xb63: case 0xb66: case 0xb6d:
+                if (binding == 0) add(handles.first, handle);
+                break;
+            case 0xb9b:
+                if (binding == 0) add(handles.second, handle);
+                break;
+            case 0x94d: // EXIT, unconditional when guarded by PT
+                exited = ((block[word] >> 12) & 0xf) == 7;
+                break;
+            default:
+                break;
+            }
+        }
+    }
+    return cache.emplace(program, std::move(handles)).first->second;
+}
+
+// Stands in for an upscaling network whose matrix multiplies (tensor-core instructions) are not
+// emulated: blits its input to its output with bilinear filtering. Ported from Eglantine
+// (scratch/oot-shader-lab, including dbf3417099). The pair is title 4's slots (cbuf0+0x90 ->
+// +0xa0), else the images the program itself reads and stores to through cbuf0 (Ocarina of Time's
+// gameplay network reads +0xc0, writes +0xd0), else the first two handles in cbuf0+0x80..0x11c
+// that form an upscale.
+bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
+    const auto& cbuf = launch_description.const_buffer_config[0];
+    const GPUVAddr cbuf_address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
+    const auto image = [&](u32 offset) -> std::optional<Texture::TICEntry> {
+        const u32 tic_index = memory_manager.Read<u32>(cbuf_address + offset) & 0xfffff;
+        if (tic_index > regs.tic.limit) return std::nullopt;
+        return GetTICEntry(tic_index);
+    };
+    // An upscale keeps the aspect ratio and scales by at most 4: anything else (a 4x4 lookup
+    // table, a 120x67 luminance image) is another image the program happens to use.
+    const auto upscale_pair = [](const std::optional<Texture::TICEntry>& from,
+                                 const std::optional<Texture::TICEntry>& to,
+                                 bool same_format = true) {
+        if (!from || !to || (same_format && from->format != to->format) || from->Address() == 0 ||
+            to->Address() == 0 || from->Address() == to->Address() || !from->IsBlockLinear() ||
+            !to->IsBlockLinear())
+            return false;
+        const u64 from_width = from->Width(), from_height = from->Height();
+        const u64 to_width = to->Width(), to_height = to->Height();
+        const u64 cross_a = to_width * from_height, cross_b = to_height * from_width;
+        return from_width >= 64 && to_width > from_width && to_width <= from_width * 4 &&
+               (cross_a > cross_b ? cross_a - cross_b : cross_b - cross_a) * 32 <= cross_a;
+    };
+    std::optional<Texture::TICEntry> input = image(0x90), output = image(0xa0);
+    if (!upscale_pair(input, output)) {
+        // The input is the largest read image that the output upscales, the output's format first.
+        const auto [reads, stores] = NativeImageHandles(regs.code_loc.Address());
+        input.reset();
+        output.reset();
+        for (const u32 store : stores) {
+            const auto to = image(store);
+            for (const bool same_format : {true, false}) {
+                for (const u32 read : reads) {
+                    const auto from = image(read);
+                    if (upscale_pair(from, to, same_format) &&
+                        (!input || u64{from->Width()} * from->Height() >
+                                       u64{input->Width()} * input->Height())) {
+                        input = from;
+                        output = to;
+                    }
+                }
+                if (input) break;
+            }
+            if (input) break;
+        }
+    }
+    if (!upscale_pair(input, output, false)) {
+        input.reset();
+        output.reset();
+        for (u32 first = 0x80; first < 0x120 && !input; first += 4) {
+            const auto from = memory_manager.Read<u32>(cbuf_address + first) != 0 ? image(first)
+                                                                                    : std::nullopt;
+            for (u32 second = first + 4; from && second < 0x120; second += 4) {
+                if (memory_manager.Read<u32>(cbuf_address + second) == 0) continue;
+                const auto to = image(second);
+                if (upscale_pair(from, to)) {
+                    input = from;
+                    output = to;
+                    break;
+                }
+            }
+        }
+    }
+    const GPUVAddr program = regs.code_loc.Address();
+    const auto skip = [&](std::string_view reason) {
+        static std::unordered_set<GPUVAddr> reported;
+        if (reported.insert(program).second && reported.size() <= 64) {
+            LOG_INFO(HW_GPU, "Upscale fallback for program {:#x} skipped: {}", program, reason);
+        }
+        return false;
+    };
+    if (!input || !output) {
+        return skip("no input/output image pair in the program's handles or cbuf0+0x80..0x11c");
+    }
+    using RTFormat = Tegra::RenderTargetFormat;
+    const auto blit_format = [](const Texture::TICEntry& tic) -> std::optional<RTFormat> {
+        switch (tic.format) {
+        case Texture::TextureFormat::A2B10G10R10: return RTFormat::A2B10G10R10_UNORM;
+        case Texture::TextureFormat::A8B8G8R8:
+            return tic.r_type == Texture::ComponentType::UNORM && tic.srgb_conversion
+                       ? RTFormat::A8B8G8R8_SRGB
+                       : RTFormat::A8B8G8R8_UNORM;
+        case Texture::TextureFormat::B10G11R11: return RTFormat::B10G11R11_FLOAT;
+        case Texture::TextureFormat::R16G16B16A16: return RTFormat::R16G16B16A16_FLOAT;
+        default: return std::nullopt;
+        }
+    };
+    // E5B9G9R9 (Ocarina of Time's gameplay frame) has no 2D surface format: the blit reads it as a
+    // 32-bit placeholder surface and the texture cache samples it as E5B9G9R9.
+    const bool shared_exponent_input = input->format == Texture::TextureFormat::E5B9G9R9;
+    if ((!blit_format(*input) && !shared_exponent_input) || !blit_format(*output)) {
+        return skip(fmt::format("formats {} -> {}", static_cast<u32>(input->format.Value()),
+                                static_cast<u32>(output->format.Value())));
+    }
+    const auto surface = [&](const Texture::TICEntry& tic) {
+        Fermi2D::Surface result{};
+        result.format = blit_format(tic).value_or(RTFormat::B10G11R11_FLOAT);
+        result.linear = Fermi2D::MemoryLayout::BlockLinear;
+        result.block_width.Assign(tic.block_width);
+        result.block_height.Assign(tic.block_height);
+        result.block_depth.Assign(tic.block_depth);
+        result.depth = 1;
+        result.width = tic.Width();
+        result.height = tic.Height();
+        result.addr_upper = static_cast<u32>(tic.Address() >> 32);
+        result.addr_lower = static_cast<u32>(tic.Address());
+        return result;
+    };
+    // Title 4's program ends by decoding its result from sRGB to linear (the 0.04045 threshold
+    // and the 2.4 exponent as half-precision immediates of HSETP2 and HMUL2). A copy of its sRGB
+    // input would leave the frame gamma-encoded twice: decode in the copy when the program does.
+    static std::unordered_map<GPUVAddr, bool> decodes_srgb;
+    const auto [known, inserted] = decodes_srgb.try_emplace(program, false);
+    if (inserted) {
+        bool threshold = false, exponent = false;
+        std::array<u32, 0x400> block{};
+        for (u64 offset = 0; offset < 0x20000 && !(threshold && exponent);
+             offset += sizeof(block)) {
+            if (!memory_manager.IsFullyMappedRange(program + offset, sizeof(block))) break;
+            memory_manager.ReadBlock(program + offset, block.data(), sizeof(block));
+            for (size_t word = 0; word < block.size(); word += 4) {
+                const u32 opcode = block[word] & 0xfff;
+                threshold |= opcode == 0x434 && block[word + 1] == 0x292d292d;
+                exponent |= opcode == 0x832 && block[word + 1] == 0x40cc40cc;
+            }
+        }
+        known->second = threshold && exponent;
+        LOG_INFO(HW_GPU, "Upscale fallback for program {:#x}: {}x{} -> {}x{}, {}", program,
+                 input->Width(), input->Height(), output->Width(), output->Height(),
+                 known->second ? "decodes sRGB like the program" : "plain copy");
+    }
+    const Fermi2D::Config config{
+        .operation = known->second ? Fermi2D::Operation::SrcCopySrgbToLinear
+                                   : Fermi2D::Operation::SrcCopy,
+        .filter = Fermi2D::Filter::Bilinear,
+        .must_accelerate = true,
+        .dst_x0 = 0,
+        .dst_y0 = 0,
+        .dst_x1 = static_cast<s32>(output->Width()),
+        .dst_y1 = static_cast<s32>(output->Height()),
+        .src_x0 = 0,
+        .src_y0 = 0,
+        .src_x1 = static_cast<s32>(input->Width()),
+        .src_y1 = static_cast<s32>(input->Height()),
+    };
+    auto source = surface(*input);
+    if (shared_exponent_input) {
+        source.format = RTFormat::B10G11R11_FLOAT; // same size per texel, replaced below
+        VideoCommon::g_blit_source_format = VideoCore::Surface::PixelFormat::E5B9G9R9_FLOAT;
+    }
+    const bool done = rasterizer->AccelerateSurfaceCopy(source, surface(*output), config);
+    VideoCommon::g_blit_source_format.reset();
+    return done;
 }
 
 // Logs the images a rejected program's handles (constant bank 0, bytes 0x80-0x11c) point to, so a
