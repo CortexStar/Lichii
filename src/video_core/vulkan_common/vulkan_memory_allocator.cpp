@@ -280,6 +280,11 @@ vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicat
                         "unbacked sparse image",
                         ci.extent.width, ci.extent.height, ci.extent.depth, ci.mipLevels,
                         ci.arrayLayers, static_cast<u32>(ci.format));
+            // What filled memory (once a session, a few times): heap usage against budget.
+            static std::atomic<u32> reported{};
+            if (reported.fetch_add(1, std::memory_order_relaxed) < 2) {
+                LogMemoryStatistics(device);
+            }
             return sparse;
         }
     }
@@ -424,7 +429,47 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
     VkMemoryPropertyFlags property_flags{};
 
     if (!CreateBufferInSeparatePool(ci, usage, alloc_ci, handle, allocation, alloc_info)) {
-        vk::Check(vmaCreateBuffer(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info));
+        VkResult result =
+            vmaCreateBuffer(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
+        if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+            // Over the device memory budget. As for images (CreateImage) and commits: go past
+            // it, then to host memory, instead of aborting the GPU thread. An RX 5500M (3 GB) in
+            // Ocarina of Time crashed here on a buffer cache buffer and on a texture download's
+            // staging buffer once gameplay filled the card.
+            pressure_events.fetch_add(1, std::memory_order_relaxed);
+            static std::atomic<u32> logged{};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 4) {
+                LOG_WARNING(Render_Vulkan,
+                            "Buffer of {} KiB (usage {}) is over the memory budget; allocating it "
+                            "anyway",
+                            ci.size >> 10, static_cast<u32>(usage));
+                LogMemoryStatistics(device);
+            }
+            VmaAllocationCreateInfo relaxed = alloc_ci;
+            relaxed.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+            result = vmaCreateBuffer(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
+            if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+                relaxed.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+                relaxed.preferredFlags &= ~VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+                result =
+                    vmaCreateBuffer(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
+                if (result == VK_SUCCESS) {
+                    static std::atomic<u32> host_logged{};
+                    if (host_logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+                        LOG_WARNING(Render_Vulkan,
+                                    "Buffer of {} KiB is out of device memory; placed in host "
+                                    "memory",
+                                    ci.size >> 10);
+                    }
+                }
+            }
+        }
+        if (result != VK_SUCCESS) {
+            LOG_CRITICAL(Render_Vulkan, "Buffer of {} KiB (usage {}) failed: {}", ci.size >> 10,
+                         static_cast<u32>(usage), static_cast<int>(result));
+            LogMemoryStatistics(device);
+        }
+        vk::Check(result);
     }
     vmaGetAllocationMemoryProperties(allocator, allocation, &property_flags);
 
