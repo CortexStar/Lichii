@@ -210,7 +210,7 @@ void GpuSplit::Publish() {
         wake.fetch_add(1, std::memory_order_seq_cst);
         wake.notify_one();
     }
-    if ((macro_sink || ring_pairs) && (++publishes & 1023) == 0) [[unlikely]] {
+    if ((macro_sink || compute_sink || ring_pairs) && (++publishes & 1023) == 0) [[unlikely]] {
         ReportBatched();
     }
 }

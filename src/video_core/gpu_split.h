@@ -167,18 +167,24 @@ public:
         return front_macros;
     }
 
-    /// EDEN_NX2_MACRO_SINK=1 (default off): the state writes the front's macros make (3D
-    /// registers outside execution_mask; native compute registers that only store their value)
-    /// go to the back's method sink like the command list's own state writes, instead of one
-    /// CallMethod each; the back applies its sink, in order, before the engine's next executable
-    /// method. Compute also drops writes that keep a register's value.
+    /// EDEN_NX2_MACRO_SINK=1 (default off): the state writes the front's 3D macros make
+    /// (registers outside execution_mask) go to the back's method sink like the command list's
+    /// own state writes, instead of one CallMethod each; the back applies its sink, in order,
+    /// before the engine's next executable method.
     [[nodiscard]] static bool MacroSink() {
         return macro_sink;
     }
+    /// EDEN_NX2_COMPUTE_SINK=1 (default off): native compute writes that only store their value
+    /// (native_plain_methods), from macros or the command list, are dropped when the front's
+    /// register copy shows the back holds the value already, else sent batched (SinkMethod).
+    [[nodiscard]] static bool ComputeSink() {
+        return compute_sink;
+    }
     /// EDEN_NX2_RING_PAIRS=1 (default off): the state writes that would go to the back's method
-    /// sink (the command list's 3D state writes; with EDEN_NX2_MACRO_SINK the macros' 3D and
-    /// compute ones too) go as (method, value) pairs in Pairs blocks (PairWrite), which the back
-    /// applies in one loop per block (EngineInterface::ApplyPairs), after its method sink.
+    /// sink (the command list's 3D state writes; the 3D macros' with EDEN_NX2_MACRO_SINK, the
+    /// compute ones with EDEN_NX2_COMPUTE_SINK) go as (method, value) pairs in Pairs blocks
+    /// (PairWrite), which the back applies in one loop per block (EngineInterface::ApplyPairs),
+    /// after its method sink.
     [[nodiscard]] static bool RingPairs() {
         return ring_pairs;
     }
@@ -371,6 +377,10 @@ private:
 
     static inline const bool macro_sink = [] {
         const char* value = std::getenv("EDEN_NX2_MACRO_SINK");
+        return value != nullptr && value[0] != '0';
+    }();
+    static inline const bool compute_sink = [] {
+        const char* value = std::getenv("EDEN_NX2_COMPUTE_SINK");
         return value != nullptr && value[0] != '0';
     }();
     static inline const bool ring_pairs = [] {
