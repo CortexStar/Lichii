@@ -1,6 +1,7 @@
 name: Ocarina Windows test build
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - oot-windows-build
