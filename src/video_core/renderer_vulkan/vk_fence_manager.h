@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <memory>
+#include <utility>
 
 #include "video_core/fence_manager.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
@@ -29,6 +32,8 @@ public:
     ~InnerFence();
 
     void Queue();
+    /// Queue with the caller's clock reading (EDEN_NX2_FENCE_LIGHT).
+    void Queue(std::chrono::steady_clock::time_point now);
 
     bool IsSignaled() const;
 
@@ -63,9 +68,15 @@ protected:
     bool IsFenceSignaled(Fence& fence) const override;
     void WaitFence(Fence& fence) override;
     bool InFlushWindow() const override;
+    bool InFlushWindowAt(std::chrono::steady_clock::time_point now) const override;
+    void QueueFenceAt(Fence& fence, std::chrono::steady_clock::time_point now) override;
+    std::pair<u64, u64> TakeLightFenceObjects() override;
 
 private:
     Scheduler& scheduler;
+    Fence light_stub; ///< EDEN_NX2_FENCE_LIGHT: the stubbed fence every stubbed fence shares
+    std::atomic<u64> light_stubs_shared{};
+    std::atomic<u64> light_fences_pooled{};
 };
 
 } // namespace Vulkan

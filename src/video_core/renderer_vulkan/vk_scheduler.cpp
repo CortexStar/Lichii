@@ -211,6 +211,20 @@ bool Scheduler::DeferFlush() {
     return true;
 }
 
+bool Scheduler::InFlushWindow(std::chrono::steady_clock::time_point now) const {
+    const s64 interval_us = FenceFlushIntervalUs();
+    return interval_us > 0 && VideoCommon::GpuSplit::OnBackThread() &&
+           now - last_flush < std::chrono::microseconds{interval_us};
+}
+
+bool Scheduler::DeferFlush(std::chrono::steady_clock::time_point now) {
+    if (!InFlushWindow(now)) {
+        return false;
+    }
+    flush_pending = true;
+    return true;
+}
+
 void Scheduler::FlushDeferred() {
     if (flush_pending) {
         Flush();
