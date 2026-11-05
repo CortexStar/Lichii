@@ -120,6 +120,13 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     active = true;
     const char* jit = std::getenv("EDEN_NX2_MME_JIT");
     front_macros = mode == '2' && (jit == nullptr || jit[0] != '0');
+    // EDEN_NX2_DMA_READ_FAST=1: a macro's DMA read waits only for the queued work that may write
+    // what it reads (QueuedMemoryWrites) and drains only for pages GPU work ever wrote.
+    static const bool dma_read_fast = [] {
+        const char* value = std::getenv("EDEN_NX2_DMA_READ_FAST");
+        return value != nullptr && value[0] != '0';
+    }();
+    track_memory_writes = front_macros && dma_read_fast;
     LOG_INFO(HW_GPU, "GPU thread split: engine methods run on a second thread{}",
              front_macros ? ", macros on the first" : "");
 }
@@ -141,6 +148,8 @@ void GpuSplit::Stop() {
     write_position = 0;
     last_writer_position = 0;
     last_sync_position = 0;
+    track_memory_writes = false;
+    queued_memory_writes.Reset();
     published_local = 0;
     consumed_cache = 0;
     publish_every = PublishEvery;
@@ -224,6 +233,11 @@ bool GpuSplit::WaitForWriters() {
 
 bool GpuSplit::WaitForSync() {
     return WaitFor(std::min(last_sync_position, write_position), DrainSite::ListSync);
+}
+
+bool GpuSplit::WaitForMemoryWrites(const void* space, GPUVAddr address, u64 size) {
+    return WaitFor(std::min(queued_memory_writes.Target(space, address, size), write_position),
+                   DrainSite::MacroDmaWriters);
 }
 
 bool GpuSplit::WaitFor(u64 target, DrainSite site) {

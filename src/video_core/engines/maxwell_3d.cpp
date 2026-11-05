@@ -1080,6 +1080,38 @@ bool FrontHandledOutsideDrawManager(u32 method) {
     }
 }
 
+// EDEN_NX2_DMA_READ_FAST (GpuSplit::TracksMemoryWrites): what a 3D method just sent to the back
+// writes in guest memory. Constant buffer updates write the bound buffer, reports their 16 bytes;
+// inline uploads and waits for idle (they write query results) are not bounded.
+void FrontNoteMemoryWrite(VideoCommon::GpuSplit& split, const void* space, const u32* regs,
+                          u32 method) {
+    constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
+    if (method >= cb_data && method < cb_data + 16) {
+        const GPUVAddr address =
+            (GPUVAddr{regs[MAXWELL3D_REG_INDEX(const_buffer.address_high)]} << 32) |
+            regs[MAXWELL3D_REG_INDEX(const_buffer.address_low)];
+        split.NoteMemoryWrite(space, address, regs[MAXWELL3D_REG_INDEX(const_buffer.size)]);
+        return;
+    }
+    switch (method) {
+    case MAXWELL3D_REG_INDEX(report_semaphore.query): {
+        const GPUVAddr address =
+            (GPUVAddr{regs[MAXWELL3D_REG_INDEX(report_semaphore.address_high)]} << 32) |
+            regs[MAXWELL3D_REG_INDEX(report_semaphore.address_low)];
+        split.NoteMemoryWrite(space, address, 16);
+        return;
+    }
+    case MAXWELL3D_REG_INDEX(launch_dma):
+    case MAXWELL3D_REG_INDEX(inline_data):
+    case MAXWELL3D_REG_INDEX(wait_for_idle):
+    case MAXWELL3D_REG_INDEX(invalidate_texture_data_cache):
+        split.NoteMemoryWriter();
+        return;
+    default:
+        return;
+    }
+}
+
 // EDEN_NX2_SPLIT_SKIP=0: send state writes that keep the register's value too.
 bool FrontSkipSame() {
     static const bool skip = [] {
@@ -1182,6 +1214,9 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
         split.MacroWrite(this, method, argument);
     } else {
         split.Method(this, method, argument, is_last_call, nullptr);
+    }
+    if (split.TracksMemoryWrites() && execution_mask[method]) {
+        FrontNoteMemoryWrite(split, &memory_manager, fs.regs.data(), method);
     }
 }
 
@@ -1288,6 +1323,9 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
         }
     }
     split.MultiMethod(this, method, base_start, amount, methods_pending, nullptr);
+    if (split.TracksMemoryWrites() && execution_mask[method]) {
+        FrontNoteMemoryWrite(split, &memory_manager, fs.regs.data(), method);
+    }
 }
 
 void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split,
@@ -1357,8 +1395,25 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
         memory_manager.ReadBlockUnsafe(source, diag_before.data(), read_bytes);
     }
     VideoCommon::Nx2Profile::CountDmaRead(macro);
-    split.Drain(VideoCommon::DrainSite::MacroDmaRead);
+    bool drain = true;
+    if (split.TracksMemoryWrites()) {
+        // EDEN_NX2_DMA_READ_FAST: wait only for the queued work that may write these words, then
+        // read guest memory unless GPU work ever wrote one of their pages (the buffer cache may
+        // hold newer words: drain and flush as below) or they are syncpoint values.
+        split.WaitForMemoryWrites(&memory_manager, source, read_bytes);
+        drain = memory_manager.OverlapsNativeSyncpointShim(source, read_bytes);
+        for (GPUVAddr page = source & ~GPUVAddr{0xfff}; !drain && page < source + read_bytes;
+             page += 0x1000) {
+            const auto device = memory_manager.GpuToCpuAddress(page);
+            drain = !device || Tegra::Nx2IsGpuWritten(*device);
+        }
+    }
+    if (drain) {
+        split.Drain(VideoCommon::DrainSite::MacroDmaRead);
+    }
     if (VideoCommon::QueryDma::TraceEnabled()) {
+        // EDEN_NX2_QUERY_DMA_TRACE (diagnostic): Run drains the back, so with tracing on a fast
+        // read still waits for all queued work and every pending report read is seen.
         split.Run(
             [this, macro, method, source, read_bytes] {
                 if (VideoCommon::QueryDma::HasPendingQueries(memory_manager, *rasterizer, source,
@@ -1370,9 +1425,20 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
             VideoCommon::DrainSite::MacroDmaFlush);
     }
     if (VideoCommon::Nx2Profile::Enabled()) {
-        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DmaReadBytes, read_bytes);
+        namespace Profile = VideoCommon::Nx2Profile;
+        Profile::Add(Profile::Counter::DmaReadBytes, read_bytes);
+        if (!drain) {
+            Profile::Add(Profile::Counter::DmaReadsFast, 1);
+        }
+        // The back's buffer downloads count the bytes on these pages (BufferCache).
+        for (GPUVAddr page = source & ~GPUVAddr{0xfff}; page < source + read_bytes; page += 0x1000) {
+            if (const auto device = memory_manager.GpuToCpuAddress(page)) {
+                Profile::AddDmaReadPage(*device >> 12);
+            }
+        }
     }
-    if (memory_manager.IsMemoryDirty(source, read_bytes, VideoCommon::CacheType::BufferCache)) {
+    if (drain &&
+        memory_manager.IsMemoryDirty(source, read_bytes, VideoCommon::CacheType::BufferCache)) {
         split.Run(
             [memory = &memory_manager, source, read_bytes] {
                 memory->FlushRegion(source, read_bytes, VideoCommon::CacheType::BufferCache);

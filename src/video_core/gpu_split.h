@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstring>
@@ -39,13 +40,105 @@ enum class DrainSite : u32 {
     Map,            ///< GPU memory maps before later command reads
     FrontStart,     ///< The front takes an engine's macros over
     FrontVerify,    ///< EDEN_NX2_FRONT_VERIFY
+    MacroDmaWriters, ///< EDEN_NX2_DMA_READ_FAST: queued work that may write what a macro reads
     Count,
 };
 
 inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> drain_site_names{
     "other",       "fetch drain",     "acquire",    "semaphore flush", "fence release",
     "list writers", "list sync",      "list flush", "macro dma read",  "macro dma flush",
-    "gp sync fence", "map",           "front start", "front verify",
+    "gp sync fence", "map",           "front start", "front verify",   "macro dma writers",
+};
+
+/// Guest memory that work still queued for the split's back may write (EDEN_NX2_DMA_READ_FAST),
+/// by ring position: the ranges the front knows (constant buffer updates, semaphore and query
+/// releases), merged when close, and the position of the last work whose writes it cannot bound
+/// (compute, copies, inline uploads, waits for idle, host requests). Front thread only.
+class QueuedMemoryWrites {
+public:
+    static constexpr size_t MaxRanges = 8;
+    /// Ranges closer than this merge (consecutive pieces of a constant buffer ring).
+    static constexpr u64 MergeGap = 0x1000;
+
+    void NoteUnbounded(u64 position) {
+        unbounded = (std::max)(unbounded, position);
+    }
+
+    /// Work up to `position` writes [begin, begin + size) of address space `space`; the back has
+    /// executed everything up to `consumed`.
+    void Note(const void* space, u64 begin, u64 size, u64 position, u64 consumed) {
+        const u64 end = begin + size;
+        if (count != 0) {
+            Range& last = ranges[last_index];
+            if (last.space == space && begin >= last.begin && end <= last.end) {
+                last.position = position;
+                return;
+            }
+        }
+        // Ranges the back is past are done.
+        size_t kept = 0;
+        for (size_t i = 0; i < count; ++i) {
+            if (ranges[i].position > consumed) {
+                ranges[kept++] = ranges[i];
+            }
+        }
+        count = kept;
+        for (size_t i = 0; i < count; ++i) {
+            Range& range = ranges[i];
+            if (range.space == space && begin <= range.end + MergeGap &&
+                range.begin <= end + MergeGap) {
+                range.begin = (std::min)(range.begin, begin);
+                range.end = (std::max)(range.end, end);
+                range.position = position;
+                last_index = i;
+                return;
+            }
+        }
+        if (count == MaxRanges) {
+            // Full: the oldest range's work counts as unbounded from now on.
+            size_t oldest = 0;
+            for (size_t i = 1; i < count; ++i) {
+                if (ranges[i].position < ranges[oldest].position) {
+                    oldest = i;
+                }
+            }
+            NoteUnbounded(ranges[oldest].position);
+            ranges[oldest] = ranges[--count];
+        }
+        ranges[count] = Range{space, begin, end, position};
+        last_index = count++;
+    }
+
+    /// The position the back must pass before [begin, begin + size) of `space` holds what the
+    /// work sent so far writes there (0: nothing queued writes it).
+    [[nodiscard]] u64 Target(const void* space, u64 begin, u64 size) const {
+        const u64 end = begin + size;
+        u64 target = unbounded;
+        for (size_t i = 0; i < count; ++i) {
+            const Range& range = ranges[i];
+            if (range.position > target &&
+                (range.space != space || (begin < range.end && range.begin < end))) {
+                target = range.position;
+            }
+        }
+        return target;
+    }
+
+    void Reset() {
+        *this = QueuedMemoryWrites{};
+    }
+
+private:
+    struct Range {
+        const void* space;
+        u64 begin;
+        u64 end;
+        u64 position;
+    };
+    std::array<Range, MaxRanges> ranges{};
+    size_t count{};
+    size_t last_index{};
+    u64 unbounded{};
 };
 
 // Splits the GPU thread in two (NX2_GPU_THREAD_SPLIT.md). The GPU thread (the front) takes the
@@ -175,6 +268,23 @@ public:
     /// of it was still queued.
     bool WaitForSync();
 
+    /// EDEN_NX2_DMA_READ_FAST (read when the split starts): the front notes the work that may
+    /// write guest memory, so a macro's DMA read waits only for that work instead of draining.
+    [[nodiscard]] bool TracksMemoryWrites() const {
+        return track_memory_writes;
+    }
+    /// Work just sent may write guest memory the front cannot bound.
+    void NoteMemoryWriter() {
+        queued_memory_writes.NoteUnbounded(write_position);
+    }
+    /// Work just sent writes [address, address + size) of GPU address space `space`.
+    void NoteMemoryWrite(const void* space, GPUVAddr address, u64 size) {
+        queued_memory_writes.Note(space, address, size, write_position, consumed_cache);
+    }
+    /// Waits until the back executed the work sent so far that may write [address, address +
+    /// size) of `space` (not what came after). Returns whether any of it was still queued.
+    bool WaitForMemoryWrites(const void* space, GPUVAddr address, u64 size);
+
 private:
     friend struct GpuSplitTestAccess;
 
@@ -247,6 +357,8 @@ private:
     u64 write_position{};
     u64 last_writer_position{};
     u64 last_sync_position{};
+    bool track_memory_writes{};
+    QueuedMemoryWrites queued_memory_writes;
     u64 published_local{};
     u64 consumed_cache{};
     /// Words between publishes: small right after a drain, while the back has nothing to do.
