@@ -185,12 +185,18 @@ TEST_CASE("sysmix waits for a whole block while the host still has audio queued"
     REQUIRE(ReadCursor(context) == 240);
     REQUIRE(context.sink.last->GetQueueSize() == 1);
 
-    // 100 frames are left: no zero-padded block while the host has the first one to play.
+    // The host starts that block and plays 100 of its frames: nothing is queued any more, but
+    // 140 frames are still to play.
+    std::array<s16, 960> output{};
+    context.sink.last->ProcessAudioOutAndRender(std::span{output}.first(200), 100);
+    REQUIRE(context.sink.last->GetQueueSize() == 0);
+    REQUIRE(context.sink.last->HasPendingAudio());
+
+    // 100 frames are left in the ring: no zero-padded block while the host has audio to play.
     stream.Pump();
     REQUIRE(ReadCursor(context) == 240);
     REQUIRE(stream.GetCounters().deferred == 1);
     REQUIRE(stream.GetCounters().admitted_blocks == 1);
-    REQUIRE(context.sink.last->GetQueueSize() == 1);
 
     // The guest tops the ring up: the next block plays straight on, with no silence between.
     Cursor(context, 240, 480);
@@ -200,9 +206,9 @@ TEST_CASE("sysmix waits for a whole block while the host still has audio queued"
     stream.Pump();
     REQUIRE(ReadCursor(context) == 480);
     REQUIRE(stream.GetCounters().accepted_frames == 480);
-    std::array<s16, 960> output{};
-    context.sink.last->ProcessAudioOutAndRender(output, 480);
+    context.sink.last->ProcessAudioOutAndRender(std::span{output}.subspan(200), 380);
     REQUIRE(std::ranges::all_of(output, [](s16 value) { return value == 8192 || value == -8192; }));
+    REQUIRE_FALSE(context.sink.last->HasPendingAudio());
 
     // Once the host has drained, a short block is a real underrun and is sent padded, so a guest
     // waiting on more free space than those frames leave (threshold 2040) is woken.
