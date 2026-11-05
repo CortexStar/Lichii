@@ -43,6 +43,16 @@ public:
         }
     }
 
+    /// GpuSplit::PairWrite blocks (EDEN_NX2_RING_PAIRS): writes that only store a register's
+    /// value, word i = method (bits 0-15) and value (bits 32-63), applied in order after the
+    /// method sink. Engines the split sends pairs to apply them as their sink would.
+    virtual void ApplyPairs(Core::System& system, const u64* pairs, u32 count) {
+        for (u32 i = 0; i < count; ++i) {
+            CallMethod(system, static_cast<u32>(pairs[i] & 0xffff),
+                       static_cast<u32>(pairs[i] >> 32), true);
+        }
+    }
+
     /// In a method_sink entry: a write the GPU thread split's front found only stores the
     /// register's value although execution_mask has the register (GpuSplit::SinkMethod).
     /// Methods are 16-bit.

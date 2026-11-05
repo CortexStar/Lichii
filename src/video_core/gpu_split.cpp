@@ -154,6 +154,8 @@ void GpuSplit::Stop() {
     consumed_cache = 0;
     publish_every = PublishEvery;
     front_engine = nullptr;
+    pairs_header = nullptr;
+    pairs_count = 0;
     back_engine = nullptr;
     front_macros = false;
     published.store(0, std::memory_order_relaxed);
@@ -196,6 +198,8 @@ void GpuSplit::WaitForSpace(size_t words) {
 }
 
 void GpuSplit::Publish() {
+    // The back may read what is published: the open Pairs block is final from here on.
+    pairs_header = nullptr;
     if (published_local == write_position) {
         return;
     }
@@ -206,7 +210,7 @@ void GpuSplit::Publish() {
         wake.fetch_add(1, std::memory_order_seq_cst);
         wake.notify_one();
     }
-    if (macro_sink && (++publishes & 1023) == 0) [[unlikely]] {
+    if ((macro_sink || ring_pairs) && (++publishes & 1023) == 0) [[unlikely]] {
         ReportBatched();
     }
 }
@@ -227,8 +231,10 @@ void GpuSplit::ReportBatched() {
     };
     LOG_INFO(HW_GPU,
              "GPU split batched writes per second: split_batch.macro_sunk {:.0f}, "
-             "split_batch.compute_sunk {:.0f}, split_batch.compute_same {:.0f}",
-             rate(Batched::MacroSunk), rate(Batched::ComputeSunk), rate(Batched::ComputeSame));
+             "split_batch.compute_sunk {:.0f}, split_batch.compute_same {:.0f}, "
+             "split_batch.pairs {:.0f} in split_batch.pair_blocks {:.0f}",
+             rate(Batched::MacroSunk), rate(Batched::ComputeSunk), rate(Batched::ComputeSame),
+             rate(Batched::Pairs), rate(Batched::PairBlocks));
     batched.fill(0);
     batched_since = now;
 }
@@ -442,6 +448,16 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
         const size_t payload = static_cast<size_t>((head >> 8) & 0xffffff);
         reinterpret_cast<void (*)(const u64*)>(entry[1])(entry + 2);
         return 2 + payload;
+    }
+    case Kind::Pairs: {
+        // EDEN_NX2_RING_PAIRS: one profiler scope and one call for the block; the sink first,
+        // as for any other write, to keep the order.
+        const u32 count = static_cast<u32>(head >> 32);
+        auto* const engine = back_engine;
+        Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+        engine->ConsumeSink(*system);
+        engine->ApplyPairs(*system, entry + 1, count);
+        return 1 + size_t{count};
     }
     }
     return 1;

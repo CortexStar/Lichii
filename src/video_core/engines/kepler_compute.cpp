@@ -91,6 +91,23 @@ void KeplerCompute::ConsumeSinkImpl(Core::System& system) {
     method_sink.clear();
 }
 
+void KeplerCompute::ApplyPairs(Core::System& system, const u64* pairs, u32 count) {
+    // EDEN_NX2_RING_PAIRS: native plain writes from the split's front (FrontPlainWrite), stored
+    // as CallMethod's native plain path stores them.
+    for (u32 i = 0; i < count; ++i) {
+        const u32 method = static_cast<u32>(pairs[i] & 0xffff);
+        const u32 value = static_cast<u32>(pairs[i] >> 32);
+        if (method < native_plain_methods.size()) [[likely]] {
+            native_registers[method] = value;
+            if (method < Regs::NUM_REGS) {
+                regs.reg_array[method] = value;
+            }
+        } else {
+            CallMethod(system, method, value, true);
+        }
+    }
+}
+
 // SET_REPORT_SEMAPHORE_A-D (0x6c0-0x6c3): address high/low, payload, then operation in bits 1:0
 // (release / acquire / report only / trap), reduction enable bit 3 with the op in bits 11:9, and
 // a one-word (no timestamp) structure in bit 28. NVN2 releases queue syncs from compute this way.
@@ -1241,7 +1258,11 @@ bool KeplerCompute::FrontPlainWrite(VideoCommon::GpuSplit& split, FrontState& fs
     }
     fs.plain_sent[method] = true;
     fs.registers[method] = argument; // All FrontApply does for a plain register
-    split.SinkMethod(this, method, argument);
+    if (VideoCommon::GpuSplit::RingPairs()) {
+        split.PairWrite(this, method, argument); // ApplyPairs
+    } else {
+        split.SinkMethod(this, method, argument);
+    }
     split.CountBatched(VideoCommon::GpuSplit::Batched::ComputeSunk);
     return true;
 }
