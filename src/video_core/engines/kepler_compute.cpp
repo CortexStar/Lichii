@@ -859,6 +859,14 @@ bool KeplerCompute::FinishDlssEvaluation() {
 }
 
 
+bool KeplerCompute::EmulatesNativeTensorPrograms() const {
+    // Donkey Kong Bananza's programs must run: rejected, they write nothing and the screen is
+    // purple from its mode select on.
+    constexpr u64 DonkeyKongBananzaProgramId = 0x040074A01BF12000ULL;
+    return Settings::GetCurrentProgramID() == DonkeyKongBananzaProgramId ||
+           rasterizer->EmulatesNativeTensorPrograms();
+}
+
 // Title 4's upscaler reads the tonemapped frame through the texture handle at cbuf0+0x90 and
 // writes the output resolution image through the surface handle at cbuf0+0xa0 (from its
 // TLD/SUST operands). Kirby Air Riders' reads a 2048x1152 image at cbuf0+0x80 and writes a
