@@ -136,9 +136,10 @@ public:
     /// writes deferred to it, GPU::OnCPUWrite); every other CPU write is applied when made. A
     /// command recorded after the first fence that follows a guest submission sees every write
     /// made before that submission, as before (the guest orders its writes before the list that
-    /// reads them). Fences that commit downloads gather as before. Not kept: a write ordered
-    /// only by a semaphore the GPU acquires (no submission) waits for the first fence past the
-    /// interval instead of the first fence after the acquire.
+    /// reads them). Fences that commit downloads gather as before, and also before the commit
+    /// when a gather was skipped since the last one (LightGatherBeforeDownloads). Not kept: a
+    /// write ordered only by a semaphore the GPU acquires (no submission) waits for the first
+    /// fence past the interval instead of the first fence after the acquire.
     static bool FenceLight() {
         return FenceLightEnabled();
     }
@@ -158,6 +159,9 @@ private:
         const bool defer_downloads = CoalesceDownloads() && !commit_downloads && !delay_fence &&
                                      !level_high &&
                                      (light ? InFlushWindowAt(now) : InFlushWindow());
+        if (light && light_gather_pending) {
+            LightGatherBeforeDownloads(now);
+        }
         auto [should_flush, committed_flushes] = CommitCacheFlushes(defer_downloads);
         if (!delay_fence && committed_flushes == 0 && SkipEmptyFence()) {
             Nx2Profile::Scope skipped_scope{Nx2Profile::Zone::FenceSkipped};
@@ -235,14 +239,40 @@ private:
         if (due) {
             light_seen_submissions = submissions;
             light_last_gather = now;
+            light_gather_pending = false;
             LightCount(submitted && !force ? light_stats.gathers_submission : light_stats.gathers);
         } else {
+            light_gather_pending = true;
             LightCount(light_stats.gathers_skipped);
         }
         if (now - light_last_log >= std::chrono::seconds{10}) {
             LogLightStats(now);
         }
         return due;
+    }
+
+    /// FenceLight, with a gather skipped since the last one: a download committed now is copied
+    /// over guest memory later, and would overwrite a CPU write the skipped gather left pending
+    /// (the cache would not know the CPU wrote there). Gather first when a cache has downloads
+    /// to commit, as the per-fence gather of the previous fence did.
+    void LightGatherBeforeDownloads(std::chrono::steady_clock::time_point now) {
+        bool downloads = false;
+        {
+            std::scoped_lock lock{texture_cache.mutex};
+            downloads = texture_cache.HasUncommittedFlushes() || texture_cache.HasAsyncFlushWork();
+        }
+        if (!downloads) {
+            std::scoped_lock lock{buffer_cache.mutex};
+            downloads = buffer_cache.HasUncommittedFlushes();
+        }
+        if (!downloads) {
+            return;
+        }
+        rasterizer.InvalidateGPUCache();
+        light_seen_submissions = fence_light_submissions.load(std::memory_order_acquire);
+        light_last_gather = now;
+        light_gather_pending = false;
+        LightCount(light_stats.gathers_download);
     }
 
     void LogLightStats(std::chrono::steady_clock::time_point now) {
@@ -259,14 +289,16 @@ private:
         const u64 gathers = take(light_stats.gathers);
         const u64 gathers_submission = take(light_stats.gathers_submission);
         const u64 gathers_skipped = take(light_stats.gathers_skipped);
+        const u64 gathers_download = take(light_stats.gathers_download);
         const u64 notifies = take(light_stats.notifies);
         const u64 notifies_skipped = take(light_stats.notifies_skipped);
         const auto [stubs_shared, fences_pooled] = TakeLightFenceObjects();
         LOG_INFO(HW_GPU,
-                 "EDEN_NX2_FENCE_LIGHT per second: gathers {} (+{} after a guest submission), "
-                 "gathers skipped {}, notifies {}, notifies skipped {}, stub fences shared {}, "
-                 "fences from the free list {}",
-                 gathers, gathers_submission, gathers_skipped, notifies, notifies_skipped,
+                 "EDEN_NX2_FENCE_LIGHT per second: gathers {} (+{} after a guest submission, "
+                 "+{} before downloads), gathers skipped {}, notifies {}, notifies skipped {}, "
+                 "stub fences shared {}, fences from the free list {}",
+                 gathers, gathers_submission, gathers_download, gathers_skipped, notifies,
+                 notifies_skipped,
                  static_cast<u64>(static_cast<double>(stubs_shared) / seconds),
                  static_cast<u64>(static_cast<double>(fences_pooled) / seconds));
     }
@@ -581,10 +613,12 @@ private:
     std::chrono::steady_clock::time_point light_last_gather{};
     std::chrono::steady_clock::time_point light_last_log{};
     u64 light_seen_submissions{};
+    bool light_gather_pending{}; ///< A gather was skipped since the last one
     struct LightStats {
         std::atomic<u64> gathers{};
         std::atomic<u64> gathers_submission{};
         std::atomic<u64> gathers_skipped{};
+        std::atomic<u64> gathers_download{};
         std::atomic<u64> notifies{};
         std::atomic<u64> notifies_skipped{};
     } light_stats;
