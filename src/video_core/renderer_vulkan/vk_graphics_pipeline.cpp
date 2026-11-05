@@ -384,8 +384,22 @@ GraphicsPipeline::GraphicsPipeline(
     auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics] {
         const VkRenderPass render_pass{render_pass_cache.Get(MakeRenderPassKey(key.state, device))};
         Validate();
+        // EDEN_NX2_PIPE_TRACE: the driver's compile, which runs here on a worker after the GPU
+        // thread's trace has ended. A begin line without its done line names the pipeline a driver
+        // crashed or hung on (RX 5500M, Ocarina of Time: an access violation inside amdvlk64).
+        static const bool pipe_trace = std::getenv("EDEN_NX2_PIPE_TRACE") != nullptr;
+        if (pipe_trace) {
+            LOG_ERROR(Render_Vulkan,
+                      "DRV PIPE begin {:016x} s0={:016x} s1={:016x} s2={:016x} s3={:016x} "
+                      "s4={:016x} s5={:016x}",
+                      key.Hash(), key.unique_hashes[0], key.unique_hashes[1], key.unique_hashes[2],
+                      key.unique_hashes[3], key.unique_hashes[4], key.unique_hashes[5]);
+        }
         try {
             MakePipeline(render_pass);
+            if (pipe_trace) {
+                LOG_ERROR(Render_Vulkan, "DRV PIPE done {:016x}", key.Hash());
+            }
         } catch (const vk::Exception& exception) {
             LOG_CRITICAL(Render_Vulkan,
                          "Graphics pipeline build failed: {} (stages: tcs={} tes={} geom={}, "

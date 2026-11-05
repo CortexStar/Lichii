@@ -287,8 +287,16 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
             return std::chrono::duration<double>(std::chrono::steady_clock::now() - build_start)
                 .count();
         };
+        // EDEN_NX2_PIPE_TRACE: see GraphicsPipeline; names a compute shader the driver dies on.
+        static const bool pipe_trace = std::getenv("EDEN_NX2_PIPE_TRACE") != nullptr;
+        if (pipe_trace) {
+            LOG_ERROR(Render_Vulkan, "DRV PIPE begin compute {:016x}", shader_hash);
+        }
         try {
             pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
+            if (pipe_trace) {
+                LOG_ERROR(Render_Vulkan, "DRV PIPE done compute {:016x}", shader_hash);
+            }
         } catch (const vk::Exception& exception) {
             LOG_CRITICAL(Render_Vulkan, "Driver rejected compute shader {:016X} after {:.1f} s: {}",
                          shader_hash, build_seconds(), exception.what());
