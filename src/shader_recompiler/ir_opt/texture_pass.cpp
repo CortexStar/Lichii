@@ -1244,8 +1244,11 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             if (flags.type != TextureType::Color2D) {
                 break;
             }
-            // Normalized once the descriptor is known (below).
-            is_rect_sample = ReadTextureTypeCached(env, cbuf) == TextureType::Color2DRect;
+            // Normalized once the descriptor is known (below). A handle computed per draw (handle
+            // program) has no single descriptor here: the static read falls back to an unrelated
+            // word, so it must not turn the sample into a rect one.
+            is_rect_sample = cbuf.handle_program == ~0U &&
+                             ReadTextureTypeCached(env, cbuf) == TextureType::Color2DRect;
             break;
         case IR::Opcode::ImageFetch:
             if (flags.type == TextureType::Color2D || flags.type == TextureType::Color2DRect ||
@@ -1257,7 +1260,8 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             if (flags.type != TextureType::Color1D) {
                 break;
             }
-            if (ReadTextureTypeCached(env, cbuf) == TextureType::Buffer) {
+            if (cbuf.handle_program == ~0U &&
+                ReadTextureTypeCached(env, cbuf) == TextureType::Buffer) {
                 // Replace with the bound texture type only when it's a texture buffer
                 // If the instruction is 1D and the bound type is 2D, don't change the code and let
                 // the rasterizer robustness handle it
