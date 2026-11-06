@@ -308,7 +308,11 @@ void IPSwitchCompiler::Parse(std::span<u8 const> bytes) {
                 || (!quote && p[0] == '#')) {
                     break;
                 } else if (p[0] == '\"' || p[0] == '\'') {
-                    quote = (p[0] == quote) ? '\0' : p[0];
+                    if (!quote) {
+                        quote = p[0];
+                    } else if (p[0] == quote) {
+                        quote = '\0';
+                    }
                     ++p;
                     last_char = p;
                 } else if (p + 1 < sline.cend() && p[0] == '\\') {
