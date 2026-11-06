@@ -17,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <limits>
 #include <zstd.h>
 
 #include "common/fs/path_util.h"
@@ -377,15 +378,15 @@ NupContainer::NupContainer(VirtualFile file_, std::size_t memory_cache_cap,
                            std::filesystem::path spill_dir_)
     : file(std::move(file_)), cache(std::make_shared<NupDecompressCache>()) {
     cache->cap = memory_cache_cap;
-    // sergio: hosts with plenty of RAM keep far more decompressed members, so area changes stop
-    // re-running zstd on files the 512 MiB default evicted. EDEN_NUP_CACHE_MIB overrides (6144 here).
+    // EDEN_NUP_CACHE_MIB raises the decompression cache above the 512 MiB default on hosts with
+    // RAM to spare (6144 on a 40 GB desktop); unset keeps the default. Opt-in only (review of #166).
     if (memory_cache_cap == NupDecompressCache::DefaultCap) {
-        std::size_t mib = 6144;
         if (const char* v = std::getenv("EDEN_NUP_CACHE_MIB"); v != nullptr && v[0] != 0) {
-            mib = static_cast<std::size_t>(std::strtoull(v, nullptr, 10));
-        }
-        if (mib >= 64) {
-            cache->cap = mib * 1024 * 1024;
+            constexpr std::size_t MiB = 1024 * 1024;
+            const auto mib = static_cast<std::size_t>(std::strtoull(v, nullptr, 10));
+            if (mib >= 64 && mib <= std::numeric_limits<std::size_t>::max() / MiB) {
+                cache->cap = mib * MiB;
+            }
         }
         LOG_INFO(Loader, "NUP decompression cache: {} MiB", cache->cap / (1024 * 1024));
     }
