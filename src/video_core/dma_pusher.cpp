@@ -476,7 +476,8 @@ void DmaPusher::CallMethod(u32 argument) {
         // DMA reads wait for them (Maxwell3D::FrontDmaRead).
         const bool other_writer = split.Active() &&
                                   (engine_type == Engines::EngineTypes::KeplerMemory ||
-                                   engine_type == Engines::EngineTypes::Fermi2D);
+                                   engine_type == Engines::EngineTypes::Fermi2D) &&
+                                  subchannel->execution_mask[dma_state.method];
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
@@ -541,7 +542,8 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
         // DMA reads wait for them (Maxwell3D::FrontDmaRead).
         const bool other_writer = split.Active() &&
                                   (engine_type == Engines::EngineTypes::KeplerMemory ||
-                                   engine_type == Engines::EngineTypes::Fermi2D);
+                                   engine_type == Engines::EngineTypes::Fermi2D) &&
+                                  subchannel->execution_mask[dma_state.method];
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
