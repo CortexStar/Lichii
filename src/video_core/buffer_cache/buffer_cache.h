@@ -833,8 +833,9 @@ void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index,
         }
         ssbo_addr = holder + indirect_offset;
     }
-    channel_state->compute_storage_buffers[ssbo_index] = StorageBufferBinding(
-        ssbo_addr, cbuf_index, is_written, kepler_compute->IsNativeMode(), indirect_offset != ~0U);
+    channel_state->compute_storage_buffers[ssbo_index] =
+        StorageBufferBinding(ssbo_addr, cbuf_index, is_written, kepler_compute->IsNativeMode(),
+                             indirect_offset != ~0U, true);
     if (indirect_offset != ~0U) {
         TraceTablePointer(true, 0, ssbo_index, cbuf_index, cbuf_offset, indirect_offset, holder,
                           channel_state->compute_storage_buffers[ssbo_index]);
@@ -2892,7 +2893,8 @@ void BufferCache<P>::TraceTablePointer(bool compute, size_t stage, size_t ssbo_i
 
 template <class P>
 Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index, bool is_written,
-                                             bool native_pointer, bool table_pointer) const {
+                                             bool native_pointer, bool table_pointer,
+                                             bool compute) const {
     const GPUVAddr gpu_addr = gpu_memory->Read<u64>(ssbo_addr);
 
     if (gpu_addr == 0) {
@@ -2913,8 +2915,8 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
     };
     constexpr size_t ways = 4;
     thread_local std::array<std::array<CachedBinding, ways>, 512> binding_cache{};
-    const u32 flags =
-        (is_written ? 1U : 0U) | (native_pointer ? 2U : 0U) | (table_pointer ? 4U : 0U);
+    const u32 flags = (is_written ? 1U : 0U) | (native_pointer ? 2U : 0U) |
+                      (table_pointer ? 4U : 0U) | (compute ? 8U : 0U);
     const size_t owner = gpu_memory->GetID() + 1;
     const u64 serial = gpu_memory->MapSerial();
     auto& set = binding_cache[((gpu_addr ^ next_qword ^ flags) * 0x9E3779B97F4A7C15ULL) >> 55];
@@ -2934,10 +2936,13 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
                 static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
             // A pointer read from a table in memory is the base of an object pool, read anywhere in
             // it (Ocarina of Time's grass instances lie 12-18 MiB past theirs): bound to the end of
-            // its mapping, up to 64 MiB. The 8 MiB cap made those reads return 0 and culled every
-            // blade. Written pools keep the cap: a write marks the whole binding GPU-modified.
+            // its mapping, up to 64 MiB (256 MiB for compute: its fog light probes, SH records
+            // ~104-122 MiB past their pointer, all read 0 at 64 MiB and the volumetric fog lost its
+            // sky ambient). The 8 MiB cap made the grass reads return 0 and culled every blade.
+            // Written pools keep the cap: a write marks the whole binding GPU-modified.
             if (table_pointer && !is_written) {
-                return (std::min)(memory_layout_size, static_cast<u32>(64_MiB));
+                return (std::min)(memory_layout_size,
+                                  static_cast<u32>(compute ? 256_MiB : 64_MiB));
             }
             // A native (Switch 2) compute program's pointer is bare: the word after it is another
             // parameter (a dimension, stride or texture handle), not an NVN buffer size. Taking it
@@ -2978,6 +2983,13 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
         u32 binding_size = static_cast<u32>(cpu_end - *aligned_device_addr);
         if (is_written) {
             binding_size = aligned_size;
+        }
+        if constexpr (requires { runtime.GetMaxStorageBufferRange(); }) {
+            // A read-only pool's 256 MiB compute cap is above the 128 MiB every device
+            // guarantees. Only those are clamped, so no write is cut off.
+            if (table_pointer && !is_written) {
+                binding_size = (std::min)(binding_size, runtime.GetMaxStorageBufferRange());
+            }
         }
         return Binding{
             .device_addr = *aligned_device_addr,
