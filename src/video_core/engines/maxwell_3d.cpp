@@ -1585,8 +1585,9 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
             if (((causes[0] + causes[1] + causes[2] + causes[3]) & 0xffff) == 0) {
                 LOG_INFO(HW_GPU, "MME DMA reads: no wait {}, writer {}, barrier {}, constant buffer {}",
                          causes[0], causes[1], causes[2], causes[3]);
-                for (const auto& [source, count] : sources) {
-                    LOG_INFO(HW_GPU, "MME DMA read barrier source {:#x}: {}", source, count);
+                for (const auto& [barrier_source, barrier_count] : sources) {
+                    LOG_INFO(HW_GPU, "MME DMA read barrier source {:#x}: {}", barrier_source,
+                             barrier_count);
                 }
             }
         }

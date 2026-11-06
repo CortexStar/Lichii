@@ -1519,9 +1519,9 @@ void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
     query_cache.CounterReport(gpu_addr, type, flags, payload, subreport);
     // The split's front reads reports with MME DMA: it flushes the pages left pending here.
     if (VideoCommon::GpuSplit::Get().Active()) {
-        if (const auto device = gpu_memory ? gpu_memory->GpuToCpuAddress(gpu_addr) : std::nullopt;
-            device && query_cache.IsRegionGpuModified(*device, 16)) {
-            Tegra::Nx2MarkReportPages(*device, 16);
+        if (const auto report_address = gpu_memory ? gpu_memory->GpuToCpuAddress(gpu_addr) : std::nullopt;
+            report_address && query_cache.IsRegionGpuModified(*report_address, 16)) {
+            Tegra::Nx2MarkReportPages(*report_address, 16);
         }
     }
 }
