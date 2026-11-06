@@ -22,6 +22,7 @@
 #include "common/scope_exit.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
+#include "common/memory_detect.h"
 #include "common/thread_worker.h"
 #include "core/core.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
@@ -725,6 +726,14 @@ bool PreloadAllPipelines() {
     }();
     return all;
 }
+
+// Graphics pipelines a Switch 2 title keeps before any is evicted: an eighth of system RAM at
+// ~0.45 MB of driver memory each (16 GB: ~4,600), and never fewer than the boot limit above.
+size_t Switch2PipelineBudget() {
+    static const size_t budget = std::max<size_t>(
+        MaxPipelinesWithoutUsedList, Common::GetMemInfo().TotalPhysicalMemory / 8 / (450 * 1024));
+    return budget;
+}
 } // Anonymous namespace
 
 PipelineCache::~PipelineCache() {
@@ -946,8 +955,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         if (!disk_pipelines.insert(hash).second) {
             return;
         }
-        // Switch 2 titles stutter on pipelines built mid-game, so all of them are built at boot.
-        if (!PreloadAllPipelines() && !Settings::CurrentProgramIsSwitch2() &&
+        if (!PreloadAllPipelines() &&
             (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
                                     : !used_pipelines.contains(hash))) {
             ++skipped_pipelines;
@@ -987,7 +995,9 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                                                  state.statistics.get(), false)};
 
             std::scoped_lock lock{state.mutex};
-            if (pipeline) {
+            // A failed one is left out, as in the background prebuild, so the first draw that
+            // needs it builds it again instead of being skipped for the whole session.
+            if (pipeline && !pipeline->Failed()) {
                 graphics_cache.emplace(key, std::move(pipeline));
             }
             ++state.built;
@@ -1165,17 +1175,42 @@ void PipelineCache::EvictUnusedPipelines() {
     // with every place a session went (title 1: 1,500 on its title screen alone). One unused for
     // this long is destroyed; it takes 2-3 ms to build again from the driver's pipeline cache.
     constexpr u64 EvictAfterFrames = 9000;
-    // Switch 2 titles keep theirs: a rebuilt pipeline translates its shader on the GPU thread.
-    if (frame_count <= EvictAfterFrames || Settings::CurrentProgramIsSwitch2()) {
+    if (frame_count <= EvictAfterFrames) {
         return;
     }
-    const u64 cutoff = frame_count - EvictAfterFrames;
+    const auto evictable = [this](const GraphicsPipeline* pipeline) {
+        return pipeline != nullptr && pipeline != current_pipeline && pipeline->IsBuilt();
+    };
+    u64 cutoff = frame_count - EvictAfterFrames;
+    size_t max_evicted = graphics_cache.size();
+    // A Switch 2 title translates a rebuilt pipeline's shaders on the GPU thread, so going back to
+    // an area rebuilt hundreds at once. Its pipelines are kept up to a memory budget, and only the
+    // least recently used ones past it are evicted.
+    const bool switch2 = Settings::CurrentProgramIsSwitch2();
+    if (switch2) {
+        const size_t budget = Switch2PipelineBudget();
+        if (graphics_cache.size() <= budget) {
+            return;
+        }
+        std::vector<u64> last_uses;
+        last_uses.reserve(graphics_cache.size());
+        for (const auto& [key, pipeline] : graphics_cache) {
+            if (evictable(pipeline.get())) {
+                last_uses.push_back(pipeline->LastUse());
+            }
+        }
+        max_evicted = std::min(graphics_cache.size() - budget, last_uses.size());
+        if (max_evicted == 0) {
+            return;
+        }
+        std::ranges::nth_element(last_uses, last_uses.begin() + (max_evicted - 1));
+        cutoff = last_uses[max_evicted - 1] + 1;
+    }
     const u64 tick = scheduler.CurrentTick();
     size_t evicted = 0;
-    for (auto it = graphics_cache.begin(); it != graphics_cache.end();) {
+    for (auto it = graphics_cache.begin(); it != graphics_cache.end() && evicted < max_evicted;) {
         GraphicsPipeline* const pipeline = it->second.get();
-        if (pipeline == nullptr || pipeline == current_pipeline || !pipeline->IsBuilt() ||
-            pipeline->LastUse() >= cutoff) {
+        if (!evictable(pipeline) || pipeline->LastUse() >= cutoff) {
             ++it;
             continue;
         }
@@ -1194,8 +1229,13 @@ void PipelineCache::EvictUnusedPipelines() {
             pipeline->ClearTransitions();
         }
     }
-    LOG_INFO(Render_Vulkan, "Evicted {} graphics pipelines unused for {} frames, {} left", evicted,
-             EvictAfterFrames, graphics_cache.size());
+    if (switch2) {
+        LOG_INFO(Render_Vulkan, "Evicted {} least recently used graphics pipelines over the budget "
+                 "of {}, {} left", evicted, Switch2PipelineBudget(), graphics_cache.size());
+    } else {
+        LOG_INFO(Render_Vulkan, "Evicted {} graphics pipelines unused for {} frames, {} left",
+                 evicted, EvictAfterFrames, graphics_cache.size());
+    }
 }
 
 /// Returns `pipeline` when it is built or the current draw must wait for it, and nullptr when the
