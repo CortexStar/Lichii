@@ -874,7 +874,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     size_t skipped_pipelines = 0;
     size_t deferred_pipelines = 0;
     size_t queued_graphics = 0;
-    std::unordered_set<u64> covered_shader_units;
+    std::array<std::unordered_set<u64>, Maxwell::MaxShaderProgram> covered_shader_units;
     constexpr size_t MaxUnitCoverPipelines = 3000;
     size_t queued_unit_covers = 0;
 
@@ -963,8 +963,9 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         }
         bool unit_cover_needed = false;
         if (queued_unit_covers < MaxUnitCoverPipelines) {
-            for (const u64 stage_hash : key.unique_hashes) {
-                if (stage_hash != 0 && covered_shader_units.insert(stage_hash).second) {
+            for (size_t stage = 0; stage < key.unique_hashes.size(); ++stage) {
+                const u64 stage_hash = key.unique_hashes[stage];
+                if (stage_hash != 0 && covered_shader_units[stage].insert(stage_hash).second) {
                     unit_cover_needed = true;
                 }
             }
