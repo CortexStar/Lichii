@@ -2861,15 +2861,16 @@ private:
     void ReleaseBuffer(HLERequestContext& ctx) {
         const auto* w = ctx.CommandBuffer();
         Log(ctx, "release output");
-        if (Common::Nx2MovieClock::Enabled() &&
-            m_last_take != std::chrono::steady_clock::time_point{}) {
+        if (const auto taken = m_take_times.find(w[2]);
+            Common::Nx2MovieClock::Enabled() && taken != m_take_times.end()) {
             auto& clock = Common::Nx2MovieClock::Get();
             Common::Nx2MovieClock::Add(clock.video_releases, 1);
             Common::Nx2MovieClock::Add(
                 clock.take_to_release_us,
                 static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
-                                     std::chrono::steady_clock::now() - m_last_take)
+                                     std::chrono::steady_clock::now() - taken->second)
                                      .count()));
+            m_take_times.erase(taken);
         }
         const auto handle = HandOut(w[2], Fence{~w[4], w[6]});
         TipcReplyWords(ctx, {handle[0], handle[1], handle[2], handle[3]});
@@ -3016,7 +3017,7 @@ private:
             auto& clock = Common::Nx2MovieClock::Get();
             Common::Nx2MovieClock::Add(clock.video_takes, 1);
             clock.video_last_pts_us.store(output->pts, std::memory_order_relaxed);
-            m_last_take = std::chrono::steady_clock::now();
+            m_take_times[output->image] = std::chrono::steady_clock::now();
         }
         const u64 pts_ns = output->pts * 1000;
         if (Nx2VideoTraceEnabled()) {
@@ -3149,7 +3150,9 @@ private:
             for (size_t i = 0; i < pictures.size(); ++i) {
                 const u64 pts = pictures[i].pts;
                 const bool last = input.end && i + 1 == pictures.size();
-                if (!last && IsLate(pts)) {
+                const bool only_frame =
+                    i + 1 == pictures.size() && m_decoded.empty() && m_inputs.Empty();
+                if (!last && !only_frame && IsLate(pts)) {
                     ++m_late_dropped;
                     continue;
                 }
@@ -3352,7 +3355,7 @@ private:
     bool m_end_queued{};
     bool m_flush{};
     bool m_quit{};
-    std::chrono::steady_clock::time_point m_last_take{};
+    std::map<u32, std::chrono::steady_clock::time_point> m_take_times;
     u64 m_frame_us{1'000'000 / 60};
     bool m_clock_running{};
     std::chrono::steady_clock::time_point m_clock_start{};
