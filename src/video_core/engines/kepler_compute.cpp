@@ -1056,8 +1056,9 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         default: return std::nullopt;
         }
     };
-    // E5B9G9R9 (Ocarina of Time's gameplay frame) has no 2D surface format: the blit reads it as a
-    // 32-bit placeholder surface and the texture cache samples it as E5B9G9R9.
+    // E5B9G9R9 (Ocarina of Time's gameplay frame) has no 2D surface format. The frame is rendered
+    // as B10G11R11, so the blit reads that image as it is (surface's default below); sampling it
+    // as E5B9G9R9, as Eglantine does, decoded its bits wrongly and washed the scene out.
     const bool shared_exponent_input = input->format == Texture::TextureFormat::E5B9G9R9;
     if ((!blit_format(*input) && !shared_exponent_input) || !blit_format(*output)) {
         return skip(fmt::format("formats {} -> {}", static_cast<u32>(input->format.Value()),
@@ -1123,13 +1124,7 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         .src_x1 = static_cast<s32>(input->Width()),
         .src_y1 = static_cast<s32>(input->Height()),
     };
-    auto source = surface(*input);
-    if (shared_exponent_input) {
-        source.format = RTFormat::B10G11R11_FLOAT; // same size per texel, replaced below
-        VideoCommon::g_blit_source_format = VideoCore::Surface::PixelFormat::E5B9G9R9_FLOAT;
-    }
-    const bool done = rasterizer->AccelerateSurfaceCopy(source, surface(*output), config);
-    VideoCommon::g_blit_source_format.reset();
+    const bool done = rasterizer->AccelerateSurfaceCopy(surface(*input), surface(*output), config);
     if (!done) {
         static std::unordered_set<u64> failed;
         if (failed.size() < 16 && failed.insert(input->Address() ^ output->Address()).second) {
