@@ -1042,20 +1042,6 @@ FN_MAX_LIMIT_LIST
         return has_broken_parallel_compiling;
     }
 
-    /// Held around a game pipeline's driver build. AMD's own drivers crashed (null read in
-    /// amdvlk64) building pipelines on several workers at once in Ocarina of Time, so their builds
-    /// take turns; translation stays parallel. EDEN_NX2_SERIAL_PIPELINE_BUILDS=1/0 forces it.
-    [[nodiscard]] std::unique_lock<std::mutex> LockPipelineBuild() const {
-        static const bool serial = [this] {
-            if (const char* value = std::getenv("EDEN_NX2_SERIAL_PIPELINE_BUILDS")) {
-                return value[0] != '0';
-            }
-            const VkDriverIdKHR id = GetDriverID();
-            return id == VK_DRIVER_ID_AMD_PROPRIETARY || id == VK_DRIVER_ID_AMD_OPEN_SOURCE;
-        }();
-        return serial ? std::unique_lock{pipeline_build_mutex} : std::unique_lock<std::mutex>{};
-    }
-
     /// Returns the vendor name reported from Vulkan.
     std::string_view GetVendorName() const {
         return properties.driver.driverName;
@@ -1357,7 +1343,6 @@ private:
     bool has_broken_cube_compatibility{};      ///< Has broken cube compatibility bit
     bool has_broken_descriptor_aliasing{};     ///< Miscompiles descriptors aliased on one binding
     bool has_broken_parallel_compiling{};      ///< Has broken parallel shader compiling.
-    mutable std::mutex pipeline_build_mutex;   ///< LockPipelineBuild
     bool has_renderdoc{};                      ///< Has RenderDoc attached
     bool has_nsight_graphics{};                ///< Has Nsight Graphics attached
     bool has_radeon_gpu_profiler{};            ///< Has Radeon GPU Profiler attached.
