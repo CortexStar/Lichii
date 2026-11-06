@@ -85,7 +85,9 @@ float staticWeight(vec2 uv) {
 float motionConsistency(vec2 sample_uv, vec2 motion) {
     vec2 there = texture(MotionVectors, sample_uv).xy * motion_scale;
     float difference = length((there - motion) * render_size);
-    return 1.0 - smoothstep(1.5, 6.0, difference);
+    // Flow is noisier for larger motions.
+    float tolerance = 1.0 + 0.04 * length(motion * render_size);
+    return 1.0 - smoothstep(tolerance, 3.0 * tolerance, difference);
 }
 
 // How badly the two frames disagree around `uv` if it moved by `motion` between them.

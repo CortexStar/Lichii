@@ -99,13 +99,21 @@ NvOpticalFlow::NvOpticalFlow(const Device& device_, MemoryAllocator& allocator, 
         return;
     }
 
+    // One vector per 2x2 pixels by default: coarser cells mix a figure's motion with the
+    // background's along its outline. EDEN_NX2_NVOF_GRID=1, 2, 4 or 8 picks another size.
+    u32 wanted_grid = 2;
+    if (const char* value = std::getenv("EDEN_NX2_NVOF_GRID")) {
+        wanted_grid = static_cast<u32>(std::atoi(value));
+    }
     VkOpticalFlowGridSizeFlagsNV grid{};
     u32 grid_size{};
-    for (const auto [bit, size] : {std::pair{VK_OPTICAL_FLOW_GRID_SIZE_4X4_BIT_NV, 4U},
-                                   std::pair{VK_OPTICAL_FLOW_GRID_SIZE_2X2_BIT_NV, 2U},
-                                   std::pair{VK_OPTICAL_FLOW_GRID_SIZE_8X8_BIT_NV, 8U},
-                                   std::pair{VK_OPTICAL_FLOW_GRID_SIZE_1X1_BIT_NV, 1U}}) {
-        if ((properties.supportedOutputGridSizes & bit) != 0) {
+    const std::array grids{std::pair{VK_OPTICAL_FLOW_GRID_SIZE_1X1_BIT_NV, 1U},
+                           std::pair{VK_OPTICAL_FLOW_GRID_SIZE_2X2_BIT_NV, 2U},
+                           std::pair{VK_OPTICAL_FLOW_GRID_SIZE_4X4_BIT_NV, 4U},
+                           std::pair{VK_OPTICAL_FLOW_GRID_SIZE_8X8_BIT_NV, 8U}};
+    for (const auto [bit, size] : grids) {
+        // The wanted size, else the next coarser one supported.
+        if (size >= wanted_grid && (properties.supportedOutputGridSizes & bit) != 0) {
             grid = bit;
             grid_size = size;
             break;
