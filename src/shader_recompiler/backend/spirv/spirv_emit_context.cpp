@@ -32,7 +32,11 @@ enum class Operation {
 
 Id ImageType(EmitContext& ctx, const TextureDescriptor& desc) {
     const spv::ImageFormat format{spv::ImageFormat::Unknown};
-    const Id type{desc.is_integer ? ctx.U32[1] : ctx.F32[1]};
+    // A Sampled Type of integer is invalid SPIR-V when Dref is set (OpTypeImage constraint:
+    // "If Dref is 1, Sampled Type must be a float or vector of float"), and all Dref image
+    // instructions emit a float result type. Depth-compare (shadow) textures must therefore
+    // use a float Sampled Type even when they are also marked as integer.
+    const Id type{desc.is_depth ? ctx.F32[1] : desc.is_integer ? ctx.U32[1] : ctx.F32[1]};
     const bool depth{desc.is_depth};
     const bool ms{desc.is_multisample};
     switch (desc.type) {
@@ -179,7 +183,11 @@ void DefineGenericOutput(EmitContext& ctx, size_t index, std::optional<u32> invo
         if (xfb_varying) {
             ctx.Decorate(id, spv::Decoration::XfbBuffer, xfb_varying->buffer);
             ctx.Decorate(id, spv::Decoration::XfbStride, xfb_varying->stride);
-            ctx.Decorate(id, spv::Decoration::Offset, xfb_varying->offset);
+            // A varying that starts inside a vector (attribute % 4 != 0) is emitted as its own
+            // variable with a Component decoration, so its byte offset is the vector's offset plus
+            // the components it skips.
+            ctx.Decorate(id, spv::Decoration::Offset,
+                         xfb_varying->offset + static_cast<u32>(element) * 4U);
             if (ctx.stage == Stage::Geometry && xfb_varying->stream != 0) {
                 ctx.Decorate(id, spv::Decoration::Stream, xfb_varying->stream);
             }
@@ -1859,7 +1867,7 @@ void EmitContext::DefineMesh(const IR::Program& program) {
     mesh_attribute_words = (std::max)(
         mesh_primitive_base + Common::DivCeil(mesh_info.max_primitives, 32U) * primitive_lines * 32,
         1U);
-    mesh_map_bytes = 4 + 3 * mesh_info.max_primitives;
+    mesh_map_bytes = 4 + mesh_info.PrimitiveVertices() * mesh_info.max_primitives;
     mesh_shared_u32 = TypePointer(spv::StorageClass::Workgroup, U32[1]);
     mesh_attributes = DefineVariable(*this, TypeArray(U32[1], Const(mesh_attribute_words)),
                                      std::nullopt, spv::StorageClass::Workgroup);
@@ -1873,11 +1881,20 @@ void EmitContext::DefineMesh(const IR::Program& program) {
 
     const Id vertex_count{Const(mesh_info.max_vertices)};
     const Id primitive_count{Const(mesh_info.max_primitives)};
-    mesh_primitive_indices =
-        DefineVariable(*this, TypeArray(U32[3], primitive_count),
-                       spv::BuiltIn::PrimitiveTriangleIndicesEXT, spv::StorageClass::Output);
+    const u32 primitive_vertices{mesh_info.PrimitiveVertices()};
+    mesh_primitive_indices = DefineVariable(
+        *this, TypeArray(U32[primitive_vertices], primitive_count),
+        primitive_vertices == 1   ? spv::BuiltIn::PrimitivePointIndicesEXT
+        : primitive_vertices == 2 ? spv::BuiltIn::PrimitiveLineIndicesEXT
+                                  : spv::BuiltIn::PrimitiveTriangleIndicesEXT,
+        spv::StorageClass::Output);
     std::array<Id, IR::NUM_GENERICS> generics[2]{};
-    Id point_size{}, primitive_layer{}, primitive_viewport{}, primitive_id_output{};
+    Id& point_size{mesh_point_size};
+    Id primitive_layer{}, primitive_viewport{}, primitive_id_output{};
+    if (primitive_vertices == 1) {
+        point_size = DefineVariable(*this, TypeArray(F32[1], vertex_count), spv::BuiltIn::PointSize,
+                                    spv::StorageClass::Output);
+    }
     const auto per_primitive_builtin = [&](Id& variable, spv::BuiltIn builtin) {
         if (!Sirit::ValidId(variable)) {
             variable = DefineVariable(*this, TypeArray(U32[1], primitive_count), builtin,
