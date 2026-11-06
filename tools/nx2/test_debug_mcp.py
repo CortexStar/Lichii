@@ -103,6 +103,9 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual(json.loads(result["content"][0]["text"]),
                          {"frames": 2, "intervals_ms": [16.7, 33.3], "truncated": False})
         self.assertEqual(self.fake.requests[-1]["params"], arguments)
+        # A null where a number belongs answers with a tool error; the adapter keeps serving.
+        self.assertTrue(self.call("frame_times", {"seconds": None})["isError"])
+        self.assertFalse(self.call("frame_times", {})["isError"])
 
     def test_status_is_forwarded(self):
         result = self.call("status", {"fps_window_ms": 0})

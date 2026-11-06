@@ -265,7 +265,7 @@ class Adapter:
             try:
                 content = self.call_tool(params.get("name"), params.get("arguments") or {})
                 reply["result"] = {"content": content, "isError": False}
-            except (EmulatorError, KeyError, ValueError) as error:
+            except (EmulatorError, KeyError, ValueError, TypeError) as error:
                 message_text = f"missing argument {error}" if isinstance(error, KeyError) else str(error)
                 reply["result"] = {"content": [text(message_text)], "isError": True}
         else:
