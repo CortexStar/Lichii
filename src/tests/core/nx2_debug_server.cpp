@@ -7,6 +7,8 @@
 #include <boost/asio.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include "common/scope_exit.h"
+#include "core/core.h"
 #include "core/debugger/nx2_debug_server.h"
 #include "core/debugger/nx2_debug_tools.h"
 #include "video_core/nx2_debug_control.h"
