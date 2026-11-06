@@ -1184,8 +1184,9 @@ void PipelineCache::EvictUnusedPipelines() {
     u64 cutoff = frame_count - EvictAfterFrames;
     size_t max_evicted = graphics_cache.size();
     // A Switch 2 title translates a rebuilt pipeline's shaders on the GPU thread, so going back to
-    // an area rebuilt hundreds at once. Its pipelines are kept up to a memory budget, and only the
-    // least recently used ones past it are evicted.
+    // an area rebuilt hundreds at once. Its pipelines are kept up to a memory budget. Past it, the
+    // least recently used are evicted, but still only ones unused for EvictAfterFrames: evicting
+    // pipelines used moments before lost the device on AMD.
     const bool switch2 = Settings::CurrentProgramIsSwitch2();
     if (switch2) {
         const size_t budget = Switch2PipelineBudget();
@@ -1204,7 +1205,7 @@ void PipelineCache::EvictUnusedPipelines() {
             return;
         }
         std::ranges::nth_element(last_uses, last_uses.begin() + (max_evicted - 1));
-        cutoff = last_uses[max_evicted - 1] + 1;
+        cutoff = std::min(cutoff, last_uses[max_evicted - 1] + 1);
     }
     const u64 tick = scheduler.CurrentTick();
     size_t evicted = 0;
@@ -1230,8 +1231,9 @@ void PipelineCache::EvictUnusedPipelines() {
         }
     }
     if (switch2) {
-        LOG_INFO(Render_Vulkan, "Evicted {} least recently used graphics pipelines over the budget "
-                 "of {}, {} left", evicted, Switch2PipelineBudget(), graphics_cache.size());
+        LOG_INFO(Render_Vulkan, "Evicted {} least recently used graphics pipelines unused for {} "
+                 "frames, over the budget of {}, {} left", evicted, EvictAfterFrames,
+                 Switch2PipelineBudget(), graphics_cache.size());
     } else {
         LOG_INFO(Render_Vulkan, "Evicted {} graphics pipelines unused for {} frames, {} left",
                  evicted, EvictAfterFrames, graphics_cache.size());
