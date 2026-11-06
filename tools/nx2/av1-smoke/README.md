@@ -21,6 +21,23 @@ Other builds remain opt-in. The current MinGW PGO dependency lacks AV1, so that 
 check is expected to fail until the package selection is fixed by
 [PR #195](https://github.com/zortos293/Lichii/pull/195) or an equivalent AV1-capable package.
 
+## Focused MinGW CI
+
+The manual-only `.github/workflows/minimal-windows-av1-smoke.yml` configures the repository
+with Qt, the CLI and project tests disabled, then builds only `av1_decode_smoke` against
+the MSYS2 UCRT64 FFmpeg selected by the production CMake configuration. It collects the
+probe's recursive DLL dependencies and runs it from that package directory in a fresh
+PowerShell process with `PATH` restricted to Windows system directories. The workflow
+uploads only the probe package and its short result report for seven days. This validates
+the probe's FFmpeg and runtime DLL closure, not the emulator executable's full package.
+
+`workflow_dispatch` does not run automatically. GitHub requires the workflow to exist on
+the repository's default branch before it can be manually dispatched. Select a ref that
+contains this probe and workflow. The manual workflow selects system FFmpeg itself, so
+it can check the proposed dependency before PR #195 is merged. It does not establish that
+the release workflow selects or packages the same libraries: that integration check still
+requires PR #195 or an equivalent release configuration fix.
+
 ## Fixture provenance
 
 The embedded 22-byte OBU stream contains one lossless 16x16 black YUV420P frame
