@@ -8,13 +8,15 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cstddef>
 #include <cstdlib>
 #include <optional>
-#include <string>
+#include <string_view>
+#include <system_error>
+#include <vector>
 
 #include <boost/container/small_vector.hpp>
-#include <fmt/format.h>
 
 #include "common/common_types.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
@@ -417,12 +419,33 @@ inline bool BuildsUnoptimized(const Device& device, u64 shader_hash) {
         0xeff3ccbe1438679dULL, // compute shader built as the AV1 intro starts: 6 min (#200)
         0xf9ea14a22394f5b1ULL, // compute shader built as the AV1 intro starts: 18 min (#200)
     };
-    static const std::string forced = [] {
+    struct Forced {
+        bool all = false;
+        std::vector<u64> hashes;
+    };
+    static const Forced forced = [] {
+        Forced result;
         const char* const value = std::getenv("EDEN_NX2_NOOPT_SHADERS");
-        return value != nullptr ? std::string{value} : std::string{};
+        const std::string_view text = value != nullptr ? value : "";
+        if (text == "all") {
+            result.all = true;
+            return result;
+        }
+        // Comma-separated hexadecimal hashes, in either case.
+        for (size_t begin = 0; begin < text.size();) {
+            const size_t end = (std::min)(text.find(',', begin), text.size());
+            const std::string_view token = text.substr(begin, end - begin);
+            u64 hash{};
+            const auto [last, error] =
+                std::from_chars(token.data(), token.data() + token.size(), hash, 16);
+            if (!token.empty() && error == std::errc{} && last == token.data() + token.size()) {
+                result.hashes.push_back(hash);
+            }
+            begin = end + 1;
+        }
+        return result;
     }();
-    if (!forced.empty() &&
-        (forced == "all" || forced.find(fmt::format("{:016x}", shader_hash)) != std::string::npos)) {
+    if (forced.all || std::ranges::find(forced.hashes, shader_hash) != forced.hashes.end()) {
         return true;
     }
     return device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY &&
