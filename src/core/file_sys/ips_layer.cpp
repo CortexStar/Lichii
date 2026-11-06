@@ -166,10 +166,13 @@ static bool IsPatchRecord(std::string_view line) {
     if (!IsHexString(offset)) {
         return false;
     }
-    if (line.find_first_of("\"'") != std::string_view::npos) {
-        return true;
+    const auto value_start = line.find_first_not_of(" \t", offset_end);
+    if (value_start == std::string_view::npos) {
+        return false;
     }
-    return IsHexString(line.substr(line.find_last_of(" /\t\r\n") + 1));
+    const auto value = line.substr(value_start);
+    return value[0] == '"' || value[0] == '\'' ||
+           value.find_first_not_of("0123456789abcdefABCDEF \t") == std::string_view::npos;
 }
 
 void IPSwitchCompiler::Parse(std::span<u8 const> bytes) {
