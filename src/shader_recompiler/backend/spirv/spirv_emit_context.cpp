@@ -32,7 +32,9 @@ enum class Operation {
 
 Id ImageType(EmitContext& ctx, const TextureDescriptor& desc) {
     const spv::ImageFormat format{spv::ImageFormat::Unknown};
-    const Id type{desc.is_integer ? ctx.U32[1] : ctx.F32[1]};
+    // A Dref (shadow) image needs a float Sampled Type even when marked integer: SPIR-V requires
+    // it, and drivers crash building the invalid module (RADV, likely amdvlk too).
+    const Id type{desc.is_depth || !desc.is_integer ? ctx.F32[1] : ctx.U32[1]};
     const bool depth{desc.is_depth};
     const bool ms{desc.is_multisample};
     switch (desc.type) {
@@ -1540,7 +1542,8 @@ void EmitContext::DefineTextures(const Info& info, u32& binding, u32& scaling_in
             .image_type = image_type,
             .count = desc.count,
             .is_multisample = desc.is_multisample,
-            .is_integer = desc.is_integer,
+            // Matches ImageType: every op on a depth image uses float results.
+            .is_integer = desc.is_integer && !desc.is_depth,
         });
         if (profile.supported_spirv >= 0x00010400) {
             interfaces.push_back(id);
