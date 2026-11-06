@@ -120,6 +120,9 @@ public:
             guard.unlock();
             cv.notify_all();
         }
+        if (delay_fence) {
+            SubmitDeferredWork();
+        }
         rasterizer.InvalidateGPUCache();
     }
 

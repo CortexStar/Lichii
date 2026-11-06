@@ -31,7 +31,6 @@ void insertionSort5(inout float a[5]) {
 }
 
 vec2 sampleMotionMedian(vec2 uv) {
-    // The motion field is at the flow's (half) resolution: step in its texels.
     vec2 texel = 1.0 / vec2(textureSize(MotionVectors, 0));
 
     // textureGather returns 2├ù2 quads: (x-0.5, y-0.5) to (x+0.5, y+0.5)
@@ -79,12 +78,10 @@ void main() {
 
     vec2 uv = (vec2(pixel_coord) + 0.5) * inv_render_size;
 
-    // Median-filtered motion vector (reduces outlier jitter). The flow stores, per current-frame
-    // pixel, the offset in flow texels to where it was in the previous frame; convert to UV.
+    // Median-filtered motion vector (reduces outlier jitter)
     vec2 motion = sampleMotionMedian(uv) / vec2(textureSize(MotionVectors, 0));
 
-    // A point at uv at time blend_factor was at uv + motion * t in the previous frame and is
-    // at uv - motion * (1 - t) in the current one.
+    // Forward and backward warped coordinates
     vec2 forward_uv  = clamp(uv + motion * blend_factor,         0.0, 1.0);
     vec2 backward_uv = clamp(uv - motion * (1.0 - blend_factor), 0.0, 1.0);
 
