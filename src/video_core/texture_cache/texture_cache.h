@@ -172,6 +172,7 @@ void TextureCache<P>::RunGarbageCollector() {
             Image& image = slot_images[entry.image_id];
             SwizzleImage(*gpu_memory, image.gpu_addr, image.info, entry.copies,
                          entry.map.mapped_span, swizzle_data_buffer);
+            runtime.FreeDeferredStagingBuffer(entry.map);
             ++gc_download_deletes;
             Evict(entry.image_id);
         }
@@ -213,10 +214,13 @@ void TextureCache<P>::RunGarbageCollector() {
         if (must_download) {
             // As DownloadMemory: a batch is capped so the staging memory held at once stays bounded.
             constexpr size_t MaxBatchBytes = 64_MiB;
+            // The batch is flushed after the passes only: deleting images while the LRU walk or
+            // the candidate list still refer to them is not safe. A full batch waits a frame.
             if (!pending.empty() && pending_bytes + image.unswizzled_size_bytes > MaxBatchBytes) {
-                FlushPending();
+                return false;
             }
-            auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes);
+            // Deferred: OpenGL hands a non-deferred download buffer to the next request at once.
+            auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes, true);
             auto copies = FullDownloadCopies(image.info);
             image.DownloadMemory(map, copies);
             pending_bytes += image.unswizzled_size_bytes;
@@ -246,6 +250,11 @@ void TextureCache<P>::RunGarbageCollector() {
             std::vector<ImageId> candidates;
             const size_t limit = num_iterations * 8;
             lru_cache.ForEachItemBelow(frame_tick - ticks_to_destroy, [&](ImageId image_id) {
+                if (std::ranges::any_of(pending, [image_id](const PendingDownload& entry) {
+                        return entry.image_id == image_id;
+                    })) {
+                    return false;
+                }
                 candidates.push_back(image_id);
                 return candidates.size() >= limit;
             });
