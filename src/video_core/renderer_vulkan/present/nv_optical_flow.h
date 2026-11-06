@@ -47,25 +47,45 @@ public:
         return *flow_copy_views[last];
     }
 
+    /// The reverse flow of the last Run (from the previous frame to the current one, on the
+    /// previous frame's pixels), or the forward one without bidirectional flow.
+    [[nodiscard]] VkImageView BackwardFlowView() const {
+        return *flow_copy_views[backward ? 2 + last : last];
+    }
+
+    [[nodiscard]] bool HasBackwardFlow() const {
+        return backward;
+    }
+
     static constexpr float FlowToPixels = 32767.0f / 32.0f;
+
+    /// Output pixels per flow input pixel along x and y.
+    [[nodiscard]] float InputScaleX() const {
+        return static_cast<float>(extent.width) / static_cast<float>(input_extent.width);
+    }
+    [[nodiscard]] float InputScaleY() const {
+        return static_cast<float>(extent.height) / static_cast<float>(input_extent.height);
+    }
 
 private:
     const Device& device;
     VkExtent2D extent{};
+    VkExtent2D input_extent{};
     VkExtent2D flow_extent{};
     VkFormat input_format{};
     bool valid{};
     bool primed{};
+    bool backward{};
     bool initialized_layouts{};
     u32 next{};
     u32 last{};
 
     std::array<vk::Image, 2> inputs;
     std::array<vk::ImageView, 2> input_views;
-    std::array<vk::Image, 2> flows;
-    std::array<vk::ImageView, 2> flow_views;
-    std::array<vk::Image, 2> flow_copies;
-    std::array<vk::ImageView, 2> flow_copy_views;
+    std::array<vk::Image, 4> flows;
+    std::array<vk::ImageView, 4> flow_views;
+    std::array<vk::Image, 4> flow_copies;
+    std::array<vk::ImageView, 4> flow_copy_views;
     std::array<VkOpticalFlowSessionNV, 2> sessions{};
     vk::CommandPool command_pool;
     vk::CommandBuffers command_buffers;

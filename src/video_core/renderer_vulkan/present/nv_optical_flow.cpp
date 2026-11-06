@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -73,10 +74,19 @@ NvOpticalFlow::NvOpticalFlow(const Device& device_, MemoryAllocator& allocator, 
         !dld.vkCmdOpticalFlowExecuteNV) {
         return;
     }
-    if (extent.width < properties.minWidth || extent.height < properties.minHeight ||
-        extent.width > properties.maxWidth || extent.height > properties.maxHeight) {
+    // Above 1920 pixels wide the flow runs on a half-size copy by default: the hardware's cost
+    // grows with the input, and a vector per input pixel there still beats one per 2x2 output
+    // pixels. EDEN_NX2_NVOF_INPUT=full or half overrides.
+    const char* const input_setting = std::getenv("EDEN_NX2_NVOF_INPUT");
+    const bool half_input = input_setting ? std::string{input_setting} == "half"
+                                          : extent.width > 1920;
+    input_extent = half_input ? VkExtent2D{(std::max)(1U, extent.width / 2),
+                                           (std::max)(1U, extent.height / 2)}
+                              : extent;
+    if (input_extent.width < properties.minWidth || input_extent.height < properties.minHeight ||
+        input_extent.width > properties.maxWidth || input_extent.height > properties.maxHeight) {
         LOG_WARNING(Render_Vulkan, "Optical flow: {}x{} is outside the supported sizes",
-                    extent.width, extent.height);
+                    input_extent.width, input_extent.height);
         return;
     }
 
@@ -101,7 +111,7 @@ NvOpticalFlow::NvOpticalFlow(const Device& device_, MemoryAllocator& allocator, 
 
     // One vector per 2x2 pixels by default: coarser cells mix a figure's motion with the
     // background's along its outline. EDEN_NX2_NVOF_GRID=1, 2, 4 or 8 picks another size.
-    u32 wanted_grid = 2;
+    u32 wanted_grid = half_input ? 1 : 2;
     if (const char* value = std::getenv("EDEN_NX2_NVOF_GRID")) {
         wanted_grid = static_cast<u32>(std::atoi(value));
     }
@@ -122,8 +132,8 @@ NvOpticalFlow::NvOpticalFlow(const Device& device_, MemoryAllocator& allocator, 
     if (grid_size == 0) {
         return;
     }
-    flow_extent = {(extent.width + grid_size - 1) / grid_size,
-                   (extent.height + grid_size - 1) / grid_size};
+    flow_extent = {(input_extent.width + grid_size - 1) / grid_size,
+                   (input_extent.height + grid_size - 1) / grid_size};
 
     const std::array families{device.GetGraphicsFamily(), device.GetOpticalFlowFamily()};
     const auto create_image = [&](VkExtent2D size, VkFormat format, VkImageUsageFlags usage,
@@ -164,9 +174,16 @@ NvOpticalFlow::NvOpticalFlow(const Device& device_, MemoryAllocator& allocator, 
         });
     };
     for (size_t i = 0; i < 2; ++i) {
-        inputs[i] = create_image(extent, input_format, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        inputs[i] = create_image(input_extent, input_format, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                                  VK_OPTICAL_FLOW_USAGE_INPUT_BIT_NV);
         input_views[i] = create_view(inputs[i], input_format);
+    }
+    // Flows: [session] forward (this frame to the last), [2 + session] backward (the reverse).
+    // EDEN_NX2_NVOF_BACKWARD=0 computes the forward flow only.
+    const char* const backward_setting = std::getenv("EDEN_NX2_NVOF_BACKWARD");
+    backward = properties.bidirectionalFlowSupported != VK_FALSE &&
+               (backward_setting == nullptr || backward_setting[0] != '0');
+    for (size_t i = 0; i < (backward ? 4U : 2U); ++i) {
         flows[i] = create_image(flow_extent, flow_format, VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                                 VK_OPTICAL_FLOW_USAGE_OUTPUT_BIT_NV);
         flow_views[i] = create_view(flows[i], flow_format);
@@ -201,15 +218,15 @@ NvOpticalFlow::NvOpticalFlow(const Device& device_, MemoryAllocator& allocator, 
         VkOpticalFlowSessionCreateInfoNV session_info{
             .sType = VK_STRUCTURE_TYPE_OPTICAL_FLOW_SESSION_CREATE_INFO_NV,
             .pNext = nullptr,
-            .width = extent.width,
-            .height = extent.height,
+            .width = input_extent.width,
+            .height = input_extent.height,
             .imageFormat = input_format,
             .flowVectorFormat = flow_format,
             .costFormat = VK_FORMAT_UNDEFINED,
             .outputGridSize = grid,
             .hintGridSize = 0,
             .performanceLevel = level,
-            .flags = 0,
+            .flags = backward ? VK_OPTICAL_FLOW_SESSION_CREATE_BOTH_DIRECTIONS_BIT_NV : 0U,
         };
         vk::Check(dld.vkCreateOpticalFlowSessionNV(logical, &session_info, nullptr, &sessions[i]));
         // Session i computes the flow from input i (this frame) to the other input (the last).
@@ -221,6 +238,11 @@ NvOpticalFlow::NvOpticalFlow(const Device& device_, MemoryAllocator& allocator, 
         for (const auto& [point, view] : bindings) {
             vk::Check(dld.vkBindOpticalFlowSessionImageNV(logical, sessions[i], point, view,
                                                           VK_IMAGE_LAYOUT_GENERAL));
+        }
+        if (backward) {
+            vk::Check(dld.vkBindOpticalFlowSessionImageNV(
+                logical, sessions[i], VK_OPTICAL_FLOW_SESSION_BINDING_POINT_BACKWARD_FLOW_VECTOR_NV,
+                *flow_views[2 + i], VK_IMAGE_LAYOUT_GENERAL));
         }
     }
 
@@ -240,9 +262,11 @@ NvOpticalFlow::NvOpticalFlow(const Device& device_, MemoryAllocator& allocator, 
         done[i] = device.GetLogical().CreateSemaphore();
     }
     valid = true;
-    LOG_INFO(Render_Vulkan, "Optical flow: {}x{} frames, {}x{} flow grid, performance level {}",
-             extent.width, extent.height, flow_extent.width, flow_extent.height,
-             static_cast<int>(level));
+    LOG_INFO(Render_Vulkan,
+             "Optical flow: {}x{} frames, {}x{} input, {}x{} flow grid, both directions {}, "
+             "performance level {}",
+             extent.width, extent.height, input_extent.width, input_extent.height,
+             flow_extent.width, flow_extent.height, backward, static_cast<int>(level));
 }
 
 NvOpticalFlow::~NvOpticalFlow() {
@@ -273,14 +297,16 @@ VkSemaphore NvOpticalFlow::Run(Scheduler& scheduler, VkImage frame) {
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([this, frame, index, first_layouts](vk::CommandBuffer cmdbuf) {
         if (first_layouts) {
-            std::array<VkImageMemoryBarrier, 6> init{};
-            for (size_t i = 0; i < 2; ++i) {
-                init[i * 3] = Barrier(*inputs[i], 0, 0, VK_IMAGE_LAYOUT_UNDEFINED,
-                                      VK_IMAGE_LAYOUT_GENERAL);
-                init[i * 3 + 1] = Barrier(*flows[i], 0, 0, VK_IMAGE_LAYOUT_UNDEFINED,
-                                          VK_IMAGE_LAYOUT_GENERAL);
-                init[i * 3 + 2] = Barrier(*flow_copies[i], 0, 0, VK_IMAGE_LAYOUT_UNDEFINED,
-                                          VK_IMAGE_LAYOUT_GENERAL);
+            std::vector<VkImageMemoryBarrier> init;
+            for (const vk::Image& image : inputs) {
+                init.push_back(Barrier(*image, 0, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+                                       VK_IMAGE_LAYOUT_GENERAL));
+            }
+            for (size_t i = 0; i < (backward ? 4U : 2U); ++i) {
+                init.push_back(Barrier(*flows[i], 0, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+                                       VK_IMAGE_LAYOUT_GENERAL));
+                init.push_back(Barrier(*flow_copies[i], 0, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+                                       VK_IMAGE_LAYOUT_GENERAL));
             }
             cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, {}, {}, init);
@@ -296,15 +322,17 @@ VkSemaphore NvOpticalFlow::Run(Scheduler& scheduler, VkImage frame) {
                                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
                                    VK_PIPELINE_STAGE_TRANSFER_BIT,
                                VK_PIPELINE_STAGE_TRANSFER_BIT, 0, {}, {}, before);
-        const VkImageCopy region{
+        const VkImageBlit region{
             .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-            .srcOffset = {0, 0, 0},
+            .srcOffsets = {{0, 0, 0},
+                           {static_cast<s32>(extent.width), static_cast<s32>(extent.height), 1}},
             .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-            .dstOffset = {0, 0, 0},
-            .extent = {extent.width, extent.height, 1},
+            .dstOffsets = {{0, 0, 0},
+                           {static_cast<s32>(input_extent.width),
+                            static_cast<s32>(input_extent.height), 1}},
         };
-        cmdbuf.CopyImage(frame, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, *inputs[index],
-                         VK_IMAGE_LAYOUT_GENERAL, region);
+        cmdbuf.BlitImage(frame, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, *inputs[index],
+                         VK_IMAGE_LAYOUT_GENERAL, region, VK_FILTER_LINEAR);
         const std::array after{
             Barrier(frame, VK_ACCESS_TRANSFER_READ_BIT,
                     VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -374,13 +402,20 @@ VkSemaphore NvOpticalFlow::Run(Scheduler& scheduler, VkImage frame) {
 }
 
 void NvOpticalFlow::RecordFlowCopy(vk::CommandBuffer cmdbuf) const {
-    const VkImage destination = *flow_copies[last];
-    const std::array before{
-        Barrier(destination, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL),
-    };
+    const size_t count = backward ? 2 : 1;
+    std::array<VkImageMemoryBarrier, 2> before{};
+    std::array<VkImageMemoryBarrier, 2> after{};
+    for (size_t direction = 0; direction < count; ++direction) {
+        const VkImage destination = *flow_copies[direction * 2 + last];
+        before[direction] = Barrier(destination, VK_ACCESS_SHADER_READ_BIT,
+                                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                                    VK_IMAGE_LAYOUT_GENERAL);
+        after[direction] = Barrier(destination, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                   VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                                   VK_IMAGE_LAYOUT_GENERAL);
+    }
     cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                           0, {}, {}, before);
+                           0, {}, {}, std::span{before.data(), count});
     const VkImageCopy region{
         .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
         .srcOffset = {0, 0, 0},
@@ -388,14 +423,12 @@ void NvOpticalFlow::RecordFlowCopy(vk::CommandBuffer cmdbuf) const {
         .dstOffset = {0, 0, 0},
         .extent = {flow_extent.width, flow_extent.height, 1},
     };
-    cmdbuf.CopyImage(*flows[last], VK_IMAGE_LAYOUT_GENERAL, destination, VK_IMAGE_LAYOUT_GENERAL,
-                     region);
-    const std::array after{
-        Barrier(destination, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL),
-    };
+    for (size_t direction = 0; direction < count; ++direction) {
+        cmdbuf.CopyImage(*flows[direction * 2 + last], VK_IMAGE_LAYOUT_GENERAL,
+                         *flow_copies[direction * 2 + last], VK_IMAGE_LAYOUT_GENERAL, region);
+    }
     cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                           0, {}, {}, after);
+                           0, {}, {}, std::span{after.data(), count});
 }
 
 } // namespace Vulkan

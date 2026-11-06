@@ -172,6 +172,8 @@ struct InterpPushConstants {
     // Converts the sampled motion to texture coordinates.
     float motion_scale_x;
     float motion_scale_y;
+    // 1 when BackwardMotion holds the reverse flow, on the previous frame's pixels.
+    float has_backward;
 };
 
 Fsr3FrameGen::Fsr3FrameGen(const Device& device, MemoryAllocator& memory_allocator,
@@ -293,6 +295,7 @@ void Fsr3FrameGen::CreatePipelines(const Device& device) {
         VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
     };
 
     m_interp_desc_layout = device.GetLogical().CreateDescriptorSetLayout(VkDescriptorSetLayoutCreateInfo{
@@ -440,7 +443,7 @@ void Fsr3FrameGen::Generate(const Device& device, Scheduler& scheduler, VkImage 
     if (!m_interp_pool) {
         m_interp_pool.emplace(device, scheduler);
         m_interp_allocator = m_interp_pool->Allocator(device, scheduler, *m_interp_desc_layout,
-                                                      DescriptorBankInfo{.textures = 3, .images = 1});
+                                                      DescriptorBankInfo{.textures = 4, .images = 1});
     }
     if (m_nvof && !m_flow_copied) {
         // In the submission that waits for the optical flow (the first after Process).
@@ -451,12 +454,15 @@ void Fsr3FrameGen::Generate(const Device& device, Scheduler& scheduler, VkImage 
     }
     const VkDescriptorSet set = m_interp_allocator.Commit();
     std::vector<VkDescriptorImageInfo> image_infos;
-    image_infos.reserve(4);
+    image_infos.reserve(5);
     std::vector<VkWriteDescriptorSet> updates{
         CreateWriteDescriptorSet(image_infos, *m_linear_sampler, *m_current_view, set, 0),
         CreateWriteDescriptorSet(image_infos, *m_linear_sampler, *m_history_view, set, 1),
         m_nvof ? CreateWriteDescriptorSet(image_infos, *m_nearest_sampler, m_nvof->FlowView(), set, 2)
                : CreateWriteDescriptorSet(image_infos, *m_linear_sampler, *m_motion_view, set, 2),
+        m_nvof ? CreateWriteDescriptorSet(image_infos, *m_nearest_sampler,
+                                          m_nvof->BackwardFlowView(), set, 4)
+               : CreateWriteDescriptorSet(image_infos, *m_linear_sampler, *m_motion_view, set, 4),
     };
 
     const VkDescriptorImageInfo dest_info{
@@ -484,12 +490,13 @@ void Fsr3FrameGen::Generate(const Device& device, Scheduler& scheduler, VkImage 
         .blend_factor = blend_factor,
         .flow_scale = flow_scale,
         // The hardware flow is in pixels, the shader's in flow texels.
-        .motion_scale_x = m_nvof ? NvofMotionScale() * NvOpticalFlow::FlowToPixels /
-                                       static_cast<float>(m_extent.width)
+        .motion_scale_x = m_nvof ? NvofMotionScale() * NvOpticalFlow::FlowToPixels *
+                                       m_nvof->InputScaleX() / static_cast<float>(m_extent.width)
                                  : 1.0f / static_cast<float>(m_flow_extent.width),
-        .motion_scale_y = m_nvof ? NvofMotionScale() * NvOpticalFlow::FlowToPixels /
-                                       static_cast<float>(m_extent.height)
+        .motion_scale_y = m_nvof ? NvofMotionScale() * NvOpticalFlow::FlowToPixels *
+                                       m_nvof->InputScaleY() / static_cast<float>(m_extent.height)
                                  : 1.0f / static_cast<float>(m_flow_extent.height),
+        .has_backward = m_nvof && m_nvof->HasBackwardFlow() ? 1.0f : 0.0f,
     };
 
     scheduler.Record([this, constants, out_w, out_h, set, destination](vk::CommandBuffer cmdbuf) {

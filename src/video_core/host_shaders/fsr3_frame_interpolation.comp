@@ -6,6 +6,8 @@ layout(binding = 0) uniform sampler2D CurrentFrame;
 layout(binding = 1) uniform sampler2D PreviousFrame;
 layout(binding = 2) uniform sampler2D MotionVectors;
 layout(binding = 3, rgba8) uniform writeonly image2D OutGeneratedFrame;
+// The reverse flow (previous frame to current, on the previous frame's pixels) when has_backward.
+layout(binding = 4) uniform sampler2D BackwardMotion;
 
 layout(push_constant) uniform PushConstants {
     vec2 inv_render_size;
@@ -13,6 +15,7 @@ layout(push_constant) uniform PushConstants {
     float blend_factor; // timestamp between 0.0 and 1.0
     float flow_scale;
     vec2 motion_scale; // sampled motion to texture coordinates
+    float has_backward;
 };
 
 // ΓöÇΓöÇ Optimized 3├ù3 motion vector median using textureGather ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
@@ -80,10 +83,15 @@ float staticWeight(vec2 uv) {
     return 1.0 - smoothstep(0.01, 0.03, frameChange(uv));
 }
 
-// 1 where the flow at `sample_uv` matches `motion` (both in texture coordinates), falling to 0
-// beyond a few pixels of difference.
-float motionConsistency(vec2 sample_uv, vec2 motion) {
-    vec2 there = texture(MotionVectors, sample_uv).xy * motion_scale;
+// The current-to-previous motion of the previous frame's content at `uv`.
+vec2 previousFrameMotion(vec2 uv) {
+    return has_backward > 0.5 ? -texture(BackwardMotion, uv).xy * motion_scale
+                              : texture(MotionVectors, uv).xy * motion_scale;
+}
+
+// 1 where `there` (the motion of what a sample lands on) matches `motion` (both in texture
+// coordinates), falling to 0 beyond a few pixels of difference.
+float motionConsistency(vec2 there, vec2 motion) {
     float difference = length((there - motion) * render_size);
     // Flow is noisier for larger motions.
     float tolerance = 1.0 + 0.04 * length(motion * render_size);
@@ -122,16 +130,21 @@ void main() {
     // object's edge the median mixes its motion with the background's (a halo around a figure the
     // camera follows); the candidate under which both frames agree belongs to this pixel.
     vec2 motion_texel = 1.0 / vec2(textureSize(MotionVectors, 0));
-    vec2 candidates[6] = vec2[](
-        sampleMotionMedian(uv), texture(MotionVectors, uv).xy,
-        texture(MotionVectors, uv + vec2(-2.0, 0.0) * motion_texel).xy,
-        texture(MotionVectors, uv + vec2(2.0, 0.0) * motion_texel).xy,
-        texture(MotionVectors, uv + vec2(0.0, -2.0) * motion_texel).xy,
-        texture(MotionVectors, uv + vec2(0.0, 2.0) * motion_texel).xy);
-    vec2 motion = candidates[0] * motion_scale;
+    // With the reverse flow, the previous frame's motions here are candidates too: where the
+    // background appears from behind something, only that frame has it.
+    vec2 candidates[9] = vec2[](
+        sampleMotionMedian(uv) * motion_scale, texture(MotionVectors, uv).xy * motion_scale,
+        texture(MotionVectors, uv + vec2(-2.0, 0.0) * motion_texel).xy * motion_scale,
+        texture(MotionVectors, uv + vec2(2.0, 0.0) * motion_texel).xy * motion_scale,
+        texture(MotionVectors, uv + vec2(0.0, -2.0) * motion_texel).xy * motion_scale,
+        texture(MotionVectors, uv + vec2(0.0, 2.0) * motion_texel).xy * motion_scale,
+        previousFrameMotion(uv),
+        previousFrameMotion(uv + vec2(-2.0, 0.0) * motion_texel),
+        previousFrameMotion(uv + vec2(2.0, 0.0) * motion_texel));
+    vec2 motion = candidates[0];
     float best_error = matchError(uv, motion);
-    for (int i = 1; i < 6; ++i) {
-        vec2 candidate = candidates[i] * motion_scale;
+    for (int i = 1; i < 9; ++i) {
+        vec2 candidate = candidates[i];
         float error = matchError(uv, candidate);
         if (error < best_error * 0.9) {
             best_error = error;
@@ -172,8 +185,11 @@ void main() {
     // A sample is only trusted where the flow moves the way this pixel does: beside something
     // the camera follows, the background's motion makes one sample land on it (still on screen)
     // and blending that in leaves a copy of it half the motion away on each side.
-    float forward_consistent = motionConsistency(forward_uv, motion);
-    float backward_consistent = motionConsistency(backward_uv, motion);
+    // Each sample is checked against its own frame's flow: the previous frame's content where
+    // the previous sample lands, the current frame's where the current one does.
+    float forward_consistent = motionConsistency(previousFrameMotion(forward_uv), motion);
+    float backward_consistent =
+        motionConsistency(texture(MotionVectors, backward_uv).xy * motion_scale, motion);
     float forward_weight = (1.0 - alpha) * (1.0 - moving * staticWeight(forward_uv)) *
                            forward_inside * (forward_consistent + 0.01);
     float backward_weight = alpha * (1.0 - moving * staticWeight(backward_uv)) *
