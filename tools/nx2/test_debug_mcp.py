@@ -114,6 +114,9 @@ class AdapterTest(unittest.TestCase):
         # A null where a number belongs answers with a tool error; the adapter keeps serving.
         self.assertTrue(self.call("frame_times", {"seconds": None})["isError"])
         self.assertFalse(self.call("frame_times", {})["isError"])
+        self.assertEqual(debug_mcp.default_timeout("frame_times", {}), 6)
+        self.assertEqual(debug_mcp.default_timeout("frame_times", {"seconds": 59.5}), 61)
+        self.assertEqual(debug_mcp.default_timeout("capture_frame", {}), 120)
 
     def test_status_is_forwarded(self):
         result = self.call("status", {"fps_window_ms": 0})

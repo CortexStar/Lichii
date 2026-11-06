@@ -14,6 +14,7 @@ be restarted between calls: the adapter reconnects on demand.
 import argparse
 import base64
 import json
+import math
 import os
 import socket
 import subprocess
@@ -310,6 +311,8 @@ def default_timeout(name, params):
     """The emulator's own timeout_s default, so the adapter waits at least as long."""
     if name == "capture_frame":
         return 120
+    if name == "frame_times":
+        return math.ceil(params.get("seconds", 5)) + 1
     if name == "sample":
         return int(params.get("seconds", 10)) + 90
     if name in ("input", "input_sequence"):
@@ -336,9 +339,6 @@ class Adapter:
         params = dict(arguments)
         index = params.pop("index", False)
         timeout = max(int(params.get("timeout_s", default_timeout(name, params))), 1) + 30
-        timeout = max(int(params.get("timeout_s", 120 if name == "capture_frame" else 5)), 1) + 30
-        if name == "frame_times":
-            timeout = int(params.get("seconds", 5)) + 31
         result = self.emulator.call(name, params, timeout)
         if name == "screenshot":
             png = result.pop("png_base64", None)
