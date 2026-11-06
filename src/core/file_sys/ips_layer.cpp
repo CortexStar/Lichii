@@ -171,8 +171,18 @@ static bool IsPatchRecord(std::string_view line) {
         return false;
     }
     const auto value = line.substr(value_start);
-    return value[0] == '"' || value[0] == '\'' ||
-           value.find_first_not_of("0123456789abcdefABCDEF \t") == std::string_view::npos;
+    if (value[0] == '"' || value[0] == '\'') {
+        // The closing quote must end the line, as comments are already stripped.
+        for (size_t i = 1; i < value.size(); ++i) {
+            if (value[i] == '\\') {
+                ++i;
+            } else if (value[i] == value[0]) {
+                return i + 1 == value.size();
+            }
+        }
+        return false;
+    }
+    return value.find_first_not_of("0123456789abcdefABCDEF \t") == std::string_view::npos;
 }
 
 void IPSwitchCompiler::Parse(std::span<u8 const> bytes) {
