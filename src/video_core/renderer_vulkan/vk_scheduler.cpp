@@ -45,6 +45,20 @@ std::atomic<u64> g_profile_finish_ns{};
 std::atomic<u64> g_profile_window_start{};
 std::mutex g_profile_end_mutex;
 std::map<std::string, u64> g_profile_ends;
+std::map<std::string, std::pair<u64, u64>> g_profile_finish_sites;
+
+void CountFinish(const char* file, u32 line, u64 ns) {
+    std::string_view name{file};
+    if (const auto slash = name.find_last_of('/'); slash != std::string_view::npos) {
+        name.remove_prefix(slash + 1);
+    }
+    std::scoped_lock lock{g_profile_end_mutex};
+    const char* reason = VideoCommon::Nx2Profile::t_finish_reason;
+    auto& site = g_profile_finish_sites[fmt::format("{}:{} ({})", name, line,
+                                                    reason ? reason : "untagged")];
+    ++site.first;
+    site.second += ns;
+}
 
 void CountRenderPassEnd(const char* file, u32 line) {
     if (!VideoCommon::Nx2Profile::Enabled()) {
@@ -78,12 +92,23 @@ void ReportSubmitCounts() {
              static_cast<double>(g_profile_finishes.exchange(0)) / seconds,
              static_cast<double>(g_profile_finish_ns.exchange(0)) / 1e6 / seconds);
     std::vector<std::pair<u64, std::string>> ends;
+    std::vector<std::tuple<u64, u64, std::string>> finishes;
     {
         std::scoped_lock lock{g_profile_end_mutex};
         for (const auto& [site, count] : g_profile_ends) {
             ends.emplace_back(count, site);
         }
         g_profile_ends.clear();
+        for (const auto& [site, value] : g_profile_finish_sites) {
+            finishes.emplace_back(value.second, value.first, site);
+        }
+        g_profile_finish_sites.clear();
+    }
+    std::sort(finishes.rbegin(), finishes.rend());
+    for (size_t i = 0; i < finishes.size() && i < 8; ++i) {
+        LOG_INFO(Render_Vulkan, "Finish waits {:.1f} ms ({:.0f}/s) at {}",
+                 static_cast<double>(std::get<0>(finishes[i])) / 1e6 / seconds,
+                 static_cast<double>(std::get<1>(finishes[i])) / seconds, std::get<2>(finishes[i]));
     }
     std::sort(ends.rbegin(), ends.rend());
     for (size_t i = 0; i < ends.size() && i < 16; ++i) {
@@ -255,8 +280,9 @@ void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
     flush_pending = false;
     if (profile) {
         g_profile_finishes.fetch_add(1, std::memory_order_relaxed);
-        g_profile_finish_ns.fetch_add(VideoCommon::Nx2Profile::Now() - start,
-                                      std::memory_order_relaxed);
+        const u64 elapsed = VideoCommon::Nx2Profile::Now() - start;
+        g_profile_finish_ns.fetch_add(elapsed, std::memory_order_relaxed);
+        CountFinish(location.file_name(), location.line(), elapsed);
     }
 }
 

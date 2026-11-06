@@ -41,6 +41,7 @@
 #include "video_core/nx2.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
+#include "video_core/nx2_profile.h"
 
 namespace Tegra {
 
@@ -229,6 +230,10 @@ struct GPU::Impl {
         return pending_maps.Overlaps(gpu_addr, size);
     }
 
+    void WaitForQueuedWork() {
+        gpu_thread.WaitForQueuedWork(is_async);
+    }
+
     /// Notify rasterizer that any caches of the specified region should be flushed to Switch memory
     void FlushRegion(DAddr addr, u64 size) {
         gpu_thread.FlushRegion(addr, size, is_async);
@@ -249,6 +254,7 @@ struct GPU::Impl {
         }
         const u64 fence = RequestSyncOperation([this, raster_area]() {
             // Apply collected guest writes before downloading GPU data over guest memory.
+            VideoCommon::Nx2Profile::FinishReason reason{"CPU read trap"};
             InvalidateGPUCache();
             renderer->ReadRasterizer()->FlushRegion(raster_area.start_address, raster_area.end_address - raster_area.start_address);
         });
@@ -263,6 +269,7 @@ struct GPU::Impl {
             VideoCore::RasterizerInterface* rasterizer = renderer->ReadRasterizer();
             if (!rasterizer->TryCacheInvalidation(addr, size)) {
                 const u64 fence = RequestSyncOperation([rasterizer, addr, size] {
+                    VideoCommon::Nx2Profile::FinishReason reason{"InvalidateRegion preserve"};
                     rasterizer->FlushRegion(addr, size, VideoCommon::CacheType::BufferCache);
                     rasterizer->OnCacheInvalidation(addr, size);
                 });
@@ -595,6 +602,10 @@ void GPU::MapInOrder(GPUVAddr gpu_addr, u64 size, std::function<void()>&& func) 
 
 bool GPU::IsMapPending(GPUVAddr gpu_addr, u64 size) const {
     return impl->IsMapPending(gpu_addr, size);
+}
+
+void GPU::WaitForQueuedWork() {
+    impl->WaitForQueuedWork();
 }
 
 void GPU::InvalidateRegion(DAddr addr, u64 size, bool preserve_gpu_writes) {

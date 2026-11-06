@@ -5,6 +5,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #define VMA_IMPLEMENTATION
+#include <cxxabi.h>
+#include <exception>
+#include <typeinfo>
+#include <android/log.h>
 #include "video_core/vulkan_common/vma.h"
 
 #include <codecvt>
@@ -1734,8 +1738,36 @@ jint Java_org_yuzu_yuzu_1emu_NativeLibrary_loadAmiibo(JNIEnv* env, jobject jobj,
     return static_cast<jint>(info);
 }
 
-extern "C" JNIEXPORT void JNICALL
+extern "C"
+namespace {
+[[noreturn]] void LogTerminateReason() {
+    std::string reason = "std::terminate without an active exception";
+    if (const std::exception_ptr current = std::current_exception()) {
+        const std::type_info* type = abi::__cxa_current_exception_type();
+        const char* type_name = type != nullptr ? type->name() : "?";
+        int status = 0;
+        char* demangled = abi::__cxa_demangle(type_name, nullptr, nullptr, &status);
+        const std::string name = status == 0 && demangled != nullptr ? demangled : type_name;
+        std::free(demangled);
+        try {
+            std::rethrow_exception(current);
+        } catch (const std::exception& e) {
+            reason = fmt::format("uncaught {}: {}", name, e.what());
+        } catch (...) {
+            reason = fmt::format("uncaught {}", name);
+        }
+    }
+    __android_log_print(ANDROID_LOG_FATAL, "YuzuNative", "%s", reason.c_str());
+    LOG_CRITICAL(Frontend, "{}", reason);
+    Common::Log::Stop();
+    std::abort();
+}
+} // namespace
+
+JNIEXPORT void JNICALL
 Java_org_yuzu_yuzu_1emu_NativeLibrary_initJvm(JNIEnv *env, jclass clazz) {
+    std::set_terminate(LogTerminateReason);
+
     JavaVM *vm;
     if (env->GetJavaVM(&vm) != JNI_OK)
         return;

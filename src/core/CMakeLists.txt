@@ -7,6 +7,9 @@
 add_library(core STATIC
     arm/arm_interface.cpp
     arm/arm_interface.h
+    arm/guest_hooks.cpp
+    arm/guest_hooks.h
+    arm/guest_hooks_mkw.cpp
     arm/debug.cpp
     arm/debug.h
     arm/exclusive_monitor.cpp

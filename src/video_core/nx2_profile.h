@@ -147,6 +147,23 @@ private:
     u64 parent_child_ns{};
 };
 
+inline thread_local const char* t_finish_reason = nullptr;
+
+class FinishReason {
+public:
+    explicit FinishReason(const char* reason) : previous{t_finish_reason} {
+        t_finish_reason = reason;
+    }
+    ~FinishReason() {
+        t_finish_reason = previous;
+    }
+    FinishReason(const FinishReason&) = delete;
+    FinishReason& operator=(const FinishReason&) = delete;
+
+private:
+    const char* previous;
+};
+
 /// Amounts counted on the GPU thread, logged per second with the zones.
 enum class Counter : u32 {
     DownloadBytes,  ///< Buffer data copied back from the host GPU at fences

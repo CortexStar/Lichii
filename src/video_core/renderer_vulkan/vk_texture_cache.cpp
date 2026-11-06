@@ -353,7 +353,7 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
     if (forced != 0) {
         return forced;
     }
-    return device.GetDeviceLocalMemory() < (u64{7} << 30) ? (u64{256} << 20) : (u64{512} << 20);
+    return u64{256} << 20;
 }
 
 // The host shape of an image whose decoded copy would not fit in VRAM: a GPU-decoded ASTC array
@@ -388,6 +388,17 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
     LOG_WARNING(Render_Vulkan, "{}x{}x{} ASTC image would be {} MiB decoded; keeping mip levels {}+ ({}x{})",
                 info.size.width, info.size.height, info.resources.layers, decoded_bytes(0) >> 20,
                 level_offset, host.size.width, host.size.height);
+    return host;
+}
+
+[[nodiscard]] ImageInfo LevelOffsetInfo(const ImageInfo& info, u32 level_offset) {
+    if (level_offset == 0) {
+        return info;
+    }
+    ImageInfo host = info;
+    host.size.width = (std::max)(info.size.width >> level_offset, 1U);
+    host.size.height = (std::max)(info.size.height >> level_offset, 1U);
+    host.resources.levels -= static_cast<s32>(level_offset);
     return host;
 }
 
@@ -487,6 +498,66 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
         }
     }
     return allocator.CreateImage(image_ci);
+}
+
+thread_local bool g_image_trimmed_for_memory = false;
+
+[[nodiscard]] vk::Image MakeHostImage(const Device& device, const MemoryAllocator& allocator,
+                                      const ImageInfo& info, u32& level_offset,
+                                      std::span<const VkFormat> view_formats,
+                                      std::optional<VkFormat> format_override, bool unbacked,
+                                      bool aliased) {
+    g_image_trimmed_for_memory = false;
+    try {
+        return MakeImage(device, allocator, LevelOffsetInfo(info, level_offset), view_formats,
+                         format_override, unbacked, aliased);
+    } catch (const vk::Exception& e) {
+        if (e.GetResult() != VK_ERROR_OUT_OF_DEVICE_MEMORY || info.type != ImageType::e2D ||
+            info.resources.levels <= 1) {
+            throw;
+        }
+    }
+    constexpr u64 TrimmedForMemoryLimit = u64{256} << 20;
+    const u32 block_w = VideoCore::Surface::DefaultBlockWidth(info.format);
+    const u32 block_h = VideoCore::Surface::DefaultBlockHeight(info.format);
+    const u64 block_bytes = VideoCore::Surface::BytesPerBlock(info.format);
+    const auto host_bytes = [&](u32 skip) {
+        u64 bytes = 0;
+        for (s32 level = static_cast<s32>(skip); level < info.resources.levels; ++level) {
+            const u64 w = (std::max)(info.size.width >> level, 1U);
+            const u64 h = (std::max)(info.size.height >> level, 1U);
+            bytes += ((w + block_w - 1) / block_w) * ((h + block_h - 1) / block_h) * block_bytes;
+        }
+        return bytes * static_cast<u64>(info.resources.layers);
+    };
+    const u32 first_offset = level_offset;
+    u32 offset = (std::max)(level_offset, 1U);
+    while (offset + 1 < static_cast<u32>(info.resources.levels) &&
+           host_bytes(offset) > TrimmedForMemoryLimit) {
+        ++offset;
+    }
+    for (; offset < static_cast<u32>(info.resources.levels); ++offset) {
+        const ImageInfo host = LevelOffsetInfo(info, offset);
+        try {
+            vk::Image image = MakeImage(device, allocator, host, view_formats, format_override,
+                                        true, false);
+            LOG_WARNING(Render_Vulkan,
+                        "{}x{}x{} image ({} levels, format {}, {} MiB) does not fit this device; "
+                        "keeping mip levels {}+ ({}x{}, {} MiB) with no contents",
+                        info.size.width, info.size.height, info.resources.layers,
+                        info.resources.levels, static_cast<u32>(info.format),
+                        host_bytes(first_offset) >> 20, offset, host.size.width,
+                        host.size.height, host_bytes(offset) >> 20);
+            level_offset = offset;
+            g_image_trimmed_for_memory = true;
+            return image;
+        } catch (const vk::Exception& e) {
+            if (e.GetResult() != VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+                throw;
+            }
+        }
+    }
+    throw vk::Exception(VK_ERROR_OUT_OF_DEVICE_MEMORY);
 }
 
 [[nodiscard]] vk::ImageView MakeStorageView(const vk::Device& device, u32 level, VkImage image,
@@ -2887,8 +2958,10 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
              VAddr cpu_addr_)
     : VideoCommon::ImageBase(info_, gpu_addr_, cpu_addr_), scheduler{&runtime_.scheduler},
       runtime{&runtime_},
-      original_image(MakeImage(runtime_.device, runtime_.memory_allocator,
-                               TrimmedHostInfo(runtime_.device, info, host_level_offset),
+      original_image(MakeHostImage(runtime_.device, runtime_.memory_allocator, info,
+                               (static_cast<void>(TrimmedHostInfo(runtime_.device, info,
+                                                                  host_level_offset)),
+                                host_level_offset),
                                IsHugeAstcArray(runtime_.device, info)
                                    ? std::span<const VkFormat>{HugeAstcViewFormats}
                                : IsOpaqueBc1Astc(runtime_.device, info)
@@ -2901,9 +2974,11 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
                                UsesSparseTiles(runtime_.device, info, gpu_addr_) &&
                                    SparseTilesModeOf(runtime_.device) == SparseTilesMode::Aliased)),
       aspect_mask(ImageAspectMask(info.format)) {
-    if (original_image.IsUnbacked()) {
+    if (g_image_trimmed_for_memory) {
         flags |= VideoCommon::ImageFlagBits::Unbacked;
-        const ImageInfo host_info = TrimmedHostInfo(runtime_.device, info, host_level_offset);
+    } else if (original_image.IsUnbacked()) {
+        flags |= VideoCommon::ImageFlagBits::Unbacked;
+        const ImageInfo host_info = LevelOffsetInfo(info, host_level_offset);
         const u64 texels = u64{host_info.size.width} * host_info.size.height *
                            host_info.size.depth * static_cast<u64>(host_info.resources.layers);
         if (UsesSparseLayers(runtime_.device, info, gpu_addr_) && InitSparseLayers()) {
@@ -3400,8 +3475,7 @@ bool Image::InitSparseLayers() {
     s.allocator = &runtime->memory_allocator;
     s.requirements = device.GetLogical().GetImageMemoryRequirements(handle);
     s.sparse = *it;
-    u32 offset = host_level_offset;
-    const ImageInfo host = TrimmedHostInfo(device, info, offset);
+    const ImageInfo host = LevelOffsetInfo(info, host_level_offset);
     s.width = host.size.width;
     s.height = host.size.height;
     s.levels = static_cast<u32>(host.resources.levels);

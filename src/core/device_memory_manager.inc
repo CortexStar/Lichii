@@ -219,6 +219,10 @@ void DeviceMemoryManager<Traits>::HintCold(DAddr address, size_t size) {
         u64 size;
     };
     std::vector<Run> runs;
+    if (address >= device_as_size) {
+        return;
+    }
+    size = (std::min)(size, static_cast<size_t>(device_as_size - address));
     const size_t page_end = Common::DivCeil(address + size, Memory::YUZU_PAGESIZE);
     for (size_t page = address >> Memory::YUZU_PAGEBITS; page < page_end; ++page) {
         const u32 compressed = tracked_entries[page].compressed_physical_ptr;

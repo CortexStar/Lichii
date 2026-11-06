@@ -13,6 +13,7 @@
 #include "core/arm/dynarmic/arm_dynarmic.h"
 #include "core/arm/dynarmic/arm_dynarmic_64.h"
 #include "core/arm/dynarmic/dynarmic_exclusive_monitor.h"
+#include "core/arm/guest_hooks.h"
 #include "core/arm/dynarmic/window_trace.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/k_process.h"
@@ -63,6 +64,9 @@ std::optional<u32> DynarmicCallbacks64::MemoryReadCode(u64 vaddr) {
         last_code_addr = aligned_vaddr;
     }
     const u32 instruction = cached_code_page.inst[(vaddr & Core::Memory::YUZU_PAGEMASK) / sizeof(u32)];
+    if (const auto hooked = GuestHooks::InstructionFor(m_process, vaddr)) {
+        return *hooked;
+    }
     if (WindowTrace::Enabled() && m_process->GetProgramId() == WindowTrace::ProgramId) {
         if (!m_window_trace) {
             m_window_trace = WindowTrace::sessions.Find(m_process);
@@ -134,6 +138,25 @@ void DynarmicCallbacks64::InstructionCacheOperationRaised(Dynarmic::A64::Instruc
 }
 
 void DynarmicCallbacks64::ExceptionRaised(u64 pc, Dynarmic::A64::Exception exception) {
+    if (exception == Dynarmic::A64::Exception::Breakpoint) {
+        class JitRegisters final : public GuestHooks::Registers {
+        public:
+            explicit JitRegisters(Dynarmic::A64::Jit& jit_) : jit{jit_} {}
+            u64 Get(u32 index) const override { return jit.GetRegister(index); }
+            void Set(u32 index, u64 value) override { jit.SetRegister(index, value); }
+            u64 GetSP() const override { return jit.GetSP(); }
+            void SetSP(u64 value) override { jit.SetSP(value); }
+            u64 GetPC() const override { return jit.GetPC(); }
+            void SetPC(u64 value) override { jit.SetPC(value); }
+
+        private:
+            Dynarmic::A64::Jit& jit;
+        };
+        JitRegisters registers{*m_parent.m_jit};
+        if (GuestHooks::RunNative(m_process, pc, registers, m_memory)) {
+            return;
+        }
+    }
     if (m_window_trace && exception == Dynarmic::A64::Exception::Breakpoint) {
         const auto point = WindowTrace::Identify(m_window_trace->base, pc, m_memory.Read32(pc));
         if (point != WindowTrace::Point::None) {
@@ -456,6 +479,12 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
         config.fastmem_pointer = std::nullopt;
         config.fastmem_exclusive_access = false;
     }
+    static const bool follow_branches = [] {
+        const char* value = std::getenv("EDEN_NX2_FOLLOW_BRANCHES");
+        return value == nullptr || value[0] != '0';
+    }();
+    config.follow_branches =
+        follow_branches && config.HasOptimization(Dynarmic::OptimizationFlag::BlockLinking);
     m_jit.emplace(config);
 }
 

@@ -12,6 +12,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <boost/container/container_fwd.hpp>
 #include <boost/container/static_vector.hpp>
@@ -80,6 +82,12 @@ public:
     /// Sets the end location for this basic block.
     inline void SetEndLocation(const LocationDescriptor& descriptor) noexcept {
         end_location = descriptor;
+    }
+    inline const std::vector<std::pair<u64, u64>>& CoveredRanges() const noexcept {
+        return covered_ranges;
+    }
+    inline void SetCoveredRanges(std::vector<std::pair<u64, u64>> ranges) noexcept {
+        covered_ranges = std::move(ranges);
     }
 
     /// Gets the condition required to pass in order to execute this block.
@@ -153,6 +161,7 @@ public:
     LocationDescriptor location;
     /// Description of the end location of this block
     LocationDescriptor end_location;
+    std::vector<std::pair<u64, u64>> covered_ranges;
     /// Conditional to pass in order to execute this block
     Cond cond = Cond::AL;
     /// Terminal instruction of this block.

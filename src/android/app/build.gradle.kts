@@ -43,6 +43,11 @@ android {
 
     buildFeatures {
         viewBinding = true
+        compose = true
+    }
+
+    composeOptions {
+        kotlinCompilerExtensionVersion = "1.5.14"
     }
 
     compileOptions {
@@ -161,7 +166,7 @@ android {
                 "proguard-rules.pro"
             )
 
-            manifestPlaceholders += mapOf("appNameSuffix" to " Debug Release")
+            manifestPlaceholders += mapOf("appNameSuffix" to "")
 
             versionNameSuffix = "-relWithDebInfo"
             applicationIdSuffix = ".relWithDebInfo"
@@ -190,8 +195,8 @@ android {
             isDefault = true
             minSdk = 33
 
-            manifestPlaceholders += mapOf("appNameBase" to "Eden")
-            resValue("string", "app_name_suffixed", "Eden")
+            manifestPlaceholders += mapOf("appNameBase" to "Lichii")
+            resValue("string", "app_name_suffixed", "Lichii")
 
             ndk {
                 abiFilters += listOf("arm64-v8a")
@@ -265,12 +270,12 @@ android {
     }
 
     productFlavors.all {
-        val currentName = manifestPlaceholders["appNameBase"] as? String ?: "Eden"
+        val currentName = manifestPlaceholders["appNameBase"] as? String ?: "Lichii"
         val suffix = if (isNightly) " Nightly" else ""
 
         // apply nightly suffix I/A
         resValue("string", "app_name_suffixed", "$currentName$suffix")
-        resValue("string", "app_name", "Eden$suffix")
+        resValue("string", "app_name", "Lichii$suffix")
     }
 
     sourceSets {
@@ -353,6 +358,13 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     implementation("androidx.compose.ui:ui-graphics-android:1.7.8")
     implementation("androidx.compose.ui:ui-text-android:1.7.8")
+
+    implementation(platform("androidx.compose:compose-bom:2025.02.00"))
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.foundation:foundation")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("net.swiftzer.semver:semver:2.0.0")
 }
 

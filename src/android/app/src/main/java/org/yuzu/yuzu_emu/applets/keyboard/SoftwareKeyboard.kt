@@ -66,7 +66,9 @@ object SoftwareKeyboard {
 
     @JvmStatic
     fun executeNormal(config: KeyboardConfig): KeyboardData {
-        NativeLibrary.sEmulationActivity.get()!!.runOnUiThread { executeNormalImpl(config) }
+        val activity = NativeLibrary.sEmulationActivity.get()
+            ?: return KeyboardData(SwkbdResult.Cancel.ordinal, "")
+        activity.runOnUiThread { executeNormalImpl(config) }
         synchronized(dataLock) {
             dataLock.wait()
         }
@@ -75,7 +77,8 @@ object SoftwareKeyboard {
 
     @JvmStatic
     fun executeInline(config: KeyboardConfig) {
-        NativeLibrary.sEmulationActivity.get()!!.runOnUiThread { executeInlineImpl(config) }
+        val activity = NativeLibrary.sEmulationActivity.get() ?: return
+        activity.runOnUiThread { executeInlineImpl(config) }
     }
 
     // Corresponds to Service::AM::Applets::SwkbdType

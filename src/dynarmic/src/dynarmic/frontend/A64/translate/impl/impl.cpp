@@ -30,6 +30,23 @@ bool TranslatorVisitor::UnallocatedEncoding() {
     return RaiseException(Exception::UnallocatedEncoding);
 }
 
+bool TranslatorVisitor::CanFollow(u64 target) const {
+    if (!options.follow_branches || ir.current_location->SingleStepping() ||
+        instructions + 1 >= options.follow_max_instructions) {
+        return false;
+    }
+    const u64 pc = ir.PC();
+    if (target >= segment_start && target <= pc) {
+        return false;
+    }
+    for (const auto& [start, end] : segments) {
+        if (target >= start && target < end) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool TranslatorVisitor::RaiseException(Exception exception) {
     ir.SetPC(ir.Imm64(ir.current_location->PC() + 4));
     ir.ExceptionRaised(exception);

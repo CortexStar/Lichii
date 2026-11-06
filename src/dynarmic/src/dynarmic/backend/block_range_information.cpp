@@ -40,6 +40,9 @@ template<typename P>
         }
         return false;
     });
+    if (!erase_locations.empty()) {
+        std::erase_if(ranges, [&](const Range& range) { return erase_locations.contains(range.location); });
+    }
     return erase_locations;
 }
 

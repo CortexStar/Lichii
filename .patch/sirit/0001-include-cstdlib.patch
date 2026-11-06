@@ -1,0 +1,21 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Lichii <noreply@lichii.local>
+Date: Fri, 6 Nov 2026 12:00:00 -0600
+Subject: [PATCH] Include <cstdlib> for std::abort
+
+libc++ (llvm-mingw) does not pull it in through the other headers.
+---
+ src/stream.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/stream.h b/src/stream.h
+--- a/src/stream.h
++++ b/src/stream.h
+@@ -13,6 +13,7 @@
+ #include <concepts>
+ #include <cstddef>
++#include <cstdlib>
+ #include <functional>
+ #include <string_view>
+ #include <unordered_map>
+ #include <variant>

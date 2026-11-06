@@ -137,6 +137,8 @@ public:
     /// Runs func on the GPU thread once the commands queued before it have been processed.
     void Run(std::function<void()>&& func, bool is_async, bool before_later_reads = false);
 
+    void WaitForQueuedWork(bool is_async);
+
     void NotifyShutdown();
 
 private:

@@ -38,6 +38,9 @@ struct TranslationOptions {
     /// If this is false, we treat the instruction as a NOP.
     /// If this is true, we emit an ExceptionRaised instruction.
     bool hook_hint_instructions = true;
+
+    bool follow_branches = false;
+    std::uint32_t follow_max_instructions = 128;
 };
 
 /**

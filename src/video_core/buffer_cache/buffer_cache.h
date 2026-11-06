@@ -227,6 +227,7 @@ void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu
             InlineMemoryImplementation(device_addr, size, tmp_buffer);
             return;
         }
+        VideoCommon::Nx2Profile::FinishReason reason{"WriteMemory keep-page"};
         DownloadMemory(page_begin, page_end - page_begin);
     }
     memory_tracker.MarkRegionAsCpuModified(device_addr, size);

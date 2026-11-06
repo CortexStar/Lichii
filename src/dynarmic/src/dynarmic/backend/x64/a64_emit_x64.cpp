@@ -159,8 +159,14 @@ finish_this_inst:
     const A64::LocationDescriptor descriptor{block.Location()};
     const A64::LocationDescriptor end_location{block.EndLocation()};
 
-    const auto range = boost::icl::discrete_interval<u64>::closed(descriptor.PC(), end_location.PC() - 1);
-    block_ranges.AddRange(range, descriptor);
+    if (block.CoveredRanges().empty()) {
+        const auto range = boost::icl::discrete_interval<u64>::closed(descriptor.PC(), end_location.PC() - 1);
+        block_ranges.AddRange(range, descriptor);
+    } else {
+        for (const auto& [start, end] : block.CoveredRanges()) {
+            block_ranges.AddRange(boost::icl::discrete_interval<u64>::closed(start, end - 1), descriptor);
+        }
+    }
 
     auto bdesc = RegisterBlock(descriptor, entrypoint, size);
     code.DisableWriting();

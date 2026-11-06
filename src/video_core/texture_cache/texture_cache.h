@@ -2547,6 +2547,21 @@ ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
                                      RelaxedOptions options) {
     std::optional<DAddr> cpu_addr = ImageCpuAddress(gpu_addr, CalculateGuestSizeInBytes(info));
     if (!cpu_addr) {
+        static u32 logged{};
+        if (logged++ < 64) {
+            const u32 guest_size = CalculateGuestSizeInBytes(info);
+            u32 mapped = 0;
+            while (mapped < guest_size && gpu_memory->GpuToCpuAddress(gpu_addr + mapped)) {
+                mapped += 0x1000;
+            }
+            LOG_WARNING(HW_GPU,
+                        "Image at {:#x} not fully mapped: {}x{}x{} format {} levels {} layers {} "
+                        "block {}x{}x{} guest size {:#x}, mapped {:#x}",
+                        gpu_addr, info.size.width, info.size.height, info.size.depth,
+                        static_cast<u32>(info.format), info.resources.levels,
+                        info.resources.layers, info.block.width, info.block.height,
+                        info.block.depth, guest_size, mapped);
+        }
         const DAddr fake_addr = ~(1ULL << 40ULL) + virtual_invalid_space;
         virtual_invalid_space += Common::AlignUp(CalculateGuestSizeInBytes(info), 32);
         cpu_addr = std::optional<DAddr>(fake_addr);

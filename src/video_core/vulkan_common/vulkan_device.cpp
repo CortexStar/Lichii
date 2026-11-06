@@ -532,7 +532,10 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         IsFormatSupported(VK_FORMAT_D24_UNORM_S8_UINT,
                           VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT, FormatType::Optimal);
 
-    supports_conditional_barriers = !is_intel_windows;
+    supports_conditional_barriers = !is_intel_windows || !is_integrated;
+    if (is_intel_windows && !is_integrated) {
+        LOG_INFO(Render_Vulkan, "Intel Arc: keeping barriers in conditional control flow");
+    }
 
     CollectPhysicalMemoryInfo();
     CollectToolingInfo();

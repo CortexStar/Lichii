@@ -416,6 +416,24 @@ NvResult nvhost_gpu::SubmitGPFIFOImpl(IoctlSubmitGpfifo& params, Tegra::CommandL
 
     auto& gpu = system.GPU();
 
+    if (g_nx2_driver && channel_state->memory_manager) {
+        bool unmapped = false;
+        for (const auto& entry : entries.command_lists) {
+            if (entry.size != 0 &&
+                !channel_state->memory_manager->GpuToCpuAddress(entry.addr, entry.size * sizeof(u32))) {
+                unmapped = true;
+                break;
+            }
+        }
+        if (unmapped) {
+            gpu.WaitForQueuedWork();
+            static std::atomic<u32> waits{};
+            if (const u32 n = waits.fetch_add(1, std::memory_order_relaxed); n < 4 || (n & 1023) == 0) {
+                LOG_INFO(Service_NVDRV, "nx2 submit waited for queued GPU maps ({} so far)", n + 1);
+            }
+        }
+    }
+
     std::unique_lock lock(channel_mutex);
 
     // Lazily initialize channel when address space is available
@@ -496,6 +514,43 @@ NvResult nvhost_gpu::SubmitGPFIFOImpl(IoctlSubmitGpfifo& params, Tegra::CommandL
     u32 increment{(flags.fence_increment.Value() != 0 ? 2 : 0) +
                   (flags.increment_value.Value() != 0 ? params.fence.value : 0)};
     params.fence.value = syncpoint_manager.IncrementSyncpointMaxExt(channel_syncpoint, increment);
+    if (g_nx2_driver) {
+        static const u32 log_limit = [] {
+            const char* value = std::getenv("EDEN_NX2_SUBMIT_LOG");
+            return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 8U;
+        }();
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < log_limit) {
+            std::string lists;
+            for (const auto& entry : entries.command_lists) {
+                lists += fmt::format(" [{:#x}+{:#x}]", entry.addr.Value(), entry.size.Value());
+            }
+            std::string head;
+            for (size_t i = 0; i < std::min<size_t>(entries.submitted_words.size(), 8); ++i) {
+                head += fmt::format(" {:08x}", entries.submitted_words[i].argument);
+            }
+            if (!entries.command_lists.empty() && channel_state->memory_manager) {
+                const u64 addr = entries.command_lists[0].addr.Value();
+                const u8* cpu_ptr = system.ApplicationMemory().GetPointer(addr);
+                const u8* gpu_ptr = channel_state->memory_manager->GetPointer(addr);
+                const auto device = channel_state->memory_manager->GpuToCpuAddress(addr);
+                u32 cpu_word = 0, gpu_word = 0;
+                if (cpu_ptr) std::memcpy(&cpu_word, cpu_ptr, 4);
+                if (gpu_ptr) std::memcpy(&gpu_word, gpu_ptr, 4);
+                LOG_INFO(Service_NVDRV,
+                         "nx2 submit view {:#x}: cpu ptr={} word={:08x}, gpu device={:#x} ptr={} "
+                         "word={:08x}",
+                         addr, fmt::ptr(cpu_ptr), cpu_word, device.value_or(0), fmt::ptr(gpu_ptr),
+                         gpu_word);
+            }
+            LOG_INFO(Service_NVDRV,
+                     "nx2 submit bind={} syncpoint={} flags={:#x} increment={} fence_max={} "
+                     "guest_value={} lists={}{} words={} head:{}",
+                     bind_id, channel_syncpoint, flags.raw, increment, params.fence.value,
+                     system.Host1x().GetSyncpointManager().GetGuestSyncpointValue(channel_syncpoint),
+                     entries.command_lists.size(), lists, entries.submitted_words.size(), head);
+        }
+    }
     gpu.PushGPUEntries(bind_id, std::move(entries));
 
     if (g_nx2_driver && !flags.fence_increment.Value() && increment > 0) {

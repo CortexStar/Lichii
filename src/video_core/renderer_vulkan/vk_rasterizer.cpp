@@ -1579,6 +1579,9 @@ void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType 
         texture_cache.DownloadMemory(addr, size);
     }
     if ((True(which & VideoCommon::CacheType::BufferCache))) {
+        VideoCommon::Nx2Profile::FinishReason reason{
+            VideoCommon::Nx2Profile::t_finish_reason ? VideoCommon::Nx2Profile::t_finish_reason
+                                                     : "rasterizer FlushRegion"};
         std::scoped_lock lock{buffer_cache.mutex};
         buffer_cache.DownloadMemory(addr, size);
     }

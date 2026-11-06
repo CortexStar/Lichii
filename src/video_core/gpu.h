@@ -270,6 +270,8 @@ public:
     /// Whether a MapInOrder over part of [gpu_addr, gpu_addr + size) is queued and not done yet.
     [[nodiscard]] bool IsMapPending(GPUVAddr gpu_addr, u64 size) const;
 
+    void WaitForQueuedWork();
+
     /// Notify rasterizer that any caches of the specified region should be invalidated
     void InvalidateRegion(DAddr addr, u64 size, bool preserve_gpu_writes = false);
 

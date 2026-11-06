@@ -9,6 +9,8 @@
 #pragma once
 
 #include <optional>
+#include <utility>
+#include <vector>
 
 #include "dynarmic/frontend/A64/a64_ir_emitter.h"
 #include "dynarmic/frontend/A64/a64_location_descriptor.h"
@@ -26,6 +28,12 @@ struct TranslatorVisitor final {
 
     A64::IREmitter ir;
     TranslationOptions options;
+
+    std::optional<u64> follow_target;
+    std::uint32_t instructions = 0;
+    u64 segment_start = 0;
+    std::vector<std::pair<u64, u64>> segments;
+    bool CanFollow(u64 target) const;
 
     bool UnpredictableInstruction();
     bool DecodeError();

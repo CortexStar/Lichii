@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include <iterator>
 
 #include "common/assert.h"
@@ -295,7 +296,7 @@ FormatInfo SurfaceFormat(const Device& device, FormatType format_type, bool with
         }
     }
     bool const attachable = (tuple.usage & usage_attachable) != 0;
-    bool const storage = (tuple.usage & usage_storage) != 0;
+    bool storage = (tuple.usage & usage_storage) != 0;
     VkFormatFeatureFlags usage{};
     switch (format_type) {
     case FormatType::Buffer:
@@ -314,6 +315,19 @@ FormatInfo SurfaceFormat(const Device& device, FormatType format_type, bool with
             usage |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
         }
         break;
+    }
+    if (storage && format_type != FormatType::Buffer) {
+        const VkFormat with_storage = device.GetSupportedFormat(tuple.format, usage, format_type);
+        if (device.IsFormatSupported(with_storage, usage, format_type)) {
+            return {with_storage, attachable, storage};
+        }
+        static std::atomic_bool warned{};
+        if (!warned.exchange(true)) {
+            LOG_WARNING(Render_Vulkan, "Host lacks storage-image support for format {}; images of "
+                        "such formats are created without storage usage", tuple.format);
+        }
+        usage &= ~VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+        storage = false;
     }
     return {device.GetSupportedFormat(tuple.format, usage, format_type), attachable, storage};
 }

@@ -28,6 +28,10 @@ bool TranslatorVisitor::B_uncond(Imm<26> imm26) {
         ir.SetTerm(IR::Term::LinkBlock{ir.current_location->SetPC(target)});
         return false;
     }
+    if (CanFollow(target)) {
+        follow_target = target;
+        return true;
+    }
     ir.SetTerm(IR::Term::LinkBlockFast{ir.current_location->SetPC(target)});
     return false;
 }
@@ -39,6 +43,10 @@ bool TranslatorVisitor::BL(Imm<26> imm26) {
     ir.PushRSB(ir.current_location->AdvancePC(4));
 
     const u64 target = ir.PC() + offset;
+    if (CanFollow(target)) {
+        follow_target = target;
+        return true;
+    }
     ir.SetTerm(IR::Term::LinkBlockFast{ir.current_location->SetPC(target)});
     return false;
 }

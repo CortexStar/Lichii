@@ -216,6 +216,8 @@ public:
     void RecordParsedEntry(const CommandListHeader& header, std::span<const CommandHeader> commands);
     /// Whether the entry lies on device pages the GPU has written (NX2).
     bool IsGpuWrittenCommands(GPUVAddr address, size_t size);
+    bool IsKnownCleanCommandEntry(GPUVAddr address, size_t size);
+    void NoteCleanCommandEntry(GPUVAddr address, size_t size);
     /// Copies the list's words from memory again, as of suspension count `now`.
     void RefreshSnapshot(CommandList& list, u64 now);
     /// Copies the list's deferred entries (CommandList::deferred_entries) from memory.

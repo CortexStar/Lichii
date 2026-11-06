@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <bit>
+#include <cstdlib>
 #include <tuple>
 #include <utility>
 
@@ -483,6 +484,13 @@ void EmitSetPatch(EmitContext& ctx, IR::Patch patch, Id value) {
             throw NotImplementedException("Patch {}", patch);
         }
     }()};
+    static const float tess_cap = [] {
+        const char* value = std::getenv("EDEN_NX2_TESS_CAP");
+        return value != nullptr ? static_cast<float>(std::atof(value)) : 16.0f;
+    }();
+    if (!IR::IsGeneric(patch) && tess_cap > 0.0f) {
+        value = ctx.OpFMin(ctx.F32[1], value, ctx.Const(tess_cap));
+    }
     ctx.OpStore(pointer, value);
 }
 

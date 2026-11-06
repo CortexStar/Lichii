@@ -50,6 +50,16 @@ object NativeLibrary {
     @JvmField
     var sEmulationActivity = WeakReference<EmulationActivity?>(null)
 
+    interface EmulationHost {
+        fun onEmulationStarted()
+        fun onEmulationStopped(status: Int)
+        fun onProgramChanged(programIndex: Int)
+        fun onEmulationError(resultCode: Int)
+    }
+
+    @Volatile
+    var emulationHost: EmulationHost? = null
+
     init {
         try {
             System.loadLibrary("yuzu-android")
@@ -312,6 +322,10 @@ object NativeLibrary {
      * @return true: continue; false: abort
      */
     fun onCoreError(error: CoreError?, details: String): Boolean {
+        if (emulationHost != null) {
+            Log.error("[NativeLibrary] Core error $error: $details")
+            return false
+        }
         val emulationActivity = sEmulationActivity.get()
         if (emulationActivity == null) {
             Log.error("[NativeLibrary] EmulationActivity not present")
@@ -376,6 +390,10 @@ object NativeLibrary {
     @Keep
     @JvmStatic
     fun exitEmulationActivity(resultCode: Int) {
+        emulationHost?.let {
+            it.onEmulationError(resultCode)
+            return
+        }
         val Success = 0
         val ErrorNotInitialized = 1
         val ErrorGetLoader = 2
@@ -446,19 +464,31 @@ object NativeLibrary {
     @Keep
     @JvmStatic
     fun onEmulationStarted() {
-        sEmulationActivity.get()!!.onEmulationStarted()
+        emulationHost?.let {
+            it.onEmulationStarted()
+            return
+        }
+        sEmulationActivity.get()?.onEmulationStarted()
     }
 
     @Keep
     @JvmStatic
     fun onEmulationStopped(status: Int) {
-        sEmulationActivity.get()!!.onEmulationStopped(status)
+        emulationHost?.let {
+            it.onEmulationStopped(status)
+            return
+        }
+        sEmulationActivity.get()?.onEmulationStopped(status)
     }
 
     @Keep
     @JvmStatic
     fun onProgramChanged(programIndex: Int) {
-        sEmulationActivity.get()!!.onProgramChanged(programIndex)
+        emulationHost?.let {
+            it.onProgramChanged(programIndex)
+            return
+        }
+        sEmulationActivity.get()?.onProgramChanged(programIndex)
     }
 
     /**

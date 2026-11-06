@@ -22,8 +22,15 @@ object DiskShaderCacheProgress {
             )[EmulationViewModel::class.java]
     }
 
+    @Volatile
+    var listener: ((stage: Int, progress: Int, max: Int) -> Unit)? = null
+
     @JvmStatic
     fun loadProgress(stage: Int, progress: Int, max: Int) {
+        listener?.let {
+            it(stage, progress, max)
+            return
+        }
         val emulationActivity = NativeLibrary.sEmulationActivity.get()
         if (emulationActivity == null) {
             Log.error("[DiskShaderCacheProgress] EmulationActivity not present")

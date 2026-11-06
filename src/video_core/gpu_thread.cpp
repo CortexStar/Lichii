@@ -170,6 +170,10 @@ void ThreadManager::Run(std::function<void()>&& func, bool is_async, bool before
     PushCommand(RunCommand{std::move(func), before_later_reads}, false, is_async);
 }
 
+void ThreadManager::WaitForQueuedWork(bool is_async) {
+    PushCommand(RunCommand{[] {}, true}, true, is_async);
+}
+
 void ThreadManager::InvalidateRegion(DAddr addr, u64 size) {
     rasterizer->OnCacheInvalidation(addr, size);
 }

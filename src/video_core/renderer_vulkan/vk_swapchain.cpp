@@ -343,7 +343,12 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
         .viewFormatCount = static_cast<u32>(view_formats.size()),
         .pViewFormats = view_formats.data(),
     };
-    if (device.IsKhrSwapchainMutableFormatEnabled()) {
+#ifdef __ANDROID__
+    constexpr bool use_mutable_format = false;
+#else
+    const bool use_mutable_format = device.IsKhrSwapchainMutableFormatEnabled();
+#endif
+    if (use_mutable_format) {
         format_list.pNext = std::exchange(swapchain_ci.pNext, &format_list);
         swapchain_ci.flags |= VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR;
     }
@@ -358,8 +363,10 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
     images = swapchain.GetImages();
     image_count = static_cast<u32>(images.size());
 #ifdef __ANDROID__
-    // Android is already ordered the same as Switch.
-    image_view_format = VK_FORMAT_R8G8B8A8_UNORM;
+    image_view_format = surface_format.format;
+    LOG_INFO(Render_Vulkan, "Android swapchain: format {} color space {}, {} images, {}x{}",
+             static_cast<u32>(surface_format.format), static_cast<u32>(surface_format.colorSpace),
+             image_count, extent.width, extent.height);
 #else
     image_view_format = VK_FORMAT_B8G8R8A8_UNORM;
 #endif

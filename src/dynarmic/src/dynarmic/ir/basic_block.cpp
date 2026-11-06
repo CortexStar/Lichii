@@ -65,6 +65,7 @@ void Block::Reset(LocationDescriptor location_) noexcept {
     cond_failed.reset();
     location = location_;
     end_location = location_;
+    covered_ranges.clear();
     cond = Cond::AL;
     terminal = std::monostate{};
     cond_failed_cycle_count = 0;

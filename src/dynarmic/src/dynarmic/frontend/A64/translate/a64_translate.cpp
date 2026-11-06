@@ -19,6 +19,7 @@ namespace Dynarmic::A64 {
 void Translate(IR::Block& block, LocationDescriptor descriptor, MemoryReadCodeFuncType memory_read_code, TranslationOptions options) {
     const bool single_step = descriptor.SingleStepping();
     TranslatorVisitor visitor{block, descriptor, std::move(options)};
+    visitor.segment_start = descriptor.PC();
 
     bool should_continue = true;
     do {
@@ -32,8 +33,16 @@ void Translate(IR::Block& block, LocationDescriptor descriptor, MemoryReadCodeFu
         } else {
             should_continue = visitor.RaiseException(Exception::NoExecuteFault);
         }
-        visitor.ir.current_location = visitor.ir.current_location->AdvancePC(4);
+        ++visitor.instructions;
         block.CycleCount()++;
+        if (visitor.follow_target) {
+            visitor.segments.emplace_back(visitor.segment_start, pc + 4);
+            visitor.segment_start = *visitor.follow_target;
+            visitor.ir.current_location = visitor.ir.current_location->SetPC(*visitor.follow_target);
+            visitor.follow_target.reset();
+        } else {
+            visitor.ir.current_location = visitor.ir.current_location->AdvancePC(4);
+        }
     } while (should_continue && !single_step);
 
     if (single_step && should_continue) {
@@ -41,6 +50,10 @@ void Translate(IR::Block& block, LocationDescriptor descriptor, MemoryReadCodeFu
     }
     ASSERT(block.HasTerminal() && "Terminal has not been set");
     block.SetEndLocation(*visitor.ir.current_location);
+    if (!visitor.segments.empty()) {
+        visitor.segments.emplace_back(visitor.segment_start, visitor.ir.current_location->PC());
+        block.SetCoveredRanges(std::move(visitor.segments));
+    }
 }
 
 bool TranslateSingleInstruction(IR::Block& block, LocationDescriptor descriptor, u32 instruction) {
