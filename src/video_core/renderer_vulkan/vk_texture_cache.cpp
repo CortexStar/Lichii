@@ -27,6 +27,7 @@
 #include "shader_recompiler/exception.h"
 
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
+#include "video_core/game_dlss_status.h"
 #include "video_core/nx2.h"
 #include "video_core/render_trace.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -1900,7 +1901,8 @@ StreamlineDlssUpscaler* TextureCacheRuntime::DlssUpscaler() {
         const char* const value = std::getenv("EDEN_NX2_DLSS_REPLACEMENT");
         return value && std::string_view{value} == "fsr";
     }();
-    if (force_fsr || dlss_unsupported) {
+    // Switched off with the hotkey: the game's own image (or FSR 3.1 in place of a game's DLSS).
+    if (force_fsr || dlss_unsupported || VideoCore::NvidiaDlssPaused()) {
         return nullptr;
     }
     if (!dlss_upscaler) {

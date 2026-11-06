@@ -52,6 +52,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/game_dlss_status.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
@@ -2255,7 +2256,14 @@ bool RasterizerVulkan::AccelerateCameraMotionUpscale(const Tegra::Engines::Fermi
         }
         return done;
     };
-    if (!scene) {
+    const bool paused = VideoCore::NvidiaDlssPaused();
+    if (paused != motion.paused) {
+        motion.paused = paused;
+        LOG_INFO(Render_Vulkan, "Ocarina of Time anti-aliasing: NVIDIA DLSS switched {}",
+                 paused ? "off, the game's own runs" : "on");
+        motion.evaluations = 0; // log the first evaluations again
+    }
+    if (!scene || paused) {
         return finish(false);
     }
     // The scene's viewport must cover the image, so the matrix maps to its pixels.

@@ -163,7 +163,8 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "does not ship NVIDIA's files. Use the download button below.\nWorks in The "
               "Legend of Zelda: Ocarina of Time (as DLAA, at the render resolution). Fire Emblem: "
               "Fortune's Weave also requires EDEN_NX2_DLSS_REPLACEMENT=dlss; without that "
-              "override, its spatial workaround remains active.\nTakes effect when a game "
+              "override, its spatial workaround remains active.\nWhile playing, F7 switches "
+              "between NVIDIA DLSS and the game's own image.\nTakes effect when a game "
               "starts."));
     INSERT(Settings, anti_aliasing, tr("Anti-Aliasing Method:"),
            tr("The anti-aliasing method to use.\nSMAA offers the best quality.\nFXAA "

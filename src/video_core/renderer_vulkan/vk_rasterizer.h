@@ -360,6 +360,7 @@ private:
         std::optional<std::chrono::steady_clock::time_point> last_evaluation;
         u32 evaluations{};
         bool jittered{}; ///< Some evaluation had jittered draws.
+        bool paused{};   ///< Switched off with the hotkey (VideoCore::NvidiaDlssPaused)
     } camera_motion;
     u32 trace_captures{};
     u32 trace_capture_dropped{};
