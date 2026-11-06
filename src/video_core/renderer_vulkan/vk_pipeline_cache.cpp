@@ -39,6 +39,7 @@
 #include "video_core/renderer_vulkan/async_draw_policy.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
+#include "video_core/renderer_vulkan/pipeline_eviction_policy.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/pipeline_shader_emission.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
@@ -1178,11 +1179,13 @@ void PipelineCache::EvictUnusedPipelines() {
     if (frame_count <= EvictAfterFrames) {
         return;
     }
-    const auto evictable = [this](const GraphicsPipeline* pipeline) {
-        return pipeline != nullptr && pipeline != current_pipeline && pipeline->IsBuilt();
+    const u64 cutoff = frame_count - EvictAfterFrames;
+    const auto evictable = [this, cutoff](const GraphicsPipeline* pipeline) {
+        return pipeline != nullptr && pipeline != current_pipeline && pipeline->IsBuilt() &&
+               pipeline->LastUse() < cutoff;
     };
-    u64 cutoff = frame_count - EvictAfterFrames;
     size_t max_evicted = graphics_cache.size();
+    std::optional<OldestPipelineSelection> oldest;
     // A Switch 2 title translates a rebuilt pipeline's shaders on the GPU thread, so going back to
     // an area rebuilt hundreds at once. Its pipelines are kept up to a memory budget. Past it, the
     // least recently used are evicted, but still only ones unused for EvictAfterFrames: evicting
@@ -1204,14 +1207,14 @@ void PipelineCache::EvictUnusedPipelines() {
         if (max_evicted == 0) {
             return;
         }
-        std::ranges::nth_element(last_uses, last_uses.begin() + (max_evicted - 1));
-        cutoff = std::min(cutoff, last_uses[max_evicted - 1] + 1);
+        oldest.emplace(last_uses, max_evicted);
     }
     const u64 tick = scheduler.CurrentTick();
     size_t evicted = 0;
     for (auto it = graphics_cache.begin(); it != graphics_cache.end() && evicted < max_evicted;) {
         GraphicsPipeline* const pipeline = it->second.get();
-        if (!evictable(pipeline) || pipeline->LastUse() >= cutoff) {
+        // Take() must only see the candidates the selection was built from.
+        if (!evictable(pipeline) || (oldest && !oldest->Take(pipeline->LastUse()))) {
             ++it;
             continue;
         }
