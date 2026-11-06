@@ -3149,12 +3149,18 @@ private:
             }
             for (size_t i = 0; i < pictures.size(); ++i) {
                 const u64 pts = pictures[i].pts;
-                const bool last = input.end && i + 1 == pictures.size();
-                const bool only_frame =
-                    i + 1 == pictures.size() && m_decoded.empty() && m_inputs.Empty();
-                if (!last && !only_frame && IsLate(pts)) {
-                    ++m_late_dropped;
-                    continue;
+                if (IsLate(pts)) {
+                    const bool last = input.end && i + 1 == pictures.size();
+                    const bool newer_follows = i + 1 < pictures.size() || !m_inputs.Empty();
+                    if (!last && newer_follows) {
+                        ++m_late_dropped;
+                        continue;
+                    }
+                    while (!m_decoded.empty() && !m_decoded.back().end &&
+                           IsLate(m_decoded.back().pts)) {
+                        m_decoded.pop_back();
+                        ++m_late_dropped;
+                    }
                 }
                 m_decoded.push_back({std::move(pictures[i]), pts, false});
             }
