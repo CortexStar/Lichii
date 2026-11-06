@@ -20,6 +20,12 @@ namespace Tegra {
 // Ampere classes and the Turing+ macro ISA, which Eden's Maxwell engines don't implement.
 inline std::atomic<bool> g_nx2_ampere{false};
 
+// GPU VA that nx2:gpu GetVaRange and GetUserPartition report to NVN. The in-process
+// allocator hands out addresses in [Nx2GpuVaStart, Nx2GpuVaEnd). NvRm's AllocAsEx range
+// can be smaller; the GMMU page tables still have to cover this one.
+inline constexpr u64 Nx2GpuVaStart = 0x8000000ULL;
+inline constexpr u64 Nx2GpuVaEnd = 0xC000000000ULL;
+
 // Device pages the GPU has written through the buffer cache (shader stores, copies), ever. Title 1
 // runs command lists the GPU writes each frame (20-byte entries its culling fills in); read
 // without a flush they are stale and the draws behind them (trees) go missing. The bits never

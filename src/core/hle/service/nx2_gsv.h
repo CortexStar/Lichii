@@ -435,13 +435,13 @@ private:
 
     // Used by nn::gpu::sdk::CreateGpuAddressSpace: three u64s after the result, a kind (< 5, 0 =
     // none) and the GPU VA range of the in-process VirtualMachine that serves AllocSpace
-    // (nn::gpu::sdk::util::ExecuteVirtualMachineAllocSpace). NVN reserves fixed VA from 0x8000000
-    // up to 512 GiB, so report the same range NvRm gives AllocAsEx: [0x8000000, 0xC000000000).
+    // (nn::gpu::sdk::util::ExecuteVirtualMachineAllocSpace). NVN reserves fixed VA in
+    // [Nx2GpuVaStart, Nx2GpuVaEnd).
     void GetVaRange(HLERequestContext& ctx) {
         LOG_WARNING(Service, "(STUBBED) nx2:gpu TIPC 203 [2]={:#x}", ctx.CommandBuffer()[2]);
         constexpr u64 kind = 1;
-        constexpr u64 start = 0x8000000ULL;
-        constexpr u64 size = 0xC000000000ULL - start;
+        constexpr u64 start = Tegra::Nx2GpuVaStart;
+        constexpr u64 size = Tegra::Nx2GpuVaEnd - start;
         TipcReplyWords(ctx, {static_cast<u32>(kind), static_cast<u32>(kind >> 32),
                              static_cast<u32>(start), static_cast<u32>(start >> 32),
                              static_cast<u32>(size), static_cast<u32>(size >> 32)});
@@ -452,8 +452,8 @@ private:
     // as (start, size) or (min, max). Title 4 never needed the gsv partition, so it stays empty.
     void GetUserPartition(HLERequestContext& ctx) {
         LOG_WARNING(Service, "(STUBBED) nx2:gpu TIPC 201 [2]={:#x}", ctx.CommandBuffer()[2]);
-        constexpr u64 first = 0x8000000ULL;
-        constexpr u64 second = 0xC000000000ULL - first;
+        constexpr u64 first = Tegra::Nx2GpuVaStart;
+        constexpr u64 second = Tegra::Nx2GpuVaEnd - first;
         TipcReplyWords(ctx, {static_cast<u32>(first), static_cast<u32>(first >> 32),
                              static_cast<u32>(second), static_cast<u32>(second >> 32)});
     }
