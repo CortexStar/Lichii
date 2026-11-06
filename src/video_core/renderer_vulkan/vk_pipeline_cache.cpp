@@ -594,6 +594,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .max_per_stage_descriptor_sampled_images = device.GetMaxPerStageDescriptorSampledImages(),
         .max_per_stage_resources = device.GetMaxPerStageResources(),
         .max_per_stage_descriptor_storage_buffers = device.GetMaxPerStageDescriptorStorageBuffers(),
+        .max_per_stage_descriptor_samplers = device.GetMaxPerStageDescriptorSamplers(),
         .max_descriptor_set_samplers = device.GetMaxDescriptorSetSamplers(),
         .max_descriptor_set_uniform_buffers = device.GetMaxDescriptorSetUniformBuffers(),
         .max_descriptor_set_uniform_buffers_dynamic = device.GetMaxDescriptorSetUniformBuffersDynamic(),
@@ -1765,6 +1766,21 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                 "Binding {} storage buffers to a pipeline whose descriptor set binds {}",
                 storage_buffers, set_limit);
         }
+    }
+    {
+        // The descriptor set limits count the textures of every stage the pipeline emits.
+        std::array<Shader::IR::Program*, Maxwell::MaxShaderProgram> stages{};
+        size_t num_stages{};
+        for (size_t index = uses_vertex_a && uses_vertex_b ? 1 : 0;
+             index < Maxwell::MaxShaderProgram; ++index) {
+            const bool is_emulated_stage = layer_source_program != nullptr &&
+                                           index == static_cast<u32>(Maxwell::ShaderType::Geometry);
+            if (key.unique_hashes[index] != 0 || is_emulated_stage) {
+                stages[num_stages++] = &programs[index];
+            }
+        }
+        Shader::Optimization::LimitPipelineSampledTextureArrays(
+            std::span{stages.data(), num_stages}, host_info);
     }
     std::array<const Shader::Info*, Maxwell::MaxShaderStage> infos{};
     std::array<vk::ShaderModule, Maxwell::MaxShaderStage> modules;
