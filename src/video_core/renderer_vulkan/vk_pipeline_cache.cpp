@@ -898,7 +898,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             pools.ReleaseContents();
             auto entry{CreateComputePipeline(pools, key, env_, state.statistics.get(), false)};
             std::scoped_lock lock{state.mutex};
-            if (entry.pipeline && !entry.pipeline->Failed()) {
+            if (entry.pipeline && entry.pipeline->IsBound()) {
                 compute_cache.emplace(key, std::move(entry));
             }
             ++state.built;
