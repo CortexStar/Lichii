@@ -2206,6 +2206,7 @@ void RasterizerVulkan::NoteCameraMotionClear() {
             motion.jitter_depth_size) {
         return;
     }
+    ++motion.clears_since_evaluation;
     if (motion.jitter_ready) {
         motion.jitter_ready = false;
         motion.jitter_active = true;
@@ -2213,9 +2214,11 @@ void RasterizerVulkan::NoteCameraMotionClear() {
     }
     // Cleared again with no evaluation since: another clear in the same frame, or the game's
     // anti-aliasing stopped running (a menu, a load), so its draws mustn't keep the jitter.
-    if (motion.jitter_active && motion.last_evaluation &&
-        std::chrono::steady_clock::now() - *motion.last_evaluation >
-            std::chrono::milliseconds{100}) {
+    // Past twice the clears of the last evaluated frame, it missed a frame. Counting clears,
+    // not time, keeps a slow frame's jitter to its end: its opaque pass tests EQUAL against
+    // the jittered prepass depth.
+    const u32 per_frame = motion.clears_per_frame != 0 ? motion.clears_per_frame : 2;
+    if (motion.jitter_active && motion.clears_since_evaluation > 2 * per_frame) {
         motion.jitter_active = false;
     }
 }
@@ -2246,6 +2249,8 @@ bool RasterizerVulkan::AccelerateCameraMotionUpscale(const Tegra::Engines::Fermi
             motion.jitter_ready = false;
             motion.jitter_depth = 0;
             motion.jitter_depth_size = {};
+            motion.clears_since_evaluation = 0;
+            motion.clears_per_frame = 0;
             motion.previous_screen.reset();
         }
         return done;
@@ -2320,6 +2325,10 @@ bool RasterizerVulkan::AccelerateCameraMotionUpscale(const Tegra::Engines::Fermi
     motion.previous_size = size;
     motion.previous_rescaled = scene->rescaled;
     motion.last_evaluation = now;
+    if (motion.clears_since_evaluation != 0) {
+        motion.clears_per_frame = motion.clears_since_evaluation;
+    }
+    motion.clears_since_evaluation = 0;
     // The next frame's jitter, from when its scene depth is cleared; the rest of this frame (its
     // interface) is drawn without it.
     motion.jitter_depth = scene->depth;

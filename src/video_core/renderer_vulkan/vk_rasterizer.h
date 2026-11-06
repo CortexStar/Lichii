@@ -341,6 +341,8 @@ private:
         std::array<u32, 2> jitter_depth_size{};
         bool jitter_ready{}; ///< An evaluation ran since the scene depth was last cleared.
         bool jitter_active{};
+        u32 clears_since_evaluation{}; ///< That depth's clears since the last evaluation.
+        u32 clears_per_frame{};        ///< Its clears in the last evaluated frame.
         u32 phase{};
         std::array<f32, 2> jitter{};
         std::array<f32, 2> applied{}; ///< The jitter in the viewports now.
