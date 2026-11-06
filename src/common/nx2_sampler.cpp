@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
 #include <thread>
@@ -376,7 +377,12 @@ std::string SampleThreads(const std::vector<std::string>& patterns, double secon
         }
         Sleep(1);
     }
+    // DbgHelp is single-threaded: the debug server's `sample` and EDEN_NX2_SAMPLE can report at
+    // the same time.
+    static std::mutex report_mutex;
+    std::unique_lock report_lock{report_mutex};
     std::string text = Report(targets, samples, out.c_str());
+    report_lock.unlock();
     std::fprintf(stderr, "nx2 sampler: %zu samples written to %s\n", samples.size(), out.c_str());
     for (const auto& target : targets) {
         CloseHandle(target.handle);
