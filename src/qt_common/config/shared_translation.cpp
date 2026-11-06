@@ -166,6 +166,9 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "override, its spatial workaround remains active.\nWhile playing, F7 switches "
               "between NVIDIA DLSS and the game's own image.\nTakes effect when a game "
               "starts."));
+    INSERT(Settings, nvidia_dlss_sharpening, tr("NVIDIA DLSS Sharpness:"),
+           tr("Strength of RCAS (AMD's contrast-adaptive sharpening) on NVIDIA DLSS's image; 0% "
+              "turns it off.\nChanges take effect at once."));
     INSERT(Settings, anti_aliasing, tr("Anti-Aliasing Method:"),
            tr("The anti-aliasing method to use.\nSMAA offers the best quality.\nFXAA "
               "can produce a more stable picture in lower resolutions."));

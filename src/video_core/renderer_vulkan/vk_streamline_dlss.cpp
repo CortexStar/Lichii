@@ -51,7 +51,7 @@ sl::DLSSMode ModeFor(VkExtent2D render, VkExtent2D upscale) {
 // Preset K for every mode: NVIDIA's defaults for Performance/Ultra Performance (M, L) draw thin
 // horizontal lines in Fire Emblem at 2x resolution scale. EDEN_NX2_DLSS_PRESET=J|K|L|M picks
 // another model, EDEN_NX2_DLSS_PRESET=default leaves the choice to NVIDIA.
-sl::DLSSPreset Preset() {
+sl::DLSSPreset Preset(bool prefer_model_m) {
     const char* const value = std::getenv("EDEN_NX2_DLSS_PRESET");
     if (value && value[0] >= 'J' && value[0] <= 'M') {
         return static_cast<sl::DLSSPreset>(static_cast<u32>(sl::DLSSPreset::ePresetJ) +
@@ -60,7 +60,8 @@ sl::DLSSPreset Preset() {
     if (value && std::string_view{value} == "default") {
         return sl::DLSSPreset::eDefault;
     }
-    return sl::DLSSPreset::ePresetK;
+    // Ocarina of Time's DLAA keeps more detail with M than with K.
+    return prefer_model_m ? sl::DLSSPreset::ePresetM : sl::DLSSPreset::ePresetK;
 }
 
 sl::float4x4 Identity() {
@@ -247,7 +248,7 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
         in.hdr && EnvInt("EDEN_NX2_DLSS_HDR", 1) != 0 ? sl::eTrue : sl::eFalse;
     options.useAutoExposure =
         in.hdr && EnvInt("EDEN_NX2_DLSS_AUTO_EXPOSURE", 1) != 0 ? sl::eTrue : sl::eFalse;
-    const sl::DLSSPreset preset = Preset();
+    const sl::DLSSPreset preset = Preset(in.prefer_model_m);
     options.dlaaPreset = preset;
     options.qualityPreset = preset;
     options.balancedPreset = preset;

@@ -269,6 +269,10 @@ public:
     /// Draws an upscaler's RGBA16F output into the DLSS output and returns it to GENERAL.
     void DrawUpscaledOutput(Framebuffer* dst_framebuffer, VkImageView view, VkImage image,
                             VkSampler sampler);
+    /// Draws NVIDIA DLSS's output (source_size) into the DLSS output, box-filtered down when it
+    /// is larger, sharpened as the NVIDIA DLSS sharpness setting says; returns it to GENERAL.
+    void DrawDlssOutput(Framebuffer* dst_framebuffer, VkImageView view, VkImage image,
+                        VkExtent2D source_size);
 #ifdef EGLANTINE_STREAMLINE
     /// NVIDIA's DLSS (through NVIDIA Streamline) in place of the game's,
     /// before FSR 3.1, when the setting is on. Returns false to fall back to FSR 3.1.

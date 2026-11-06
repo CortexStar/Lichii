@@ -1894,6 +1894,37 @@ void TextureCacheRuntime::DrawUpscaledOutput(Framebuffer* dst_framebuffer, VkIma
     });
 }
 
+void TextureCacheRuntime::DrawDlssOutput(Framebuffer* dst_framebuffer, VkImageView view,
+                                         VkImage output, VkExtent2D source_size) {
+    // The slider stores RCAS stops x 100, as for FSR: 200 (shown as 0%) is off.
+    const int slider = Settings::values.nvidia_dlss_sharpening.GetValue();
+    blit_image_helper.ResolveUpscaled(dst_framebuffer, view, output, source_size, slider < 200,
+                                      static_cast<f32>(slider) / 100.0f);
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([output](vk::CommandBuffer cmdbuf) {
+        const VkImageMemoryBarrier barrier{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = output,
+            .subresourceRange{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, barrier);
+    });
+}
+
 #ifdef EGLANTINE_STREAMLINE
 StreamlineDlssUpscaler* TextureCacheRuntime::DlssUpscaler() {
     // EDEN_NX2_DLSS_REPLACEMENT=fsr keeps FSR 3.1 for A/B runs.
@@ -1979,8 +2010,8 @@ bool TextureCacheRuntime::UpscaleWithDlss(Framebuffer* dst_framebuffer, ImageVie
         dlss_unsupported = true;
         return false;
     }
-    DrawUpscaledOutput(dst_framebuffer, dlss_upscaler->OutputView(), dlss_upscaler->OutputImage(),
-                       dlss_upscaler->PointSampler());
+    DrawDlssOutput(dst_framebuffer, dlss_upscaler->OutputView(), dlss_upscaler->OutputImage(),
+                   dst_framebuffer->RenderArea());
     static bool logged{};
     if (!logged) {
         logged = true;
@@ -1997,9 +2028,12 @@ bool TextureCacheRuntime::UpscaleWithCameraMotion(Framebuffer* dst_framebuffer,
                                                   const std::array<f32, 16>& reprojection,
                                                   std::array<f32, 2> jitter, bool reset) {
 #ifdef EGLANTINE_STREAMLINE
-    // The game's anti-aliasing writes its result at the render size: DLAA.
+    // DLAA at the render size. The game's anti-aliasing writes its result at the render size, or
+    // smaller when resolution scaling renders the scene larger than that image: DLSS's result is
+    // then box-filtered down to it (supersampling).
     const VkExtent2D extent = dst_framebuffer->RenderArea();
-    if (extent.width != render_size[0] || extent.height != render_size[1] ||
+    const VkExtent2D render{render_size[0], render_size[1]};
+    if (extent.width > render.width || extent.height > render.height ||
         input_color.Samples() != VK_SAMPLE_COUNT_1_BIT || depth.Samples() != VK_SAMPLE_COUNT_1_BIT) {
         return false;
     }
@@ -2010,7 +2044,7 @@ bool TextureCacheRuntime::UpscaleWithCameraMotion(Framebuffer* dst_framebuffer,
         camera_motion_pass = std::make_unique<CameraMotionPass>(
             device, scheduler, descriptor_pool, compute_pass_descriptor_queue, memory_allocator);
     }
-    camera_motion_pass->Record(depth.DepthView(), extent, reprojection);
+    camera_motion_pass->Record(depth.DepthView(), render, reprojection);
     const StreamlineDlssUpscaler::Image motion_vectors{
         .view = camera_motion_pass->View(),
         .image = camera_motion_pass->Image(),
@@ -2032,14 +2066,15 @@ bool TextureCacheRuntime::UpscaleWithCameraMotion(Framebuffer* dst_framebuffer,
                                VK_IMAGE_ASPECT_COLOR_BIT),
             .depth = DlssImage(device, depth, depth.DepthView(), VK_IMAGE_ASPECT_DEPTH_BIT),
             .motion_vectors = motion_vectors,
-            .render_size = extent,
-            .upscale_size = extent,
+            .render_size = render,
+            .upscale_size = render,
             .jitter = jitter,
             // The motion vectors are in render pixels.
             .motion_vector_scale = {1.0f, 1.0f},
             .reset = reset,
             .depth_inverted = false,
             .hdr = false,
+            .prefer_model_m = true,
         });
     } catch (const vk::Exception& exception) {
         LOG_WARNING(Render_Vulkan, "NVIDIA DLSS evaluation unavailable ({})", exception.what());
@@ -2048,13 +2083,13 @@ bool TextureCacheRuntime::UpscaleWithCameraMotion(Framebuffer* dst_framebuffer,
         dlss_unsupported = true;
         return false;
     }
-    DrawUpscaledOutput(dst_framebuffer, dlss_upscaler->OutputView(), dlss_upscaler->OutputImage(),
-                       dlss_upscaler->PointSampler());
+    DrawDlssOutput(dst_framebuffer, dlss_upscaler->OutputView(), dlss_upscaler->OutputImage(),
+                   render);
     static bool logged{};
     if (!logged) {
         logged = true;
-        LOG_INFO(Render_Vulkan, "Anti-aliasing replaced by NVIDIA DLSS: {}x{}", extent.width,
-                 extent.height);
+        LOG_INFO(Render_Vulkan, "Anti-aliasing replaced by NVIDIA DLSS: {}x{} into {}x{}",
+                 render.width, render.height, extent.width, extent.height);
     }
     return true;
 #else

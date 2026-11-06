@@ -1419,8 +1419,13 @@ bool TextureCache<P>::CameraMotionUpscale(const Tegra::Engines::Fermi2D::Surface
                 image_rescaled ? resolution.ScaleUp(image.info.size.width) : image.info.size.width,
                 image_rescaled ? resolution.ScaleUp(image.info.size.height)
                                : image.info.size.height};
+            // Colour and depth at the render size; the game's image may stay at its own size
+            // when resolution scaling renders the scene larger (DLSS then runs above it).
+            const bool fits = id == dst_id ? host_size[0] <= render_size[0] &&
+                                                 host_size[1] <= render_size[1]
+                                           : host_size == render_size;
             if (image.info.num_samples != 1 || image.info.size.width != src.width ||
-                image.info.size.height != src.height || host_size != render_size) {
+                image.info.size.height != src.height || !fits) {
                 return false;
             }
         }

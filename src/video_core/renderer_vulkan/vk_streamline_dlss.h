@@ -43,6 +43,8 @@ public:
         bool depth_inverted{true};
         /// Linear colour that goes above 1 (DLSS exposes it itself); false for tonemapped colour.
         bool hdr{true};
+        /// Model M (DLSS 4.5) unless EDEN_NX2_DLSS_PRESET picks one; otherwise K.
+        bool prefer_model_m{};
     };
 
     /// Throws vk::Exception when Streamline has no DLSS for this device.
