@@ -356,3 +356,22 @@ TEST_CASE("Storage handle words are read from the host-aligned buffer base",
         CHECK(VideoCommon::EvaluateTextureHandle(info, 0, memory, cbuf_address, 4) == 0x22U);
     }
 }
+
+TEST_CASE("Handle tracking skips the floating-point math a reused register leads to",
+          "[video_core][texture_handles]") {
+    // The handle register holds a storage word on one path and a float result on the other: no
+    // constant buffer word behind the float math is the handle.
+    HandleProgram shader;
+    shader.insertion_block = &shader.left;
+    const Value handle{shader.Storage(0)};
+    shader.insertion_block = &shader.right;
+    const Value word{shader.Emit(Opcode::GetCbufU32, {Value{3U}, Value{0x10U}})};
+    const Value sum{
+        shader.Emit(Opcode::FPAdd32, {shader.Emit(Opcode::BitCastF32U32, {word}), Value{1.0f}})};
+    const Value reused{shader.Emit(Opcode::BitCastU32F32, {sum})};
+    auto& sample{shader.Sample(shader.Phi(handle, reused))};
+    shader.Run();
+
+    CHECK(shader.Descriptor(sample).handle_program != ~0U);
+    CHECK(shader.Evaluate(sample) == 0x1234);
+}
