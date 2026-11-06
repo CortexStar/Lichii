@@ -1366,7 +1366,10 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                 });
             } else {
                 count = std::min(count, sampled_dynamic_cap);
-                const bool is_integer{is_texture_pixel_format_integer(cbuf)};
+                // A depth-compare sample always reads a float image: SPIR-V requires the image's
+                // sampled type to match the Dref result. A descriptor the handle tracking misreads
+                // can carry an integer format, which made invalid SPIR-V that crashed RADV.
+                const bool is_integer{flags.is_depth == 0 && is_texture_pixel_format_integer(cbuf)};
                 index = descriptors.Add(TextureDescriptor{
                     .type = flags.type,
                     .is_depth = flags.is_depth != 0,
