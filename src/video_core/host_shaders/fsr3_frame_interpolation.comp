@@ -80,6 +80,14 @@ float staticWeight(vec2 uv) {
     return 1.0 - smoothstep(0.01, 0.03, frameChange(uv));
 }
 
+// 1 where the flow at `sample_uv` matches `motion` (both in texture coordinates), falling to 0
+// beyond a few pixels of difference.
+float motionConsistency(vec2 sample_uv, vec2 motion) {
+    vec2 there = texture(MotionVectors, sample_uv).xy * motion_scale;
+    float difference = length((there - motion) * render_size);
+    return 1.0 - smoothstep(1.5, 6.0, difference);
+}
+
 // How badly the two frames disagree around `uv` if it moved by `motion` between them.
 float matchError(vec2 uv, vec2 motion) {
     vec2 previous_uv = uv + motion * blend_factor;
@@ -159,9 +167,15 @@ void main() {
         change = max(change, frameChange(uv + cross_offsets[i] * inv_render_size));
     }
     float moving = smoothstep(0.01, 0.03, change);
-    float forward_weight =
-        (1.0 - alpha) * (1.0 - moving * staticWeight(forward_uv)) * forward_inside;
-    float backward_weight = alpha * (1.0 - moving * staticWeight(backward_uv)) * backward_inside;
+    // A sample is only trusted where the flow moves the way this pixel does: beside something
+    // the camera follows, the background's motion makes one sample land on it (still on screen)
+    // and blending that in leaves a copy of it half the motion away on each side.
+    float forward_consistent = motionConsistency(forward_uv, motion);
+    float backward_consistent = motionConsistency(backward_uv, motion);
+    float forward_weight = (1.0 - alpha) * (1.0 - moving * staticWeight(forward_uv)) *
+                           forward_inside * (forward_consistent + 0.01);
+    float backward_weight = alpha * (1.0 - moving * staticWeight(backward_uv)) *
+                            backward_inside * (backward_consistent + 0.01);
     vec4 center_color = mix(texture(PreviousFrame, uv), texture(CurrentFrame, uv), blend_factor);
     if (forward_weight + backward_weight > 1e-3) {
         interpolated = (forward_color * forward_weight + backward_color * backward_weight) /
