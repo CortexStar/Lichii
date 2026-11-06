@@ -1756,6 +1756,7 @@ void RasterizerVulkan::DispatchCompute() {
                 cmdbuf.DispatchIndirect(indirect_buffer, indirect_offset);
             });
         });
+        scheduler.NoteComputeWrites();
         SubmitNx2ListCopies();
         return;
     }
@@ -1787,6 +1788,7 @@ void RasterizerVulkan::DispatchCompute() {
             TextureCacheRuntime::CopyByteAddressedShadow(cmdbuf, *byte_addressed_shadow, true);
         }
     });
+    scheduler.NoteComputeWrites();
     SubmitNx2ListCopies();
 
     // Log compute dispatch

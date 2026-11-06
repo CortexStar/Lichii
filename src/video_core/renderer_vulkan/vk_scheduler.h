@@ -128,6 +128,11 @@ public:
         return fragment_barrier.Pending();
     }
 
+    /// A dispatch wrote memory; the next render pass waits for it (BeginRenderPassImpl).
+    void NoteComputeWrites() {
+        compute_writes_pending = true;
+    }
+
     void NoteRenderPassStores() {
         render_pass_has_stores = true;
     }
@@ -453,6 +458,7 @@ private:
 
     std::unique_ptr<MasterSemaphore> master_semaphore;
     FragmentBarrierState fragment_barrier;
+    bool compute_writes_pending{};
     bool render_pass_has_stores{};
     u64 render_pass_serial{};
     bool graphics_pipeline_missing{};
