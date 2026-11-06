@@ -297,6 +297,7 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
             LOG_ERROR(Render_Vulkan, "DRV PIPE begin compute {:016x}", shader_hash);
         }
         try {
+            const auto build_lock = device.LockPipelineBuild();
             pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
             if (pipe_trace) {
                 LOG_ERROR(Render_Vulkan, "DRV PIPE done compute {:016x}", shader_hash);
