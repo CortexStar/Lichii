@@ -2936,13 +2936,21 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
                 static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
             // A pointer read from a table in memory is the base of an object pool, read anywhere in
             // it (Ocarina of Time's grass instances lie 12-18 MiB past theirs): bound to the end of
-            // its mapping, up to 64 MiB (256 MiB for compute: its fog light probes, SH records
-            // ~104-122 MiB past their pointer, all read 0 at 64 MiB and the volumetric fog lost its
-            // sky ambient). The 8 MiB cap made the grass reads return 0 and culled every blade.
-            // Written pools keep the cap: a write marks the whole binding GPU-modified.
+            // its mapping, up to 256 MiB. Its light probes, SH records ~104-122 MiB past their
+            // pointer, read 0 at 64 MiB: the volumetric fog lost its sky ambient (compute), and
+            // Kokiri Forest's water and foliage turned black after an area change (graphics). The
+            // 8 MiB cap made the grass reads return 0 and culled every blade. Written pools keep
+            // the cap: a write marks the whole binding GPU-modified.
             if (table_pointer && !is_written) {
+                // EDEN_NX2_GFX_TABLE_MIB=<1-1024> sets the graphics cap instead (testing).
+                static const u32 graphics_cap = [] {
+                    const char* text = std::getenv("EDEN_NX2_GFX_TABLE_MIB");
+                    const unsigned long mib = text ? std::strtoul(text, nullptr, 10) : 0;
+                    return mib > 0 && mib <= 1024 ? static_cast<u32>(mib << 20)
+                                                  : static_cast<u32>(256_MiB);
+                }();
                 return (std::min)(memory_layout_size,
-                                  static_cast<u32>(compute ? 256_MiB : 64_MiB));
+                                  compute ? static_cast<u32>(256_MiB) : graphics_cap);
             }
             // A native (Switch 2) compute program's pointer is bare: the word after it is another
             // parameter (a dimension, stride or texture handle), not an NVN buffer size. Taking it
@@ -2985,8 +2993,8 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
             binding_size = aligned_size;
         }
         if constexpr (requires { runtime.GetMaxStorageBufferRange(); }) {
-            // A read-only pool's 256 MiB compute cap is above the 128 MiB every device
-            // guarantees. Only those are clamped, so no write is cut off.
+            // A read-only pool's 256 MiB cap is above the 128 MiB every device guarantees.
+            // Only those are clamped, so no write is cut off.
             if (table_pointer && !is_written) {
                 binding_size = (std::min)(binding_size, runtime.GetMaxStorageBufferRange());
             }
