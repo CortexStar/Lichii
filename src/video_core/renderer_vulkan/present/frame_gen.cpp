@@ -331,7 +331,11 @@ void FrameGen::Rebuild(const Device& device, VkExtent2D extent, VkFormat format,
     generated = false;
 }
 
-// EDEN_NX2_FG_DUMP=<directory>: from EDEN_NX2_FG_DUMP_AFTER seconds (default 50), every
+namespace {
+const auto program_start = std::chrono::steady_clock::now();
+}
+
+// EDEN_NX2_FG_DUMP=<directory>: EDEN_NX2_FG_DUMP_AFTER seconds after start (default 50), every
 // EDEN_NX2_FG_DUMP_EVERY generated frames (default 30), saves the previous, generated and current
 // frames of up to 8 interpolations as PPM files.
 void FrameGen::DumpInterpolation(VkImage generated_image) {
@@ -340,14 +344,13 @@ void FrameGen::DumpInterpolation(VkImage generated_image) {
     if (!directory || interpolation_dumps >= 8 || !fsr3_chain) {
         return;
     }
-    static const auto start = std::chrono::steady_clock::now();
     static const auto after = std::chrono::seconds(
         std::getenv("EDEN_NX2_FG_DUMP_AFTER") ? std::atoi(std::getenv("EDEN_NX2_FG_DUMP_AFTER")) : 50);
     static const u32 every = std::getenv("EDEN_NX2_FG_DUMP_EVERY")
                                  ? static_cast<u32>(std::atoi(std::getenv("EDEN_NX2_FG_DUMP_EVERY")))
                                  : 30U;
     static u32 seen{};
-    if (std::chrono::steady_clock::now() - start < after || seen++ % (std::max)(every, 1U) != 0) {
+    if (std::chrono::steady_clock::now() - program_start < after || seen++ % (std::max)(every, 1U) != 0) {
         return;
     }
     const u32 dump = interpolation_dumps++;

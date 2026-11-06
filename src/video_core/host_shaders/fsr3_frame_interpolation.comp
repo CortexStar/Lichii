@@ -80,6 +80,25 @@ float staticWeight(vec2 uv) {
     return 1.0 - smoothstep(0.01, 0.03, frameChange(uv));
 }
 
+// How badly the two frames disagree around `uv` if it moved by `motion` between them.
+float matchError(vec2 uv, vec2 motion) {
+    vec2 previous_uv = uv + motion * blend_factor;
+    vec2 current_uv = uv - motion * (1.0 - blend_factor);
+    const vec2 offsets[5] = vec2[](vec2(0.0), vec2(-2.0, 0.0), vec2(2.0, 0.0), vec2(0.0, -2.0),
+                                   vec2(0.0, 2.0));
+    float error = 0.0;
+    for (int i = 0; i < 5; ++i) {
+        vec2 offset = offsets[i] * inv_render_size;
+        vec3 difference = abs(texture(PreviousFrame, previous_uv + offset).rgb -
+                              texture(CurrentFrame, current_uv + offset).rgb);
+        error += dot(difference, vec3(0.333));
+    }
+    // Samples from outside the frame only repeat its edge.
+    bool outside = any(notEqual(previous_uv, clamp(previous_uv, 0.0, 1.0))) ||
+                   any(notEqual(current_uv, clamp(current_uv, 0.0, 1.0)));
+    return error + (outside ? 0.5 : 0.0);
+}
+
 void main() {
     ivec2 pixel_coord = ivec2(gl_GlobalInvocationID.xy);
     if (pixel_coord.x >= int(render_size.x) || pixel_coord.y >= int(render_size.y)) {
@@ -89,7 +108,26 @@ void main() {
     vec2 uv = (vec2(pixel_coord) + 0.5) * inv_render_size;
 
     // Median-filtered motion vector (reduces outlier jitter)
-    vec2 motion = sampleMotionMedian(uv) * motion_scale;
+    // Candidate motions: the median and the raw vectors here and two flow cells away. At an
+    // object's edge the median mixes its motion with the background's (a halo around a figure the
+    // camera follows); the candidate under which both frames agree belongs to this pixel.
+    vec2 motion_texel = 1.0 / vec2(textureSize(MotionVectors, 0));
+    vec2 candidates[6] = vec2[](
+        sampleMotionMedian(uv), texture(MotionVectors, uv).xy,
+        texture(MotionVectors, uv + vec2(-2.0, 0.0) * motion_texel).xy,
+        texture(MotionVectors, uv + vec2(2.0, 0.0) * motion_texel).xy,
+        texture(MotionVectors, uv + vec2(0.0, -2.0) * motion_texel).xy,
+        texture(MotionVectors, uv + vec2(0.0, 2.0) * motion_texel).xy);
+    vec2 motion = candidates[0] * motion_scale;
+    float best_error = matchError(uv, motion);
+    for (int i = 1; i < 6; ++i) {
+        vec2 candidate = candidates[i] * motion_scale;
+        float error = matchError(uv, candidate);
+        if (error < best_error * 0.9) {
+            best_error = error;
+            motion = candidate;
+        }
+    }
 
     // Forward and backward warped coordinates
     vec2 forward_raw  = uv + motion * blend_factor;
