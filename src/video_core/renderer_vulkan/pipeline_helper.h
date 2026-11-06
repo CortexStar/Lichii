@@ -6,10 +6,15 @@
 
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
+#include <cstdlib>
 #include <optional>
+#include <string>
 
 #include <boost/container/small_vector.hpp>
+#include <fmt/format.h>
 
 #include "common/common_types.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
@@ -399,6 +404,29 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
         }
         rescaling.PushImage(is_rescaled);
     }
+}
+
+/// Whether a pipeline using a shader with this hash is built with
+/// VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT. AMD's proprietary compiler crashes or spends
+/// minutes on a few shaders it builds in seconds unoptimized. EDEN_NX2_NOOPT_SHADERS=<hash>,...
+/// adds hashes on any driver ("all" for every pipeline), to look for new ones.
+inline bool BuildsUnoptimized(const Device& device, u64 shader_hash) {
+    // The Legend of Zelda: Ocarina of Time (0400486024DEC000), driver 2.0.353 on an RX 6600 XT
+    static constexpr std::array<u64, 3> amd_proprietary{
+        0x3c2193d0166610b3ULL, // scene lighting fragment shader: access violation at amdvlk64+0xaff2e7
+        0xeff3ccbe1438679dULL, // compute shader built as the AV1 intro starts: 6 min (#200)
+        0xf9ea14a22394f5b1ULL, // compute shader built as the AV1 intro starts: 18 min (#200)
+    };
+    static const std::string forced = [] {
+        const char* const value = std::getenv("EDEN_NX2_NOOPT_SHADERS");
+        return value != nullptr ? std::string{value} : std::string{};
+    }();
+    if (!forced.empty() &&
+        (forced == "all" || forced.find(fmt::format("{:016x}", shader_hash)) != std::string::npos)) {
+        return true;
+    }
+    return device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY &&
+           std::ranges::find(amd_proprietary, shader_hash) != amd_proprietary.end();
 }
 
 } // namespace Vulkan
