@@ -233,7 +233,7 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
     if (native && !mesh &&
         maxwell3d->draw_manager.draw_state.topology ==
             Tegra::Engines::Maxwell3D::Regs::PrimitiveTopology::Patches) {
-        if (!shader_infos[2] && !shader_infos[3]) {
+        if (!unique_hashes[2] && !unique_hashes[3]) {
             last_shaders_valid = false;
             return false;
         }
