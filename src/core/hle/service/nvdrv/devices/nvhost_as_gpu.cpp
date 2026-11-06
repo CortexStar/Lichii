@@ -332,6 +332,8 @@ NvResult nvhost_as_gpu::Nx2GetSyncpointShimInfo(IoctlNx2SyncpointShimInfo& param
     return NvResult::Success;
 }
 
+/// Creates the GPU address space. Switch 2 page tables cover the VA given to NVN,
+/// which can extend past the va_range_end NvRm passed in.
 NvResult nvhost_as_gpu::AllocAsEx(IoctlAllocAsEx& params) {
     LOG_DEBUG(Service_NVDRV, "called, flags={:#x} big_page_size={:#x} va_range_start={:#x} va_range_end={:#x} va_range_split={:#x}", params.flags, params.big_page_size, params.va_range_start, params.va_range_end, params.va_range_split);
 

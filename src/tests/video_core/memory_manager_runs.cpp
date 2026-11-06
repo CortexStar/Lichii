@@ -82,6 +82,18 @@ TEST_CASE("A 40-bit address space maps Switch 2 VA past 128 GiB", "[memory_manag
     constexpr GPUVAddr past_end = 1ULL << 40;
     memory.Map(past_end, dev, size, Tegra::PTEKind::PITCH, false);
     REQUIRE_FALSE(memory.GpuToCpuAddress(past_end).has_value());
+
+    // A map that starts on the last valid page and crosses the end must not replace that page.
+    constexpr GPUVAddr last_page = past_end - 0x1000;
+    constexpr DAddr last_dev = 0x3000;
+    memory.Map(last_page, last_dev, 0x1000, Tegra::PTEKind::PITCH, false);
+    REQUIRE(memory.GpuToCpuAddress(last_page) == last_dev);
+    memory.Map(last_page, last_dev + 0x1000, 0x2000, Tegra::PTEKind::PITCH, false);
+    REQUIRE(memory.GpuToCpuAddress(last_page) == last_dev);
+    // Unmap refuses the same crossing range, so the page stays mapped. A destroy that
+    // released backing after this would free memory the page table still points at.
+    memory.Unmap(last_page, 0x2000);
+    REQUIRE(memory.GpuToCpuAddress(last_page) == last_dev);
 }
 
 TEST_CASE("MaxContinuousRange from the mapping runs matches the page walk", "[memory_manager]") {

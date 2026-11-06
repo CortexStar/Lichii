@@ -118,6 +118,8 @@ inline void MemoryManager::SetBigPageContinuous(size_t big_page_index, bool valu
         (~(1ULL << sub_index) & continuous_mask) | (value ? 1ULL << sub_index : 0);
 }
 
+/// Maps, reserves, or frees small pages in [gpu_addr, +size). A range that does not lie
+/// entirely in the address space is left unchanged.
 GPUVAddr MemoryManager::PageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr dev_addr, size_t size, PTEKind kind, MemoryManager::EntryType entry_type) {
     if (size != 0 && (!IsWithinGPUAddressRange(gpu_addr) || size > address_space_size - gpu_addr)) {
         LOG_ERROR(HW_GPU, "GPU mapping {:#x}+{:#x} is outside the {:#x}-byte address space",
@@ -168,6 +170,8 @@ GPUVAddr MemoryManager::PageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr de
     return gpu_addr;
 }
 
+/// Maps, reserves, or frees big pages in [gpu_addr, +size). A range that does not lie
+/// entirely in the address space is left unchanged.
 GPUVAddr MemoryManager::BigPageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr dev_addr, size_t size, PTEKind kind, MemoryManager::EntryType entry_type) {
     if (size != 0 && (!IsWithinGPUAddressRange(gpu_addr) || size > address_space_size - gpu_addr)) {
         LOG_ERROR(HW_GPU, "GPU mapping {:#x}+{:#x} is outside the {:#x}-byte address space",
