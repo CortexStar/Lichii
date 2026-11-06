@@ -383,12 +383,20 @@ struct DeferredStages {
 };
 
 size_t GetTotalPipelineWorkers() {
-    if (const char* const text = std::getenv("EDEN_NX2_TRANSLATION_WORKERS")) {
-        const auto val = std::strtoul(text, nullptr, 10);
-        if (val > 0) return val;
-    }
     const size_t max_core_threads =
         std::max<size_t>(static_cast<size_t>(std::thread::hardware_concurrency()), 2ULL) - 1ULL;
+#ifdef __ANDROID__
+    constexpr size_t safe_worker_limit = 8;
+#else
+    constexpr size_t safe_worker_limit = 128;
+#endif
+    if (const char* const text = std::getenv("EDEN_NX2_TRANSLATION_WORKERS")) {
+        char* end = nullptr;
+        const auto val = std::strtoul(text, &end, 10);
+        if (end != text && *end == '\0' && val > 0 && val <= safe_worker_limit) {
+            return val;
+        }
+    }
 #ifdef __ANDROID__
     const int configured = AndroidSettings::values.pipeline_worker_count.GetValue();
     const int clamped = std::clamp(configured, 2, 8);
@@ -398,7 +406,7 @@ size_t GetTotalPipelineWorkers() {
     }
     return std::min(max_core_threads, desired);
 #else
-    return max_core_threads;
+    return std::min<size_t>(max_core_threads, safe_worker_limit);
 #endif
 }
 
@@ -867,6 +875,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     size_t deferred_pipelines = 0;
     size_t queued_graphics = 0;
     std::unordered_set<u64> covered_shader_units;
+    constexpr size_t MaxUnitCoverPipelines = 3000;
+    size_t queued_unit_covers = 0;
 
     if (use_vulkan_pipeline_cache) {
         vulkan_pipeline_cache_filename =
@@ -952,9 +962,11 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             return;
         }
         bool unit_cover_needed = false;
-        for (const u64 stage_hash : key.unique_hashes) {
-            if (stage_hash != 0 && covered_shader_units.insert(stage_hash).second) {
-                unit_cover_needed = true;
+        if (queued_unit_covers < MaxUnitCoverPipelines) {
+            for (const u64 stage_hash : key.unique_hashes) {
+                if (stage_hash != 0 && covered_shader_units.insert(stage_hash).second) {
+                    unit_cover_needed = true;
+                }
             }
         }
         if (!PreloadAllPipelines() && !unit_cover_needed &&
@@ -985,11 +997,15 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             }
             return;
         }
+        if (unit_cover_needed) {
+            ++queued_unit_covers;
+        }
         ++queued_graphics;
 
         workers.QueueWork([this, key, envs_ = std::move(envs), &state, &callback]() mutable {
             ShaderPools pools;
-            boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
+            boost::container::static_vector<Shader::Environment*, Maxwell::MaxShaderProgram>
+                env_ptrs;
             for (auto& env : envs_) {
                 env_ptrs.push_back(&env);
             }
