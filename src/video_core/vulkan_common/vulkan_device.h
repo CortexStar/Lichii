@@ -310,6 +310,23 @@ public:
     }
 
     /// Returns the main present queue.
+    /// The NVIDIA optical flow queue (VK_NV_optical_flow), or a null queue.
+    vk::Queue GetOpticalFlowQueue() const {
+        return optical_flow_queue;
+    }
+
+    u32 GetOpticalFlowFamily() const {
+        return optical_flow_family;
+    }
+
+    bool HasOpticalFlow() const {
+        return optical_flow_family != ~0U;
+    }
+
+    const VkPhysicalDeviceOpticalFlowPropertiesNV& GetOpticalFlowProperties() const {
+        return optical_flow_properties;
+    }
+
     vk::Queue GetPresentQueue() const {
         return present_queue;
     }
@@ -1277,6 +1294,9 @@ private:
     vk::Device logical;          ///< Logical device.
     vk::Queue graphics_queue;    ///< Main graphics queue.
     vk::Queue present_queue;     ///< Main present queue.
+    vk::Queue optical_flow_queue; ///< VK_NV_optical_flow queue, when enabled.
+    u32 optical_flow_family = ~0U;
+    VkPhysicalDeviceOpticalFlowPropertiesNV optical_flow_properties{};
     vk::PipelineCache static_pipeline_cache;
     bool owns_static_pipeline_cache{};
     u32 instance_version{};      ///< Vulkan instance version.

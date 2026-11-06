@@ -181,6 +181,7 @@ struct InstanceDispatch {
     PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR
         vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR{};
     PFN_vkGetPhysicalDeviceFeatures2 vkGetPhysicalDeviceFeatures2{};
+    PFN_vkGetPhysicalDeviceOpticalFlowImageFormatsNV vkGetPhysicalDeviceOpticalFlowImageFormatsNV{};
     PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties{};
     PFN_vkGetPhysicalDeviceFormatProperties2 vkGetPhysicalDeviceFormatProperties2{};
     PFN_vkGetPhysicalDeviceMemoryProperties vkGetPhysicalDeviceMemoryProperties{};
@@ -226,6 +227,10 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkCmdCopyImageToBuffer vkCmdCopyImageToBuffer{};
     PFN_vkCmdCopyQueryPoolResults vkCmdCopyQueryPoolResults{};
     PFN_vkCmdDispatch vkCmdDispatch{};
+    PFN_vkCmdOpticalFlowExecuteNV vkCmdOpticalFlowExecuteNV{};
+    PFN_vkCreateOpticalFlowSessionNV vkCreateOpticalFlowSessionNV{};
+    PFN_vkDestroyOpticalFlowSessionNV vkDestroyOpticalFlowSessionNV{};
+    PFN_vkBindOpticalFlowSessionImageNV vkBindOpticalFlowSessionImageNV{};
     PFN_vkCmdDispatchIndirect vkCmdDispatchIndirect{};
     PFN_vkCmdDraw vkCmdDraw{};
     PFN_vkCmdDrawIndexed vkCmdDrawIndexed{};

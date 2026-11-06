@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
+
+#include "common/logging.h"
 
 #include "video_core/renderer_vulkan/present/fsr3_frame_gen.h"
 #include "video_core/renderer_vulkan/present/util.h"
@@ -139,6 +142,15 @@ void CopyImageToImage(vk::CommandBuffer cmdbuf, VkImage source, VkImage destinat
                            0, {}, {}, after);
 }
 
+// EDEN_NX2_NVOF_SCALE: a factor on the hardware flow (-1 flips its direction), for testing.
+float NvofMotionScale() {
+    static const float scale = [] {
+        const char* const value = std::getenv("EDEN_NX2_NVOF_SCALE");
+        return value ? static_cast<float>(std::atof(value)) : 1.0f;
+    }();
+    return scale;
+}
+
 } // anonymous namespace
 
 struct FlowPushConstants {
@@ -157,6 +169,9 @@ struct InterpPushConstants {
     float render_h;
     float blend_factor;
     float flow_scale;
+    // Converts the sampled motion to texture coordinates.
+    float motion_scale_x;
+    float motion_scale_y;
 };
 
 Fsr3FrameGen::Fsr3FrameGen(const Device& device, MemoryAllocator& memory_allocator,
@@ -168,6 +183,23 @@ Fsr3FrameGen::Fsr3FrameGen(const Device& device, MemoryAllocator& memory_allocat
     CreateShaders(device);
     CreatePipelines(device);
     m_initialized = true;
+
+    // EDEN_NX2_NVOF=0 keeps the flow shader on hardware with optical flow.
+    const char* const nvof_setting = std::getenv("EDEN_NX2_NVOF");
+    if (device.HasOpticalFlow() && (nvof_setting == nullptr || nvof_setting[0] != '0')) {
+        try {
+            m_nvof = std::make_unique<NvOpticalFlow>(device, memory_allocator, extent);
+        } catch (const vk::Exception& exception) {
+            LOG_ERROR(Render_Vulkan, "Optical flow session failed: {}", exception.what());
+            m_nvof.reset();
+        }
+        if (m_nvof && !m_nvof->IsValid()) {
+            m_nvof.reset();
+        }
+        m_nearest_sampler = CreateNearestNeighborSampler(device);
+    }
+    LOG_INFO(Render_Vulkan, "Frame generation motion: {}",
+             m_nvof ? "NVIDIA optical flow hardware" : "flow shader");
 }
 
 Fsr3FrameGen::~Fsr3FrameGen() = default;
@@ -308,6 +340,9 @@ void Fsr3FrameGen::Process(const Device& device, Scheduler& scheduler, VkImage c
         });
         m_has_history = true;
         m_last_frame_count = frame_count;
+        if (m_nvof) {
+            void(m_nvof->Run(scheduler, current_frame));
+        }
         return;
     }
 
@@ -316,6 +351,23 @@ void Fsr3FrameGen::Process(const Device& device, Scheduler& scheduler, VkImage c
         return;
     }
     m_last_frame_count = frame_count;
+
+    if (m_nvof) {
+        scheduler.Record([this, current_frame](vk::CommandBuffer cmdbuf) {
+            CopyImageToImage(cmdbuf, *m_current_image, *m_history_image, m_extent);
+            CopyImageToImage(cmdbuf, current_frame, *m_current_image, m_extent);
+        });
+        m_flow_wait = m_nvof->Run(scheduler, current_frame);
+        if (m_nvof->IsValid()) {
+            m_flow_valid = m_flow_wait != VK_NULL_HANDLE;
+            m_flow_copied = false;
+            return;
+        }
+        LOG_WARNING(Render_Vulkan, "Optical flow hardware unusable, using the flow shader");
+        m_nvof.reset();
+        m_flow_valid = false;
+        return;
+    }
 
     // ΓöÇΓöÇ Descriptor caching ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     if (!m_flow_descriptors_initialized) {
@@ -390,13 +442,21 @@ void Fsr3FrameGen::Generate(const Device& device, Scheduler& scheduler, VkImage 
         m_interp_allocator = m_interp_pool->Allocator(device, scheduler, *m_interp_desc_layout,
                                                       DescriptorBankInfo{.textures = 3, .images = 1});
     }
+    if (m_nvof && !m_flow_copied) {
+        // In the submission that waits for the optical flow (the first after Process).
+        m_flow_copied = true;
+        scheduler.Record([nvof = m_nvof.get()](vk::CommandBuffer cmdbuf) {
+            nvof->RecordFlowCopy(cmdbuf);
+        });
+    }
     const VkDescriptorSet set = m_interp_allocator.Commit();
     std::vector<VkDescriptorImageInfo> image_infos;
     image_infos.reserve(4);
     std::vector<VkWriteDescriptorSet> updates{
         CreateWriteDescriptorSet(image_infos, *m_linear_sampler, *m_current_view, set, 0),
         CreateWriteDescriptorSet(image_infos, *m_linear_sampler, *m_history_view, set, 1),
-        CreateWriteDescriptorSet(image_infos, *m_linear_sampler, *m_motion_view, set, 2),
+        m_nvof ? CreateWriteDescriptorSet(image_infos, *m_nearest_sampler, m_nvof->FlowView(), set, 2)
+               : CreateWriteDescriptorSet(image_infos, *m_linear_sampler, *m_motion_view, set, 2),
     };
 
     const VkDescriptorImageInfo dest_info{
@@ -423,6 +483,13 @@ void Fsr3FrameGen::Generate(const Device& device, Scheduler& scheduler, VkImage 
         .render_h = static_cast<float>(out_h),
         .blend_factor = blend_factor,
         .flow_scale = flow_scale,
+        // The hardware flow is in pixels, the shader's in flow texels.
+        .motion_scale_x = m_nvof ? NvofMotionScale() * NvOpticalFlow::FlowToPixels /
+                                       static_cast<float>(m_extent.width)
+                                 : 1.0f / static_cast<float>(m_flow_extent.width),
+        .motion_scale_y = m_nvof ? NvofMotionScale() * NvOpticalFlow::FlowToPixels /
+                                       static_cast<float>(m_extent.height)
+                                 : 1.0f / static_cast<float>(m_flow_extent.height),
     };
 
     scheduler.Record([this, constants, out_w, out_h, set, destination](vk::CommandBuffer cmdbuf) {

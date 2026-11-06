@@ -1,0 +1,393 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#include <algorithm>
+#include <cstdlib>
+#include <string>
+#include <vector>
+
+#include "common/logging.h"
+#include "video_core/renderer_vulkan/present/nv_optical_flow.h"
+#include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/vulkan_common/vulkan_device.h"
+
+namespace Vulkan {
+
+namespace {
+
+std::vector<VkFormat> OpticalFlowFormats(const Device& device, VkOpticalFlowUsageFlagsNV usage) {
+    const auto& dld = device.GetDispatchLoader();
+    if (!dld.vkGetPhysicalDeviceOpticalFlowImageFormatsNV) {
+        return {};
+    }
+    const VkOpticalFlowImageFormatInfoNV info{
+        .sType = VK_STRUCTURE_TYPE_OPTICAL_FLOW_IMAGE_FORMAT_INFO_NV,
+        .pNext = nullptr,
+        .usage = usage,
+    };
+    u32 count{};
+    dld.vkGetPhysicalDeviceOpticalFlowImageFormatsNV(device.GetPhysical(), &info, &count, nullptr);
+    std::vector<VkOpticalFlowImageFormatPropertiesNV> properties(
+        count, {.sType = VK_STRUCTURE_TYPE_OPTICAL_FLOW_IMAGE_FORMAT_PROPERTIES_NV});
+    dld.vkGetPhysicalDeviceOpticalFlowImageFormatsNV(device.GetPhysical(), &info, &count,
+                                                     properties.data());
+    std::vector<VkFormat> formats;
+    for (u32 i = 0; i < count; ++i) {
+        formats.push_back(properties[i].format);
+    }
+    return formats;
+}
+
+std::string FormatList(const std::vector<VkFormat>& formats) {
+    std::string text;
+    for (const VkFormat format : formats) {
+        text += (text.empty() ? "" : ", ") + std::to_string(static_cast<int>(format));
+    }
+    return text.empty() ? "none" : text;
+}
+
+VkImageMemoryBarrier Barrier(VkImage image, VkAccessFlags src, VkAccessFlags dst,
+                             VkImageLayout old_layout, VkImageLayout new_layout) {
+    return VkImageMemoryBarrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .pNext = nullptr,
+        .srcAccessMask = src,
+        .dstAccessMask = dst,
+        .oldLayout = old_layout,
+        .newLayout = new_layout,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+    };
+}
+
+} // Anonymous namespace
+
+NvOpticalFlow::NvOpticalFlow(const Device& device_, MemoryAllocator& allocator, VkExtent2D extent_)
+    : device{device_}, extent{extent_} {
+    const auto& dld = device.GetDispatchLoader();
+    const auto& properties = device.GetOpticalFlowProperties();
+    if (!device.HasOpticalFlow() || !dld.vkCreateOpticalFlowSessionNV ||
+        !dld.vkCmdOpticalFlowExecuteNV) {
+        return;
+    }
+    if (extent.width < properties.minWidth || extent.height < properties.minHeight ||
+        extent.width > properties.maxWidth || extent.height > properties.maxHeight) {
+        LOG_WARNING(Render_Vulkan, "Optical flow: {}x{} is outside the supported sizes",
+                    extent.width, extent.height);
+        return;
+    }
+
+    const auto input_formats = OpticalFlowFormats(device, VK_OPTICAL_FLOW_USAGE_INPUT_BIT_NV);
+    const auto output_formats = OpticalFlowFormats(device, VK_OPTICAL_FLOW_USAGE_OUTPUT_BIT_NV);
+    for (const VkFormat candidate : {VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM}) {
+        if (std::ranges::find(input_formats, candidate) != input_formats.end()) {
+            input_format = candidate;
+            break;
+        }
+    }
+    constexpr VkFormat flow_format = VK_FORMAT_R16G16_SFIXED5_NV;
+    const bool flow_sampled =
+        (device.GetPhysical().GetFormatProperties(flow_format).optimalTilingFeatures &
+         VK_FORMAT_FEATURE_TRANSFER_SRC_BIT) != 0;
+    LOG_INFO(Render_Vulkan, "Optical flow formats: input {}, output {}, flow sampled {}",
+             FormatList(input_formats), FormatList(output_formats), flow_sampled);
+    if (input_format == VK_FORMAT_UNDEFINED || !flow_sampled ||
+        std::ranges::find(output_formats, flow_format) == output_formats.end()) {
+        return;
+    }
+
+    VkOpticalFlowGridSizeFlagsNV grid{};
+    u32 grid_size{};
+    for (const auto [bit, size] : {std::pair{VK_OPTICAL_FLOW_GRID_SIZE_4X4_BIT_NV, 4U},
+                                   std::pair{VK_OPTICAL_FLOW_GRID_SIZE_2X2_BIT_NV, 2U},
+                                   std::pair{VK_OPTICAL_FLOW_GRID_SIZE_8X8_BIT_NV, 8U},
+                                   std::pair{VK_OPTICAL_FLOW_GRID_SIZE_1X1_BIT_NV, 1U}}) {
+        if ((properties.supportedOutputGridSizes & bit) != 0) {
+            grid = bit;
+            grid_size = size;
+            break;
+        }
+    }
+    if (grid_size == 0) {
+        return;
+    }
+    flow_extent = {(extent.width + grid_size - 1) / grid_size,
+                   (extent.height + grid_size - 1) / grid_size};
+
+    const std::array families{device.GetGraphicsFamily(), device.GetOpticalFlowFamily()};
+    const auto create_image = [&](VkExtent2D size, VkFormat format, VkImageUsageFlags usage,
+                                  VkOpticalFlowUsageFlagsNV flow_usage) {
+        VkOpticalFlowImageFormatInfoNV flow_info{
+            .sType = VK_STRUCTURE_TYPE_OPTICAL_FLOW_IMAGE_FORMAT_INFO_NV,
+            .pNext = nullptr,
+            .usage = flow_usage,
+        };
+        return allocator.CreateImage(VkImageCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = &flow_info,
+            .flags = 0,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = format,
+            .extent = {size.width, size.height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = usage,
+            .sharingMode = VK_SHARING_MODE_CONCURRENT,
+            .queueFamilyIndexCount = static_cast<u32>(families.size()),
+            .pQueueFamilyIndices = families.data(),
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        });
+    };
+    const auto create_view = [&](vk::Image& image, VkFormat format) {
+        return device.GetLogical().CreateImageView(VkImageViewCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .image = *image,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = format,
+            .components{},
+            .subresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+        });
+    };
+    for (size_t i = 0; i < 2; ++i) {
+        inputs[i] = create_image(extent, input_format, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                 VK_OPTICAL_FLOW_USAGE_INPUT_BIT_NV);
+        input_views[i] = create_view(inputs[i], input_format);
+        flows[i] = create_image(flow_extent, flow_format, VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                VK_OPTICAL_FLOW_USAGE_OUTPUT_BIT_NV);
+        flow_views[i] = create_view(flows[i], flow_format);
+        flow_copies[i] = allocator.CreateImage(VkImageCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = VK_FORMAT_R16G16_SNORM,
+            .extent = {flow_extent.width, flow_extent.height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        });
+        flow_copy_views[i] = create_view(flow_copies[i], VK_FORMAT_R16G16_SNORM);
+    }
+
+    // EDEN_NX2_NVOF_PERF=1 (slow, best), 2 (medium, default) or 3 (fast).
+    VkOpticalFlowPerformanceLevelNV level = VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_MEDIUM_NV;
+    if (const char* value = std::getenv("EDEN_NX2_NVOF_PERF"); value && value[0] >= '1' &&
+                                                               value[0] <= '3') {
+        level = static_cast<VkOpticalFlowPerformanceLevelNV>(value[0] - '0');
+    }
+    const VkDevice logical = *device.GetLogical();
+    for (size_t i = 0; i < 2; ++i) {
+        VkOpticalFlowSessionCreateInfoNV session_info{
+            .sType = VK_STRUCTURE_TYPE_OPTICAL_FLOW_SESSION_CREATE_INFO_NV,
+            .pNext = nullptr,
+            .width = extent.width,
+            .height = extent.height,
+            .imageFormat = input_format,
+            .flowVectorFormat = flow_format,
+            .costFormat = VK_FORMAT_UNDEFINED,
+            .outputGridSize = grid,
+            .hintGridSize = 0,
+            .performanceLevel = level,
+            .flags = 0,
+        };
+        vk::Check(dld.vkCreateOpticalFlowSessionNV(logical, &session_info, nullptr, &sessions[i]));
+        // Session i computes the flow from input i (this frame) to the other input (the last).
+        const std::array bindings{
+            std::pair{VK_OPTICAL_FLOW_SESSION_BINDING_POINT_INPUT_NV, *input_views[i]},
+            std::pair{VK_OPTICAL_FLOW_SESSION_BINDING_POINT_REFERENCE_NV, *input_views[1 - i]},
+            std::pair{VK_OPTICAL_FLOW_SESSION_BINDING_POINT_FLOW_VECTOR_NV, *flow_views[i]},
+        };
+        for (const auto& [point, view] : bindings) {
+            vk::Check(dld.vkBindOpticalFlowSessionImageNV(logical, sessions[i], point, view,
+                                                          VK_IMAGE_LAYOUT_GENERAL));
+        }
+    }
+
+    command_pool = device.GetLogical().CreateCommandPool({
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = device.GetOpticalFlowFamily(),
+    });
+    command_buffers = command_pool.Allocate(2);
+    for (size_t i = 0; i < 2; ++i) {
+        fences[i] = device.GetLogical().CreateFence({
+            .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+        });
+        done[i] = device.GetLogical().CreateSemaphore();
+    }
+    valid = true;
+    LOG_INFO(Render_Vulkan, "Optical flow: {}x{} frames, {}x{} flow grid, performance level {}",
+             extent.width, extent.height, flow_extent.width, flow_extent.height,
+             static_cast<int>(level));
+}
+
+NvOpticalFlow::~NvOpticalFlow() {
+    for (const vk::Fence& fence : fences) {
+        if (fence) {
+            void(fence.Wait());
+        }
+    }
+    const auto& dld = device.GetDispatchLoader();
+    for (const VkOpticalFlowSessionNV session : sessions) {
+        if (session != VK_NULL_HANDLE) {
+            dld.vkDestroyOpticalFlowSessionNV(*device.GetLogical(), session, nullptr);
+        }
+    }
+}
+
+VkSemaphore NvOpticalFlow::Run(Scheduler& scheduler, VkImage frame) {
+    const VkSemaphore timeline = scheduler.GetMasterSemaphore().TimelineHandle();
+    if (timeline == VK_NULL_HANDLE) {
+        // The optical flow queue waits for the copy through the scheduler's timeline.
+        valid = false;
+        return VK_NULL_HANDLE;
+    }
+    const u32 index = next;
+    next = 1 - index;
+    const bool first_layouts = !initialized_layouts;
+    initialized_layouts = true;
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([this, frame, index, first_layouts](vk::CommandBuffer cmdbuf) {
+        if (first_layouts) {
+            std::array<VkImageMemoryBarrier, 6> init{};
+            for (size_t i = 0; i < 2; ++i) {
+                init[i * 3] = Barrier(*inputs[i], 0, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+                                      VK_IMAGE_LAYOUT_GENERAL);
+                init[i * 3 + 1] = Barrier(*flows[i], 0, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+                                          VK_IMAGE_LAYOUT_GENERAL);
+                init[i * 3 + 2] = Barrier(*flow_copies[i], 0, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+                                          VK_IMAGE_LAYOUT_GENERAL);
+            }
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, {}, {}, init);
+        }
+        const std::array before{
+            Barrier(frame,
+                    VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                        VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL),
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               VK_PIPELINE_STAGE_TRANSFER_BIT, 0, {}, {}, before);
+        const VkImageCopy region{
+            .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+            .srcOffset = {0, 0, 0},
+            .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+            .dstOffset = {0, 0, 0},
+            .extent = {extent.width, extent.height, 1},
+        };
+        cmdbuf.CopyImage(frame, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, *inputs[index],
+                         VK_IMAGE_LAYOUT_GENERAL, region);
+        const std::array after{
+            Barrier(frame, VK_ACCESS_TRANSFER_READ_BIT,
+                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL),
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                               0, {}, {}, after);
+    });
+    if (!primed) {
+        primed = true;
+        return VK_NULL_HANDLE;
+    }
+
+    // The timeline value of this submission: the optical flow queue waits for the copy.
+    const u64 copied = scheduler.Flush();
+    const vk::Fence& fence = fences[index];
+    void(fence.Wait());
+    fence.Reset();
+
+    const auto& dld = device.GetDispatchLoader();
+    const VkCommandBuffer raw = command_buffers[index];
+    vk::CommandBuffer cmdbuf{raw, dld};
+    cmdbuf.Begin({
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .pNext = nullptr,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        .pInheritanceInfo = nullptr,
+    });
+    VkOpticalFlowExecuteInfoNV execute{
+        .sType = VK_STRUCTURE_TYPE_OPTICAL_FLOW_EXECUTE_INFO_NV,
+        .pNext = nullptr,
+        .flags = 0,
+        .regionCount = 0,
+        .pRegions = nullptr,
+    };
+    dld.vkCmdOpticalFlowExecuteNV(raw, sessions[index], &execute);
+    cmdbuf.End();
+
+    const VkSemaphore signal = *done[index];
+    const u64 wait_value = copied;
+    const u64 signal_value = 0;
+    const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    const VkTimelineSemaphoreSubmitInfo timeline_info{
+        .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+        .pNext = nullptr,
+        .waitSemaphoreValueCount = 1,
+        .pWaitSemaphoreValues = &wait_value,
+        .signalSemaphoreValueCount = 1,
+        .pSignalSemaphoreValues = &signal_value,
+    };
+    const VkSubmitInfo submit{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .pNext = &timeline_info,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &timeline,
+        .pWaitDstStageMask = &wait_stage,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &raw,
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &signal,
+    };
+    vk::Check(device.GetOpticalFlowQueue().Submit(submit, *fence));
+    last = index;
+    return signal;
+}
+
+void NvOpticalFlow::RecordFlowCopy(vk::CommandBuffer cmdbuf) const {
+    const VkImage destination = *flow_copies[last];
+    const std::array before{
+        Barrier(destination, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL),
+    };
+    cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           0, {}, {}, before);
+    const VkImageCopy region{
+        .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+        .srcOffset = {0, 0, 0},
+        .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+        .dstOffset = {0, 0, 0},
+        .extent = {flow_extent.width, flow_extent.height, 1},
+    };
+    cmdbuf.CopyImage(*flows[last], VK_IMAGE_LAYOUT_GENERAL, destination, VK_IMAGE_LAYOUT_GENERAL,
+                     region);
+    const std::array after{
+        Barrier(destination, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL),
+    };
+    cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                           0, {}, {}, after);
+}
+
+} // namespace Vulkan

@@ -12,6 +12,7 @@ layout(push_constant) uniform PushConstants {
     vec2 render_size;
     float blend_factor; // timestamp between 0.0 and 1.0
     float flow_scale;
+    vec2 motion_scale; // sampled motion to texture coordinates
 };
 
 // ΓöÇΓöÇ Optimized 3├ù3 motion vector median using textureGather ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
@@ -70,6 +71,15 @@ vec2 sampleMotionMedian(vec2 uv) {
     return vec2(xlo[4], ylo[4]);
 }
 
+float frameChange(vec2 uv) {
+    vec3 difference = abs(texture(PreviousFrame, uv).rgb - texture(CurrentFrame, uv).rgb);
+    return dot(difference, vec3(0.333));
+}
+
+float staticWeight(vec2 uv) {
+    return 1.0 - smoothstep(0.01, 0.03, frameChange(uv));
+}
+
 void main() {
     ivec2 pixel_coord = ivec2(gl_GlobalInvocationID.xy);
     if (pixel_coord.x >= int(render_size.x) || pixel_coord.y >= int(render_size.y)) {
@@ -79,11 +89,16 @@ void main() {
     vec2 uv = (vec2(pixel_coord) + 0.5) * inv_render_size;
 
     // Median-filtered motion vector (reduces outlier jitter)
-    vec2 motion = sampleMotionMedian(uv) / vec2(textureSize(MotionVectors, 0));
+    vec2 motion = sampleMotionMedian(uv) * motion_scale;
 
     // Forward and backward warped coordinates
-    vec2 forward_uv  = clamp(uv + motion * blend_factor,         0.0, 1.0);
-    vec2 backward_uv = clamp(uv - motion * (1.0 - blend_factor), 0.0, 1.0);
+    vec2 forward_raw  = uv + motion * blend_factor;
+    vec2 backward_raw = uv - motion * (1.0 - blend_factor);
+    vec2 forward_uv  = clamp(forward_raw,  0.0, 1.0);
+    vec2 backward_uv = clamp(backward_raw, 0.0, 1.0);
+    // A sample from outside the frame (motion off screen) would smear its edge.
+    float forward_inside  = forward_raw == forward_uv ? 1.0 : 0.0;
+    float backward_inside = backward_raw == backward_uv ? 1.0 : 0.0;
 
     vec4 forward_color  = texture(PreviousFrame, forward_uv);
     vec4 backward_color = texture(CurrentFrame,  backward_uv);
@@ -96,11 +111,33 @@ void main() {
     float alpha = mix(blend_factor, 0.5, occlusion * 0.4);
     vec4 interpolated = mix(forward_color, backward_color, alpha);
 
+    // Static pixels (HUD over a moving scene): unchanged between the frames, here and around.
+    // A moving pixel ignores a warped sample that lands on one, else the HUD is copied along the
+    // flow of what moves behind it.
+    float change = 0.0;
+    const vec2 cross_offsets[5] = vec2[](vec2(0.0), vec2(-1.0, 0.0), vec2(1.0, 0.0),
+                                         vec2(0.0, -1.0), vec2(0.0, 1.0));
+    for (int i = 0; i < 5; ++i) {
+        change = max(change, frameChange(uv + cross_offsets[i] * inv_render_size));
+    }
+    float moving = smoothstep(0.01, 0.03, change);
+    float forward_weight =
+        (1.0 - alpha) * (1.0 - moving * staticWeight(forward_uv)) * forward_inside;
+    float backward_weight = alpha * (1.0 - moving * staticWeight(backward_uv)) * backward_inside;
+    vec4 center_color = mix(texture(PreviousFrame, uv), texture(CurrentFrame, uv), blend_factor);
+    if (forward_weight + backward_weight > 1e-3) {
+        interpolated = (forward_color * forward_weight + backward_color * backward_weight) /
+                       (forward_weight + backward_weight);
+    } else {
+        interpolated = center_color;
+    }
+
     // ΓöÇΓöÇ Anti-flicker: blend with un-warped centre pixel ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     float motion_magnitude = length(motion * render_size);
     float direct_weight = exp(-motion_magnitude * 0.5);
-    vec4 center_color = mix(texture(PreviousFrame, uv), texture(CurrentFrame, uv), blend_factor);
     interpolated = mix(interpolated, center_color, direct_weight * 0.3);
+    // Unchanged pixels stay where they are.
+    interpolated = mix(interpolated, center_color, 1.0 - moving);
 
     imageStore(OutGeneratedFrame, pixel_coord, interpolated);
 }

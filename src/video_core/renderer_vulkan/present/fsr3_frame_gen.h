@@ -4,10 +4,13 @@
 #pragma once
 
 #include <array>
+#include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "common/common_types.h"
+#include "video_core/renderer_vulkan/present/nv_optical_flow.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -39,6 +42,20 @@ public:
 
     void Generate(const Device& device, Scheduler& scheduler, VkImage destination,
                   VkImageView destination_storage_view, float blend_factor, float flow_scale);
+
+    /// The semaphore the next graphics submission must wait on before reading the hardware
+    /// optical flow, or a null handle. Taking it hands that wait to the caller.
+    [[nodiscard]] VkSemaphore TakeFlowWait() {
+        return std::exchange(m_flow_wait, VK_NULL_HANDLE);
+    }
+
+    /// The frames the last generation interpolated between (for debug dumps).
+    [[nodiscard]] VkImage PreviousImage() const {
+        return *m_history_image;
+    }
+    [[nodiscard]] VkImage CurrentImage() const {
+        return *m_current_image;
+    }
 
     [[nodiscard]] bool IsReady() const {
         return m_initialized && m_has_history && m_flow_valid;
@@ -90,6 +107,12 @@ private:
     bool m_flow_valid{};
 
     bool m_flow_descriptors_initialized{};
+
+    /// NVIDIA optical flow hardware in place of the flow shader, when available.
+    std::unique_ptr<NvOpticalFlow> m_nvof;
+    VkSemaphore m_flow_wait{};
+    bool m_flow_copied{};
+    vk::Sampler m_nearest_sampler;
 };
 
 } // namespace Vulkan

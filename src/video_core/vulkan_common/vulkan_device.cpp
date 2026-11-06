@@ -780,10 +780,72 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     if (host_float16_supported) {
         features.shader_float16_int8.shaderFloat16 = VK_TRUE;
     }
-    logical = vk::Device::Create(physical, queue_cis, ExtensionListForVulkan(loaded_extensions), first_next, dld);
+    // VK_NV_optical_flow (frame generation): its own queue family, enabled only when it exists.
+    auto all_queue_cis = queue_cis;
+    VkPhysicalDeviceOpticalFlowFeaturesNV optical_flow_features{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPTICAL_FLOW_FEATURES_NV,
+        .pNext = nullptr,
+        .opticalFlow = VK_FALSE,
+    };
+    static constexpr float OPTICAL_FLOW_PRIORITY = 1.0f;
+    const char* const disable_optical_flow = std::getenv("EDEN_NX2_NO_OPTICAL_FLOW");
+    if (supported_extensions.contains(VK_NV_OPTICAL_FLOW_EXTENSION_NAME) &&
+        (disable_optical_flow == nullptr || disable_optical_flow[0] == '0')) {
+        VkPhysicalDeviceFeatures2 query{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            .pNext = &optical_flow_features,
+            .features = {},
+        };
+        physical.GetFeatures2(query);
+        const auto families = physical.GetQueueFamilyProperties();
+        for (u32 family = 0; family < families.size(); ++family) {
+            if ((families[family].queueFlags & VK_QUEUE_OPTICAL_FLOW_BIT_NV) != 0 &&
+                family != graphics_family && family != present_family) {
+                optical_flow_family = family;
+                break;
+            }
+        }
+        if (optical_flow_features.opticalFlow && optical_flow_family != ~0U) {
+            optical_flow_properties = {
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPTICAL_FLOW_PROPERTIES_NV,
+            };
+            VkPhysicalDeviceProperties2 flow_properties2{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                .pNext = &optical_flow_properties,
+                .properties = {},
+            };
+            physical.GetProperties2(flow_properties2);
+            loaded_extensions.insert(VK_NV_OPTICAL_FLOW_EXTENSION_NAME);
+            optical_flow_features.pNext = const_cast<void*>(first_next);
+            first_next = &optical_flow_features;
+            all_queue_cis.push_back(VkDeviceQueueCreateInfo{
+                .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .queueFamilyIndex = optical_flow_family,
+                .queueCount = 1,
+                .pQueuePriorities = &OPTICAL_FLOW_PRIORITY,
+            });
+            LOG_INFO(Render_Vulkan,
+                     "Optical flow: queue family {}, grids {:#x}, cost {}, both directions {}, "
+                     "{}x{} to {}x{}",
+                     optical_flow_family, optical_flow_properties.supportedOutputGridSizes,
+                     optical_flow_properties.costSupported,
+                     optical_flow_properties.bidirectionalFlowSupported,
+                     optical_flow_properties.minWidth, optical_flow_properties.minHeight,
+                     optical_flow_properties.maxWidth, optical_flow_properties.maxHeight);
+        } else {
+            optical_flow_family = ~0U;
+        }
+    }
+
+    logical = vk::Device::Create(physical, all_queue_cis, ExtensionListForVulkan(loaded_extensions), first_next, dld);
 
     graphics_queue = logical.GetQueue(graphics_family);
     present_queue = logical.GetQueue(present_family);
+    if (optical_flow_family != ~0U) {
+        optical_flow_queue = logical.GetQueue(optical_flow_family);
+    }
 
 #ifdef EGLANTINE_STREAMLINE
     if (streamline_extensions) {

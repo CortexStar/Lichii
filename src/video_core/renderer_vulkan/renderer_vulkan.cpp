@@ -242,6 +242,7 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
                                present_manager.SwapchainImageCount(),
                                swapchain.GetImageViewFormat());
 
+    VkSemaphore flow_wait = VK_NULL_HANDLE;
 #ifdef HAS_LSFG
     void(frame_gen.WantedGenerations(present_manager.MaxExtraFrames()));
 
@@ -254,12 +255,15 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     const auto spacing = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::duration<f32>(std::min(frame_gen.FrameInterval(), 0.1f) /
                                    static_cast<f32>(generated_frames + 1)));
+    // The first submission after the optical flow waits for it.
+    flow_wait = frame_gen.TakeFlowWait();
     for (size_t generation = 0; generation < generated_frames; ++generation) {
         Frame* generated = present_manager.GetRenderFrame();
         generated->present_spacing = spacing;
         blit_swapchain.PrepareFrame(device, generated, render_window.GetFramebufferLayout());
         frame_gen.GenerateInto(device, generated, generation);
-        scheduler.Flush(*generated->render_ready);
+        scheduler.Flush(*generated->render_ready, std::exchange(flow_wait, VK_NULL_HANDLE));
+        frame_gen.DumpInterpolation(*generated->image);
         present_manager.Present(generated);
     }
 #endif
@@ -267,7 +271,7 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     if (trace) {
         scheduler.MarkFrameEnd(++trace_frame);
     }
-    scheduler.Flush(*frame->render_ready);
+    scheduler.Flush(*frame->render_ready, flow_wait);
 
     const auto presenting = trace ? std::chrono::steady_clock::now()
                                   : std::chrono::steady_clock::time_point{};
