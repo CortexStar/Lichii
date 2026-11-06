@@ -57,6 +57,16 @@ static u64 NativeShaderHash(std::span<const u64> code) {
            0x4f554e4345000002ULL;
 }
 
+bool RejectedByHash(u64 hash) {
+    static const std::string list = [] {
+        const char* text = std::getenv("EDEN_NX2_REJECT_HASH");
+        std::string value = text ? "," + std::string{text} + "," : std::string{};
+        std::ranges::transform(value, value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value;
+    }();
+    return !list.empty() && list.find(fmt::format(",{:016x},", hash)) != std::string::npos;
+}
+
 static u64 MakeCbufKey(u32 index, u32 offset) {
     return (static_cast<u64>(index) << 32) | offset;
 }
@@ -666,18 +676,10 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
     Shader::Ampere::AppendNativeAddressMap(lowered_code, lowered.source_instruction_offsets);
     // EDEN_NX2_REJECT_HASH=<hash>,...: like EDEN_NX2_REJECT, but by native program key (shader
     // dump file names) or shader hash (frame dump "shaders"), which stay the same between runs.
-    if (static const std::string reject_hashes = [] {
-            const char* text = std::getenv("EDEN_NX2_REJECT_HASH");
-            std::string list = text ? "," + std::string{text} + "," : std::string{};
-            std::ranges::transform(list, list.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            return list;
-        }();
-        !reject_hashes.empty()) {
-        for (const u64 hash : {result->native_program_key, NativeShaderHash(lowered_code)}) {
-            if (reject_hashes.find(fmt::format(",{:016x},", hash)) != std::string::npos) {
-                throw Shader::RuntimeError("Native shader at {:#x} ({:016x}) rejected by EDEN_NX2_REJECT_HASH",
-                                           program_base, hash);
-            }
+    for (const u64 hash : {result->native_program_key, NativeShaderHash(lowered_code)}) {
+        if (RejectedByHash(hash)) {
+            throw Shader::RuntimeError("Native shader at {:#x} ({:016x}) rejected by EDEN_NX2_REJECT_HASH",
+                                       program_base, hash);
         }
     }
     // The same list, changed at runtime by the debug server (docs/nx2/debug-mcp.md).

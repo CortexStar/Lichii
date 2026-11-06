@@ -1188,6 +1188,14 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     std::unique_ptr<EmissionBudget::Reservation> reservation) try {
     auto hash = key.Hash();
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
+    // Pipelines from the disk cache are not lowered again, so the list is checked here too.
+    for (const u64 stage_hash : key.unique_hashes) {
+        if (stage_hash != 0 && VideoCommon::RejectedByHash(stage_hash)) {
+            LOG_WARNING(Render_Vulkan, "Pipeline {:016x}: shader {:016x} rejected by EDEN_NX2_REJECT_HASH",
+                        hash, stage_hash);
+            return nullptr;
+        }
+    }
     size_t env_index{0};
     std::array<Shader::IR::Program, Maxwell::MaxShaderProgram> programs;
     const bool uses_vertex_a{key.unique_hashes[0] != 0};
