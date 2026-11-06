@@ -147,6 +147,31 @@ static IPSwitchRecord EscapeStringSequences(std::string_view sv) {
     return r;
 }
 
+static bool IsHexString(std::string_view sv) {
+    return !sv.empty() && std::all_of(sv.cbegin(), sv.cend(), [](char c) {
+        return std::isxdigit(static_cast<unsigned char>(c)) != 0;
+    });
+}
+
+// A record is a hex offset followed by a quoted string or a hex value.
+static bool IsPatchRecord(std::string_view line) {
+    const auto offset_end = line.find_first_of(" \t\"'");
+    if (offset_end == std::string_view::npos) {
+        return false;
+    }
+    auto offset = line.substr(0, offset_end);
+    if (offset.starts_with("0x") || offset.starts_with("0X")) {
+        offset.remove_prefix(2);
+    }
+    if (!IsHexString(offset)) {
+        return false;
+    }
+    if (line.find_first_of("\"'") != std::string_view::npos) {
+        return true;
+    }
+    return IsHexString(line.substr(line.find_last_of(" /\t\r\n") + 1));
+}
+
 void IPSwitchCompiler::Parse(std::span<u8 const> bytes) {
     LOG_INFO(Loader, "IPSwitchCompiler: '{}'", patch_text->GetName());
     bool is_little_endian = true;
@@ -203,6 +228,9 @@ void IPSwitchCompiler::Parse(std::span<u8 const> bytes) {
             }
         } else if (patches.empty()) {
             LOG_WARNING(Loader, "Invalid line not in a patch {}", line);
+        } else if (!IsPatchRecord(line)) {
+            // Text after a patch, such as credits, must not be written into the module.
+            LOG_WARNING(Loader, "Ignoring line that is not a patch {}", line);
         } else {
             size_t offset = size_t(std::strtoul(line.data(), nullptr, 16));
             offset += size_t(offset_shift);
