@@ -888,11 +888,17 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         ComputePipelineCacheKey key;
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
 
+        const u64 hash = key.Hash();
+        if (!disk_compute_pipelines.insert(hash).second) {
+            return;
+        }
+
         workers.QueueWork([this, key, env_ = std::move(env), &state, &callback]() mutable {
-            ShaderPools pools;
+            thread_local ShaderPools pools;
+            pools.ReleaseContents();
             auto entry{CreateComputePipeline(pools, key, env_, state.statistics.get(), false)};
             std::scoped_lock lock{state.mutex};
-            if (entry.pipeline) {
+            if (entry.pipeline && !entry.pipeline->Failed()) {
                 compute_cache.emplace(key, std::move(entry));
             }
             ++state.built;
