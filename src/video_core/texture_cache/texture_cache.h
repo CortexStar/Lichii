@@ -2811,16 +2811,25 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         return &new_image.aliased_images[alias_pointer->second];
     };
     // Whether that copy writes every texel of the new image: a plain copy (same format) of every
-    // level and layer from its origin.
+    // level and layer from its origin. Sparse and unbacked images still need RefreshContents to
+    // bind their memory.
     const auto writes_whole_image = [&](const AliasedImage& aliased) {
         const Image& source = slot_images[aliased.id];
-        if (new_image.info.type != ImageType::e2D || source.info.format != new_image.info.format ||
+        if (new_image.info.type != ImageType::e2D || source.info.type != ImageType::e2D ||
+            source.info.format != new_image.info.format ||
             source.info.astc_opaque != new_image.info.astc_opaque ||
-            True((source.flags | new_image.flags) & ImageFlagBits::UnwrittenSparse)) {
+            True((source.flags | new_image.flags) & ImageFlagBits::UnwrittenSparse) ||
+            True(new_image.flags & (ImageFlagBits::SparseLayers | ImageFlagBits::SparseTiles |
+                                    ImageFlagBits::Unbacked))) {
             return false;
         }
         const u32 block_width = VideoCore::Surface::DefaultBlockWidth(new_image.info.format);
         const u32 block_height = VideoCore::Surface::DefaultBlockHeight(new_image.info.format);
+        if (can_rescale && (block_width > 1 || block_height > 1)) {
+            // CopyImage scales a rescaled copy's extent in blocks, which can round below the
+            // scaled image's size in blocks.
+            return false;
+        }
         for (s32 level = 0; level < new_image.info.resources.levels; ++level) {
             const Extent3D size = MipSize(new_image.info.size, level);
             const u32 width = Common::DivCeil(size.width, block_width);
