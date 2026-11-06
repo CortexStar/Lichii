@@ -29,11 +29,11 @@ LsfgBeta::LsfgBeta(const Device& device, MemoryAllocator& memory_allocator,
                    const LsfgShaders& shaders, LsfgResources& resources,
                    vk::DescriptorPool& descriptor_pool, LsfgImageHistory& inputs_)
     : inputs{&inputs_} {
-    using namespace VideoCore::FrameGen::PerformanceShader;
+    using namespace VideoCore::FrameGen::LsfgShader;
 
     passes[0] = LsfgPass(device, shaders, BETA[0],
                          {{1, VK_DESCRIPTOR_TYPE_SAMPLER},
-                          {6, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
+                          {3 * shaders.FeaturePlanes(), VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
                           {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
     for (size_t i = 1; i < LSFG_BETA_STAGES - 1; ++i) {
         passes[i] = LsfgPass(device, shaders, BETA[i],

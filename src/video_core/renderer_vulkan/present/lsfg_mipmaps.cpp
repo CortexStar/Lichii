@@ -30,7 +30,7 @@ LsfgMipmaps::LsfgMipmaps(const Device& device, MemoryAllocator& memory_allocator
                          vk::DescriptorPool& descriptor_pool, LsfgImagePair& frames_,
                          f32 flow_scale)
     : frames{&frames_} {
-    using namespace VideoCore::FrameGen::PerformanceShader;
+    using namespace VideoCore::FrameGen::LsfgShader;
 
     pass = LsfgPass(device, shaders, MIPMAPS,
                     {{1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},

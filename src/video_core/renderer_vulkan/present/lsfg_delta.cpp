@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2025 lsfg-vk
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
+#include <span>
 #include <vector>
 
 #include "video_core/frame_gen/lossless_dll.h"
@@ -31,48 +33,52 @@ LsfgDelta::LsfgDelta(const Device& device, MemoryAllocator& memory_allocator,
                      LsfgImage* previous2_)
     : inputs{&inputs_}, flow_input{&flow_input_}, previous_gamma{previous_gamma_},
       previous1{previous1_}, previous2{previous2_} {
-    using namespace VideoCore::FrameGen::PerformanceShader;
+    using namespace VideoCore::FrameGen::LsfgShader;
+    feature_planes = shaders.FeaturePlanes();
+    const u32 planes = feature_planes;
 
     passes[0] = LsfgPass(device, shaders, DELTA[0],
                          {{1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},
                           {2, VK_DESCRIPTOR_TYPE_SAMPLER},
-                          {5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
+                          {2 * planes + 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
                           {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
     passes[1] = LsfgPass(device, shaders, DELTA[1],
                          {{1, VK_DESCRIPTOR_TYPE_SAMPLER},
                           {3, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
-                          {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
+                          {planes, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
     passes[2] = LsfgPass(device, shaders, DELTA[2],
                          {{1, VK_DESCRIPTOR_TYPE_SAMPLER},
-                          {2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
-                          {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
+                          {planes, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
+                          {planes, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
     passes[3] = LsfgPass(device, shaders, DELTA[3],
                          {{1, VK_DESCRIPTOR_TYPE_SAMPLER},
-                          {2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
-                          {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
+                          {planes, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
+                          {planes, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
     passes[4] = LsfgPass(device, shaders, DELTA[4],
                          {{1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},
                           {2, VK_DESCRIPTOR_TYPE_SAMPLER},
-                          {4, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
+                          {planes + 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
                           {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
     passes[5] = LsfgPass(device, shaders, DELTA[5],
                          {{1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},
                           {2, VK_DESCRIPTOR_TYPE_SAMPLER},
-                          {6, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
-                          {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
+                          {2 * planes + 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
+                          {planes / 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
     for (size_t i = 6; i < LSFG_DELTA_STAGES - 1; ++i) {
         passes[i] = LsfgPass(device, shaders, DELTA[i],
                              {{1, VK_DESCRIPTOR_TYPE_SAMPLER},
-                              {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
-                              {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
+                              {planes / 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
+                              {planes / 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
     }
     passes[9] = LsfgPass(device, shaders, DELTA[9],
                          {{1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},
                           {2, VK_DESCRIPTOR_TYPE_SAMPLER},
-                          {2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
+                          {planes / 2 + 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
                           {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
 
     const VkExtent2D extent = (*inputs)[0][0].Extent();
+    temp1.resize(std::max(planes, 3U));
+    temp2.resize(planes);
     for (auto& image : temp1) {
         image = LsfgImage(device, memory_allocator, extent);
     }
@@ -131,7 +137,7 @@ LsfgDelta::LsfgDelta(const Device& device, MemoryAllocator& memory_allocator,
                 .AddSampledImages((*inputs)[(i + 2) % LSFG_HISTORY_SLOTS])
                 .AddSampledImages((*inputs)[i % LSFG_HISTORY_SLOTS])
                 .AddSampledImage(previous_gamma)
-                .AddStorageImages(temp1)
+                .AddStorageImages(std::span{temp1}.first(3))
                 .Build(device);
             LsfgDescriptorWriter(pass.sixth_descriptor_sets[i])
                 .AddUniformBuffer(buffer, LsfgResources::BufferSize())
@@ -141,24 +147,22 @@ LsfgDelta::LsfgDelta(const Device& device, MemoryAllocator& memory_allocator,
                 .AddSampledImages((*inputs)[i % LSFG_HISTORY_SLOTS])
                 .AddSampledImage(previous_gamma)
                 .AddSampledImage(previous1)
-                .AddStorageImage(temp2[0])
+                .AddStorageImages(std::span{temp2}.first(planes / 2))
                 .Build(device);
         }
         LsfgDescriptorWriter(pass.descriptor_sets[0])
             .AddSampler(sampler)
-            .AddSampledImages(temp1)
+            .AddSampledImages(std::span{temp1}.first(3))
             .AddStorageImages(temp2)
             .Build(device);
         LsfgDescriptorWriter(pass.descriptor_sets[1])
             .AddSampler(sampler)
             .AddSampledImages(temp2)
-            .AddStorageImage(temp1[0])
-            .AddStorageImage(temp1[1])
+            .AddStorageImages(std::span{temp1}.first(planes))
             .Build(device);
         LsfgDescriptorWriter(pass.descriptor_sets[2])
             .AddSampler(sampler)
-            .AddSampledImage(temp1[0])
-            .AddSampledImage(temp1[1])
+            .AddSampledImages(std::span{temp1}.first(planes))
             .AddStorageImages(temp2)
             .Build(device);
         LsfgDescriptorWriter(pass.descriptor_sets[3])
@@ -172,24 +176,24 @@ LsfgDelta::LsfgDelta(const Device& device, MemoryAllocator& memory_allocator,
             .Build(device);
         LsfgDescriptorWriter(pass.descriptor_sets[4])
             .AddSampler(sampler)
-            .AddSampledImage(temp2[0])
-            .AddStorageImage(temp1[0])
+            .AddSampledImages(std::span{temp2}.first(planes / 2))
+            .AddStorageImages(std::span{temp1}.first(planes / 2))
             .Build(device);
         LsfgDescriptorWriter(pass.descriptor_sets[5])
             .AddSampler(sampler)
-            .AddSampledImage(temp1[0])
-            .AddStorageImage(temp2[0])
+            .AddSampledImages(std::span{temp1}.first(planes / 2))
+            .AddStorageImages(std::span{temp2}.first(planes / 2))
             .Build(device);
         LsfgDescriptorWriter(pass.descriptor_sets[6])
             .AddSampler(sampler)
-            .AddSampledImage(temp2[0])
-            .AddStorageImage(temp1[0])
+            .AddSampledImages(std::span{temp2}.first(planes / 2))
+            .AddStorageImages(std::span{temp1}.first(planes / 2))
             .Build(device);
         LsfgDescriptorWriter(pass.descriptor_sets[7])
             .AddUniformBuffer(buffer, LsfgResources::BufferSize())
             .AddSampler(sampler)
             .AddSampler(edge_sampler)
-            .AddSampledImage(temp1[0])
+            .AddSampledImages(std::span{temp1}.first(planes / 2))
             .AddSampledImage(previous2)
             .AddStorageImage(out_image2)
             .Build(device);
@@ -206,24 +210,29 @@ void LsfgDelta::Dispatch(vk::CommandBuffer cmdbuf, u64 frame_count, size_t slot)
     const size_t history = frame_count % LSFG_HISTORY_SLOTS;
     const size_t previous_history = (frame_count + 2) % LSFG_HISTORY_SLOTS;
 
+    auto first = std::span{temp1}.first(3);
+    auto expanded = std::span{temp1}.first(feature_planes);
+    auto refine1 = std::span{temp1}.first(feature_planes / 2);
+    auto refine2 = std::span{temp2}.first(feature_planes / 2);
+
     LsfgBarriers(cmdbuf)
         .WriteToReadAll((*inputs)[previous_history])
         .WriteToReadAll((*inputs)[history])
         .WriteToRead(previous_gamma)
-        .ReadToWriteAll(temp1)
+        .ReadToWriteAll(first)
         .Build();
     passes[0].Bind(cmdbuf, pass.first_descriptor_sets[history]);
     cmdbuf.Dispatch(groups_x, groups_y, 1);
 
-    LsfgBarriers(cmdbuf).WriteToReadAll(temp1).ReadToWriteAll(temp2).Build();
+    LsfgBarriers(cmdbuf).WriteToReadAll(first).ReadToWriteAll(temp2).Build();
     passes[1].Bind(cmdbuf, pass.descriptor_sets[0]);
     cmdbuf.Dispatch(groups_x, groups_y, 1);
 
-    LsfgBarriers(cmdbuf).WriteToReadAll(temp2).ReadToWriteAll(temp1).Build();
+    LsfgBarriers(cmdbuf).WriteToReadAll(temp2).ReadToWriteAll(expanded).Build();
     passes[2].Bind(cmdbuf, pass.descriptor_sets[1]);
     cmdbuf.Dispatch(groups_x, groups_y, 1);
 
-    LsfgBarriers(cmdbuf).WriteToReadAll(temp1).ReadToWriteAll(temp2).Build();
+    LsfgBarriers(cmdbuf).WriteToReadAll(expanded).ReadToWriteAll(temp2).Build();
     passes[3].Bind(cmdbuf, pass.descriptor_sets[2]);
     cmdbuf.Dispatch(groups_x, groups_y, 1);
 
@@ -241,38 +250,25 @@ void LsfgDelta::Dispatch(vk::CommandBuffer cmdbuf, u64 frame_count, size_t slot)
         .WriteToReadAll((*inputs)[history])
         .WriteToRead(previous_gamma)
         .WriteToRead(previous1)
-        .ReadToWriteAll(temp2)
+        .ReadToWriteAll(refine2)
         .Build();
     passes[5].Bind(cmdbuf, pass.sixth_descriptor_sets[history]);
     cmdbuf.Dispatch(groups_x, groups_y, 1);
 
-    LsfgBarriers(cmdbuf)
-        .WriteToReadAll(temp2)
-        .ReadToWrite(temp1[0])
-        .ReadToWrite(temp1[1])
-        .Build();
+    LsfgBarriers(cmdbuf).WriteToReadAll(refine2).ReadToWriteAll(refine1).Build();
     passes[6].Bind(cmdbuf, pass.descriptor_sets[4]);
     cmdbuf.Dispatch(groups_x, groups_y, 1);
 
-    LsfgBarriers(cmdbuf)
-        .WriteToRead(temp1[0])
-        .WriteToRead(temp1[1])
-        .ReadToWriteAll(temp2)
-        .Build();
+    LsfgBarriers(cmdbuf).WriteToReadAll(refine1).ReadToWriteAll(refine2).Build();
     passes[7].Bind(cmdbuf, pass.descriptor_sets[5]);
     cmdbuf.Dispatch(groups_x, groups_y, 1);
 
-    LsfgBarriers(cmdbuf)
-        .WriteToReadAll(temp2)
-        .ReadToWrite(temp1[0])
-        .ReadToWrite(temp1[1])
-        .Build();
+    LsfgBarriers(cmdbuf).WriteToReadAll(refine2).ReadToWriteAll(refine1).Build();
     passes[8].Bind(cmdbuf, pass.descriptor_sets[6]);
     cmdbuf.Dispatch(groups_x, groups_y, 1);
 
     LsfgBarriers(cmdbuf)
-        .WriteToRead(temp1[0])
-        .WriteToRead(temp1[1])
+        .WriteToReadAll(refine1)
         .WriteToRead(previous2)
         .ReadToWrite(out_image2)
         .Build();

@@ -6,6 +6,9 @@
 
 #include <memory>
 #include <thread>
+#include <QCheckBox>
+#include <QLabel>
+#include <QVBoxLayout>
 
 #include "common/settings.h"
 #include "common/settings_enums.h"
@@ -176,6 +179,25 @@ void ConfigureInput::Initialize(InputCommon::InputSubsystem* input_subsystem,
     connect(ui->buttonClearAll, &QPushButton::clicked, [this] { ClearAll(); });
     connect(ui->buttonRestoreDefaults, &QPushButton::clicked, [this] { RestoreDefaults(); });
 
+    frame_gen_tab = new QWidget(this);
+    auto* frame_gen_layout = new QVBoxLayout(frame_gen_tab);
+    auto* description = new QLabel(
+        tr("Standard-quality LSFG 3.1 is used by default. Performance mode uses a lighter "
+           "network at reduced image quality. Enable frame generation in Graphics settings."),
+        frame_gen_tab);
+    description->setWordWrap(true);
+    frame_gen_layout->addWidget(description);
+    lsfg_performance = new QCheckBox(tr("LSFG Performance Mode"), frame_gen_tab);
+    lsfg_performance->setToolTip(
+        tr("Leave disabled for standard quality. Per-game overrides are available in "
+           "Configure Game -> Graphics."));
+    lsfg_performance->setChecked(Settings::values.frame_gen_performance_mode.GetValue(true));
+    lsfg_performance->setEnabled(!system.IsPoweredOn() ||
+                                 Settings::values.frame_gen_performance_mode.UsingGlobal());
+    frame_gen_layout->addWidget(lsfg_performance);
+    frame_gen_layout->addStretch();
+    ui->tabWidget->addTab(frame_gen_tab, tr("Frame Generation"));
+
     RetranslateUI();
     LoadConfiguration();
 }
@@ -202,10 +224,12 @@ void ConfigureInput::PropagatePlayerNumberChanged(size_t player_index, bool chec
 }
 
 QList<QWidget*> ConfigureInput::GetSubTabs() const {
-    return {
+    QList<QWidget*> tabs{
         ui->tabPlayer1, ui->tabPlayer2, ui->tabPlayer3, ui->tabPlayer4,  ui->tabPlayer5,
         ui->tabPlayer6, ui->tabPlayer7, ui->tabPlayer8, ui->tabAdvanced,
     };
+    tabs.push_back(frame_gen_tab);
+    return tabs;
 }
 
 void ConfigureInput::ApplyConfiguration() {
@@ -226,6 +250,14 @@ void ConfigureInput::ApplyConfiguration() {
     Settings::values.vibration_enabled.SetValue(ui->vibrationGroup->isChecked());
     Settings::values.motion_enabled.SetValue(ui->motionGroup->isChecked());
     Settings::values.players.SetGlobal(was_global);
+
+    if (lsfg_performance->isEnabled()) {
+        auto& setting = Settings::values.frame_gen_performance_mode;
+        const bool use_global = setting.UsingGlobal();
+        setting.SetGlobal(true);
+        setting.SetValue(lsfg_performance->isChecked());
+        setting.SetGlobal(use_global);
+    }
 }
 
 void ConfigureInput::changeEvent(QEvent* event) {

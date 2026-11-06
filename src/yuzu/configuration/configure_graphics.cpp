@@ -222,6 +222,11 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
     QCheckBox* frame_gen_checkbox = nullptr;
 
     for (const auto setting : Settings::values.linkage.by_category[Settings::Category::Renderer]) {
+        // Global LSFG mode is edited in Controls; per-game overrides remain in Graphics.
+        if (Settings::IsConfiguringGlobal() &&
+            setting->Id() == Settings::values.frame_gen_performance_mode.Id()) {
+            continue;
+        }
 #ifndef HAS_RESHADE
         if (setting->Id() == Settings::values.post_shader_enabled.Id()) {
             continue;
@@ -358,12 +363,13 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
 
     // Hide rather than disable, a disabled widget would read as using the global value
     if (frame_gen_checkbox != nullptr) {
-        for (const u32 id : {Settings::values.frame_gen_type.Id(),
-                             Settings::values.frame_gen_multiplier.Id(),
-                             Settings::values.frame_gen_target_rate.Id(),
-                             Settings::values.frame_gen_flow_scale_auto.Id(),
-                             Settings::values.frame_gen_flow_scale.Id(),
-                             Settings::values.frame_gen_queue_target.Id()}) {
+        for (const u32 id :
+             {Settings::values.frame_gen_type.Id(), Settings::values.frame_gen_multiplier.Id(),
+              Settings::values.frame_gen_target_rate.Id(),
+              Settings::values.frame_gen_flow_scale_auto.Id(),
+              Settings::values.frame_gen_flow_scale.Id(),
+              Settings::values.frame_gen_queue_target.Id(),
+              Settings::values.frame_gen_performance_mode.Id()}) {
             if (const auto it = hold_graphics.find(id); it != hold_graphics.end()) {
                 it->second->setVisible(frame_gen_checkbox->isChecked());
                 connect(frame_gen_checkbox, &QCheckBox::toggled, it->second, &QWidget::setVisible);

@@ -493,6 +493,15 @@ struct Values {
     SwitchableSetting<bool> frame_gen_dump_flow{linkage, false, "frame_gen_dump_flow",
                                                 Category::Renderer};
 
+    SwitchableSetting<bool> frame_gen_performance_mode{linkage,
+                                                       false,
+                                                       "frame_gen_performance_mode",
+                                                       Category::Renderer,
+                                                       Specialization::Default,
+                                                       true,
+                                                       true,
+                                                       &frame_gen};
+
     SwitchableSetting<bool> use_asynchronous_gpu_emulation{linkage, true, "use_asynchronous_gpu_emulation",
                                                            Category::Renderer};
     // *nix platforms may have issues with the borderless windowed fullscreen mode.

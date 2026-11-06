@@ -32,24 +32,26 @@ constexpr u32 DISPATCH_TILE_SHIFT = 3;
 } // Anonymous namespace
 
 LsfgAlphaPasses::LsfgAlphaPasses(const Device& device, const LsfgShaders& shaders) {
-    using namespace VideoCore::FrameGen::PerformanceShader;
+    using namespace VideoCore::FrameGen::LsfgShader;
+    feature_planes = shaders.FeaturePlanes();
+    const u32 planes = feature_planes;
 
     passes[0] = LsfgPass(device, shaders, ALPHA[0],
                          {{1, VK_DESCRIPTOR_TYPE_SAMPLER},
                           {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
-                          {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
+                          {planes / 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
     passes[1] = LsfgPass(device, shaders, ALPHA[1],
                          {{1, VK_DESCRIPTOR_TYPE_SAMPLER},
-                          {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
-                          {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
+                          {planes / 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
+                          {planes / 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
     passes[2] = LsfgPass(device, shaders, ALPHA[2],
                          {{1, VK_DESCRIPTOR_TYPE_SAMPLER},
-                          {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
-                          {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
+                          {planes / 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
+                          {planes, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
     passes[3] = LsfgPass(device, shaders, ALPHA[3],
                          {{1, VK_DESCRIPTOR_TYPE_SAMPLER},
-                          {2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
-                          {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
+                          {planes, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
+                          {planes, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}});
 }
 
 LsfgAlpha::LsfgAlpha(const Device& device, MemoryAllocator& memory_allocator,
@@ -59,8 +61,16 @@ LsfgAlpha::LsfgAlpha(const Device& device, MemoryAllocator& memory_allocator,
     const VkExtent2D half_extent = HalveExtent(input->Extent());
     const VkExtent2D quarter_extent = HalveExtent(half_extent);
 
-    temp1 = LsfgImage(device, memory_allocator, half_extent);
-    temp2 = LsfgImage(device, memory_allocator, half_extent);
+    const auto planes = passes->FeaturePlanes();
+    temp1.resize(planes / 2);
+    temp2.resize(planes / 2);
+    temp3.resize(planes);
+    for (auto& image : temp1)
+        image = LsfgImage(device, memory_allocator, half_extent);
+    for (auto& image : temp2)
+        image = LsfgImage(device, memory_allocator, half_extent);
+    for (auto& history : out_images)
+        history.resize(planes);
     for (size_t i = 0; i < temp3.size(); ++i) {
         temp3[i] = LsfgImage(device, memory_allocator, quarter_extent);
         for (size_t j = 0; j < LSFG_HISTORY_SLOTS; ++j) {
@@ -89,16 +99,16 @@ LsfgAlpha::LsfgAlpha(const Device& device, MemoryAllocator& memory_allocator,
     LsfgDescriptorWriter(descriptor_sets[0])
         .AddSampler(sampler)
         .AddSampledImage(*input)
-        .AddStorageImage(temp1)
+        .AddStorageImages(temp1)
         .Build(device);
     LsfgDescriptorWriter(descriptor_sets[1])
         .AddSampler(sampler)
-        .AddSampledImage(temp1)
-        .AddStorageImage(temp2)
+        .AddSampledImages(temp1)
+        .AddStorageImages(temp2)
         .Build(device);
     LsfgDescriptorWriter(descriptor_sets[2])
         .AddSampler(sampler)
-        .AddSampledImage(temp2)
+        .AddSampledImages(temp2)
         .AddStorageImages(temp3)
         .Build(device);
     for (size_t i = 0; i < LSFG_HISTORY_SLOTS; ++i) {
@@ -113,13 +123,13 @@ LsfgAlpha::LsfgAlpha(const Device& device, MemoryAllocator& memory_allocator,
 void LsfgAlpha::PushBarriers(LsfgBarriers& barriers, u64 frame_count, size_t stage) {
     switch (stage) {
     case 0:
-        barriers.WriteToRead(*input).ReadToWrite(temp1);
+        barriers.WriteToRead(*input).ReadToWriteAll(temp1);
         break;
     case 1:
-        barriers.WriteToRead(temp1).ReadToWrite(temp2);
+        barriers.WriteToReadAll(temp1).ReadToWriteAll(temp2);
         break;
     case 2:
-        barriers.WriteToRead(temp2).ReadToWriteAll(temp3);
+        barriers.WriteToReadAll(temp2).ReadToWriteAll(temp3);
         break;
     default:
         barriers.WriteToReadAll(temp3).ReadToWriteAll(out_images[frame_count % LSFG_HISTORY_SLOTS]);
@@ -128,7 +138,7 @@ void LsfgAlpha::PushBarriers(LsfgBarriers& barriers, u64 frame_count, size_t sta
 }
 
 void LsfgAlpha::DispatchStage(vk::CommandBuffer cmdbuf, u64 frame_count, size_t stage) {
-    const VkExtent2D extent = stage < 2 ? temp1.Extent() : temp3[0].Extent();
+    const VkExtent2D extent = stage < 2 ? temp1[0].Extent() : temp3[0].Extent();
     const VkDescriptorSet set = stage < LSFG_ALPHA_STAGES - 1
                                     ? descriptor_sets[stage]
                                     : last_descriptor_sets[frame_count % LSFG_HISTORY_SLOTS];

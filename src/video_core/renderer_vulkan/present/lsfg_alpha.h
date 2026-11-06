@@ -27,7 +27,12 @@ public:
         return passes[stage];
     }
 
+    [[nodiscard]] u32 FeaturePlanes() const {
+        return feature_planes;
+    }
+
 private:
+    u32 feature_planes{};
     std::array<LsfgPass, LSFG_ALPHA_STAGES> passes;
 };
 
@@ -53,9 +58,9 @@ private:
     std::array<VkDescriptorSet, LSFG_HISTORY_SLOTS> last_descriptor_sets{};
     vk::DescriptorSets owned_sets;
 
-    LsfgImage temp1;
-    LsfgImage temp2;
-    LsfgImagePair temp3;
+    LsfgImageGroup temp1;
+    LsfgImageGroup temp2;
+    LsfgImageGroup temp3;
     LsfgImageHistory out_images;
 };
 

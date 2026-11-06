@@ -8,6 +8,7 @@
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
+#include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/renderer_vulkan/present/frame_gen.h"
 #include "video_core/renderer_vulkan/present/util.h"
@@ -227,8 +228,13 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
 
     const VkExtent2D extent{.width = frame->width, .height = frame->height};
     const f32 flow_scale = ConfiguredFlowScale(peak_guest_extent, extent);
-    if ((!chain && !fsr3_chain) || built_extent.width != extent.width || built_extent.height != extent.height ||
-        built_format != format || built_flow_scale != flow_scale) {
+    const bool use_fsr3 =
+        Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3;
+    if ((use_fsr3 ? !fsr3_chain : !chain) || built_extent.width != extent.width ||
+        built_extent.height != extent.height || built_format != format ||
+        built_flow_scale != flow_scale ||
+        (!use_fsr3 &&
+         shaders->IsPerformanceMode() != Settings::values.frame_gen_performance_mode.GetValue())) {
         Rebuild(device, extent, format, flow_scale);
     }
 
@@ -240,12 +246,16 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
     warm_streak = warm ? warm_streak + 1 : 0;
     generated = warm && warm_streak >= LSFG_RECURRENCE_FRAMES && plan.generations > 0;
 
-    const bool use_fsr3 = Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3;
-
     if (use_fsr3 && fsr3_chain) {
         scheduler.RequestOutsideRenderPassOperationContext();
         fsr3_chain->Process(device, scheduler, *frame->image, *frame->storage_view, count);
     } else if (chain) {
+        if (generated && !generation_logged) {
+            LOG_INFO(Render_Vulkan, "LSFG 3.1 {} active: {} generated frames per game frame",
+                     shaders->IsPerformanceMode() ? "Performance" : "standard quality",
+                     last_generations);
+            generation_logged = true;
+        }
         scheduler.RequestOutsideRenderPassOperationContext();
         scheduler.Record([this, source = *frame->image, extent, count,
                           dispatch = warm](vk::CommandBuffer cmdbuf) {
@@ -314,13 +324,18 @@ void FrameGen::Rebuild(const Device& device, VkExtent2D extent, VkFormat format,
     if (Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3) {
         fsr3_chain.emplace(device, memory_allocator, extent, format);
     } else {
+        shaders->SetPerformanceMode(Settings::values.frame_gen_performance_mode.GetValue());
         chain.emplace(device, memory_allocator, *shaders, extent, format, built_flow_scale);
+        LOG_INFO(Render_Vulkan, "LSFG 3.1 {} mode initialized: {}x{}, flow scale {}",
+                 shaders->IsPerformanceMode() ? "Performance" : "standard quality", extent.width,
+                 extent.height, built_flow_scale);
     }
     built_extent = extent;
     built_format = format;
     frame_count = 0;
     warm_streak = 0;
     generated = false;
+    generation_logged = false;
 }
 
 void FrameGen::DumpDebugImages(u64 count) {

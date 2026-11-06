@@ -28,7 +28,7 @@ enum class LosslessStatus : u32 {
 using ShaderResources = std::map<u32, std::vector<u8>>;
 using ShaderModules = std::map<u32, std::vector<u32>>;
 
-namespace PerformanceShader {
+namespace LsfgShader {
 constexpr u32 MIPMAPS = 255;
 constexpr u32 GENERATE = 256;
 constexpr std::array<u32, 4> ALPHA{290, 291, 292, 293};
@@ -37,7 +37,7 @@ constexpr std::array<u32, 5> GAMMA{280, 282, 283, 284, 285};
 constexpr std::array<u32, 10> DELTA{280, 286, 287, 288, 289, 281, 294, 295, 296, 297};
 
 constexpr u32 NATIVE_FP16_OFFSET = 49;
-} // namespace PerformanceShader
+} // namespace LsfgShader
 
 [[nodiscard]] std::filesystem::path GetLosslessDllPath();
 

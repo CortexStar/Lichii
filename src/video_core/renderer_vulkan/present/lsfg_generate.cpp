@@ -51,7 +51,7 @@ LsfgGenerate::LsfgGenerate(const Device& device, const LsfgShaders& shaders,
                            LsfgImagePair& frames_, LsfgImage& motion_, LsfgImage& detail1_,
                            LsfgImage& detail2_)
     : frames{&frames_}, motion{&motion_}, detail1{&detail1_}, detail2{&detail2_} {
-    using namespace VideoCore::FrameGen::PerformanceShader;
+    using namespace VideoCore::FrameGen::LsfgShader;
 
     pass = LsfgPass(device, shaders, GENERATE,
                     {{1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},

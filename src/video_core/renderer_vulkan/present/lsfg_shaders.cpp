@@ -33,7 +33,7 @@ LsfgShaders::LsfgShaders(const Device& device) {
 }
 
 VkShaderModule LsfgShaders::Get(u32 shader_id) const {
-    const auto hit = modules.find(shader_id);
+    const auto hit = modules.find(VideoCore::FrameGen::LsfgShaderId(shader_id, performance));
     return hit == modules.end() ? VK_NULL_HANDLE : *hit->second;
 }
 

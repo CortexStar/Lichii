@@ -227,6 +227,8 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, frame_gen_flow_scale, tr("Flow Scale"), QString());
     INSERT(Settings, frame_gen_queue_target, tr("Queue Target"), QString());
     INSERT(Settings, frame_gen_dump_flow, tr("Dump Optical Flow"), QString());
+    INSERT(Settings, frame_gen_performance_mode, tr("LSFG Performance Mode"),
+           tr("Uses the lighter LSFG 3.1 network. Leave disabled for standard quality."));
 
     // Renderer (Advanced Graphics)
     INSERT(Settings, use_asynchronous_gpu_emulation, QString(), QString());

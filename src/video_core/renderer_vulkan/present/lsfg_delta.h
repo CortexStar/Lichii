@@ -17,7 +17,6 @@ class Device;
 class LsfgShaders;
 
 constexpr size_t LSFG_DELTA_STAGES = 10;
-constexpr size_t LSFG_DELTA_TEMPS = 3;
 
 class LsfgDelta {
 public:
@@ -54,8 +53,9 @@ private:
     std::array<Generation, LSFG_GENERATION_SLOTS> generations{};
     vk::DescriptorSets owned_sets;
 
-    std::array<LsfgImage, LSFG_DELTA_TEMPS> temp1;
-    LsfgImagePair temp2;
+    u32 feature_planes{};
+    LsfgImageGroup temp1;
+    LsfgImageGroup temp2;
     LsfgImage out_image1;
     LsfgImage out_image2;
 };

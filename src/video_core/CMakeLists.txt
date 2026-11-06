@@ -313,6 +313,7 @@ if (ENABLE_LSFG)
     target_sources(video_core PRIVATE
         frame_gen/lossless_dll.cpp
         frame_gen/lossless_dll.h
+        frame_gen/lsfg_model.h
         frame_gen/lsfg_translate.cpp
         frame_gen/lsfg_translate.h
         renderer_vulkan/present/frame_gen.cpp

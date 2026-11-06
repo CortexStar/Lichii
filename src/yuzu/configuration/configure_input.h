@@ -73,6 +73,8 @@ private:
     std::unique_ptr<Ui::ConfigureInput> ui;
 
     std::unique_ptr<InputProfiles> profiles;
+    QWidget* frame_gen_tab = nullptr;
+    QCheckBox* lsfg_performance = nullptr;
 
     std::array<ConfigureInputPlayer*, 8> player_controllers{};
     std::array<QWidget*, 8> player_tabs{};

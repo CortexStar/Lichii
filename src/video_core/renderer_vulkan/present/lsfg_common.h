@@ -92,7 +92,8 @@ private:
 };
 
 using LsfgImagePair = std::array<LsfgImage, 2>;
-using LsfgImageHistory = std::array<LsfgImagePair, LSFG_HISTORY_SLOTS>;
+using LsfgImageGroup = std::vector<LsfgImage>;
+using LsfgImageHistory = std::array<LsfgImageGroup, LSFG_HISTORY_SLOTS>;
 
 class LsfgResources {
 public:
@@ -129,7 +130,7 @@ public:
     LsfgBarriers& DiscardToWrite(VkImage image);
 
     template <typename Range>
-    LsfgBarriers& WriteToReadAll(Range& images) {
+    LsfgBarriers& WriteToReadAll(Range&& images) {
         for (auto& image : images) {
             WriteToRead(image);
         }
@@ -137,7 +138,7 @@ public:
     }
 
     template <typename Range>
-    LsfgBarriers& ReadToWriteAll(Range& images) {
+    LsfgBarriers& ReadToWriteAll(Range&& images) {
         for (auto& image : images) {
             ReadToWrite(image);
         }
