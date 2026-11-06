@@ -1409,11 +1409,18 @@ namespace {
 // (AMD's then fail with VK_ERROR_OUT_OF_HOST_MEMORY), so it is rejected and
 // KeplerCompute::UpscaleInsteadOfNativeProgram draws in its place, as Eglantine does. Checked after
 // translation so programs from the disk cache are rejected too. EDEN_NX2_TENSOR=1 emulates it
-// anyway, EDEN_NX2_TENSOR=0 rejects it for every title.
-bool EmulatesSoftwareMatrix() {
-    static const char* const forced = std::getenv("EDEN_NX2_TENSOR");
-    if (forced != nullptr && *forced != '\0') {
-        return *forced != '0';
+// anyway, EDEN_NX2_TENSOR=0 rejects it for every title, and a list of shader hashes emulates only
+// those (Ocarina's gameplay network without its intro ones).
+bool EmulatesSoftwareMatrix(u64 shader_hash) {
+    static const std::string forced = [] {
+        const char* value = std::getenv("EDEN_NX2_TENSOR");
+        return value ? std::string{value} : std::string{};
+    }();
+    if (forced == "1" || forced == "0") {
+        return forced == "1";
+    }
+    if (!forced.empty()) {
+        return ("," + forced + ",").find(fmt::format(",{:016x},", shader_hash)) != std::string::npos;
     }
     constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
     return Settings::GetCurrentProgramID() != OcarinaOfTimeProgramId;
@@ -1594,7 +1601,7 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     }
 
     auto program{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
-    if (program.info.uses_software_matrix && !EmulatesSoftwareMatrix()) {
+    if (program.info.uses_software_matrix && !EmulatesSoftwareMatrix(key.unique_hash)) {
         return {.failure = "native matrix multiply is not emulated for this title (set "
                            "EDEN_NX2_TENSOR=1 to emulate)"};
     }

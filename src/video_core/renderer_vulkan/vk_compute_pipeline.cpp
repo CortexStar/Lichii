@@ -365,14 +365,16 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         if (!kepler_compute.IsNativeMode()) {
             return false;
         }
+        // "matrix multiply" lets KeplerCompute's upscale stand-in draw meanwhile.
         if (!is_built.load(std::memory_order::acquire)) {
             throw Shader::RuntimeError(
-                "Compute shader {:016X} is still being built by the driver; its dispatches are "
-                "skipped until it is ready",
+                "Compute shader {:016X} (software matrix multiply) is still being built by the "
+                "driver; its dispatches are skipped until it is ready",
                 shader_hash);
         }
         throw Shader::RuntimeError(
-            "The driver failed to build compute shader {:016X}; its dispatches are skipped",
+            "The driver failed to build compute shader {:016X} (software matrix multiply); its "
+            "dispatches are skipped",
             shader_hash);
     }
     guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
