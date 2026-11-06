@@ -826,6 +826,41 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
                 .queueCount = 1,
                 .pQueuePriorities = &OPTICAL_FLOW_PRIORITY,
             });
+            // Generated frames are built on a queue of their own, so the graphics queue never
+            // waits for the optical flow: a second queue of the graphics family by default
+            // (submissions on NVIDIA's compute-only family lost the device), or with
+            // EDEN_NX2_FG_QUEUE=compute a compute-only family.
+            static constexpr std::array<float, 2> GRAPHICS_PRIORITIES{1.0f, 1.0f};
+            const char* const queue_setting = std::getenv("EDEN_NX2_FG_QUEUE");
+            const bool compute_family =
+                queue_setting != nullptr && std::string_view{queue_setting} == "compute";
+            if (!compute_family && families[graphics_family].queueCount >= 2) {
+                for (VkDeviceQueueCreateInfo& queue_ci : all_queue_cis) {
+                    if (queue_ci.queueFamilyIndex == graphics_family) {
+                        queue_ci.queueCount = 2;
+                        queue_ci.pQueuePriorities = GRAPHICS_PRIORITIES.data();
+                        frame_gen_compute_family = graphics_family;
+                        frame_gen_queue_index = 1;
+                    }
+                }
+            }
+            for (u32 family = 0; family < families.size() && frame_gen_compute_family == ~0U;
+                 ++family) {
+                const VkQueueFlags flags = families[family].queueFlags;
+                if ((flags & VK_QUEUE_COMPUTE_BIT) != 0 && (flags & VK_QUEUE_GRAPHICS_BIT) == 0 &&
+                    family != optical_flow_family && family != present_family) {
+                    frame_gen_compute_family = family;
+                    all_queue_cis.push_back(VkDeviceQueueCreateInfo{
+                        .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                        .pNext = nullptr,
+                        .flags = 0,
+                        .queueFamilyIndex = family,
+                        .queueCount = 1,
+                        .pQueuePriorities = &OPTICAL_FLOW_PRIORITY,
+                    });
+                    break;
+                }
+            }
             LOG_INFO(Render_Vulkan,
                      "Optical flow: queue family {}, grids {:#x}, cost {}, both directions {}, "
                      "{}x{} to {}x{}",
@@ -845,6 +880,10 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     present_queue = logical.GetQueue(present_family);
     if (optical_flow_family != ~0U) {
         optical_flow_queue = logical.GetQueue(optical_flow_family);
+    }
+    if (frame_gen_compute_family != ~0U) {
+        frame_gen_compute_queue =
+            logical.GetQueue(frame_gen_compute_family, frame_gen_queue_index);
     }
 
 #ifdef EGLANTINE_STREAMLINE

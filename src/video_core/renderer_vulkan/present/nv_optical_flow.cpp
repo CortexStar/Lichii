@@ -135,7 +135,12 @@ NvOpticalFlow::NvOpticalFlow(const Device& device_, MemoryAllocator& allocator, 
     flow_extent = {(input_extent.width + grid_size - 1) / grid_size,
                    (input_extent.height + grid_size - 1) / grid_size};
 
-    const std::array families{device.GetGraphicsFamily(), device.GetOpticalFlowFamily()};
+    // The frame generation compute queue reads the flows too.
+    std::vector<u32> families{device.GetGraphicsFamily(), device.GetOpticalFlowFamily()};
+    if (device.HasFrameGenCompute() &&
+        std::ranges::find(families, device.GetFrameGenComputeFamily()) == families.end()) {
+        families.push_back(device.GetFrameGenComputeFamily());
+    }
     const auto create_image = [&](VkExtent2D size, VkFormat format, VkImageUsageFlags usage,
                                   VkOpticalFlowUsageFlagsNV flow_usage) {
         VkOpticalFlowImageFormatInfoNV flow_info{
@@ -199,9 +204,9 @@ NvOpticalFlow::NvOpticalFlow(const Device& device_, MemoryAllocator& allocator, 
             .samples = VK_SAMPLE_COUNT_1_BIT,
             .tiling = VK_IMAGE_TILING_OPTIMAL,
             .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-            .queueFamilyIndexCount = 0,
-            .pQueueFamilyIndices = nullptr,
+            .sharingMode = VK_SHARING_MODE_CONCURRENT,
+            .queueFamilyIndexCount = static_cast<u32>(families.size()),
+            .pQueueFamilyIndices = families.data(),
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         });
         flow_copy_views[i] = create_view(flow_copies[i], VK_FORMAT_R16G16_SNORM);
@@ -261,6 +266,17 @@ NvOpticalFlow::NvOpticalFlow(const Device& device_, MemoryAllocator& allocator, 
         });
         done[i] = device.GetLogical().CreateSemaphore();
     }
+    const VkSemaphoreTypeCreateInfo timeline_type{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+        .pNext = nullptr,
+        .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+        .initialValue = 0,
+    };
+    flow_timeline = device.GetLogical().CreateSemaphore({
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .pNext = &timeline_type,
+        .flags = 0,
+    });
     valid = true;
     LOG_INFO(Render_Vulkan,
              "Optical flow: {}x{} frames, {}x{} input, {}x{} flow grid, both directions {}, "
@@ -292,6 +308,9 @@ VkSemaphore NvOpticalFlow::Run(Scheduler& scheduler, VkImage frame) {
     }
     const u32 index = next;
     next = 1 - index;
+    // The last run reads this input as its reference: the copy below must not overwrite it
+    // before that run is done (nothing on the graphics queue waits for the optical flow).
+    void(fences[1 - index].Wait());
     const bool first_layouts = !initialized_layouts;
     initialized_layouts = true;
     scheduler.RequestOutsideRenderPassOperationContext();
@@ -373,9 +392,9 @@ VkSemaphore NvOpticalFlow::Run(Scheduler& scheduler, VkImage frame) {
     dld.vkCmdOpticalFlowExecuteNV(raw, sessions[index], &execute);
     cmdbuf.End();
 
-    const VkSemaphore signal = *done[index];
+    const VkSemaphore signal = use_timeline ? *flow_timeline : *done[index];
     const u64 wait_value = copied;
-    const u64 signal_value = 0;
+    const u64 signal_value = use_timeline ? ++flow_value : 0;
     const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     const VkTimelineSemaphoreSubmitInfo timeline_info{
         .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,

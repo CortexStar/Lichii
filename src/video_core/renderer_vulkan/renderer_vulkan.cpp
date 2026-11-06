@@ -262,8 +262,11 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
         generated->present_spacing = spacing;
         blit_swapchain.PrepareFrame(device, generated, render_window.GetFramebufferLayout());
         frame_gen.GenerateInto(device, generated, generation);
-        scheduler.Flush(*generated->render_ready, std::exchange(flow_wait, VK_NULL_HANDLE));
-        frame_gen.DumpInterpolation(*generated->image);
+        if (!generated->generated_async) {
+            // Generated on the graphics queue (or not at all): this submission signals it.
+            scheduler.Flush(*generated->render_ready, std::exchange(flow_wait, VK_NULL_HANDLE));
+        }
+        frame_gen.DumpInterpolation(generated);
         present_manager.Present(generated);
     }
 #endif

@@ -216,6 +216,7 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
     X(vkDestroyShaderModule);
     X(vkDestroySwapchainKHR);
     X(vkDeviceWaitIdle);
+    X(vkQueueWaitIdle);
     X(vkEndCommandBuffer);
     X(vkFreeCommandBuffers);
     X(vkFreeDescriptorSets);

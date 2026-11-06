@@ -49,7 +49,7 @@ public:
                 .generated_frames = generated_frames.load(std::memory_order_relaxed)};
     }
     /// EDEN_NX2_FG_DUMP: saves a generated frame and its two sources, after its submission.
-    void DumpInterpolation(VkImage generated);
+    void DumpInterpolation(Frame* generated);
 
 private:
     void Rebuild(const Device& device, VkExtent2D extent, VkFormat format, f32 flow_scale);

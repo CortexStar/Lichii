@@ -335,6 +335,7 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkDestroyShaderModule vkDestroyShaderModule{};
     PFN_vkDestroySwapchainKHR vkDestroySwapchainKHR{};
     PFN_vkDeviceWaitIdle vkDeviceWaitIdle{};
+    PFN_vkQueueWaitIdle vkQueueWaitIdle{};
     PFN_vkEndCommandBuffer vkEndCommandBuffer{};
     PFN_vkFreeCommandBuffers vkFreeCommandBuffers{};
     PFN_vkFreeDescriptorSets vkFreeDescriptorSets{};
@@ -887,6 +888,10 @@ public:
         return dld->vkQueueBindSparse(queue, bind_infos.size(), bind_infos.data(), fence);
     }
 
+    VkResult WaitIdle() const noexcept {
+        return dld->vkQueueWaitIdle(queue);
+    }
+
     VkResult Present(const VkPresentInfoKHR& present_info) const noexcept {
         return dld->vkQueuePresentKHR(queue, &present_info);
     }
@@ -1075,6 +1080,12 @@ public:
                                        DeviceDispatch& dispatch);
 
     [[nodiscard]] Queue GetQueue(u32 family_index) const noexcept;
+
+    [[nodiscard]] Queue GetQueue(u32 family_index, u32 queue_index) const noexcept {
+        VkQueue queue;
+        dld->vkGetDeviceQueue(handle, family_index, queue_index, &queue);
+        return Queue(queue, *dld);
+    }
 
     [[nodiscard]] BufferView CreateBufferView(const VkBufferViewCreateInfo& ci) const;
 

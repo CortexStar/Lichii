@@ -36,6 +36,17 @@ public:
     /// frame (nothing to compare with).
     [[nodiscard]] VkSemaphore Run(Scheduler& scheduler, VkImage frame);
 
+    /// Runs signal a timeline semaphore instead (Run returns it; wait for LastFlowValue). A
+    /// binary semaphore signalled on the optical flow queue and waited on a compute queue lost
+    /// the device on NVIDIA.
+    void UseTimeline() {
+        use_timeline = true;
+    }
+
+    [[nodiscard]] u64 LastFlowValue() const {
+        return flow_value;
+    }
+
     /// Records, in the graphics submission that waits for the last Run, the copy of its flow to
     /// the image FlowView samples. Drivers sample R16G16_SFIXED5_NV as half floats, so the raw
     /// fixed-point words are read through an R16G16_SNORM image instead.
@@ -91,6 +102,9 @@ private:
     vk::CommandBuffers command_buffers;
     std::array<vk::Fence, 2> fences;
     std::array<vk::Semaphore, 2> done;
+    vk::Semaphore flow_timeline;
+    u64 flow_value{};
+    bool use_timeline{};
 };
 
 } // namespace Vulkan

@@ -323,6 +323,19 @@ public:
         return optical_flow_family != ~0U;
     }
 
+    /// A compute-only queue for frame generation next to the optical flow one, or a null queue.
+    vk::Queue GetFrameGenComputeQueue() const {
+        return frame_gen_compute_queue;
+    }
+
+    u32 GetFrameGenComputeFamily() const {
+        return frame_gen_compute_family;
+    }
+
+    bool HasFrameGenCompute() const {
+        return frame_gen_compute_family != ~0U;
+    }
+
     const VkPhysicalDeviceOpticalFlowPropertiesNV& GetOpticalFlowProperties() const {
         return optical_flow_properties;
     }
@@ -1296,6 +1309,9 @@ private:
     vk::Queue present_queue;     ///< Main present queue.
     vk::Queue optical_flow_queue; ///< VK_NV_optical_flow queue, when enabled.
     u32 optical_flow_family = ~0U;
+    vk::Queue frame_gen_compute_queue; ///< Frame generation work off the graphics queue.
+    u32 frame_gen_compute_family = ~0U;
+    u32 frame_gen_queue_index = 0;
     VkPhysicalDeviceOpticalFlowPropertiesNV optical_flow_properties{};
     vk::PipelineCache static_pipeline_cache;
     bool owns_static_pipeline_cache{};

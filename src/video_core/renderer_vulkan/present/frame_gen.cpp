@@ -294,8 +294,12 @@ void FrameGen::GenerateInto(const Device& device, Frame* destination, size_t gen
         const f32 flow_scale = ConfiguredFlowScale(peak_guest_extent, built_extent);
 
         scheduler.RequestOutsideRenderPassOperationContext();
-        fsr3_chain->Generate(device, scheduler, *destination->image, *destination->storage_view,
-                             blend, flow_scale);
+        if (fsr3_chain->IsAsync()) {
+            fsr3_chain->GenerateAsync(device, *destination, blend, flow_scale);
+        } else {
+            fsr3_chain->Generate(device, scheduler, *destination->image,
+                                 *destination->storage_view, blend, flow_scale);
+        }
     } else if (chain) {
         chain->SetTarget(device, last_generations, generation, destination->index,
                          *destination->storage_view);
@@ -338,7 +342,8 @@ const auto program_start = std::chrono::steady_clock::now();
 // EDEN_NX2_FG_DUMP=<directory>: EDEN_NX2_FG_DUMP_AFTER seconds after start (default 50), every
 // EDEN_NX2_FG_DUMP_EVERY generated frames (default 30), saves the previous, generated and current
 // frames of up to 8 interpolations as PPM files.
-void FrameGen::DumpInterpolation(VkImage generated_image) {
+void FrameGen::DumpInterpolation(Frame* generated_frame) {
+    const VkImage generated_image = *generated_frame->image;
     const VkExtent2D extent = built_extent;
     static const char* const directory = std::getenv("EDEN_NX2_FG_DUMP");
     if (!directory || interpolation_dumps >= 8 || !fsr3_chain) {
@@ -354,6 +359,9 @@ void FrameGen::DumpInterpolation(VkImage generated_image) {
         return;
     }
     const u32 dump = interpolation_dumps++;
+    if (generated_frame->generated_async) {
+        void(generated_frame->generated_ready.Wait());
+    }
     LOG_INFO(Render_Vulkan, "Frame gen dump {} to {} ({}x{})", dump, directory, extent.width,
              extent.height);
     const VkDeviceSize size = VkDeviceSize{extent.width} * extent.height * COLOR_CHANNELS;
