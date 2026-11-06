@@ -113,6 +113,10 @@ public:
         return fragment_has_color0_output;
     }
 
+    bool HasNoFragmentColorOutputs() const noexcept {
+        return fragment_has_no_color_outputs;
+    }
+
     bool SupportsAlphaToOne() const noexcept {
         return fragment_has_color0_output;
     }
@@ -217,6 +221,7 @@ private:
     std::vector<SampledImage> sampled_images;
     u32 num_textures{};
     bool fragment_has_color0_output{};
+    bool fragment_has_no_color_outputs{};
     bool writes_storage{};
 
     vk::DescriptorSetLayout descriptor_set_layout;

@@ -2403,6 +2403,8 @@ void RasterizerVulkan::UpdateDynamicStates() {
     }
 
     if (device.IsExtExtendedDynamicState3BlendingSupported()) {
+        const auto* pipeline = pipeline_cache.CurrentGraphicsPipeline();
+        fragment_color_mask.Update(pipeline && pipeline->HasNoFragmentColorOutputs(), flags);
         UpdateBlending(regs);
     } else if (device.IsExtColorWriteEnableSupported()) {
         UpdateColorWriteEnable(regs);
@@ -3061,6 +3063,7 @@ void RasterizerVulkan::UpdateBlending(Tegra::Engines::Maxwell3D::Regs& regs) {
             if (mask.A) {
                 current |= VK_COLOR_COMPONENT_A_BIT;
             }
+            current = fragment_color_mask.Apply(current);
         }
         scheduler.Record([setup_masks](vk::CommandBuffer cmdbuf) {
             cmdbuf.SetColorWriteMaskEXT(0, setup_masks);
