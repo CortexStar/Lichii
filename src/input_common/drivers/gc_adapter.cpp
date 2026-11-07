@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <fmt/ranges.h>
 #include <libusb.h>
@@ -342,7 +343,7 @@ Common::Input::DriverResult GCAdapter::SetVibration(
         if (value != nullptr) {
             LOG_INFO(Input, "EDEN_GC_RUMBLE_BOOST: {}", boost);
         }
-        return boost > 0.0f ? boost : 1.0f;
+        return std::isfinite(boost) && boost > 0.0f ? boost : 1.0f;
     }();
     const auto mean_amplitude = (std::min)(
         (vibration.low_amplitude + vibration.high_amplitude) * 0.5f * rumble_boost, 1.0f);
