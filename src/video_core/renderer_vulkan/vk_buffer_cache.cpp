@@ -469,6 +469,10 @@ bool BufferCacheRuntime::CanReportMemoryUsage() const {
     return device.CanReportMemoryUsage();
 }
 
+u64 BufferCacheRuntime::GetBufferAllocationTail() const {
+    return device.IsMoltenVK() ? MOLTENVK_BUFFER_TAIL : 0;
+}
+
 u32 BufferCacheRuntime::GetUniformBufferAlignment() const {
     return static_cast<u32>(device.GetUniformBufferAlignment());
 }
