@@ -175,13 +175,16 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
         std::chrono::steady_clock::now() - pending_acquire->since >= std::chrono::seconds{2};
     const std::optional<u32> polled =
         overdue ? std::optional<u32>{} : PollSemaphoreRead(dma_pusher, pending_acquire->address);
-    if (polled) {
-        if (pending_acquire->Matches(*polled) || Nx2SemaphoreWaiters::Get().Latched(this)) {
-            NoteAcquireSync(pending_acquire->address);
-            return true;
-        }
-        return false;
+    if (polled &&
+        (pending_acquire->Matches(*polled) || Nx2SemaphoreWaiters::Get().Latched(this))) {
+        NoteAcquireSync(pending_acquire->address);
+        return true;
     }
+    // Not met in guest memory: the release may still be queued for the back (one the front
+    // doesn't record, such as a QMD release or a report). Check it as below rather than wait for
+    // the next poll: suspended channels are polled with yields and 1 ms sleeps, and that latency
+    // (hundreds of acquires a second) took OoT from 39 to 20 FPS. With the back caught up the
+    // drain returns at once, so an acquire the CPU releases costs no wait on the back.
     // Met without waiting for all queued work: the work after it is queued behind the work
     // before it, and command list reads wait for that work (NoteSync).
     std::optional<u32> narrowed = NarrowSemaphoreRead(dma_pusher, pending_acquire->address);
@@ -374,28 +377,14 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
                          [&acquire](u32 value) { return acquire.Matches(value); })) {
             return;
         }
-        if (const std::optional<u32> polled = PollSemaphoreRead(dma_pusher, acquire.address)) {
-            if (acquire.Matches(*polled)) {
-                NoteAcquireSync(acquire.address);
-                return;
-            }
-            // Not met yet: suspend without draining (the back runs what was sent meanwhile and
-            // CanResumeAcquire polls). A GPU write that meets it latches it, even if a later one
-            // in the same burst of fences overwrites it.
-            auto& waiters = Nx2SemaphoreWaiters::Get();
-            if (const auto device = dma_pusher.memory_manager.GpuToCpuAddress(acquire.address)) {
-                waiters.Add(this, *device, acquire.value, acquire.operation);
-            }
-            if (acquire.Matches(dma_pusher.memory_manager.Read<u32>(acquire.address))) {
-                waiters.Remove(this);
-                NoteAcquireSync(acquire.address);
-                return;
-            }
-            pending_acquire = acquire;
-            dma_pusher.suspensions.fetch_add(1, std::memory_order_release);
-            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireWaits, 1);
+        if (const std::optional<u32> polled = PollSemaphoreRead(dma_pusher, acquire.address);
+            polled && acquire.Matches(*polled)) {
+            NoteAcquireSync(acquire.address);
             return;
         }
+        // Not met in guest memory: the release may still be queued for the back, so check it
+        // with the drained read below before suspending (see CanResumeAcquire). Suspending at
+        // once left the channel to the pending-channel polling, whose latency halved the FPS.
         std::optional<u32> narrowed = NarrowSemaphoreRead(dma_pusher, acquire.address);
         if (narrowed && acquire.Matches(*narrowed)) {
             if (!VideoCommon::GpuSplit::NarrowVerify()) {
