@@ -21,6 +21,12 @@
 
 namespace ConfigurationShared {
 
+/**
+ * Builds the label and tooltip every settings widget shows, keyed by setting id.
+ *
+ * @param parent Object used for translation lookups.
+ * @return The translation map.
+ */
 std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     std::unique_ptr<TranslationMap> translations = std::make_unique<TranslationMap>();
     const auto& tr = [](const char* text) -> QString { return QCoreApplication::translate("ConfigurationShared", text); };
@@ -209,6 +215,9 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, skip_cpu_inner_invalidation, tr("Skip CPU Inner Invalidation"),
            tr("Skips certain cache invalidations during memory updates, reducing CPU usage and "
               "improving latency. This may cause soft-crashes."));
+    INSERT(Settings, fps_limit, tr("FPS Limit"),
+           tr("Caps how often the game presents, so the game itself runs at this rate. 0 leaves "
+              "the frame rate to the game and the display."));
     INSERT(Settings, vsync_mode, tr("VSync Mode:"),
            tr("FIFO (VSync) does not drop frames or exhibit tearing but is limited by the screen "
               "refresh rate.\nFIFO Relaxed allows tearing as it recovers from a slow down.\n"
@@ -277,12 +286,23 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "emulated CPU cores off them.\n"
               "Can hurt performance on CPUs with few cores. Skipped on CPUs with fewer than 6 "
               "physical performance cores.\n"
-              "Windows only. Takes effect when a game starts."));
+              "Windows and Linux only. Takes effect when a game starts."));
 
     INSERT(Settings, use_vulkan_driver_pipeline_cache, tr("Use Vulkan pipeline cache"),
            tr("Enables GPU vendor-specific pipeline cache.\nThis option can improve shader loading "
               "time significantly in cases where the Vulkan driver does not store pipeline cache "
               "files internally."));
+    INSERT(Settings, native_async_draws, tr("Switch 2 draws with unbuilt pipelines:"),
+           tr("Only applies when asynchronous shader building is on. Decides what a Switch 2 draw "
+              "does when its graphics pipeline is still building.\n"
+              "Wait stalls the GPU until the pipeline is ready (no missing effects, but long "
+              "stalls on new content). Skip drops the draw, which can leave an effect missing for "
+              "a few frames. Bounded waits up to the time below per frame, then skips. The "
+              "EDEN_NX2_ASYNC_DISCARD=1 environment variable still forces Skip."));
+    INSERT(Settings, native_pipeline_wait_ms, tr("Pipeline wait per frame (ms):"),
+           tr("Used by the Bounded mode: the most time per frame that Switch 2 draws may wait in "
+              "total for pipelines that are still building. Once spent, the remaining unbuilt "
+              "draws of that frame are skipped."));
     INSERT(Settings, enable_compute_pipelines, tr("Enable Compute Pipelines (Intel Vulkan Only)"),
            tr("Required by some games.\nThis setting only exists for Intel "
               "proprietary drivers and may crash if enabled.\nCompute pipelines are always enabled "
@@ -666,6 +686,12 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                           {
                               PAIR(ConsoleMode, Docked, tr("Docked")),
                               PAIR(ConsoleMode, Handheld, tr("Handheld")),
+                          }});
+    translations->insert({Settings::EnumMetadata<Settings::NativeAsyncDraws>::Index(),
+                          {
+                              PAIR(NativeAsyncDraws, Wait, tr("Wait")),
+                              PAIR(NativeAsyncDraws, Bounded, tr("Bounded wait")),
+                              PAIR(NativeAsyncDraws, Skip, tr("Skip")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::CpuClock>::Index(),
                           {

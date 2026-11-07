@@ -108,11 +108,11 @@ struct SysmixOutput::Impl {
                 .count());
         LOG_INFO(Service_Audio,
                  "sysmix stream {} output: copied={} accepted={} nonzero={} blocks={} full={} "
-                 "queued={} retried={} padded={} filled={} emu_us={}",
+                 "queued={} retried={} padded={} deferred={} filled={} emu_us={}",
                  id, counters.copied_frames, counters.accepted_frames, counters.nonzero_frames,
                  counters.admitted_blocks, counters.backpressure,
                  host ? host->GetQueueSize() : 0, counters.retried_frames, counters.padded_frames,
-                 filled, emu_us);
+                 counters.deferred, filled, emu_us);
     }
 
     Core::System& system;
@@ -404,6 +404,16 @@ void SysmixOutput::Pump() {
         return;
     }
     const u32 taken = std::min(filled, BlockFrames);
+    // A short block is padded with silence. That is right for a real underrun, but while the host
+    // still has audio to play the guest is only a little behind this tick, and padding would cut a
+    // gap into continuous audio. Wait for a whole block until the host drains, so a guest that
+    // waits on fewer than BlockFrames frames (a high notification threshold) still makes progress.
+    // The queue size alone is not enough: it is zero while the last block is still playing.
+    if (taken < BlockFrames && p.host->HasPendingAudio()) {
+        ++p.counters.deferred;
+        p.Notify(filled);
+        return;
+    }
     const u32 first = std::min(taken, p.slots - read);
     const u32 second = taken - first;
     auto& memory = p.process->GetMemory();

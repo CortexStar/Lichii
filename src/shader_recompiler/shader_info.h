@@ -279,7 +279,9 @@ struct MeshInfo {
 struct Info {
     static constexpr size_t MAX_INDIRECT_CBUFS{14};
     static constexpr size_t MAX_CBUFS{18};
-    static constexpr size_t MAX_SSBOS{32};
+    /// Native (Switch 2) programs take their storage buffers from raw pointers, as many as they
+    /// read: Ocarina of Time's foliage culling binds 37 for its lists and per-type instance tables.
+    static constexpr size_t MAX_SSBOS{64};
 
     bool is_task{}; ///< Switch 2 task program (Stage::Task)
     bool is_mesh{}; ///< Switch 2 mesh program (Stage::Mesh)
@@ -354,6 +356,8 @@ struct Info {
     bool uses_global_memory{};
     bool requires_coherent_global_memory{};
     bool requires_coherent_image_memory{};
+    /// Set by the SPIR-V backend when HMMA runs on cooperative matrices, which need full subgroups
+    bool uses_cooperative_matrix{};
     /// Native global accesses whose pointer is chosen at run time: every storage buffer descriptor
     /// is a candidate and its bound length (not an NVN size word) limits the range.
     bool native_global_bounds{};
