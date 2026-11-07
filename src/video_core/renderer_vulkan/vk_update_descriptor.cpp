@@ -40,6 +40,7 @@ void UpdateDescriptorQueue::TickFrame() {
     payload_cursor = payload_start;
 }
 
+/// Reserve one batch, growing drained host storage when possible, otherwise reusing it safely.
 void UpdateDescriptorQueue::Acquire(Scheduler& scheduler, size_t required_entries,
                                     bool use_descriptor_buffer_) {
     use_descriptor_buffer = supports_descriptor_buffer && use_descriptor_buffer_;

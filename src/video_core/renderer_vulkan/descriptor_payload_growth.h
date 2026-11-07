@@ -12,12 +12,12 @@ namespace Vulkan {
 
 enum class PayloadGrowthResult { Grown, AtLimit, AllocationFailed };
 
-// Allocate first, but keep all old entries alive until the recording worker has
-// consumed them. As with a drained wrap, none of their contents needs copying.
+/// Grow within the configured ceiling, preserving old entries until drain() completes.
+/// Allocation failure leaves storage and capacity unchanged; drained entries need no copy.
 template <class Entry, class Drain, class Allocate>
 PayloadGrowthResult GrowDescriptorPayload(std::unique_ptr<Entry[]>& storage, size_t& capacity,
-                                         size_t maximum, size_t frames, size_t required,
-                                         Drain&& drain, Allocate&& allocate) {
+                                          size_t maximum, size_t frames, size_t required,
+                                          Drain&& drain, Allocate&& allocate) {
     if (capacity == 0 || capacity >= maximum || required > maximum || frames == 0) {
         return PayloadGrowthResult::AtLimit;
     }
