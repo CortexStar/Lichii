@@ -16,8 +16,8 @@ the old way there.
 
 | Guest (NVIDIA) behaviour | Vulkan, and what AMD does | What Lichii does | Change |
 |---|---|---|---|
-| `FMNMX` returns the operand that is not NaN, and saturation turns NaN into 0 | `FMin`, `FMax` and `FClamp` leave NaN undefined; AMD returns the NaN, and blurred or accumulated targets spread it over the screen | Min, max, clamp and saturate are emitted as `NMin`/`NMax`, clamp as `NMin(NMax(x, lo), hi)` | [#325] |
-| A bound render target that the fragment shader doesn't export keeps its old value | The attachment gets an undefined value; AMD writes whatever its export registers hold (format maximum, NaN) | Nothing yet: the write mask still comes from the guest's registers only. The open PRs mask colour writes for outputs the shader doesn't write | [#339], [#353] (open; from [#323]) |
+| `FMNMX` returns the operand that is not NaN, and saturation turns NaN into 0 | `FMin`, `FMax` and `FClamp` leave NaN undefined; AMD returns the NaN, and blurred or accumulated targets spread it over the screen | Min, max, clamp, saturate and the atomic float min/max loops are emitted as `NMin`/`NMax`, clamp as `NMin(NMax(x, lo), hi)` | [#432] (from [#325]) |
+| A bound render target that the fragment shader doesn't export keeps its old value | The attachment gets an undefined value; AMD writes whatever its export registers hold (format maximum, NaN) | Colour writes are masked for the render target components the fragment shader doesn't write | [#353] (from [#323]) |
 | Storage buffers start at the guest's alignment, so 64- and 128-bit accesses are aligned | Bindings start at `minStorageBufferOffsetAlignment`, which is 4 bytes on AMD; vector views of the binding read the wrong words | Misaligned 64/128-bit accesses are split into 32-bit words | [#295] |
 | Demoted fragments stop writing where the guest's control flow says | Moving demotes to the end of the program over nested returns let helper lanes keep writing; AMD drew a black scene | Nested returns are counted before demotes move | [#127] |
 | Fragment subgroup shuffles | AMD's proprietary driver gets them wrong | Broadcast fallback on that driver | [#273] |
@@ -28,8 +28,9 @@ Not specific to AMD, but easy to mistake for an AMD bug:
 
 - Ocarina's volumetric fog reads its sky-light probes 104-122 MiB past a pointer it loads from a
   table. With the 64 MiB cap for read-only table pointers every probe read returned 0, the fog lost
-  its sky ambient and outdoor scenes turned into a white haze, on every vendor. The fix, a 256 MiB
-  cap, is in the open [#292].
+  its sky ambient and outdoor scenes turned into a white haze, on every vendor. [#351] binds
+  read-only table-pointer pools as far as a storage buffer reaches (up to 1 GiB); a 256 MiB cap
+  ([#292]) still left a white blob in the Kakariko graveyard.
 - Two of Ocarina's compute shaders take minutes to optimise in AMD's driver ([#200]); [#273] builds
   them unoptimised on that driver.
 
@@ -88,10 +89,11 @@ Check these before filing a new one.
 [#295]: https://github.com/zortos293/Lichii/pull/295
 [#323]: https://github.com/zortos293/Lichii/issues/323
 [#325]: https://github.com/zortos293/Lichii/issues/325
-[#339]: https://github.com/zortos293/Lichii/pull/339
 [#342]: https://github.com/zortos293/Lichii/issues/342
+[#351]: https://github.com/zortos293/Lichii/pull/351
 [#353]: https://github.com/zortos293/Lichii/pull/353
 [#354]: https://github.com/zortos293/Lichii/pull/354
 [#378]: https://github.com/zortos293/Lichii/pull/378
 [#392]: https://github.com/zortos293/Lichii/issues/392
 [#403]: https://github.com/zortos293/Lichii/issues/403
+[#432]: https://github.com/zortos293/Lichii/pull/432

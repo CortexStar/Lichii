@@ -17,8 +17,8 @@ Id Decorate(EmitContext& ctx, IR::Inst* inst, Id op) {
     return op;
 }
 
-// The guest's min, max and saturate return the operand that isn't NaN, so a NaN saturates to 0.
-// FMin, FMax and FClamp leave NaN undefined, and AMD returns it, which bloom then spreads.
+// Maxwell's FMNMX and .SAT return the non-NaN operand (NaN saturates to 0). FMin/FMax/FClamp leave
+// NaN undefined and AMD's Windows compiler passes it through, so use the NaN-defined N variants.
 Id Clamp(EmitContext& ctx, Id type, Id value, Id zero, Id one) {
     return ctx.OpNMin(type, ctx.OpNMax(type, value, zero), one);
 }
