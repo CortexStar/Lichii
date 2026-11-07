@@ -351,7 +351,12 @@ void EmitMeshPrologue(EmitContext& ctx) {
             // A task that culls all its threads never writes the mesh workgroup count, and the
             // payload starts undefined. Intel's garbage there launches enough workgroups to lose
             // the device. The as-compute path zeroes the whole region in the prologue instead.
-            ctx.OpStore(PayloadWord(ctx, ctx.Const(1U)), ctx.u32_zero_value);
+            // Every invocation writes the same word, so this must be an atomic store: concurrent
+            // plain stores are a data race even when they write the same value. SPV_EXT_mesh_shader
+            // allows atomics on TaskPayloadWorkgroupEXT, and WorkgroupMemory semantics cover it.
+            ctx.OpAtomicStore(PayloadWord(ctx, ctx.Const(1U)),
+                              ctx.Const(static_cast<u32>(spv::Scope::Workgroup)),
+                              ctx.u32_zero_value, ctx.u32_zero_value);
             Barrier(ctx);
             return;
         }
