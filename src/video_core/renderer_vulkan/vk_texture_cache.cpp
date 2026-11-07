@@ -1900,6 +1900,7 @@ void TextureCacheRuntime::DrawDlssOutput(Framebuffer* dst_framebuffer, VkImageVi
     const int slider = Settings::values.nvidia_dlss_sharpening.GetValue();
     blit_image_helper.ResolveUpscaled(dst_framebuffer, view, output, source_size, slider < 200,
                                       static_cast<f32>(slider) / 100.0f);
+    VideoCore::MarkNvidiaDlssFrame();
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([output](vk::CommandBuffer cmdbuf) {
         const VkImageMemoryBarrier barrier{

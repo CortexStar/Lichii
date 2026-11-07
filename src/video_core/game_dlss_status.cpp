@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <atomic>
+#include <chrono>
 
 #include "video_core/game_dlss_status.h"
 
@@ -9,6 +10,13 @@ namespace VideoCore {
 
 namespace {
 std::atomic<bool> nvidia_dlss_paused{};
+std::atomic<s64> nvidia_dlss_frame_ns{};
+
+s64 NowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 } // Anonymous namespace
 
 void SetNvidiaDlssPaused(bool paused) {
@@ -17,6 +25,15 @@ void SetNvidiaDlssPaused(bool paused) {
 
 bool NvidiaDlssPaused() {
     return nvidia_dlss_paused.load(std::memory_order_relaxed);
+}
+
+void MarkNvidiaDlssFrame() {
+    nvidia_dlss_frame_ns.store(NowNs(), std::memory_order_relaxed);
+}
+
+bool NvidiaDlssDrawing() {
+    const s64 last = nvidia_dlss_frame_ns.load(std::memory_order_relaxed);
+    return last != 0 && NowNs() - last < 250'000'000;
 }
 
 const char* GameDlssReasonText(GameDlssReason reason) {

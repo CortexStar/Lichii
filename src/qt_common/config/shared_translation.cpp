@@ -164,7 +164,8 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "Legend of Zelda: Ocarina of Time (as DLAA, at the render resolution). Fire Emblem: "
               "Fortune's Weave also requires EDEN_NX2_DLSS_REPLACEMENT=dlss; without that "
               "override, its spatial workaround remains active.\nWhile playing, F7 switches "
-              "between NVIDIA DLSS and the game's own image.\nTakes effect when a game "
+              "between NVIDIA DLSS and the game's own image. While DLSS draws the image, "
+              "the FXAA or SMAA setting is skipped.\nTakes effect when a game "
               "starts."));
     INSERT(Settings, nvidia_dlss_sharpening, tr("NVIDIA DLSS Sharpness:"),
            tr("Strength of RCAS (AMD's contrast-adaptive sharpening) on NVIDIA DLSS's image; 0% "

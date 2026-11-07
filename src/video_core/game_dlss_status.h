@@ -41,6 +41,12 @@ struct GameDlssStatus {
 void SetNvidiaDlssPaused(bool paused);
 [[nodiscard]] bool NvidiaDlssPaused();
 
+/// Called each time NVIDIA DLSS draws a game's anti-aliased image. While it does, the presenter
+/// skips the FXAA or SMAA setting: on top of DLSS they only blur the image.
+void MarkNvidiaDlssFrame();
+/// True when NVIDIA DLSS drew an image in the last 250 ms.
+[[nodiscard]] bool NvidiaDlssDrawing();
+
 /// One health check of a game's DLSS network output against its input, by blocks of a coarse grid
 /// (host_shaders/dlss_network_probe.comp).
 struct GameDlssProbe {

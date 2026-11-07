@@ -11,6 +11,8 @@ New entries go under `## [Unreleased]`; `tools/ci/bump-version.sh` turns them in
 - Graphics: "NVIDIA DLSS Sharpness" (RCAS on DLSS's image, off by default, changes apply at once)
 - Ocarina of Time: NVIDIA DLSS uses model M, and DLAA also runs with resolution scaling above 1x
   (at the scaled size, then box-filtered to the game's image)
+- The FXAA or SMAA setting is skipped while NVIDIA DLSS draws the game's image (on top of DLSS
+  they only blurred it); it applies again when DLSS is off
 
 ## [0.1.0]
 
