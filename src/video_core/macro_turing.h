@@ -24,7 +24,9 @@ public:
         std::size_t consumed;
         std::string_view error;
         /// The call wrote something outside its own registers (an emitted method, a DMA read or
-        /// a data RAM word), so replaying it from the start would repeat that write.
+        /// a data RAM word), so replaying it from the start would repeat that write. Both engines
+        /// report it: the interpreter from its write list and emit calls, the JIT from the same
+        /// points in its generated code.
         bool side_effects{};
     };
 
@@ -91,6 +93,7 @@ public:
         Word pc = start, loop_count{}, loop_start{}, loop_end{};
         std::size_t consumed{};
         bool end_next{}, stopped{};
+        bool emitted{};
         std::string_view error;
         const auto fail = [&](std::string_view message) { if (error.empty()) error = message; };
         if (decoded.size() < code.size() / 3) decoded.resize(code.size() / 3);
@@ -246,18 +249,21 @@ public:
                 }
                 if (d.out_emit[lane]) {
                     const Word value = output(d.out_emit[lane]);
+                    emitted = true;
                     if (error.empty() && !emit(method, value)) fail("unsupported emitted method");
                     method += increment;
                 }
             }
             if (!error.empty()) break;
-            if (end_next || stopped) return {true, pc, consumed, {}};
+            if (end_next || stopped) {
+                return {true, pc, consumed, {}, emitted || !data_ram_writes.empty()};
+            }
             end_next = d.end && !branch_cancels_end;
             if (loop_count && pc == loop_end) { --loop_count; next_pc = loop_start + 1; }
             pc = next_pc;
         }
         if (error.empty()) error = "instruction limit exceeded";
-        return {false, pc, consumed, error};
+        return {false, pc, consumed, error, emitted || !data_ram_writes.empty()};
     }
 
     using DataRam = std::array<Word, 0xc00>;
