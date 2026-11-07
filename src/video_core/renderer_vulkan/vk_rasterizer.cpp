@@ -335,7 +335,22 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
       frame_dump(device, memory_allocator, scheduler), wfi_event(device.GetLogical().CreateEvent()) {
     scheduler.SetQueryCache(query_cache);
     VideoCommon::GpuSplit::Get().SetIdleHook(
-        [](void* argument) { static_cast<Scheduler*>(argument)->FlushDeferred(); },
+        [](void* argument, VideoCommon::IdleHookReason reason) {
+            // One call per reason, each on its own line: "Submits N/s at file:line" (profile)
+            // counts the idle hook's submits by reason.
+            Scheduler& idle_scheduler = *static_cast<Scheduler*>(argument);
+            switch (reason) {
+            case VideoCommon::IdleHookReason::Sleep:
+                idle_scheduler.FlushDeferred(); // about to sleep, nobody asked
+                break;
+            case VideoCommon::IdleHookReason::SleepAsked:
+                idle_scheduler.FlushDeferred(); // asked (WaitSubmitted) while out of work
+                break;
+            case VideoCommon::IdleHookReason::Asked:
+                idle_scheduler.FlushDeferred(); // asked (WaitSubmitted) between ring entries
+                break;
+            }
+        },
         &scheduler);
     if (VideoCommon::Nx2WriteHandoff::Enabled()) {
         // Whoever takes or releases the buffer cache's lock first applies the guest write traps

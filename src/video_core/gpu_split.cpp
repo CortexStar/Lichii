@@ -1407,10 +1407,11 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 available = published.load(std::memory_order_acquire);
             }
             if (available == read_position && idle_hook != nullptr) {
-                hook_requested.store(false, std::memory_order_seq_cst);
+                const bool asked = hook_requested.exchange(false, std::memory_order_seq_cst);
                 {
                     Nx2Profile::Scope hook_scope{Nx2Profile::Zone::IdleHook};
-                    idle_hook(idle_argument);
+                    idle_hook(idle_argument,
+                              asked ? IdleHookReason::SleepAsked : IdleHookReason::Sleep);
                 }
                 available = published.load(std::memory_order_acquire);
             }
@@ -1463,7 +1464,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 idle_hook != nullptr) [[unlikely]] {
                 hook_requested.store(false, std::memory_order_seq_cst);
                 Nx2Profile::Scope hook_scope{Nx2Profile::Zone::IdleHook};
-                idle_hook(idle_argument);
+                idle_hook(idle_argument, IdleHookReason::Asked);
             }
             // Hand ring space back now and then while working through a long batch, and at once
             // when the front waits for this position (WaitForWriters).

@@ -151,6 +151,14 @@ struct SemaphorePrediction {
     return value[0] != '0';
 }
 
+/// Why the split's back runs its idle hook. The rasterizer submits deferred work for each from a
+/// line of its own, so the profiler's "Submits N/s at file:line" tells them apart.
+enum class IdleHookReason : u32 {
+    Sleep,      ///< The back found no work after its spin and is about to sleep; nobody asked
+    SleepAsked, ///< RequestIdleHook (Scheduler::WaitSubmitted) while the back had no work
+    Asked,      ///< RequestIdleHook, seen between ring entries while the back works
+};
+
 // Splits the GPU thread in two (NX2_GPU_THREAD_SPLIT.md). The GPU thread (the front) takes the
 // CPU's commands, parses command lists and runs the puller; engine method calls and everything
 // behind them (register state, macros, draws, the rasterizer and its caches) run in order on a
@@ -180,7 +188,7 @@ public:
         return on_back_thread;
     }
     /// Called on the back before it sleeps waiting for work (the rasterizer submits deferred work).
-    void SetIdleHook(void (*hook)(void*), void* argument) {
+    void SetIdleHook(void (*hook)(void*, IdleHookReason), void* argument) {
         idle_hook = hook;
         idle_argument = argument;
     }
@@ -959,7 +967,7 @@ private:
 
     static GpuSplit instance;
     static inline thread_local bool on_back_thread{};
-    void (*idle_hook)(void*){};
+    void (*idle_hook)(void*, IdleHookReason){};
     void* idle_argument{};
     alignas(64) std::atomic<bool> hook_requested{};
     std::atomic<bool> back_running{};
