@@ -113,8 +113,8 @@ constexpr std::array B10G11R11_UFLOAT_PACK32{
 
 } // namespace Alternatives
 
-// VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME lives in vulkan_beta.h.
-constexpr std::string_view PORTABILITY_SUBSET_EXTENSION_NAME = "VK_KHR_portability_subset";
+// VK_ENABLE_BETA_EXTENSIONS is not defined, so vulkan_core.h leaves this value out.
+constexpr auto PORTABILITY_SUBSET_FEATURES_STYPE = static_cast<VkStructureType>(1000163000);
 
 template <typename T>
 void SetNext(void**& next, T& data) {
@@ -1225,8 +1225,8 @@ bool Device::GetSuitability(bool requires_swapchain) {
     FOR_EACH_VK_EXTENSION(EXTENSION);
 
     // The spec requires enabling VK_KHR_portability_subset on devices that expose it.
-    if (supported_extensions.contains(PORTABILITY_SUBSET_EXTENSION_NAME)) {
-        loaded_extensions.emplace(PORTABILITY_SUBSET_EXTENSION_NAME);
+    if (supported_extensions.contains(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
+        loaded_extensions.insert(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
     }
 
     extensions.depth_stencil_resolve =
@@ -1347,6 +1347,12 @@ bool Device::GetSuitability(bool requires_swapchain) {
     if (has_device_fault_extension) {
         device_fault_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
         SetNext(next, device_fault_features);
+    }
+
+    // The features the driver reports are enabled through the same chain at device creation.
+    if (loaded_extensions.contains(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
+        portability_subset_features.sType = PORTABILITY_SUBSET_FEATURES_STYPE;
+        SetNext(next, portability_subset_features);
     }
 
     // Perform the feature test.
