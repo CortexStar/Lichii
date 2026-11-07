@@ -847,9 +847,9 @@ Widget* Builder::BuildWidget(Settings::BasicSetting* setting,
         return nullptr;
     }
 
-    auto* const widget = new Widget(setting, *translations, *combobox_translations, parent,
-                                    runtime_lock, apply_funcs, request, managed, multiplier,
-                                    other_setting, suffix);
+    auto* const widget =
+        new Widget(setting, *translations, *combobox_translations, parent, runtime_lock,
+                   apply_funcs, request, managed, multiplier, other_setting, suffix);
     // Only managed widgets: the tab handles the others' values itself.
     if (widget->Valid() && widget->Managed()) {
         widgets[setting] = widget;

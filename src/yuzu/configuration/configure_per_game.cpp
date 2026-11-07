@@ -72,9 +72,9 @@
 #include "yuzu/configuration/configure_input_per_game.h"
 #include "yuzu/configuration/configure_network.h"
 #include "yuzu/configuration/configure_per_game.h"
-#include "yuzu/configuration/settings_share.h"
 #include "yuzu/configuration/configure_per_game_addons.h"
 #include "yuzu/configuration/configure_system.h"
+#include "yuzu/configuration/settings_share.h"
 #include "yuzu/util/util.h"
 
 namespace {

@@ -4,7 +4,6 @@
 #include <cstdlib>
 #include <map>
 #include <set>
-#include <fmt/format.h>
 #include <QApplication>
 #include <QByteArray>
 #include <QClipboard>
@@ -17,6 +16,7 @@
 #include <QRegularExpression>
 #include <QStringList>
 #include <QUrl>
+#include <fmt/format.h>
 #include "common/settings.h"
 #include "qt_common/config/uisettings.h"
 #include "yuzu/configuration/settings_share.h"
@@ -41,17 +41,22 @@ const std::vector<Section>& Sections() {
     static const std::vector<Section> sections = [] {
         std::vector<Section> list{
             {"gen", QT_TRANSLATE_NOOP("SettingsShare", "General"), {Category::UiGeneral}},
-            {"sys", QT_TRANSLATE_NOOP("SettingsShare", "System"),
+            {"sys",
+             QT_TRANSLATE_NOOP("SettingsShare", "System"),
              {Category::Core, Category::System}},
             {"app", QT_TRANSLATE_NOOP("SettingsShare", "Applets"), {Category::LibraryApplet}},
-            {"cpu", QT_TRANSLATE_NOOP("SettingsShare", "CPU"),
+            {"cpu",
+             QT_TRANSLATE_NOOP("SettingsShare", "CPU"),
              {Category::Cpu, Category::CpuUnsafe}},
             {"gfx", QT_TRANSLATE_NOOP("SettingsShare", "Graphics"), {Category::Renderer}},
-            {"gfxa", QT_TRANSLATE_NOOP("SettingsShare", "Advanced Graphics"),
+            {"gfxa",
+             QT_TRANSLATE_NOOP("SettingsShare", "Advanced Graphics"),
              {Category::RendererAdvanced}},
-            {"gfxx", QT_TRANSLATE_NOOP("SettingsShare", "Graphics Extensions"),
+            {"gfxx",
+             QT_TRANSLATE_NOOP("SettingsShare", "Graphics Extensions"),
              {Category::RendererExtensions, Category::RendererHacks}},
-            {"aud", QT_TRANSLATE_NOOP("SettingsShare", "Audio"),
+            {"aud",
+             QT_TRANSLATE_NOOP("SettingsShare", "Audio"),
              {Category::Audio, Category::SystemAudio, Category::UiAudio}},
         };
         Section all{"all", QT_TRANSLATE_NOOP("SettingsShare", "all settings"), {}};
@@ -84,8 +89,8 @@ QString Tr(const char* text, int n = -1) {
 
 // Values tied to this PC or account, never carried by a code.
 const std::set<std::string> machine_keys{
-    "vulkan_device", "output_device", "input_device",  "device_name",
-    "serial_unit",   "serial_battery", "touch_device", "ir_sensor_device",
+    "vulkan_device", "output_device",  "input_device",  "device_name",
+    "serial_unit",   "serial_battery", "touch_device",  "ir_sensor_device",
     "eden_token",    "eden_username",  "gamecard_path",
 };
 
