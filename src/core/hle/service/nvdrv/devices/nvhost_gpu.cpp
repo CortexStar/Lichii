@@ -1,5 +1,5 @@
 #pragma GCC diagnostic ignored "-Wunused-variable"
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
@@ -430,7 +430,7 @@ NvResult nvhost_gpu::SubmitGPFIFOImpl(IoctlSubmitGpfifo& params, Tegra::CommandL
             LOG_TRACE(Service_NVDRV, "nx2 GPFIFO entry raw={:#018x} addr={:#x} size={:#x}", entry.raw,
                      entry.addr.Value(), entry.size.Value());
         }
-        static const bool check = std::getenv("EDEN_NX2_PB_CHECK") != nullptr;
+        static const bool check = std::getenv("LICHII_NX2_PB_CHECK") != nullptr;
         if (check) {
             std::vector<u32> words;
             for (const auto& entry : entries.command_lists) {
@@ -444,9 +444,9 @@ NvResult nvhost_gpu::SubmitGPFIFOImpl(IoctlSubmitGpfifo& params, Tegra::CommandL
         // frames ahead), and Mario Kart World then refills command memory it already
         // submitted: the end of a frame ran with the next frame's present image as its render
         // target, leaving an image three frames old to be shown. Keep the words as submitted.
-        // EDEN_NX2_PB_SNAPSHOT=0: execute from memory.
+        // LICHII_NX2_PB_SNAPSHOT=0: execute from memory.
         static const bool snapshot = [] {
-            const char* value = std::getenv("EDEN_NX2_PB_SNAPSHOT");
+            const char* value = std::getenv("LICHII_NX2_PB_SNAPSHOT");
             return value == nullptr || value[0] != '0';
         }();
         if (snapshot && channel_state->memory_manager && channel_state->payload) {
@@ -522,7 +522,7 @@ NvResult nvhost_gpu::SubmitGPFIFOImpl(IoctlSubmitGpfifo& params, Tegra::CommandL
     flags.raw = 0;
 
     static const bool sync_submit = [] {
-        const char* value = std::getenv("EDEN_NX2_SYNC_SUBMIT");
+        const char* value = std::getenv("LICHII_NX2_SYNC_SUBMIT");
         return value != nullptr && value[0] != '0';
     }();
     if (g_nx2_driver && sync_submit && increment > 0) {

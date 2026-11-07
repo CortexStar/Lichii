@@ -28,8 +28,8 @@ not been proven for this LLE path. The RGBA16F menu/DLAA path also requires alph
 that the Fire Emblem contract does not provide. Turning on NVIDIA DLSS does not override
 these safety checks and is not evidence of a Fast Fusion visual fix.
 
-For a diagnostic run, `EDEN_NX2_DLSS_CONTRACT_TRACE=1` logs at most 24 matching Fast Fusion
-dispatches per compute engine. `EDEN_NX2_DLSS_CONTRACT_SKIP=N` skips the first N matching
+For a diagnostic run, `LICHII_NX2_DLSS_CONTRACT_TRACE=1` logs at most 24 matching Fast Fusion
+dispatches per compute engine. `LICHII_NX2_DLSS_CONTRACT_SKIP=N` skips the first N matching
 dispatches, capped at one million. Logs include exact shader identity, QMD launch dimensions,
 bounded constant-buffer words and raw texture descriptors. They contain guest addresses
 and should remain private. No shaders are skipped or game files changed by this capture.
@@ -42,10 +42,10 @@ replacement uses FSR 3.1. Missing DLLs and unsupported GPUs fall back to FSR. Re
 asynchronous. A failed DLSS recording clears that frame's output, restores input layouts,
 and makes later evaluations fall back; it does not wait for the scheduler worker.
 
-`EDEN_NX2_DLSS_REPLACEMENT=fsr` selects temporal replacement and forces FSR for comparison.
+`LICHII_NX2_DLSS_REPLACEMENT=fsr` selects temporal replacement and forces FSR for comparison.
 `dlss` selects temporal replacement with NVIDIA preferred when enabled and available.
 `native` preserves the guest evaluation. With no override, Fire Emblem uses spatial de-jitter.
-The old `EDEN_NX2_DLSS_STANDIN` variable is not read. The internal `standin` backend override
+The old `LICHII_NX2_DLSS_STANDIN` variable is not read. The internal `standin` backend override
 does not select Fire Emblem's intercepted dispatch. The RCAS sharpness setting controls FSR
 and fallback sharpening. NVIDIA model-selection overrides
 from the upstream implementation remain available for diagnostic comparisons.
@@ -67,7 +67,7 @@ MIT `license.txt` in the packaged notices.
 
 Do not bundle NVIDIA's proprietary DLLs. The Graphics panel obtains missing files from
 NVIDIA's Streamline release only after the user reviews and accepts the license texts.
-The runtime searches `EDEN_STREAMLINE_DIR`, the user `streamline` directory, then the
+The runtime searches `LICHII_STREAMLINE_DIR`, the user `streamline` directory, then the
 executable's `streamline` directory. It verifies the interposer signature and supports the
 NVIDIA app's signed DLSS model. The UI and Windows loading path require Windows validation.
 

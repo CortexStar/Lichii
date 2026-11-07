@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
@@ -72,7 +72,7 @@ Result INewsService::SetPassphrase(InBuffer<BufferAttr_HipcPointer> buffer_data)
 
 Result INewsService::GetTopicList(Out<s32> out_count, OutBuffer<BufferAttr_HipcMapAlias> out_topics, s32 filter) {
     constexpr size_t TopicIdSize = 32;
-    constexpr auto LichiiTopicId = "eden";
+    constexpr auto LichiiTopicId = "lichii";
 
     const size_t max_topics = out_topics.size() / TopicIdSize;
 

@@ -60,7 +60,7 @@ The first compilation error includes both shader and pipeline hashes. The existi
 Native compute pipeline unavailable: address=<guest address> shader=<shader hash> pipeline=<key hash>: SPIR-V emission failed at IR opcode <name>: <original reason>
 ```
 
-The opcode is an optimized IR opcode, not a guessed native instruction address. Keep `EDEN_DKB_FRAME_TRACE=1` to retain the existing timing/rejection trace. The original compute rejection log also reports each distinct detailed error without that switch. Enabling the existing `dump_guest_shaders` setting can additionally dump guest code before emission; `gpu_log_shader_dumps` alone cannot capture a module whose emission failed.
+The opcode is an optimized IR opcode, not a guessed native instruction address. Keep `LICHII_DKB_FRAME_TRACE=1` to retain the existing timing/rejection trace. The original compute rejection log also reports each distinct detailed error without that switch. Enabling the existing `dump_guest_shaders` setting can additionally dump guest code before emission; `gpu_log_shader_dumps` alone cannot capture a module whose emission failed.
 
 ## Verification
 
@@ -68,6 +68,6 @@ The new emitter regression uses two synthetic unsupported operations, `UndefU8` 
 
 The cache-entry regression repeats lookups of the same failed key at two guest addresses. It checks retained cause text, the current address and hashes, unchanged legacy-null behavior, native rejection, and isolation of a different workgroup key.
 
-Clang 20 and Ninja built the integrated headless emulator and tests using all eight cloud cores. All **486 test cases passed**, both with tracing disabled and with `EDEN_DKB_FRAME_TRACE=1 EDEN_NX2_GPU_PROFILE=1`. The focused `[diagnostics]` filter passed 24 assertions across the two new failure-context cases. The existing build configuration keeps Werror disabled for unrelated baseline warnings.
+Clang 20 and Ninja built the integrated headless emulator and tests using all eight cloud cores. All **486 test cases passed**, both with tracing disabled and with `LICHII_DKB_FRAME_TRACE=1 LICHII_NX2_GPU_PROFILE=1`. The focused `[diagnostics]` filter passed 24 assertions across the two new failure-context cases. The existing build configuration keeps Werror disabled for unrelated baseline warnings.
 
 The pre-integration runner linked real shader and Vulkan cache code; 14 adjacent cases passed with 7,255 assertions. The new opcode regression had two failing assertions before the diagnostic change. No Vulkan device or game was launched. The two modified test files were already registered, so this diagnostic change does not alter their CMake registration.

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
@@ -39,6 +39,10 @@ enum class LichiiPath {
 
 // migration/compat dirs
 enum EmuPath {
+    EdenDir,
+    EdenConfigDir,
+    EdenCacheDir,
+
     CitronDir,
     CitronConfigDir,
     CitronCacheDir,

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
@@ -13,13 +13,13 @@
 #include "common/common_types.h"
 #include "common/logging.h"
 
-// EDEN_NX2_DOWNLOAD_TRACE: what the buffer cache copies back to guest memory at fences. Every
+// LICHII_NX2_DOWNLOAD_TRACE: what the buffer cache copies back to guest memory at fences. Every
 // 10 s it logs the GPU writes that queued the most bytes for download (by written range), the
 // 64 KiB regions copied back the most, and the first 2000 guest CPU reads of GPU-written ranges
 // (a Preflushable mark sends later GPU writes over the range to a download at every fence).
 namespace VideoCommon::Nx2DownloadTrace {
 
-inline const bool g_enabled = std::getenv("EDEN_NX2_DOWNLOAD_TRACE") != nullptr;
+inline const bool g_enabled = std::getenv("LICHII_NX2_DOWNLOAD_TRACE") != nullptr;
 
 struct Totals {
     u64 bytes{};

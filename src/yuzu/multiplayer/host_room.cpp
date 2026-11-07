@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2017 Citra Emulator Project
@@ -59,7 +59,7 @@ HostRoomWindow::HostRoomWindow(QWidget* parent, QStandardItemModel* list,
     ui->username->setText(
         QString::fromStdString(UISettings::values.multiplayer_room_nickname.GetValue()));
     if (ui->username->text().isEmpty() && !Settings::values.lichii_username.GetValue().empty()) {
-        // Use Eden Web Service user name as nickname by default
+        // Use the web service user name as nickname by default
         ui->username->setText(QString::fromStdString(Settings::values.lichii_username.GetValue()));
     }
     ui->room_name->setText(
@@ -185,7 +185,7 @@ void HostRoomWindow::Host() {
                     QMessageBox::warning(
                         this, tr("Error"),
                         tr("Failed to announce the room to the public lobby. In order to host a "
-                           "room publicly, you must have a valid Eden account configured in "
+                           "room publicly, you must have a valid Lichii account configured in "
                            "Emulation -> Configure -> Web. If you do not want to publish a room in "
                            "the public lobby, then select Unlisted instead.\nDebug Message: ") +
                             QString::fromStdString(result.result_string),

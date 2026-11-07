@@ -40,7 +40,7 @@ have not been validated.
 - Apply the microphone choice, reopen Configure, and restart the emulator to verify
   the selection and gain persist. Check Cancel leaves saved settings unchanged.
 - In Ocarina, enter the microphone test and check both input response and return from
-  the screen. If it still fails, launch with `EDEN_NX2_IPC_TRACE=1` and save the log
+  the screen. If it still fails, launch with `LICHII_NX2_IPC_TRACE=1` and save the log
   immediately after reproducing. Do not infer that the saved null-pointer panic was
   fixed solely because the missing `aud:u` interface is now implemented.
 

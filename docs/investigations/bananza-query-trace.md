@@ -1,9 +1,9 @@
 # Bananza query diagnostics
 
-`EDEN_DKB_FRAME_TRACE=1` enables `DKB_QUERY` and `DKB_CONDITION` lines in the normal
+`LICHII_DKB_FRAME_TRACE=1` enables `DKB_QUERY` and `DKB_CONDITION` lines in the normal
 log. Keep `HW.GPU` and `Render.Vulkan` at Info or more verbose. The switch is read
 once per process; restart after changing it. It does not enable the separate
-`EDEN_NATIVE_DRAW_DIAGNOSTICS` CSV trace.
+`LICHII_NATIVE_DRAW_DIAGNOSTICS` CSV trace.
 
 Each event class logs its first 64 events, then samples every 1024th event with a
 limit of one sampled line per second. `n` is a

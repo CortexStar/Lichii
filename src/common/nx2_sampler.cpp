@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "common/nx2_sampler.h"
@@ -377,7 +377,7 @@ std::string SampleThreads(const std::vector<std::string>& patterns, double secon
         }
         Sleep(1);
     }
-    // DbgHelp is single-threaded: the debug server's `sample` and EDEN_NX2_SAMPLE can report at
+    // DbgHelp is single-threaded: the debug server's `sample` and LICHII_NX2_SAMPLE can report at
     // the same time.
     static std::mutex report_mutex;
     std::unique_lock report_lock{report_mutex};
@@ -397,13 +397,13 @@ std::string Sample(const char* names, double seconds, const std::string& out) {
 }
 
 void StartFromEnvironment() {
-    const char* names = std::getenv("EDEN_NX2_SAMPLE");
+    const char* names = std::getenv("LICHII_NX2_SAMPLE");
     if (names == nullptr || *names == '\0') {
         return;
     }
-    const char* out = std::getenv("EDEN_NX2_SAMPLE_OUT");
-    std::thread{[patterns = SplitNames(names), start = EnvSeconds("EDEN_NX2_SAMPLE_START", 60.0),
-                 seconds = EnvSeconds("EDEN_NX2_SAMPLE_SECONDS", 30.0),
+    const char* out = std::getenv("LICHII_NX2_SAMPLE_OUT");
+    std::thread{[patterns = SplitNames(names), start = EnvSeconds("LICHII_NX2_SAMPLE_START", 60.0),
+                 seconds = EnvSeconds("LICHII_NX2_SAMPLE_SECONDS", 30.0),
                  out = std::string{out != nullptr ? out : "nx2_samples.txt"}] {
         std::this_thread::sleep_for(std::chrono::duration<double>(start));
         SampleThreads(patterns, seconds, out);

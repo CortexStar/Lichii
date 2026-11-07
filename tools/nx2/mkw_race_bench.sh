@@ -39,8 +39,8 @@ done
 keys="$keys,f1900:4"
 print -r -- $keys > $out/keys.txt
 
-environment=(EDEN_NX2_FPS_LOG=1 EDEN_NX2_AUTO_STUB=1 EDEN_NX2_KEY_SCRIPT=@$out/keys.txt
-             EDEN_NX2_FRAME_CAPTURE=$out/frames EDEN_NX2_FRAME_CAPTURE_EVERY=600)
+environment=(LICHII_NX2_FPS_LOG=1 LICHII_NX2_AUTO_STUB=1 LICHII_NX2_KEY_SCRIPT=@$out/keys.txt
+             LICHII_NX2_FRAME_CAPTURE=$out/frames LICHII_NX2_FRAME_CAPTURE_EVERY=600)
 if [[ -z ${LIBVULKAN_PATH:-} ]]; then
     moltenvk=$(dirname $binary)/eglantine.app/Contents/Frameworks/libMoltenVK.dylib
     [[ -f $moltenvk ]] && environment+=(LIBVULKAN_PATH=$moltenvk)

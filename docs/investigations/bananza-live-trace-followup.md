@@ -51,10 +51,10 @@ five `ChannelSetTimeout` lines configure timeouts; they are not timeout events.
 Restart from a PowerShell shell with:
 
 ```powershell
-$env:EDEN_DKB_FRAME_TRACE = "1"
-$env:EDEN_NX2_GPU_PROFILE = "1"
-Remove-Item Env:EDEN_DKB_INDIRECT_READBACK -ErrorAction SilentlyContinue
-Remove-Item Env:EDEN_NX2_SWAP_INTERVAL -ErrorAction SilentlyContinue
+$env:LICHII_DKB_FRAME_TRACE = "1"
+$env:LICHII_NX2_GPU_PROFILE = "1"
+Remove-Item Env:LICHII_DKB_INDIRECT_READBACK -ErrorAction SilentlyContinue
+Remove-Item Env:LICHII_NX2_SWAP_INTERVAL -ErrorAction SilentlyContinue
 & .\eden.exe
 ```
 
@@ -64,7 +64,7 @@ scene and settings. Hold each troublesome/recovered camera direction for at leas
 the full log from startup, including the first compute failure, and note the
 camera-transition times. No shader-cache deletion is required for failed builds.
 The existing zone profiler adds overhead. For an absolute-FPS comparison, repeat
-with `EDEN_NX2_GPU_PROFILE` unset while keeping `EDEN_DKB_FRAME_TRACE=1`.
+with `LICHII_NX2_GPU_PROFILE` unset while keeping `LICHII_DKB_FRAME_TRACE=1`.
 
 The next log should show the exact unsupported IR opcode and retained compute
 failure reason, `DKB cpu` host-thread CPU counters and per-frame averages, and

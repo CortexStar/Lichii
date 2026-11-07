@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /* SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project */
@@ -13,15 +13,15 @@
 // around these includes, since glibc headers also look at __ASSEMBLER__.
 #ifndef __ASSEMBLER__
 #define __ASSEMBLER__
-#define EDEN_NCE_UNDEF_ASSEMBLER
+#define LICHII_NCE_UNDEF_ASSEMBLER
 #endif
 
 #include <asm-generic/signal.h>
 #include <asm-generic/unistd.h>
 
-#ifdef EDEN_NCE_UNDEF_ASSEMBLER
+#ifdef LICHII_NCE_UNDEF_ASSEMBLER
 #undef __ASSEMBLER__
-#undef EDEN_NCE_UNDEF_ASSEMBLER
+#undef LICHII_NCE_UNDEF_ASSEMBLER
 #endif
 
 #define ReturnToRunCodeByExceptionLevelChangeSignal SIGUSR2

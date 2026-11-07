@@ -28,7 +28,7 @@ X.Y.Z
 X.Y.Z-rcN
 ```
 
-Examples: `0.1.0-rc1`, `0.1.0`, `0.1.1-rc1`. Numeric components cannot have leading zeroes. The bundle starts with `0.1.0-rc1` as a **suggested starting point**, not as an existing Eglantine version convention. The current public releases use `build-<run number>`; confirm the first semantic version with maintainers before merging this value. The included `[0.1.0]` changelog section is intentionally empty and must receive the real initial release notes before the first versioned release can publish.
+Examples: `0.1.0-rc1`, `0.1.0`, `0.1.1-rc1`. Numeric components cannot have leading zeroes. The bundle starts with `0.1.0-rc1` as a **suggested starting point**, not as an existing upstream version convention. The current public releases use `build-<run number>`; confirm the first semantic version with maintainers before merging this value. The included `[0.1.0]` changelog section is intentionally empty and must receive the real initial release notes before the first versioned release can publish.
 
 Add changes to the top `## [Unreleased]` section in `CHANGELOG.md`. When a new candidate is prepared, the bump script moves those entries beneath `## [X.Y.Z]` and leaves an empty `## [Unreleased]` section ready for the next cycle. The RC and stable release notes come from that version section; an absent or empty section fails before the build is published.
 
@@ -89,7 +89,7 @@ Build artifacts are retained for seven days. Published GitHub Release assets rem
 
 ## Windows PGO profile
 
-`windows-x86_64-pgo` is the `windows-x86_64` build plus `-fprofile-use=lichii-windows.profdata`. The profile is an LLVM indexed IR profile from clang-cl, so its function names use the MSVC ABI. Linux's `eglantine.profdata` uses Itanium names, and clang-cl cannot use it. The committed profile comes from about six minutes of Ocarina of Time gameplay. Code that run never reached gets no profile data, so other games gain less.
+`windows-x86_64-pgo` is the `windows-x86_64` build plus `-fprofile-use=lichii-windows.profdata`. The profile is an LLVM indexed IR profile from clang-cl, so its function names use the MSVC ABI. Linux's `lichii.profdata` uses Itanium names, and clang-cl cannot use it. The committed profile comes from about six minutes of Ocarina of Time gameplay. Code that run never reached gets no profile data, so other games gain less.
 
 A profile older than the source only produces warnings. Functions whose code changed since training lose their profile data and are compiled as in the ThinLTO build. Retrain when those warnings cover code that matters, or when the LLVM version changes. clang-cl reads only the indexed format its own LLVM writes, so use the version that `tools/windows/install-llvm.ps1` installs.
 

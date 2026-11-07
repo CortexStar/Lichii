@@ -31,7 +31,7 @@ permissions:
 
 # Clang major the Linux PGO build uses, from apt.llvm.org. A profile is written by a current clang
 # and an older reader refuses it, so this has to stay at or above whatever produced
-# eglantine.profdata; bump it when a refreshed profile needs a newer LLVM.
+# lichii.profdata; bump it when a refreshed profile needs a newer LLVM.
 env:
   PGO_LLVM_VERSION: "23"
 
@@ -83,8 +83,8 @@ jobs:
           - platform: linux-x86_64
             runner: ubuntu-24.04
           # The Linux -pgo builds are the same programs compiled by clang against the repo's
-          # eglantine.profdata. Eden's profile (Eden-CI/PGO) comes from Switch 1 games: with it Mario
-          # Kart World ran at about half the speed of the normal build, with eglantine.profdata at
+          # lichii.profdata. Eden's profile (Eden-CI/PGO) comes from Switch 1 games: with it Mario
+          # Kart World ran at about half the speed of the normal build, with lichii.profdata at
           # about the same speed. Both Windows builds are clang-cl with ThinLTO; windows-x86_64-pgo
           # adds lichii-windows.profdata, an MSVC-ABI profile trained on Ocarina of Time (see
           # docs/CI.md). MSVC still builds for development.
@@ -184,7 +184,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -s "${{ matrix.profile || 'eglantine.profdata' }}"
+          test -s "${{ matrix.profile || 'lichii.profdata' }}"
 
       - name: Set up MSVC
         if: startsWith(matrix.platform, 'windows')
@@ -280,8 +280,8 @@ jobs:
             -DENABLE_QT_TRANSLATION=ON
           )
           if [ '${{ matrix.pgo }}' = 'true' ]; then
-            # Same flags Eden's CI passes for its clang PGO build.
-            profile="-fprofile-use=$PWD/eglantine.profdata -Wno-backend-plugin \
+            # Same flags upstream CI passes for its clang PGO build.
+            profile="-fprofile-use=$PWD/lichii.profdata -Wno-backend-plugin \
               -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
             flags+=(
               "-DCMAKE_C_COMPILER=clang-$PGO_LLVM_VERSION"

@@ -182,7 +182,7 @@ class AdapterTest(unittest.TestCase):
         reply = adapter.handle({"id": 1, "method": "tools/call",
                                 "params": {"name": "status", "arguments": {}}})
         self.assertTrue(reply["result"]["isError"])
-        self.assertIn("EDEN_NX2_DEBUG_SERVER", reply["result"]["content"][0]["text"])
+        self.assertIn("LICHII_NX2_DEBUG_SERVER", reply["result"]["content"][0]["text"])
 
     def test_stdio_framing(self):
         stdin = io.StringIO('{"jsonrpc":"2.0","id":1,"method":"ping"}\n\nnot json\n')

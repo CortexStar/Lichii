@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <vector>
@@ -48,7 +48,7 @@ struct SortingInfo {
 int main(int argc, char *argv[]) {
     auto which = std::string{argv[1]};
     std::printf(
-"// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project\n"
+"// SPDX-FileCopyrightText: Copyright 2026 Lichii Project\n"
 "// SPDX-License-Identifier: GPL-3.0-or-later\n"
 "// DO NOT REORDER\n");
     if (which == "-arm") {

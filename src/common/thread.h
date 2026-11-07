@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: 2013 Dolphin Emulator Project
@@ -116,7 +116,7 @@ enum class PinnedRole : u32 { GpuFront, GpuBack, GuestCore };
 
 /// The experimental pin_gpu_threads setting (Windows and Linux): the split GPU thread's front and
 /// back each get a physical performance core of their own and the guest cores keep off those two.
-/// Skipped, with one log line, on CPUs with too few cores, with EDEN_HYBRID_CORES=0 (Windows), and
+/// Skipped, with one log line, on CPUs with too few cores, with LICHII_HYBRID_CORES=0 (Windows), and
 /// on other hosts.
 void PinCurrentThread(PinnedRole role);
 

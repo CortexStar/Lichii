@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
@@ -38,7 +38,7 @@ public:
     bool process_created{false};
 };
 
-/// The name a service gave an event (EDEN_NX2_SVC_TRACE shows the handles a thread waits on).
+/// The name a service gave an event (LICHII_NX2_SVC_TRACE shows the handles a thread waits on).
 std::string DebugEventName(const Kernel::KReadableEvent* event);
 
 } // namespace Service::KernelHelpers

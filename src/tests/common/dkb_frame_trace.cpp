@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <catch2/catch_test_macros.hpp>
@@ -6,7 +6,7 @@
 #include "common/dkb_frame_trace.h"
 
 TEST_CASE("DKB frame trace requires the exact environment opt-in", "[common][dkb_frame_trace]") {
-    const char* value = std::getenv("EDEN_DKB_FRAME_TRACE");
+    const char* value = std::getenv("LICHII_DKB_FRAME_TRACE");
     REQUIRE(Common::DkbFrameTrace::Enabled() == (value && std::strcmp(value, "1") == 0));
 }
 

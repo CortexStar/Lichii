@@ -75,7 +75,7 @@ checks size and permission rejection, and verifies repeated requests reuse
 the object. Copied handles remain valid after the service is destroyed.
 Before the fix, both routes left the configuration as the TLS sentinel.
 
-After review, package with `EDEN_NX2_IPC_TRACE=1` and filter `*:Info`.
+After review, package with `LICHII_NX2_IPC_TRACE=1` and filter `*:Info`.
 Have the 4060 Ti reporter repeat the same launch and progress beyond the
 previous panic. Save the entire new log. Expect
 `GameShare guest HID shared memory: size=0x9b000, offset=0, no guests connected`

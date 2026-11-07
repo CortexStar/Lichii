@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
@@ -12,7 +12,7 @@
 #include "common/fs/fs_paths.h"
 #include "common/fs/path_util.h"
 
-// The NX2 switches are read from the environment (EDEN_NX2_*), which a GUI launch has no way to
+// The NX2 switches are read from the environment (LICHII_NX2_*), which a GUI launch has no way to
 // set. nx2_switches.txt holds "NAME=VALUE" lines, one per line, '#' comments. A variable already
 // in the real environment always wins, so a launcher script can still override one run; between
 // files the later one wins, so the copy next to the executable (shipped with the build) can be
@@ -83,11 +83,11 @@ static void LoadNx2Switches(const char* argv0) {
 #endif
     std::erase_if(entries, [](const auto& entry) {
         const auto& name = entry.first;
-        return !(name.starts_with("EDEN_NX2_") || name == "EDEN_DKB_FRAME_TRACE" ||
-                 name == "EDEN_DKB_INDIRECT_READBACK" || name == "EDEN_NATIVE_DRAW_CAPTURE" ||
-                 name == "EDEN_NATIVE_DRAW_DIAGNOSTICS" || name == "EDEN_NATIVE_FRAME_CAPTURE" ||
-                 name == "EDEN_NATIVE_SHADER_OVERRIDE_DIR" || name == "EDEN_PUNCH_HOLE" ||
-                 name == "EDEN_STARFOX_WINDOW_TRACE" || name == "EDEN_VI2_MAX_RESOLUTION_MODE" ||
+        return !(name.starts_with("LICHII_NX2_") || name == "LICHII_DKB_FRAME_TRACE" ||
+                 name == "LICHII_DKB_INDIRECT_READBACK" || name == "LICHII_NATIVE_DRAW_CAPTURE" ||
+                 name == "LICHII_NATIVE_DRAW_DIAGNOSTICS" || name == "LICHII_NATIVE_FRAME_CAPTURE" ||
+                 name == "LICHII_NATIVE_SHADER_OVERRIDE_DIR" || name == "LICHII_PUNCH_HOLE" ||
+                 name == "LICHII_STARFOX_WINDOW_TRACE" || name == "LICHII_VI2_MAX_RESOLUTION_MODE" ||
                  name == "EGLANTINE_EXPERIMENTAL_STATIC_VERTEX_REPACK" ||
                  name == "EGLANTINE_TEST_VERTEX_REPACK");
     });

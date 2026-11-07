@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
@@ -302,7 +302,7 @@ RasterizerVulkan::~RasterizerVulkan() {
 // indirect record writes on the host until general GPU-address translation is available.
 bool RasterizerVulkan::TryNx2IndirectReset(bool is_indexed, u32 instance_count) {
     static const bool enabled = [] {
-        const char* value = std::getenv("EDEN_NX2_RESETFIX");
+        const char* value = std::getenv("LICHII_NX2_RESETFIX");
         return !value || std::string_view{value} != "0";
     }();
     const auto& regs = maxwell3d->regs;
@@ -440,18 +440,18 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     }
     // Task/mesh pipelines: the draw's vertex count is the number of task workgroups.
     mesh_draw = pipeline->IsMeshPipeline();
-    // EDEN_NX2_NO_MESH=1: skip task/mesh draws as before they were supported (A/B comparisons).
-    // EDEN_NX2_NO_MESH_FILE=<path>: skip them while that file exists (checked every 1024 draws),
+    // LICHII_NX2_NO_MESH=1: skip task/mesh draws as before they were supported (A/B comparisons).
+    // LICHII_NX2_NO_MESH_FILE=<path>: skip them while that file exists (checked every 1024 draws),
     // to compare the same scene with and without them in one run.
-    static const bool no_mesh_always{std::getenv("EDEN_NX2_NO_MESH") != nullptr};
-    static const char* const no_mesh_file{std::getenv("EDEN_NX2_NO_MESH_FILE")};
+    static const bool no_mesh_always{std::getenv("LICHII_NX2_NO_MESH") != nullptr};
+    static const char* const no_mesh_file{std::getenv("LICHII_NX2_NO_MESH_FILE")};
     static bool no_mesh{no_mesh_always};
     static u32 no_mesh_check{};
     if (no_mesh_file && (no_mesh_check++ % 1024) == 0) {
         no_mesh = std::filesystem::exists(no_mesh_file);
     }
     if (mesh_draw && (no_mesh || !device.IsExtMeshShaderSupported())) {
-        report_failure(no_mesh ? "EDEN_NX2_NO_MESH" : "no VK_EXT_mesh_shader");
+        report_failure(no_mesh ? "LICHII_NX2_NO_MESH" : "no VK_EXT_mesh_shader");
         TraceRenderState(is_indexed, "mesh-skipped", nullptr);
         return;
     }
@@ -506,7 +506,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
 
     if (is_indirect && !mesh_draw && Common::DkbFrameTrace::Enabled()) {
         static const bool readback = [] {
-            const char* value = std::getenv("EDEN_DKB_INDIRECT_READBACK");
+            const char* value = std::getenv("LICHII_DKB_INDIRECT_READBACK");
             return value && std::string_view{value} == "1";
         }();
         if (readback) {
@@ -532,7 +532,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     static u32 native_capture_count{};
     if (maxwell3d->GetNativeMacroEngine().native_turing &&
         native_capture_count < 16 && [] {
-            static const bool capture = std::getenv("EDEN_NATIVE_DRAW_CAPTURE") != nullptr;
+            static const bool capture = std::getenv("LICHII_NATIVE_DRAW_CAPTURE") != nullptr;
             return capture;
         }()) {
         const u32 capture = native_capture_count++;
@@ -574,19 +574,19 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
 
 
 namespace {
-// EDEN_NX2_WINDOW_TRACE: describe clears and draws into screen-sized colour targets (debug aid).
+// LICHII_NX2_WINDOW_TRACE: describe clears and draws into screen-sized colour targets (debug aid).
 void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::MemoryManager& memory,
                        const char* kind, u32 count) {
-    static const bool trace = std::getenv("EDEN_NX2_WINDOW_TRACE") != nullptr;
+    static const bool trace = std::getenv("LICHII_NX2_WINDOW_TRACE") != nullptr;
     static u32 traced{};
     const auto& regs = maxwell3d.regs;
     static const u64 skip = [] {
-        const char* value = std::getenv("EDEN_NX2_WINDOW_TRACE_SKIP");
+        const char* value = std::getenv("LICHII_NX2_WINDOW_TRACE_SKIP");
         return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ULL;
     }();
     static u64 seen_events{};
     static const u64 only_ps = [] {
-        const char* value = std::getenv("EDEN_NX2_TRACE_PS");
+        const char* value = std::getenv("LICHII_NX2_TRACE_PS");
         return value != nullptr ? std::strtoull(value, nullptr, 16) : 0ULL;
     }();
     const u64 pixel_shader =
@@ -642,8 +642,8 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
     memory.ReadBlockUnsafe(texture, texels.data(), sizeof(texels));
     LOG_INFO(HW_GPU, "nx2 window texture {:#x} {}x{}: {:08x}", texture, (tic[4] & 0xffff) + 1,
              (tic[5] & 0xffff) + 1, fmt::join(texels, " "));
-    // EDEN_NX2_TEXTURE_DUMP=<file>: save the first 4 MiB of the last traced texture's memory.
-    if (const char* path = std::getenv("EDEN_NX2_TEXTURE_DUMP"); path != nullptr) {
+    // LICHII_NX2_TEXTURE_DUMP=<file>: save the first 4 MiB of the last traced texture's memory.
+    if (const char* path = std::getenv("LICHII_NX2_TEXTURE_DUMP"); path != nullptr) {
         std::vector<u8> bytes(2048u * 10240u);
         memory.ReadBlockUnsafe(texture, bytes.data(), bytes.size());
         if (std::FILE* file = std::fopen(path, "wb")) {
@@ -680,9 +680,9 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     TraceWindowTarget(*maxwell3d, *gpu_memory, is_indexed ? "draw-indexed" : "draw",
                       is_indexed ? maxwell3d->draw_manager.draw_state.index_buffer.count
                                  : maxwell3d->draw_manager.draw_state.vertex_buffer.count);
-    // EDEN_NX2_CB24_TRACE: for draws whose vertex shader reads bank 24, show the inline
+    // LICHII_NX2_CB24_TRACE: for draws whose vertex shader reads bank 24, show the inline
     // constant buffer upload target (CB_ADDRESS) and its first words.
-    if (static const bool trace = std::getenv("EDEN_NX2_CB24_TRACE") != nullptr; trace) {
+    if (static const bool trace = std::getenv("LICHII_NX2_CB24_TRACE") != nullptr; trace) {
         const auto& regs = maxwell3d->regs;
         const u64 vs = (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) | regs.pipelines[1].reserved[1];
         static u32 logged{};
@@ -709,10 +709,10 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
             }
         }
     }
-    // EDEN_NX2_TRACE_VS=<address>: describe the next few draws using that vertex shader like the
+    // LICHII_NX2_TRACE_VS=<address>: describe the next few draws using that vertex shader like the
     // after-upscale trace does (render target, blend, fragment textures).
     static const u64 trace_vs = [] {
-        const char* value = std::getenv("EDEN_NX2_TRACE_VS");
+        const char* value = std::getenv("LICHII_NX2_TRACE_VS");
         return value ? std::strtoull(value, nullptr, 16) : 0ULL;
     }();
     if (trace_vs != 0) {
@@ -756,10 +756,10 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
                  static_cast<u32>(bt.alpha_source), static_cast<u32>(bt.alpha_dest),
                  regs.color_mask[0].raw);
     }
-    // EDEN_NX2_SKIP_VS=<address>[,<address>...]: drop draws using those vertex shaders (debug aid).
+    // LICHII_NX2_SKIP_VS=<address>[,<address>...]: drop draws using those vertex shaders (debug aid).
     static const std::vector<u64> skip_list = [] {
         std::vector<u64> list;
-        if (const char* value = std::getenv("EDEN_NX2_SKIP_VS")) {
+        if (const char* value = std::getenv("LICHII_NX2_SKIP_VS")) {
             for (char* end = nullptr; *value; value = *end ? end + 1 : end) {
                 list.push_back(std::strtoull(value, &end, 16));
                 if (end == value) break;
@@ -772,8 +772,8 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
         const u64 vs = (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) | regs.pipelines[1].reserved[1];
         if (std::find(skip_list.begin(), skip_list.end(), vs) != skip_list.end()) return;
     }
-    // EDEN_NX2_RT_TRACE: log the first draw to every distinct colour target (debug aid).
-    if (static const bool trace = std::getenv("EDEN_NX2_RT_TRACE") != nullptr; trace) {
+    // LICHII_NX2_RT_TRACE: log the first draw to every distinct colour target (debug aid).
+    if (static const bool trace = std::getenv("LICHII_NX2_RT_TRACE") != nullptr; trace) {
         static std::set<std::tuple<GPUVAddr, u32, u32, u64, u64>> seen;
         const auto& regs = maxwell3d->regs;
         const auto& rt = regs.rt[0];
@@ -1962,7 +1962,7 @@ void RasterizerVulkan::TraceRenderState(bool is_indexed, const char* outcome,
 void RasterizerVulkan::TracePendingCpuWrites(bool compute, std::span<const u64> shader_hashes) {
     // Guest CPU writes into GPU-written buffer memory are collected, and applied to the host
     // buffers only at the next fence or cache invalidation. A hit here reads the older bytes.
-    static const bool enabled = std::getenv("EDEN_NX2_PENDING_WRITE_TRACE") != nullptr;
+    static const bool enabled = std::getenv("LICHII_NX2_PENDING_WRITE_TRACE") != nullptr;
     if (!enabled) {
         return;
     }
@@ -2185,7 +2185,7 @@ void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
         VideoCommon::TraceNativeQuery(11, gpu_memory->GetID(), address, cpu_addr.value_or(0),
             0, first_word, static_cast<u32>(copy_size));
         static const GPUVAddr watch = [] {
-            const char* value = std::getenv("EDEN_NX2_SEM_WATCH");
+            const char* value = std::getenv("LICHII_NX2_SEM_WATCH");
             return value ? GPUVAddr{std::strtoull(value, nullptr, 16)} : GPUVAddr{};
         }();
         if (watch != 0 && address < watch + 16 && address + copy_size > watch) {
@@ -2198,9 +2198,9 @@ void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
         return;
     }
     gpu_memory->WriteBlockUnsafe(address, memory.data(), copy_size);
-    // EDEN_NX2_INLINE_DEFER=0: invalidate every cache at once (for comparisons).
+    // LICHII_NX2_INLINE_DEFER=0: invalidate every cache at once (for comparisons).
     static const bool defer = [] {
-        const char* value = std::getenv("EDEN_NX2_INLINE_DEFER");
+        const char* value = std::getenv("LICHII_NX2_INLINE_DEFER");
         return value == nullptr || value[0] != '0';
     }();
     // One cache at a time: holding both while waiting for either (std::lock) waited longer, the
@@ -2242,7 +2242,7 @@ std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
     const auto [image_view, scaled] =
         texture_cache.TryFindFramebufferImageView(config, framebuffer_addr);
     static u32 display_trace_count{};
-    static const bool frame_capture = std::getenv("EDEN_NATIVE_FRAME_CAPTURE") != nullptr;
+    static const bool frame_capture = std::getenv("LICHII_NATIVE_FRAME_CAPTURE") != nullptr;
     if (frame_capture && display_trace_count++ < 64) {
         LOG_INFO(HW_GPU, "Native display source: address={:#x}, offset={:#x}, dimensions={}x{}, stride={}, accelerated={}, mask={:#x}",
                  framebuffer_addr, config.offset, config.width, config.height, pixel_stride,
@@ -2285,12 +2285,12 @@ void RasterizerVulkan::FlushWork() {
     u32 budget = SubmissionPolicy::DefaultNativeBudget;
     if (native && !android) {
         static const std::optional<u32> configured_budget = []() -> std::optional<u32> {
-            if (const char* value = std::getenv("EDEN_NX2_FLUSH_DRAWS")) {
+            if (const char* value = std::getenv("LICHII_NX2_FLUSH_DRAWS")) {
                 if (const auto parsed = SubmissionPolicy::ParseBudget(value)) {
                     return parsed;
                 }
                 LOG_WARNING(Render_Vulkan,
-                            "Invalid EDEN_NX2_FLUSH_DRAWS; expected an integer from 1 to {}",
+                            "Invalid LICHII_NX2_FLUSH_DRAWS; expected an integer from 1 to {}",
                             (std::numeric_limits<u32>::max)());
             }
             return std::nullopt;
@@ -2300,7 +2300,7 @@ void RasterizerVulkan::FlushWork() {
     u32 legacy_budget = 4096;
     if (!native && !android) {
         static const u32 forced_draws = [] {
-            const char* value = std::getenv("EDEN_NX2_FLUSH_DRAWS");
+            const char* value = std::getenv("LICHII_NX2_FLUSH_DRAWS");
             return value != nullptr
                        ? static_cast<u32>(std::max(32L, std::strtol(value, nullptr, 10)) & ~31L)
                        : 0U;

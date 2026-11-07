@@ -1,5 +1,5 @@
 #!/usr/bin/bash
-# SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
+# SPDX-FileCopyrightText: Copyright 2025 Lichii Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 ARCH_RAW="$PROCESSOR_ARCHITECTURE"

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
@@ -10,7 +10,7 @@
 #include <string_view>
 #include <vector>
 
-// Eden's Xbyak configuration (its hash maps): every translation unit must see the same one.
+// the emulator's Xbyak configuration (its hash maps): every translation unit must see the same one.
 #include "common/x64/xbyak.h"
 
 #include "video_core/macro_turing.h"

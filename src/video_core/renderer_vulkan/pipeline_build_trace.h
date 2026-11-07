@@ -13,14 +13,14 @@
 
 namespace Vulkan {
 
-/// EDEN_NX2_PIPELINE_BUILD_TRACE=<file>: appends a line before and after every driver pipeline
+/// LICHII_NX2_PIPELINE_BUILD_TRACE=<file>: appends a line before and after every driver pipeline
 /// build, flushed at once, so the last BEGIN without an END names the shaders a driver crashed on.
 /// END lines carry the build's wall time (ms=), which includes time spent waiting on other builds.
 inline void TracePipelineBuild(const char* phase, const char* kind, u64 key_hash,
                                std::span<const u64> stage_hashes, bool unoptimized,
                                double elapsed_ms = -1.0) {
     static std::FILE* const file = [] {
-        const char* const path = std::getenv("EDEN_NX2_PIPELINE_BUILD_TRACE");
+        const char* const path = std::getenv("LICHII_NX2_PIPELINE_BUILD_TRACE");
         return path != nullptr && *path != '\0' ? std::fopen(path, "a") : nullptr;
     }();
     if (file == nullptr) {

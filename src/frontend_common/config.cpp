@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: 2023 yuzu Emulator Project
@@ -423,6 +423,22 @@ void Config::ReadWebServiceValues() {
     BeginGroup(Settings::TranslateCategory(Settings::Category::WebService));
 
     ReadCategory(Settings::Category::WebService);
+
+    // One-time migration: credentials saved by pre-rename builds used the
+    // eden_username/eden_token keys. Pull them forward while the new keys are
+    // still unset; the next save writes them under the lichii_* keys.
+    if (Settings::values.lichii_username.GetValue().empty()) {
+        const auto legacy_username = ReadStringSetting(std::string("eden_username"), std::string());
+        if (!legacy_username.empty()) {
+            Settings::values.lichii_username = legacy_username;
+        }
+    }
+    if (Settings::values.lichii_token.GetValue().empty()) {
+        const auto legacy_token = ReadStringSetting(std::string("eden_token"), std::string());
+        if (!legacy_token.empty()) {
+            Settings::values.lichii_token = legacy_token;
+        }
+    }
 
     EndGroup();
 }

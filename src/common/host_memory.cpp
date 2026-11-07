@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
@@ -1091,7 +1091,7 @@ void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 f
 #ifdef __linux__
     // Handing a whole granule back to the kernel frees its RAM; a memset would commit it.
     static const bool punch = [] {
-        const char* value = std::getenv("EDEN_PUNCH_HOLE");
+        const char* value = std::getenv("LICHII_PUNCH_HOLE");
         return value == nullptr || value[0] != '0';
     }();
 #endif

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
@@ -752,7 +752,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     }
 #ifdef EGLANTINE_STREAMLINE
     // NVIDIA's DLSS needs buffer device addresses: keep the feature enabled for
-    // it, but leave Eglantine's own buffers as they are without descriptor buffers.
+    // it, but leave the emulator's own buffers as they are without descriptor buffers.
     const bool dlss_wants_device_address =
         streamline_extensions && features.buffer_device_address.bufferDeviceAddress;
     if (!extensions.descriptor_buffer && dlss_wants_device_address) {
@@ -805,7 +805,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     if (extensions.buffer_device_address) {
         flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     }
-    // EDEN_NX2_VRAM_LIMIT_MIB: VMA fails allocations past the limit, like a smaller card.
+    // LICHII_NX2_VRAM_LIMIT_MIB: VMA fails allocations past the limit, like a smaller card.
     std::array<VkDeviceSize, VK_MAX_MEMORY_HEAPS> heap_size_limits;
     heap_size_limits.fill(VK_WHOLE_SIZE);
     if (heap_size_limit != 0) {
@@ -1945,14 +1945,14 @@ void Device::CollectPhysicalMemoryInfo() {
     device_access_memory = 0;
     u64 device_initial_usage = 0;
     u64 local_memory = 0;
-    // EDEN_NX2_VRAM_LIMIT_MIB=<n>: treat every device-local heap as n MiB (small card tests).
-    if (const char* value = std::getenv("EDEN_NX2_VRAM_LIMIT_MIB")) {
+    // LICHII_NX2_VRAM_LIMIT_MIB=<n>: treat every device-local heap as n MiB (small card tests).
+    if (const char* value = std::getenv("LICHII_NX2_VRAM_LIMIT_MIB")) {
         heap_size_limit = std::strtoull(value, nullptr, 10) << 20;
         if (heap_size_limit != 0) {
-            LOG_INFO(Render_Vulkan, "EDEN_NX2_VRAM_LIMIT_MIB: device-local heaps limited to {} MiB",
+            LOG_INFO(Render_Vulkan, "LICHII_NX2_VRAM_LIMIT_MIB: device-local heaps limited to {} MiB",
                      heap_size_limit >> 20);
         } else {
-            LOG_WARNING(Render_Vulkan, "EDEN_NX2_VRAM_LIMIT_MIB={} is not a size in MiB, ignored",
+            LOG_WARNING(Render_Vulkan, "LICHII_NX2_VRAM_LIMIT_MIB={} is not a size in MiB, ignored",
                         value);
         }
     }

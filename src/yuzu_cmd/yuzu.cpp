@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: 2014 Citra Emulator Project
@@ -82,7 +82,7 @@ __declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
 __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 }
 
-// EDEN_NX2_CRASH_DUMP=<dir>: on an unhandled exception (a real crash; fastmem faults are handled
+// LICHII_NX2_CRASH_DUMP=<dir>: on an unhandled exception (a real crash; fastmem faults are handled
 // before this), write <dir>/eden-crash-<pid>.dmp. A debugger changes the timing enough to hide
 // some crashes, so this catches them at full speed. dbghelp.dll is loaded only then.
 // Prints a code address as module+offset (resolve with llvm-symbolizer and the module's PDB).
@@ -102,7 +102,7 @@ static void PrintCodeAddress(const char* label, const void* address) {
 
 static LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* exception) {
     static std::atomic<bool> written{};
-    const char* directory = std::getenv("EDEN_NX2_CRASH_DUMP");
+    const char* directory = std::getenv("LICHII_NX2_CRASH_DUMP");
     if (directory == nullptr || written.exchange(true)) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
@@ -259,7 +259,7 @@ constexpr int kRestartExitCode = 75;
 static std::atomic_bool restart_requested{false};
 
 // ExecuteProgram state for the restarted process: what the Qt frontend keeps in-process when it
-// reboots a game. Only read when the launcher sets EDEN_CLI_RESTART_HANDOFF, so a leftover file
+// reboots a game. Only read when the launcher sets LICHII_CLI_RESTART_HANDOFF, so a leftover file
 // never changes a normal launch.
 struct RestartHandoff {
     u64 program_id{};
@@ -594,7 +594,7 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     Service::AM::FrontendAppletParameters load_parameters{
         .applet_id = Service::AM::AppletId::Application,
     };
-    const char* const handoff_env = std::getenv("EDEN_CLI_RESTART_HANDOFF");
+    const char* const handoff_env = std::getenv("LICHII_CLI_RESTART_HANDOFF");
     const bool restarted = handoff_env != nullptr && handoff_env[0] != '\0';
     if (restarted) {
         auto handoff = ReadRestartHandoff();
@@ -642,7 +642,7 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
         const u16 error_id = u16(load_result) - loader_id;
         LOG_CRITICAL(Frontend,
             "While attempting to load the ROM requested, an error occurred. Please "
-            "refer to the Eden wiki for more information or the Eden discord for "
+            "refer to the project wiki for more information or the community discord for "
             "additional help.\n\nError Code: {:04X}-{:04X}\nError Description: {}",
             loader_id, error_id, Loader::ResultStatus(error_id));
         return SDL_APP_FAILURE;
@@ -677,7 +677,7 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
 
     // A game executing a program (e.g. restarting after a settings change) writes its launch state
     // to the restart handoff and quits with kRestartExitCode; the launcher boots the same file again
-    // with EDEN_CLI_RESTART_HANDOFF set. Mirrors MainWindow::OnExecuteProgram.
+    // with LICHII_CLI_RESTART_HANDOFF set. Mirrors MainWindow::OnExecuteProgram.
     state->system.RegisterExecuteProgramCallback([system = &state->system](std::size_t program_index) {
         RestartHandoff handoff{
             .program_index = static_cast<s32>(program_index),
@@ -728,7 +728,7 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
         state->system.InitializeDebugger();
     return SDL_APP_CONTINUE;
 }
-// EDEN_NX2_KEY_SCRIPT="seconds:code,seconds:-code,..." (or "@<file>"): press (code) or release (-code) keyboard
+// LICHII_NX2_KEY_SCRIPT="seconds:code,seconds:-code,..." (or "@<file>"): press (code) or release (-code) keyboard
 // keys, by SDL scancode, that many seconds after start. Lets hidden test runs drive menus.
 double Nx2KeyClockSeconds(); // emu_window_sdl3.cpp
 
@@ -740,7 +740,7 @@ static void RunKeyScript(InputCommon::InputSubsystem& input_subsystem) {
     };
     static const std::vector<KeyEvent> script = [] {
         std::vector<KeyEvent> events;
-        if (const char* text = std::getenv("EDEN_NX2_KEY_SCRIPT")) {
+        if (const char* text = std::getenv("LICHII_NX2_KEY_SCRIPT")) {
             // "@<file>" reads the list from a file: long scripts in the environment slow down
             // every getenv in the process.
             std::string list{text};

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
@@ -66,9 +66,9 @@ std::vector<ByteAddressedRange> ByteAddressedMappedRanges(Tegra::MemoryManager& 
     return ranges;
 }
 
-// EDEN_NX2_UPSCALER_TRACE=1 waits for the first native dispatch using subgroup shuffles (software
-// HMMA) at or after frame EDEN_NX2_UPSCALER_TRACE_FRAME (default 600), then logs the resources of
-// every native compute dispatch in the next EDEN_NX2_UPSCALER_TRACE_FRAMES frames (default 3), at
+// LICHII_NX2_UPSCALER_TRACE=1 waits for the first native dispatch using subgroup shuffles (software
+// HMMA) at or after frame LICHII_NX2_UPSCALER_TRACE_FRAME (default 600), then logs the resources of
+// every native compute dispatch in the next LICHII_NX2_UPSCALER_TRACE_FRAMES frames (default 3), at
 // most 4000 lines. It prints guest addresses and hashes of constant data, never the data.
 struct UpscalerTrace {
     bool enabled{};
@@ -86,11 +86,11 @@ UpscalerTrace& GetUpscalerTrace() {
             const char* const value{std::getenv(name)};
             return value ? u64{std::strtoull(value, nullptr, 10)} : fallback;
         }};
-        const char* const enabled{std::getenv("EDEN_NX2_UPSCALER_TRACE")};
+        const char* const enabled{std::getenv("LICHII_NX2_UPSCALER_TRACE")};
         return UpscalerTrace{
             .enabled = enabled != nullptr && *enabled != '\0' && *enabled != '0',
-            .first_frame = number("EDEN_NX2_UPSCALER_TRACE_FRAME", 600),
-            .frames = number("EDEN_NX2_UPSCALER_TRACE_FRAMES", 3),
+            .first_frame = number("LICHII_NX2_UPSCALER_TRACE_FRAME", 600),
+            .frames = number("LICHII_NX2_UPSCALER_TRACE_FRAMES", 3),
         };
     }()};
     return trace;

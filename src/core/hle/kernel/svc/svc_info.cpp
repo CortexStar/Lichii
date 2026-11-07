@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
@@ -347,8 +347,8 @@ Result GetSystemInfo(Core::System& system, uint64_t* out, SystemInfoType info_ty
 Result GetInfo64(Core::System& system, uint64_t* out, InfoType info_type, Handle handle,
                  uint64_t info_subtype) {
     const Result result = GetInfo(system, out, info_type, handle, info_subtype);
-    // EDEN_NX2_MEM_TRACE: log the memory layout and size queries of a title (diagnostics).
-    static const bool trace = std::getenv("EDEN_NX2_MEM_TRACE") != nullptr;
+    // LICHII_NX2_MEM_TRACE: log the memory layout and size queries of a title (diagnostics).
+    static const bool trace = std::getenv("LICHII_NX2_MEM_TRACE") != nullptr;
     const u32 type = static_cast<u32>(info_type);
     if (static u32 logs{}; trace && logs < 200 && (type <= 7 || (type >= 12 && type <= 33))) {
         ++logs;

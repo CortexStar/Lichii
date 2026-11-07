@@ -54,7 +54,7 @@ ShuffleModule EmitShuffles(Stage stage, u32 subgroup_size, bool fragment_fallbac
     profile.has_broken_spirv_fragment_shuffle = fragment_fallback;
     profile.has_broken_spirv_subgroup_shuffle = general_fallback;
     auto code = Backend::SPIRV::EmitSPIRV(profile, program);
-    if (const char* directory = std::getenv("EDEN_SHUFFLE_TEST_OUTPUT")) {
+    if (const char* directory = std::getenv("LICHII_SHUFFLE_TEST_OUTPUT")) {
         std::filesystem::create_directories(directory);
         const auto name = std::to_string(static_cast<u32>(stage)) + "-" +
                           std::to_string(subgroup_size) + "-" +

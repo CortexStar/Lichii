@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <cstdlib>
@@ -26,7 +26,7 @@ void TranslatorVisitor::TENSOR_MUL_ADD(u64 insn) {
     const u64 ci = static_cast<u64>(cr);
     const u64 di = static_cast<u64>(dr);
     const bool has_c = ci != 255;
-    static const bool disabled{std::getenv("EDEN_NX2_NO_TENSOR") != nullptr};
+    static const bool disabled{std::getenv("LICHII_NX2_NO_TENSOR") != nullptr};
     if (disabled || ((insn >> 48) & 1) == 0) {
         throw NotImplementedException("Unsupported matrix multiply encoding");
     }

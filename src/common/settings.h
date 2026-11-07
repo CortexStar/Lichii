@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
@@ -989,10 +989,10 @@ struct Values {
     // WebService
     Setting<std::string> web_api_url{linkage, "api.ynet-fun.xyz", "web_api_url",
                                      Category::WebService};
-    Setting<std::string> lichii_username{linkage, "Lichii", "eden_username",
+    Setting<std::string> lichii_username{linkage, "Lichii", "lichii_username",
                                        Category::WebService};
     Setting<std::string> lichii_token{linkage, "",
-                                    "eden_token", Category::WebService};
+                                    "lichii_token", Category::WebService};
 
     // Add-Ons
     std::map<u64, std::vector<std::string>> disabled_addons;

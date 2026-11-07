@@ -89,5 +89,5 @@ is separable, but requires parser tests and evidence that parsing is costly.
 
 Retain both GPU thread and GPU back thread reports. Compare `split drain` with
 `split wait`, then the descriptor/binding zones above, before choosing any port.
-Use the same scene with `EDEN_DKB_FRAME_TRACE=1` and `EDEN_NX2_GPU_PROFILE=1`.
-Keep indirect readback off: unset `EDEN_DKB_INDIRECT_READBACK` or set it to `0`.
+Use the same scene with `LICHII_DKB_FRAME_TRACE=1` and `LICHII_NX2_GPU_PROFILE=1`.
+Keep indirect readback off: unset `LICHII_DKB_INDIRECT_READBACK` or set it to `0`.

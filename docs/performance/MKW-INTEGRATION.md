@@ -66,7 +66,7 @@ collision, audio, hitches, and stopping/closing. Asynchronous shaders can delay
 the appearance of new objects while their pipelines compile. A lower CPU counter
 alone does not establish an FPS gain. No locked-60-FPS result is claimed.
 
-`EDEN_NX2_FLUSH_DRAWS=4096` restores the previous native submission threshold for
-a controlled comparison. `EDEN_NX2_UBOREUSE=0` disables uniform allocation reuse.
+`LICHII_NX2_FLUSH_DRAWS=4096` restores the previous native submission threshold for
+a controlled comparison. `LICHII_NX2_UBOREUSE=0` disables uniform allocation reuse.
 
 Assisted by Codex.

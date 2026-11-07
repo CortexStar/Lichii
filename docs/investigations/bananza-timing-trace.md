@@ -1,6 +1,6 @@
 # Bananza timing trace reference
 
-`EDEN_DKB_FRAME_TRACE=1` enables the `DKB frame`, `DKB renderer`, `DKB cpu`, `DKB host_pace`, and
+`LICHII_DKB_FRAME_TRACE=1` enables the `DKB frame`, `DKB renderer`, `DKB cpu`, `DKB host_pace`, and
 `DKB gpu_frame` records. The value must be exactly `1`. The process caches it on first
 use. Unset, empty, `0`, and other values disable these diagnostics. The flag does not
 select a title, change a swap interval, bypass a wait, or enable a rendering workaround.
@@ -22,7 +22,7 @@ limiting is disabled.
 | `word12` | Raw present command word 12. |
 | `requested_interval`, `requested_hz` | Raw high and low 16-bit halves of word 12. |
 | `effective_interval`, `effective_hz` | Values selected by the existing pacing calculation. The interval is clamped to 1 through 4 unless overridden. Refresh rates outside 30 through 240 become 60 Hz. These values do not imply that pacing is enabled. |
-| `forced_interval` | Parsed `EDEN_NX2_SWAP_INTERVAL`, with zero meaning no override. |
+| `forced_interval` | Parsed `LICHII_NX2_SWAP_INTERVAL`, with zero meaning no override. |
 | `speed_limit`, `speed_percent` | Current speed-limit setting and percentage. Disabled speed limiting or zero percent skips guest vblank pacing. |
 | `switches` | Number of raw word-12 changes since the preceding trace record. The first request is not a switch. |
 | `last_switch` | Most recently observed old and new raw timing words. Zero to zero means none has been observed. This is not a lossless event stream. |
@@ -128,7 +128,7 @@ than the nanosecond representation, especially on Windows. Do not interpret smal
 window-to-window changes as exact scheduling boundaries or assume that a busy thread
 is necessarily on the frame's critical path.
 
-With both `EDEN_DKB_FRAME_TRACE=1` and `EDEN_NX2_GPU_PROFILE=1`, the existing GPU-thread
+With both `LICHII_DKB_FRAME_TRACE=1` and `LICHII_NX2_GPU_PROFILE=1`, the existing GPU-thread
 profiler supplies its exclusive wall-time subzones, including draw, pipeline lookup,
 buffer work, texture work, and waits. Those zones remain behind their existing flag
 and are not CPU-busy measurements. Its existing roughly ten-second report now also
@@ -187,12 +187,12 @@ frame, unavailable results, or an unsupported device can leave no completed samp
 
 ## Existing controls
 
-- `EDEN_NX2_SWAP_INTERVAL=<n>` forces a nonzero guest interval. It is not a trace switch
+- `LICHII_NX2_SWAP_INTERVAL=<n>` forces a nonzero guest interval. It is not a trace switch
   and can change emulation speed. Zero leaves the guest interval selection in effect.
-- `EDEN_NX2_FRAMES_AHEAD` defaults to enabled. A value starting with `0` restores waiting
+- `LICHII_NX2_FRAMES_AHEAD` defaults to enabled. A value starting with `0` restores waiting
   for the current frame. The default waits for the previous frame and also waits for
   the current one when the previous fence is behind. Trace logging does not change it.
-- `EDEN_NX2_GPU_PROFILE`, enabled by presence even with value `0`, reports host GPU-thread
+- `LICHII_NX2_GPU_PROFILE`, enabled by presence even with value `0`, reports host GPU-thread
   zones and scheduler counters every 10 seconds. Its zone milliseconds remain CPU-thread
   wall durations, not hardware GPU timestamps. The separate `host_cpu_busy_ms_per_s`
   field uses OS CPU accounting.

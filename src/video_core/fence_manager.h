@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
@@ -240,9 +240,9 @@ private:
         // signal thousands a second and the host GPU completes them in bursts, so each cache's
         // lock is taken once per burst instead of once per fence (the GPU thread, which holds
         // them for nearly every command, spun, slept and woke this thread for each one).
-        // EDEN_NX2_FENCE_BATCH=0: one fence at a time (for comparisons).
+        // LICHII_NX2_FENCE_BATCH=0: one fence at a time (for comparisons).
         static const size_t MaxBatch = [] {
-            const char* value = std::getenv("EDEN_NX2_FENCE_BATCH");
+            const char* value = std::getenv("LICHII_NX2_FENCE_BATCH");
             return value != nullptr && value[0] == '0' ? size_t{1} : size_t{64};
         }();
         struct Released {

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
@@ -224,7 +224,7 @@ Result SM::GetServiceImpl(Kernel::KClientSession** out_client_session, HLEReques
     }
 
     if (port_result != ResultSuccess) {
-        // Switch 2 programs also ask for services Eden does not have at all (newer Mario Kart
+        // Switch 2 programs also ask for services the emulator does not have at all (newer Mario Kart
         // World updates open chat:u, GameChat, while booting). Nothing ever registers those, so
         // waiting would hang them for good: hand out a placeholder whose commands are all
         // auto-stubbed, like their unknown commands on existing services.

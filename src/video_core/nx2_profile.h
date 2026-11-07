@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
@@ -21,7 +21,7 @@
 #include "common/cpu_features.h"
 #include "common/thread_cpu_clock.h"
 
-// EDEN_NX2_GPU_PROFILE: time where the GPU thread spends its time. Each zone counts its own
+// LICHII_NX2_GPU_PROFILE: time where the GPU thread spends its time. Each zone counts its own
 // (exclusive) time, nested zones excluded; every 10 s the thread logs each zone's share.
 namespace VideoCommon::Nx2Profile {
 
@@ -77,7 +77,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
 };
 
 // Read once at startup: Enabled() runs several times per method write (no guard to check).
-inline const bool g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
+inline const bool g_enabled = std::getenv("LICHII_NX2_GPU_PROFILE") != nullptr;
 
 inline bool Enabled() {
     return g_enabled;

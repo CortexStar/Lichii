@@ -70,11 +70,11 @@ fingerprints or slot-search heuristics are added.
 
 ## Owner-side comparison
 
-Start a fresh process with `EDEN_NX2_DLSS_CONTRACT_TRACE=1` and log filter
+Start a fresh process with `LICHII_NX2_DLSS_CONTRACT_TRACE=1` and log filter
 `*:Info HW.GPU:Debug Shader:Debug Render.Vulkan:Debug`.
-Leave `EDEN_NX2_DLSS_REPLACEMENT` unset for the spatial candidate. Star Fox always
+Leave `LICHII_NX2_DLSS_REPLACEMENT` unset for the spatial candidate. Star Fox always
 uses the spatial path, even if `fsr` or `dlss` is requested; its temporal resource
-contract has not been validated. Set `EDEN_NX2_DLSS_REPLACEMENT=native` in a second
+contract has not been validated. Set `LICHII_NX2_DLSS_REPLACEMENT=native` in a second
 fresh process to retain the original output for comparison.
 
 `Star Fox DLSS replacement: applied temporal=false` confirms application and logs

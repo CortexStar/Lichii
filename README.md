@@ -1,5 +1,5 @@
 <!--
-# SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
+# SPDX-FileCopyrightText: Copyright 2025 Lichii Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # SPDX-FileCopyrightText: 2018 yuzu Emulator Project
@@ -26,7 +26,7 @@ On Windows, extract the entire build archive and run **lichii.exe**. Only use ga
 
 ### Existing saves and settings
 
-The rebrand intentionally retains the existing Eden/Eglantine data directories and configuration keys. It does not move or delete saves, settings or shader caches. Back up your saves before testing experimental builds.
+This release moves your data out of the old `eden` directory into a `lichii` one. On first launch you are asked to migrate the old data (copy, move or link it); nothing is moved or deleted without your say-so, and your saves, settings and shader caches survive either choice. Back up your saves before testing experimental builds.
 
 ## Compatibility and issue reports
 

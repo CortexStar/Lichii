@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
@@ -3207,7 +3207,7 @@ public:
     void CallConstBufferWords(Core::System& system, const u32* methods, const u32* arguments,
                               u32 count);
 
-    /// GPU thread split with macros on its front half (gpu_split.h, EDEN_NX2_SPLIT=2), called by
+    /// GPU thread split with macros on its front half (gpu_split.h, LICHII_NX2_SPLIT=2), called by
     /// the front instead of CallMethod: runs macros and macro uploads against a copy of the
     /// registers and sends the register writes to the back thread.
     void FrontCallMethod(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
@@ -3292,7 +3292,7 @@ private:
     /// CallMethod with every check, for the cases and tools CallMethodFast leaves out.
     void CallMethodSlow(Core::System& system, u32 method, u32 method_argument, bool is_last_call);
     void CallMethodFast(u32 method, u32 method_argument, bool is_last_call);
-    /// EDEN_NX2_PERF_VERIFY: CallMethodFast's register state against CallMethodSlow's.
+    /// LICHII_NX2_PERF_VERIFY: CallMethodFast's register state against CallMethodSlow's.
     void VerifyCallMethod(Core::System& system, u32 method, u32 method_argument, bool is_last_call);
 
     /// Retrieves information about a specific TIC entry from the TIC buffer.
@@ -3312,7 +3312,7 @@ private:
     /// Whether state register writes that keep the register's value are dropped (CallMethod).
     static bool SkipSameValueWrites() {
         static const bool skip = [] {
-            const char* value = std::getenv("EDEN_NX2_SKIP_SAME");
+            const char* value = std::getenv("LICHII_NX2_SKIP_SAME");
             return value == nullptr || value[0] != '0';
         }();
         return skip;
@@ -3366,7 +3366,7 @@ private:
     size_t recent_write_index = 0;
     const bool record_write_history{
 #ifdef NDEBUG
-        std::getenv("EDEN_NX2_3D_HISTORY") != nullptr
+        std::getenv("LICHII_NX2_3D_HISTORY") != nullptr
 #else
         true
 #endif
@@ -3409,7 +3409,7 @@ private:
     void FinishFrontMacro(Core::System& system);
     std::unique_ptr<FrontState> front;
     bool front_macros{};
-    // EDEN_NX2_SPLIT_VERIFY: the last SET_SHADOW_RAM_CONTROL writes each side saw (argument,
+    // LICHII_NX2_SPLIT_VERIFY: the last SET_SHADOW_RAM_CONTROL writes each side saw (argument,
     // mode before, path), printed when the sides disagree.
     struct ControlWrite {
         u32 argument;

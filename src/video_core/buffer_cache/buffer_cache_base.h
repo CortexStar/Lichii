@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
@@ -663,10 +663,10 @@ private:
     /// dispatch, the fencing thread holding the buffer cache while it wrote them), while its CPU
     /// read GPU-written memory at most 64 times in 200 s (counted with reactive flushing) and
     /// the native MME's DMA reads never touched those pages. Without them a fence costs ~1 us
-    /// instead of ~5 and draw setup ~7% less. EDEN_NX2_BUFFER_DOWNLOADS=0/1 forces it.
+    /// instead of ~5 and draw setup ~7% less. LICHII_NX2_BUFFER_DOWNLOADS=0/1 forces it.
     bool AsyncBufferDownloads() const {
         static const int forced = [] {
-            const char* value = std::getenv("EDEN_NX2_BUFFER_DOWNLOADS");
+            const char* value = std::getenv("LICHII_NX2_BUFFER_DOWNLOADS");
             return value == nullptr ? -1 : (value[0] == '0' ? 0 : 1);
         }();
         if (forced >= 0) {
@@ -687,7 +687,7 @@ private:
     /// of a large buffer would otherwise copy the whole buffer back at every fence.
     void QueueFenceDownload(DAddr device_addr, u64 size) {
         static const bool exact = [] {
-            const char* value = std::getenv("EDEN_NX2_EXACT_PREFLUSH");
+            const char* value = std::getenv("LICHII_NX2_EXACT_PREFLUSH");
             return value == nullptr || value[0] != '0';
         }();
         if (AsyncBufferDownloads()) {
@@ -766,7 +766,7 @@ private:
     std::vector<MultiRangeSegment> graphics_segments;
     std::vector<MultiRangeSegment> compute_segments;
     u64 frame_tick = 0;
-    /// EDEN_NX2_TABLE_POINTER_TRACE: last table entry and size bound per table pointer slot.
+    /// LICHII_NX2_TABLE_POINTER_TRACE: last table entry and size bound per table pointer slot.
     std::unordered_map<u64, std::pair<GPUVAddr, u32>> traced_table_pointers;
     u64 total_used_memory = 0;
     u64 buffer_bytes = 0; ///< The buffers' own size (total_used_memory may be the device's)

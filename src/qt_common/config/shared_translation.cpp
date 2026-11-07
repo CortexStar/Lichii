@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2024 Torzu Emulator Project
@@ -166,7 +166,7 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "instead of AMD FSR 3.1.\nNeeds NVIDIA's Streamline loader, and NVIDIA DLSS unless "
               "the NVIDIA app has downloaded it; Lichii does not ship NVIDIA's files. Use the "
               "download button below.\nCurrently requires Fire Emblem: Fortune's Weave and "
-              "EDEN_NX2_DLSS_REPLACEMENT=dlss. Without that override, its spatial workaround "
+              "LICHII_NX2_DLSS_REPLACEMENT=dlss. Without that override, its spatial workaround "
               "remains active.\nTakes effect when a game starts."));
     INSERT(Settings, anti_aliasing, tr("Anti-Aliasing Method:"),
            tr("The anti-aliasing method to use.\nSMAA offers the best quality.\nFXAA "
@@ -298,7 +298,7 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "Wait stalls the GPU until the pipeline is ready (no missing effects, but long "
               "stalls on new content). Skip drops the draw, which can leave an effect missing for "
               "a few frames. Bounded waits up to the time below per frame, then skips. The "
-              "EDEN_NX2_ASYNC_DISCARD=1 environment variable still forces Skip."));
+              "LICHII_NX2_ASYNC_DISCARD=1 environment variable still forces Skip."));
     INSERT(Settings, native_pipeline_wait_ms, tr("Pipeline wait per frame (ms):"),
            tr("Used by the Bounded mode: the most time per frame that Switch 2 draws may wait in "
               "total for pipelines that are still building. Once spent, the remaining unbuilt "

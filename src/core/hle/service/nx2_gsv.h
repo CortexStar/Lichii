@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
@@ -170,7 +170,7 @@ private:
 //   NVN's NvOsEventPool asks for slots and multi-waits on them.
 // - TIPC 201(slot, counter, u64 value, mode): signal the slot's event once the counter reaches
 //   value. The counter is a SyncCounterId, the bitwise NOT of the host1x syncpoint id; mode 0
-//   compares 32-bit wrapping, mode 1 64-bit. Eden's guest syncpoints back it.
+//   compares 32-bit wrapping, mode 1 64-bit. the emulator's guest syncpoints back it.
 // - TIPC 202(slot): cancel the slot's request.
 class INx2SyncptSession final : public ServiceFramework<INx2SyncptSession> {
 public:
@@ -302,7 +302,7 @@ private:
         // nn::syncpt::sdk's cancel always waits on the slot's event after this reply, so a cancel
         // signals it like a completion, also when nothing was pending; the client rechecks the
         // counter (TIPC 103) itself. Title 1 hung forever there when the GPU thread ran a frame
-        // behind (EDEN_NX2_FRAMES_AHEAD) and a mid-frame wait outlasted NvOsEventPool's 100 ms,
+        // behind (LICHII_NX2_FRAMES_AHEAD) and a mid-frame wait outlasted NvOsEventPool's 100 ms,
         // and its movie player cancels each slot before its first request: signalled only for
         // pending requests, the player never got to start a movie.
         auto*& event = m_events[slot];
@@ -1069,19 +1069,19 @@ private:
         }
     }
 
-    // EDEN_NX2_SPARSE_LAZY=0 backs sparse regions whole, as before.
+    // LICHII_NX2_SPARSE_LAZY=0 backs sparse regions whole, as before.
     static bool LazySparseRegions() {
         static const bool lazy = [] {
-            const char* value = std::getenv("EDEN_NX2_SPARSE_LAZY");
+            const char* value = std::getenv("LICHII_NX2_SPARSE_LAZY");
             return value == nullptr || value[0] != '0';
         }();
         return lazy;
     }
 
-    // EDEN_NX2_GPU_ONLY_LAZY=0 backs GPU-only regions whole, as before.
+    // LICHII_NX2_GPU_ONLY_LAZY=0 backs GPU-only regions whole, as before.
     static bool LazyGpuOnlyRegions() {
         static const bool lazy = [] {
-            const char* value = std::getenv("EDEN_NX2_GPU_ONLY_LAZY");
+            const char* value = std::getenv("LICHII_NX2_GPU_ONLY_LAZY");
             return value == nullptr || value[0] != '0';
         }();
         return lazy;
@@ -1488,7 +1488,7 @@ private:
 };
 
 inline bool Nx2VideoTraceEnabled() {
-    static const bool enabled = std::getenv("EDEN_NX2_VDEC_TRACE") != nullptr;
+    static const bool enabled = std::getenv("LICHII_NX2_VDEC_TRACE") != nullptr;
     return enabled;
 }
 
@@ -1773,9 +1773,9 @@ private:
         // only after this present returns: while a channel stays suspended on one, wait for the
         // previous frame's fence instead and let the game prepare frame N+1 meanwhile (waiting
         // for this frame there cost 8-56 ms of every 34-105 ms frame, or never finished).
-        // EDEN_NX2_FRAMES_AHEAD=1 always waits for the previous frame, =0 always for this one.
+        // LICHII_NX2_FRAMES_AHEAD=1 always waits for the previous frame, =0 always for this one.
         static const int frames_ahead_setting = [] {
-            const char* value = std::getenv("EDEN_NX2_FRAMES_AHEAD");
+            const char* value = std::getenv("LICHII_NX2_FRAMES_AHEAD");
             return value == nullptr ? -1 : value[0] == '1' ? 1 : 0;
         }();
         // Donkey Kong Bananza's channels wait on each other every frame, so it always ran a frame
@@ -1796,10 +1796,10 @@ private:
             LOG_DEBUG(Service, "nx2:vi2 present #{} fence ({}, {:#x}), waiting for ({}, {:#x}); now {:#x}",
                       m_presents, ~w[22], w[24], m_previous_fence_id, m_previous_fence_value,
                       ~w[22] < 192 ? system.Host1x().GetSyncpointManager().GetGuestSyncpointValue(~w[22]) : 0U);
-            // With EDEN_NX2_FRAMES_AHEAD=1, only run a frame ahead while the GPU keeps up. With
+            // With LICHII_NX2_FRAMES_AHEAD=1, only run a frame ahead while the GPU keeps up. With
             // the previous frame still on the GPU here, the GPU is the limit and running ahead
             // gains nothing; and Splatoon Raiders, which reuses its command memory as if the GPU
-            // were at most a frame behind, rewrote command lists Eden had not read yet (misread
+            // were at most a frame behind, rewrote command lists the emulator had not read yet (misread
             // commands, then crashes, with a slow GPU). Wait for this frame too then. Not when a
             // suspended channel brought us here: this frame can't finish before the present
             // returns.
@@ -1848,7 +1848,7 @@ private:
             m_frame_trace.last_present = entered;
         }
         // Where each frame's time goes on the present thread, averaged per 600 presents: the
-        // game is blocked here while Eden's GPU thread catches up (fence) and composites.
+        // game is blocked here while the GPU thread catches up (fence) and composites.
         {
             using us = std::chrono::microseconds;
             // long long like the stats: microseconds::rep is long on Linux (std::max needs one type).
@@ -1890,7 +1890,7 @@ private:
     // The console's compositor frees a buffer only once its frame's GPU fence has passed, which
     // is what keeps a game from running ahead of the GPU. This reply always reports every buffer
     // free, so pace the game here instead: wait (bounded, in case the GPU waits on the CPU) until
-    // Eden's GPU thread has processed the frame. Otherwise the game laps the GPU thread and
+    // The GPU thread has processed the frame. Otherwise the game laps the GPU thread and
     // rewrites command memory it hasn't read yet.
     u32 m_wait_timeouts{};
     struct PresentStats {
@@ -1920,11 +1920,11 @@ private:
 
     /**
      * Holds this present until the next vblank its word asks for, or for longer when an FPS limit
-     * (the setting, or EDEN_NX2_FPS_LIMIT) is below that rate.
+     * (the setting, or LICHII_NX2_FPS_LIMIT) is below that rate.
      *
      * Fire Emblem: Fortune's Weave sends 0x1003c during its boot logos and 0x2003c (two vblanks
      * per frame, 30 fps) after; paced at every vblank it ran at double speed.
-     * EDEN_NX2_SWAP_INTERVAL=<n> forces the interval.
+     * LICHII_NX2_SWAP_INTERVAL=<n> forces the interval.
      *
      * @param timing  Present word 12: (swap interval << 16) | refresh rate.
      * @param process Owning process, for the Mario Kart World dynamic FPS case; may be null.
@@ -1944,7 +1944,7 @@ private:
             m_frame_trace.deadline_reset = false;
         }
         static const u32 forced_interval = [] {
-            const char* value = std::getenv("EDEN_NX2_SWAP_INTERVAL");
+            const char* value = std::getenv("LICHII_NX2_SWAP_INTERVAL");
             return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
         }();
         const bool mkw_dynamic =
@@ -1964,7 +1964,7 @@ private:
             m_frame_trace.forced = forced_interval;
         }
         static const u32 forced_fps_limit = [] {
-            const char* value = std::getenv("EDEN_NX2_FPS_LIMIT");
+            const char* value = std::getenv("LICHII_NX2_FPS_LIMIT");
             return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
         }();
         const u32 fps_limit =
@@ -2157,11 +2157,11 @@ private:
             crop_height = 1440;
         }
         static const u32 env_crop_w = [] {
-            const char* v = std::getenv("EDEN_NX2_CROP_WIDTH");
+            const char* v = std::getenv("LICHII_NX2_CROP_WIDTH");
             return v ? static_cast<u32>(std::strtoul(v, nullptr, 10)) : 0U;
         }();
         static const u32 env_crop_h = [] {
-            const char* v = std::getenv("EDEN_NX2_CROP_HEIGHT");
+            const char* v = std::getenv("LICHII_NX2_CROP_HEIGHT");
             return v ? static_cast<u32>(std::strtoul(v, nullptr, 10)) : 0U;
         }();
         if (env_crop_w != 0 && env_crop_h != 0) {
@@ -2203,12 +2203,12 @@ private:
         system.GetPerfStats().BeginSystemFrame();
     }
 
-    // EDEN_NX2_FRAME_CAPTURE=<dir>: every 120th present, save what the renderer shows as
+    // LICHII_NX2_FRAME_CAPTURE=<dir>: every 120th present, save what the renderer shows as
     // nx2-frame-<n>.tga in <dir> (lets hidden test runs check the output; idea from changes.patch).
     void CaptureFrame() {
-        static const char* const directory = std::getenv("EDEN_NX2_FRAME_CAPTURE");
+        static const char* const directory = std::getenv("LICHII_NX2_FRAME_CAPTURE");
         static const u64 every = [] {
-            const char* value = std::getenv("EDEN_NX2_FRAME_CAPTURE_EVERY");
+            const char* value = std::getenv("LICHII_NX2_FRAME_CAPTURE_EVERY");
             return value != nullptr ? (std::max)(u64{1}, static_cast<u64>(std::strtoull(value, nullptr, 10))) : u64{120};
         }();
         if (directory == nullptr || (m_presents % every) != 1 % every || m_capture_pending->exchange(true)) {
@@ -2241,19 +2241,19 @@ private:
             layout);
     }
 
-    // EDEN_NX2_DUMP=<present>:<hex address>:<hex size>[,<hex address>:<hex size>...]: at that
+    // LICHII_NX2_DUMP=<present>:<hex address>:<hex size>[,<hex address>:<hex size>...]: at that
     // present, flush those GPU ranges back from the host GPU and save their bytes as
-    // nx2-dump-<address>.bin in the EDEN_NX2_FRAME_CAPTURE directory (to inspect what a pass
+    // nx2-dump-<address>.bin in the LICHII_NX2_FRAME_CAPTURE directory (to inspect what a pass
     // rendered, e.g. a 3D volume, offline).
     void DumpRanges() {
         static const std::string spec = [] {
-            const char* text = std::getenv("EDEN_NX2_DUMP");
+            const char* text = std::getenv("LICHII_NX2_DUMP");
             return text ? std::string{text} : std::string{};
         }();
         if (spec.empty() || m_presents != std::strtoull(spec.c_str(), nullptr, 10)) {
             return;
         }
-        const char* const directory = std::getenv("EDEN_NX2_FRAME_CAPTURE");
+        const char* const directory = std::getenv("LICHII_NX2_FRAME_CAPTURE");
         size_t position = spec.find(':');
         while (position != std::string::npos) {
             char* end{};
@@ -2330,7 +2330,7 @@ private:
     // The highest buffer resolution mode of the "default" display. Fire Emblem: Fortune's Weave picks
     // its output from it: 1 -> 1280x720, 2 -> 1920x1080, 4 and 8 -> 2560x1440; 0 (the auto stub's
     // reply), 3 and 5 fall back to 720p. Docked reports 4, handheld 2 (the screen is 1080p);
-    // EDEN_VI2_MAX_RESOLUTION_MODE=<n> overrides.
+    // LICHII_VI2_MAX_RESOLUTION_MODE=<n> overrides.
     void GetBufferMaxResolution(HLERequestContext& ctx) {
         const auto* packet = ctx.CommandBuffer();
         const u64 name = u64{packet[2]} | (u64{packet[3]} << 32);
@@ -2340,7 +2340,7 @@ private:
         if (packet[0] == 0x7a && packet[1] == 2) {
             result = Result{ErrorModule::VI, 7};
             if (name == DefaultDisplay) {
-                static const char* forced = std::getenv("EDEN_VI2_MAX_RESOLUTION_MODE");
+                static const char* forced = std::getenv("LICHII_VI2_MAX_RESOLUTION_MODE");
                 mode = forced ? std::strtoull(forced, nullptr, 0) : Settings::IsDockedMode() ? 4 : 2;
                 result = ResultSuccess;
             }
@@ -2469,10 +2469,10 @@ private:
 
     void StartVsyncTimer() {
         if (!m_vsync_timer) {
-            // EDEN_NX2_VSYNC_HZ=<rate> (experiment): the game starts frames on this event, so a
+            // LICHII_NX2_VSYNC_HZ=<rate> (experiment): the game starts frames on this event, so a
             // frame that misses a 60 Hz tick idles until the next one.
             static const std::chrono::nanoseconds VblankInterval{[] {
-                const char* text = std::getenv("EDEN_NX2_VSYNC_HZ");
+                const char* text = std::getenv("LICHII_NX2_VSYNC_HZ");
                 const long long hz = text ? (std::max)(std::strtoll(text, nullptr, 10), 1LL) : 60LL;
                 return 1'000'000'000LL / hz;
             }()};
@@ -2657,7 +2657,7 @@ private:
             LOG_INFO(Service, "{} TIPC {} {} (first use): words {:08x}", GetServiceName(),
                      ctx.GetCommand(), what, fmt::join(std::span<const u32>{w, 12}, " "));
         } else if (Nx2VideoTraceEnabled()) {
-            // EDEN_NX2_VDEC_TRACE=1: every video decoder call at Info level.
+            // LICHII_NX2_VDEC_TRACE=1: every video decoder call at Info level.
             LOG_INFO(Service, "{} TIPC {} {}: [2]={:#x} [3]={:#x} [4]={:#x} [5]={:#x}",
                      GetServiceName(), ctx.GetCommand(), what, w[2], w[3], w[4], w[5]);
         } else {
@@ -2785,7 +2785,7 @@ private:
             // Mario Kart World waits for returned images after a movie and acquires a frame for
             // each completed fence, so its released images need synthetic end-of-stream frames.
             static const bool release_now = [] {
-                const char* env_value = std::getenv("EDEN_NX2_VDEC_EOS_RELEASE_NOW");
+                const char* env_value = std::getenv("LICHII_NX2_VDEC_EOS_RELEASE_NOW");
                 return env_value != nullptr && env_value[0] != '0';
             }();
             const bool drain_eos =
@@ -3191,7 +3191,7 @@ private:
         auto& memory = system.ApplicationMemory();
         if (block_linear) {
             // Read on the GPU: RGBA (the blit's format 0xd5) in the native block-linear layout,
-            // 16-GOB blocks, as our Eden tree writes these images.
+            // 16-GOB blocks, as our tree writes these images.
             decoder->Render(*frame.picture, Tegra::Host1x::Nx2PictureFormat::Rgba8, width, height,
                             layout.pitch, 0, bytes);
             DumpFrame(image_id, bytes, layout, width, height);
@@ -3222,11 +3222,11 @@ private:
         return {width, height};
     }
 
-    // EDEN_NX2_VDEC_DUMP=<dir>: save the luma of every 120th decoded frame, a quarter of its size,
+    // LICHII_NX2_VDEC_DUMP=<dir>: save the luma of every 120th decoded frame, a quarter of its size,
     // as nx2-vdec-image-<id>-<frame>.pgm (apart from how the game shows it).
     void DumpFrame(u32 image_id, const std::vector<u8>& bytes, const Nx2DecoderImageLayout& layout,
                    u32 width, u32 height) {
-        static const char* const directory = std::getenv("EDEN_NX2_VDEC_DUMP");
+        static const char* const directory = std::getenv("LICHII_NX2_VDEC_DUMP");
         if (directory == nullptr || (m_frames_out % 120) != 0) {
             return;
         }
@@ -3605,7 +3605,7 @@ private:
         rb.PushCopyObjects(ctx, m_syncpt_events[1]->GetReadableEvent());
     }
 
-    // Mirrors Eden's guest syncpoint values into the shared RO page. Returns true if any changed.
+    // Mirrors the guest syncpoint values into the shared RO page. Returns true if any changed.
     bool UpdateSyncptValues() {
         auto& manager = system.Host1x().GetSyncpointManager();
         bool changed = false;
@@ -3862,7 +3862,7 @@ private:
 
     // 428/426 for a decoder output image (Fire Emblem: Fortune's Weave's movie player blits each
     // one, block-linear RGBA, format 0xd5, block height 16 GOBs, into a texture of its own). The
-    // reply follows our Eden tree, where the movies play: words 3-4 the GPU address, 5-6 the last
+    // reply follows our tree, where the movies play: words 3-4 the GPU address, 5-6 the last
     // byte's address, then the descriptor {1, 0, dimensions, .., 0x01000001, 1, offset, size}
     // (offset 0 once mapped). 426 maps the image at its own address for the GPU: decoder pool
     // memory is process memory (114) that no GPU mapping covers, and the blit read zeros.
@@ -4070,7 +4070,7 @@ private:
     void OpenNvsrvSession(HLERequestContext& ctx) {
         // The SDK reads the handle at word 3 and the result at word 4.
         // nvsrv speaks the nvdrv INvDrvServices protocol (Open/Ioctl/Close/...,
-        // 13 = SetGraphicsFirmwareMemoryMarginEnabled), so serve it with Eden's nvdrv on the shared
+        // 13 = SetGraphicsFirmwareMemoryMarginEnabled), so serve it with the emulator's nvdrv on the shared
         // module. The nx2: name keeps unknown commands auto-stubbed and logged.
         LOG_WARNING(Service, "(STUBBED) nx2:gsv TIPC 1402, returning an nvdrv-backed nx2:nvsrv session");
         auto module = system.ServiceManager().GetService<Nvidia::NVDRV>("nvdrv", true)->GetModule();

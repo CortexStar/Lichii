@@ -24,24 +24,23 @@ Never assume the environment — detect it, then adapt:
 
 ## Naming
 
-Lichii is the product name. Anything user-facing or host-visible takes Lichii naming: UI strings, dialogs, window titles, log lines, cubeb/SDL application names, default profile/nickname/device values, docs, dist metadata. Executables are `lichii`, `lichii-cli` and `lichii-room`; the CMake targets behind them keep their historical `yuzu*` names.
+Lichii is the product name, everywhere. Anything user-facing or host-visible takes Lichii naming: UI strings, dialogs, window titles, log lines, cubeb/SDL application names, default profile/nickname/device values, config keys, environment switches, docs, dist metadata, SPDX headers (`Lichii Project`). Executables are `lichii`, `lichii-cli` and `lichii-room`; the CMake targets behind them keep their historical `yuzu*` names.
 
-Deliberate keeps — do not rename these, and do not "finish" them in passing:
+Pre-rename compatibility identifiers exist as migration data, not branding. They must stay exactly as they are:
 
-- On-disk `eden` data directories (`LICHII_DIR` keeps the value `"eden"`), `eden_log.txt` (the log filename, `src/common/fs/fs_paths.h` `LOG_FILE`), and the `eden_username`/`eden_token` config keys. Renaming strands every existing user's saves and tokens.
-- All `EDEN_*` environment switches. They are the debugging surface documented in `docs/nx2/debug-tools.md` and in the owner's launch scripts.
-- Eden web-service URLs and the strings that name them ("Eden Web Services", "valid Eden account").
-- SPDX headers (`Eden Emulator Project`), `eglantine.profdata` (release CI), and comments attributing upstream behaviour ("Eden's compiler…", "an Eglantine developer…").
-- The stored hotkey key `"Exit Eglantine"` (it displays as "Exit Lichii"; renaming the key orphans saved keybinds).
-- The Android app (`org.yuzu.yuzu_emu`) and factual upstream references (PR inventories, session notes).
+- `EDEN_DIR "eden"` and the Eden entry in the `EmuPath` legacy list (`src/common/fs/`): they name the on-disk directory pre-rename builds used, so the first-run migration prompt can bring users' saves into the `lichii` directory.
+- The `"Exit Eglantine"` group read in `QtConfig::ReadShortcutValues`: pulls keybinds saved under the pre-rename hotkey name forward.
+- The `eden_username`/`eden_token` fallback reads in `Config::ReadWebServiceValues`: same idea for stored web-service credentials.
+- The `"Eden Default UID"` byte string in `UUID::MakeDefault` (`src/common/uuid.h`): it seeds a guest-visible UUID; changing it would desync existing system saves.
+- Factual references that are functional or historical: upstream repo URLs (required by "Before writing a fix"), the Eden web-service endpoint and Discord client ID (live external services), the records under `docs/investigations/` and `docs/reference/`, and the Android package id `org.yuzu.yuzu_emu` (a yuzu-era name outside this rebrand's scope).
 
-When merging from `origin/nx2`: nx2 does not carry the rebrand, so keep it through conflicts — take upstream's functional changes, keep the Lichii strings, then sweep the merged files for reintroduced branding. SPDX headers and attribution comments are expected; new user-facing Eden/Eglantine strings are not.
+When merging from `origin/nx2`: nx2 does not carry the rebrand, so keep it through conflicts — take upstream's functional changes and apply Lichii naming to the merged code (rename `EDEN_*` switches to `LICHII_*`, `eden_*` config keys to `lichii_*`, user-facing strings), then sweep for reintroduced branding. The compatibility identifiers above and factual upstream references are the only acceptable "eden"/"Eglantine" strings.
 
 Icons are generated from `dist/lichii.svg` by `tools/update-icons.sh` (needs `magick` and `optipng`). Translation catalogs (`dist/languages/*.ts`) still carry pre-rename source strings; Transifex ownership for Lichii is undecided, so don't hand-edit the catalogs and don't `tx pull -t -f` — it would overwrite local changes with the shared Eden resource.
 
 ## Game bug reports
 
-Users report game bugs with Lichii logs (`eden_log.txt`, `eden_log.txt.old`). Each `Booting game: <program id>` line starts a session; the build is on the first line (`Lichii Version: ... | nx2-<sha>`). Known program ids:
+Users report game bugs with Lichii logs (`lichii_log.txt`, `lichii_log.txt.old`; pre-rename builds wrote `eden_log.txt`). Each `Booting game: <program id>` line starts a session; the build is on the first line (`Lichii Version: ... | nx2-<sha>`). Known program ids:
 
 | Program id | Game |
 |---|---|
@@ -108,7 +107,7 @@ is stated. Match validation depth to the change:
 
 ## Live debug server
 
-Every debug package on the PC launches with `EDEN_NX2_DEBUG_SERVER=127.0.0.1:6545` (in the env argument of `build-fix.sh`; `EDEN_NX2_DEBUG_DIR=<dir>` moves its dumps). Ask the running game from bash on the PC with native Windows Python; MSYS `python` rejects `C:/` paths.
+Every debug package on the PC launches with `LICHII_NX2_DEBUG_SERVER=127.0.0.1:6545` (in the env argument of `build-fix.sh`; `LICHII_NX2_DEBUG_DIR=<dir>` moves its dumps). Ask the running game from bash on the PC with native Windows Python; MSYS `python` rejects `C:/` paths.
 
 ```sh
 PY=/c/Users/Zortos/AppData/Local/Programs/Python/Python314/python.exe
@@ -116,7 +115,7 @@ $PY -I C:/lx/src/tools/nx2/debug_mcp.py --server 127.0.0.1:6545 --call '{"method
 $PY -I C:/lx/src/tools/nx2/debug_mcp.py --server 127.0.0.1:6545 --call '{"method":"screenshot"}' --out C:/Users/Zortos/.capy/work/lichii-debug/shot.png
 ```
 
-Methods: `status`, `frame_times` (`seconds`, `refresh_hz`), `screenshot`, `log_tail` (`after`, `contains`), `log_filter`, `capture_frame` (the frame dump below, taken now; `sampled`, `index`), `capture_image`, `reject_shaders` (`EDEN_NX2_REJECT_HASH` at runtime; `"reject": false` restores). Without `--call` the script is a stdio MCP server. See `docs/nx2/debug-mcp.md`.
+Methods: `status`, `frame_times` (`seconds`, `refresh_hz`), `screenshot`, `log_tail` (`after`, `contains`), `log_filter`, `capture_frame` (the frame dump below, taken now; `sampled`, `index`), `capture_image`, `reject_shaders` (`LICHII_NX2_REJECT_HASH` at runtime; `"reject": false` restores). Without `--call` the script is a stdio MCP server. See `docs/nx2/debug-mcp.md`.
 
 - Try a live experiment (screenshot, `reject_shaders` A/B, `capture_frame`, `log_tail`) before asking the owner for a new build or shortcut.
 - Use full 16-hex-digit hashes; shorter ones are refused.
@@ -139,7 +138,7 @@ Use both for graphics investigations. The live server provides emulator state, n
 
 ## Debugging tools
 
-Use these before guessing. The full switch table (frame dumps, shader dumps, `EDEN_NX2_REJECT_HASH`
+Use these before guessing. The full switch table (frame dumps, shader dumps, `LICHII_NX2_REJECT_HASH`
 bisecting, traces, minidumps) lives in `docs/nx2/debug-tools.md` — read it, pick the row that
 matches the symptom. The rules that always apply:
 
@@ -211,4 +210,4 @@ Maintenance rules:
 ## Toggles and merging
 
 - Experiment switches (env flags that pick between candidate fixes) never merge to nx2. A proven fix ships as unconditional behaviour, and a disproven one is dropped.
-- Diagnostic tools (frame dump, `EDEN_NX2_REJECT_HASH`, traces, the debug server) stay in nx2, off unless their variable is set.
+- Diagnostic tools (frame dump, `LICHII_NX2_REJECT_HASH`, traces, the debug server) stay in nx2, off unless their variable is set.

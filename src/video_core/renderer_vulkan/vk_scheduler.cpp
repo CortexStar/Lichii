@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
@@ -186,7 +186,7 @@ bool Scheduler::DeferFlush() {
     // Command list copies after dispatches were ~9,000 more a second, of which the front waited
     // for about 5%.
     static const s64 interval_us = [] {
-        const char* value = std::getenv("EDEN_NX2_FENCE_FLUSH_US");
+        const char* value = std::getenv("LICHII_NX2_FENCE_FLUSH_US");
         if (value != nullptr) {
             return static_cast<s64>(std::atoll(value));
         }

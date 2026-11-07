@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 SPDX-License-Identifier: GPL-3.0-or-later
 SPDX-FileCopyrightText: 2015 Pierre de La Morinerie <kemenaran@gmail.com>
 SPDX-License-Identifier: GPL-2.0-or-later
@@ -76,7 +76,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         <string>LaunchGameIntent</string>
     </array>
     <key>NSHumanReadableCopyright</key>
-    <string>Copyright 2025 Eden Emulator Project GPL-3.0-or-later</string>
+    <string>Copyright 2025 Lichii Project GPL-3.0-or-later</string>
 
     <!-- UI -->
     <key>UIDesignRequiresCompatibility</key>

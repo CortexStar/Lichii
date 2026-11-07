@@ -10,22 +10,22 @@ In PowerShell, before launching the debug build:
 
 ```powershell
 New-Item -ItemType Directory -Force C:\video-debug\decoded, C:\video-debug\presented
-$env:EDEN_NX2_VDEC_TRACE = "1"
-$env:EDEN_NX2_VDEC_DUMP = "C:\video-debug\decoded"
-$env:EDEN_NX2_FRAME_CAPTURE = "C:\video-debug\presented"
-$env:EDEN_NX2_FRAME_CAPTURE_EVERY = "30"
-Remove-Item Env:EDEN_NX2_VDEC_EOS_RELEASE_NOW -ErrorAction SilentlyContinue
+$env:LICHII_NX2_VDEC_TRACE = "1"
+$env:LICHII_NX2_VDEC_DUMP = "C:\video-debug\decoded"
+$env:LICHII_NX2_FRAME_CAPTURE = "C:\video-debug\presented"
+$env:LICHII_NX2_FRAME_CAPTURE_EVERY = "30"
+Remove-Item Env:LICHII_NX2_VDEC_EOS_RELEASE_NOW -ErrorAction SilentlyContinue
 ```
 
 On Linux:
 
 ```sh
 mkdir -p "$HOME/video-debug/decoded" "$HOME/video-debug/presented"
-export EDEN_NX2_VDEC_TRACE=1
-export EDEN_NX2_VDEC_DUMP="$HOME/video-debug/decoded"
-export EDEN_NX2_FRAME_CAPTURE="$HOME/video-debug/presented"
-export EDEN_NX2_FRAME_CAPTURE_EVERY=30
-unset EDEN_NX2_VDEC_EOS_RELEASE_NOW
+export LICHII_NX2_VDEC_TRACE=1
+export LICHII_NX2_VDEC_DUMP="$HOME/video-debug/decoded"
+export LICHII_NX2_FRAME_CAPTURE="$HOME/video-debug/presented"
+export LICHII_NX2_FRAME_CAPTURE_EVERY=30
+unset LICHII_NX2_VDEC_EOS_RELEASE_NOW
 ```
 
 1. Launch the emulator from that shell and reproduce the movie without skipping it.
@@ -55,7 +55,7 @@ narrows the failure to the path after decoding, but does not identify the failin
 
 ## Compare synchronization and decoder modes
 
-Only after saving the baseline, repeat with `EDEN_NX2_SYNC_SUBMIT=1`.
+Only after saving the baseline, repeat with `LICHII_NX2_SYNC_SUBMIT=1`.
 This enables #123's bounded wait after GPU submissions. It is off by default
 because the fork already snapshots command buffers. It can reduce performance
 or log a two-second timeout when the GPU needs more guest work.
@@ -65,6 +65,6 @@ Repeat with the emulator's video-decoder setting on CPU and then GPU.
 Keep the logs separate. AV1 requires an FFmpeg build with an AV1 decoder;
 the existing MSVC/Linux AV1 package selection does not establish MinGW support.
 
-Unset all trace/capture variables after testing. `EDEN_NX2_VDEC_TRACE` is enabled
+Unset all trace/capture variables after testing. `LICHII_NX2_VDEC_TRACE` is enabled
 by presence, so setting it to `0` does not disable it. Restart after changing
 environment variables because the emulator caches them.

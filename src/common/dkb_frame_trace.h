@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
@@ -13,7 +13,7 @@ namespace Common::DkbFrameTrace {
 
 inline bool Enabled() {
     static const bool enabled = [] {
-        const char* value = std::getenv("EDEN_DKB_FRAME_TRACE");
+        const char* value = std::getenv("LICHII_DKB_FRAME_TRACE");
         return value && std::strcmp(value, "1") == 0;
     }();
     return enabled;

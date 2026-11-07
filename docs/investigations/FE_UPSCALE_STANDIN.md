@@ -34,7 +34,7 @@ establishes a routing difference, not which network instruction or input is wron
 ## Same-scene verification
 
 The candidate enables this narrow workaround by default.
-`EDEN_NX2_DLSS_REPLACEMENT=native` restores the native path for a fresh process.
+`LICHII_NX2_DLSS_REPLACEMENT=native` restores the native path for a fresh process.
 Explicit `fsr` or `dlss` values select the validated temporal path described in
 [Game-DLSS replacement](native-dlss-replacement.md), rather than the spatial workaround.
 The setting is process-local and does not modify saved configuration.

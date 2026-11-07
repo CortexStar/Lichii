@@ -104,8 +104,8 @@ Bananza uses only as a quality tier.
 
 ## Next in-game capture
 
-Set `EDEN_NX2_SHADER_DUMP` to an existing writable directory and
-`EDEN_NX2_RENDER_TRACE=1`. Use log filter
+Set `LICHII_NX2_SHADER_DUMP` to an existing writable directory and
+`LICHII_NX2_RENDER_TRACE=1`. Use log filter
 `*:Info HW.GPU:Debug Render.Vulkan:Debug Shader:Debug`.
 
 Besides native shader binaries, the dump directory now receives
@@ -182,7 +182,7 @@ The `kirby-fix4` log does not establish the cause of the low frame rate. Its 636
 summary spans 10.070 seconds and counts GPU-thread translation, not driver-worker compilation.
 Between 118 and 125 seconds the individual logged builds total 2,121.1 ms. The last logged
 build is at 124.556 seconds; the log continues to 157.936 seconds. Profile another run with
-`EDEN_NX2_GPU_PROFILE=1 EDEN_DKB_FRAME_TRACE=1`; exclude the deliberate frame-dump stall from
+`LICHII_NX2_GPU_PROFILE=1 LICHII_DKB_FRAME_TRACE=1`; exclude the deliberate frame-dump stall from
 performance measurements.
 
 ### Sustained GPU stalls
@@ -194,7 +194,7 @@ but do not identify the shader responsible. The captured present image is a sky 
 so it cannot verify the remaining black characters or broken shadows.
 
 For another performance capture, keep the shader cache and enable
-`EDEN_NX2_GPU_PROFILE=1 EDEN_DKB_FRAME_TRACE=1`. Do not enable a frame dump in the measured
+`LICHII_NX2_GPU_PROFILE=1 LICHII_DKB_FRAME_TRACE=1`. Do not enable a frame dump in the measured
 interval. The profile adds `writer wait`, `list submit wait` and `list GPU wait` zones to
 separate front command-list readback waits from command parsing. Existing GPU timestamp
 samples also report up to four submissions taking at least 10 ms as `DKB gpu_submission`.
@@ -214,18 +214,18 @@ and their sum exceeds the submission time. Use it to rank work, not to measure t
 
 ## Frame dump
 
-The logs show every shader building, so the next step needs pixels. `EDEN_NX2_FRAME_DUMP` reads
+The logs show every shader building, so the next step needs pixels. `LICHII_NX2_FRAME_DUMP` reads
 back one whole frame inside the emulator. No capture tool is needed.
 
 | Variable | Value |
 |---|---|
-| `EDEN_NX2_FRAME_DUMP` | Directory for the dump. It is created if missing. When unset, the dump code stays inactive. |
-| `EDEN_NX2_FRAME_DUMP_AT` | Which frame to capture: seconds after boot (`45`), a frame number with an `f` suffix (`2700f`), or `file` to capture once `capture.now` exists in the dump directory (checked every 30 frames). Default `60`. |
+| `LICHII_NX2_FRAME_DUMP` | Directory for the dump. It is created if missing. When unset, the dump code stays inactive. |
+| `LICHII_NX2_FRAME_DUMP_AT` | Which frame to capture: seconds after boot (`45`), a frame number with an `f` suffix (`2700f`), or `file` to capture once `capture.now` exists in the dump directory (checked every 30 frames). Default `60`. |
 
 Example for the character select screen:
 
 ```
-EDEN_NX2_FRAME_DUMP=C:\lx\dump EDEN_NX2_FRAME_DUMP_AT=45
+LICHII_NX2_FRAME_DUMP=C:\lx\dump LICHII_NX2_FRAME_DUMP_AT=45
 ```
 
 Open character select, then wait past the trigger time. The log shows `Frame dump: capturing frame

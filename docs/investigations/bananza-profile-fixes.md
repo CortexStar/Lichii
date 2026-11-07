@@ -79,7 +79,7 @@ enabled. #157's unmap-unsafe pointer cache is not imported.
 
 The resolved tree built `yuzu-cmd` and `tests` with Clang 20, Ninja and all eight
 available cores. All 529 test cases passed with frame tracing disabled and with
-`EDEN_DKB_FRAME_TRACE=1`. The atomic, pacing, descriptor and command-fetch filter
+`LICHII_DKB_FRAME_TRACE=1`. The atomic, pacing, descriptor and command-fetch filter
 passed 22 cases and 135,908 assertions.
 Both Vulkan and OpenGL rasterizers also passed syntax checks with Debug validation
 enabled. All seven descriptor cases passed AddressSanitizer and
@@ -105,12 +105,12 @@ test program is recorded under `~/.capy/work/bananza-compute-tests`.
 ## Check the Windows result
 
 First compare the same lava-cave position and camera directions with
-`EDEN_DKB_FRAME_TRACE=1`, `*:Info`, and `EDEN_NX2_GPU_PROFILE` unset. Keep resolution,
-accuracy and speed settings unchanged. Leave `EDEN_DKB_INDIRECT_READBACK`,
-`EDEN_NX2_SWAP_INTERVAL` and `EDEN_NX2_VSYNC_HZ` unset. Setting the last variable to
+`LICHII_DKB_FRAME_TRACE=1`, `*:Info`, and `LICHII_NX2_GPU_PROFILE` unset. Keep resolution,
+accuracy and speed settings unchanged. Leave `LICHII_DKB_INDIRECT_READBACK`,
+`LICHII_NX2_SWAP_INTERVAL` and `LICHII_NX2_VSYNC_HZ` unset. Setting the last variable to
 zero does not disable its override. Record any other environment overrides.
 The incoming defaults use split mode 2 and batched fence release; leave
-`EDEN_NX2_SPLIT` and `EDEN_NX2_FENCE_BATCH` unset for that baseline. These changes
+`LICHII_NX2_SPLIT` and `LICHII_NX2_FENCE_BATCH` unset for that baseline. These changes
 are another reason not to treat the old profile as a post-merge measurement.
 
 Check whether all nine failing shaders, including the six reported examples,
@@ -119,7 +119,7 @@ changes. A `no routable storage buffer` error identifies a remaining pointer
 problem. Executing previously skipped work can increase the workload; assess
 rendering correctness separately from FPS. See [atomic evidence](bananza-atomic-fix.md).
 
-For a second run, enable `EDEN_NX2_GPU_PROFILE=1` and hold each camera direction
+For a second run, enable `LICHII_NX2_GPU_PROFILE=1` and hold each camera direction
 for at least 20 seconds. Save the complete startup log and mark visible speed
 swings. Compare zone time per call, host CPU time per frame and frame durations.
 The new `DKB vsync` records expose callback lateness/gaps and guest ticks, but

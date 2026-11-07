@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
@@ -43,8 +43,8 @@ KeplerCompute::KeplerCompute(MemoryManager& memory_manager_)
     : memory_manager{memory_manager_}
     , upload_state{memory_manager, regs.upload}
 {
-    // EDEN_NX2_QMD_TRACE: log the QMD scheduler's loads, dependency counts and launches.
-    if (std::getenv("EDEN_NX2_QMD_TRACE")) {
+    // LICHII_NX2_QMD_TRACE: log the QMD scheduler's loads, dependency counts and launches.
+    if (std::getenv("LICHII_NX2_QMD_TRACE")) {
         native_qmd.trace = [this](std::string_view event, u64 address, s32 value) {
             LOG_INFO(HW_GPU, "QMD trace {} {:#x} {} (engine {} as {})", event, address, value,
                      fmt::ptr(this), memory_manager.GetID());
@@ -68,7 +68,7 @@ KeplerCompute::KeplerCompute(MemoryManager& memory_manager_)
                              static_cast<u32>(KEPLER_COMPUTE_REG_INDEX(data_upload))}) {
         native_plain_methods[method] = false;
     }
-    if (std::getenv("EDEN_NATIVE_DRAW_DIAGNOSTICS") != nullptr) {
+    if (std::getenv("LICHII_NATIVE_DRAW_DIAGNOSTICS") != nullptr) {
         native_plain_methods[0x5a] = false;
         for (u32 method = 0xc6; method <= 0x108; ++method) {
             native_plain_methods[method] = false;
@@ -145,7 +145,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
         native_executing_macro_logged = native_executing_macro;
         native_executing_macro.reset();
         static const u32 watch = [] {
-            const char* value = std::getenv("EDEN_NX2_SEM_WATCH");
+            const char* value = std::getenv("LICHII_NX2_SEM_WATCH");
             return value ? static_cast<u32>(std::strtoull(value, nullptr, 16)) : 0U;
         }();
         const bool watched = watch != 0 && std::ranges::any_of(native_parameters,
@@ -154,9 +154,9 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             LOG_INFO(HW_GPU, "Semaphore watch: compute macro start={:#x} parameters={:08x}",
                      native_macro_positions[entry], fmt::join(native_parameters, ","));
         }
-        // EDEN_NX2_MME_DUMP: write the compute macro code once per engine, and log each macro
+        // LICHII_NX2_MME_DUMP: write the compute macro code once per engine, and log each macro
         // call with its entry and parameters (diagnostics).
-        if (static const bool mme_dump = std::getenv("EDEN_NX2_MME_DUMP") != nullptr; mme_dump) {
+        if (static const bool mme_dump = std::getenv("LICHII_NX2_MME_DUMP") != nullptr; mme_dump) {
             if (!native_mme_dumped && native_macro_positions[entry] == 0xda) {
                 native_mme_dumped = true;
                 std::ofstream dump(fmt::format("native-compute-mme-{}.bin", fmt::ptr(this)),
@@ -173,7 +173,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
         const u32 start = native_macro_positions[entry];
         const auto emit = [&](u32 address, u32 value) {
             static u32 diagnostic_writes{};
-            static const bool log_emits = std::getenv("EDEN_NX2_SEM_WATCH_EMITS") != nullptr;
+            static const bool log_emits = std::getenv("LICHII_NX2_SEM_WATCH_EMITS") != nullptr;
             if (watched && log_emits) LOG_INFO(HW_GPU, "Semaphore watch: compute macro emit {:#x} = {:#x}", address, value);
             if (diagnostic_writes++ < 4096) LOG_DEBUG(HW_GPU, "Native compute MME emit method={:#x}, value={:#x}", address, value);
             if (address >= 0xe00) return false;
@@ -182,9 +182,9 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             return true;
         };
 #ifdef ARCHITECTURE_x86_64
-        // Compiled macro code, as for 3D macros (macro_turing_jit.h); EDEN_NX2_MME_JIT=0 off.
+        // Compiled macro code, as for 3D macros (macro_turing_jit.h); LICHII_NX2_MME_JIT=0 off.
         static const bool use_jit = [] {
-            const char* value = std::getenv("EDEN_NX2_MME_JIT");
+            const char* value = std::getenv("LICHII_NX2_MME_JIT");
             return value == nullptr || value[0] != '0';
         }();
         if (use_jit && !watched) {
@@ -209,7 +209,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
 #endif
         // Repeated calls replay their writes, as for 3D macros (macro_memo.h).
         static const bool use_memo = [] {
-            const char* value = std::getenv("EDEN_NX2_MME_MEMO");
+            const char* value = std::getenv("LICHII_NX2_MME_MEMO");
             return value == nullptr || value[0] != '0';
         }();
         auto& memo = native_macro->native_memo;
@@ -248,7 +248,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             memo.Store(start, native_memo_parameters, interpreter.data_ram_reads,
                        interpreter.data_ram_writes, native_macro->native_writes);
         }
-        if (static const bool mme_dump = std::getenv("EDEN_NX2_MME_DUMP") != nullptr;
+        if (static const bool mme_dump = std::getenv("LICHII_NX2_MME_DUMP") != nullptr;
             mme_dump && (*native_macro->native_interpreter.active_dram)[0x27] != dram0_before) {
             LOG_INFO(HW_GPU, "MME data RAM[0x27] {:#x} -> {:#x} by engine {} macro start={:#x}",
                      dram0_before, (*native_macro->native_interpreter.active_dram)[0x27], fmt::ptr(this),
@@ -256,7 +256,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
         }
         if (!result.success) {
             native_macro->native_execution_failed = true;
-            if (static const bool diagnostics = std::getenv("EDEN_NATIVE_DRAW_DIAGNOSTICS") != nullptr;
+            if (static const bool diagnostics = std::getenv("LICHII_NATIVE_DRAW_DIAGNOSTICS") != nullptr;
                 diagnostics) {
                 std::ofstream dump("native-compute-mme.bin", std::ios::binary);
                 dump.write(reinterpret_cast<const char*>(native_macro->native_code.data()), sizeof(native_macro->native_code));
@@ -285,7 +285,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
         LOG_DEBUG(HW_GPU, "Native inline QMD: address={:#x}, program={:#x}, control={:#x}, grid={}/{}/{}",
             address, program, control, native_registers[0xc8 + 12],
             native_registers[0xc8 + 13] & 0xffff, native_registers[0xc8 + 14] & 0xffff);
-        if (static const bool diagnostics = std::getenv("EDEN_NATIVE_DRAW_DIAGNOSTICS") != nullptr;
+        if (static const bool diagnostics = std::getenv("LICHII_NATIVE_DRAW_DIAGNOSTICS") != nullptr;
             diagnostics) {
             std::ofstream dump("native-inline-qmd.bin", std::ios::binary);
             dump.write(reinterpret_cast<const char*>(native_registers.data() + 0xc8), 256);
@@ -330,7 +330,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             memory_manager.GpuToCpuAddress(qmd_address).value_or(0), method, argument, 0);
         if (method == 0xae || (method == 0xaf && !(argument & 2)) ||
             (method == 0xb0 && ((argument & 15) == 0 || (argument & 15) == 1))) return true;
-        static const bool qmd_diagnostics = std::getenv("EDEN_NATIVE_DRAW_DIAGNOSTICS") != nullptr;
+        static const bool qmd_diagnostics = std::getenv("LICHII_NATIVE_DRAW_DIAGNOSTICS") != nullptr;
         if ((argument & 15) == 12 && qmd_diagnostics) {
             static u32 captured{};
             if (captured++ == 0 && memory_manager.IsFullyMappedRange(qmd_address, 256)) {
@@ -375,7 +375,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                             Tegra::Nx2SemaphoreWaiters::Get().OnWrite(*device, value);
                         }
                         static const u64 watch = [] {
-                            const char* text = std::getenv("EDEN_NX2_SEM_WATCH");
+                            const char* text = std::getenv("LICHII_NX2_SEM_WATCH");
                             return text ? u64{std::strtoull(text, nullptr, 16)} : u64{};
                         }();
                         if (watch != 0 && (address & ~u64{0xf}) == watch) {
@@ -401,7 +401,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                     });
                 } else {
                     static const u64 watch = [] {
-                        const char* text = std::getenv("EDEN_NX2_SEM_WATCH");
+                        const char* text = std::getenv("LICHII_NX2_SEM_WATCH");
                         return text ? u64{std::strtoull(text, nullptr, 16)} : u64{};
                     }();
                     if (watch != 0 && (address & ~u64{0xf}) == (watch & ~u64{0xf})) {
@@ -665,7 +665,7 @@ bool KeplerCompute::ProcessGameDlss(u64 program_id, u64 native_key) {
 // only without resolution scaling; its matrix multiplies need shaders 32 threads wide.
 VideoCore::GameDlssReason KeplerCompute::GameDlssBlocker() const {
     using VideoCore::GameDlssReason;
-    static const char* const option = std::getenv("EDEN_NX2_DLSS_REPLACEMENT");
+    static const char* const option = std::getenv("LICHII_NX2_DLSS_REPLACEMENT");
     const bool forced_replacement = option && VideoCommon::FireEmblemUpscale::UseReplacement(
         VideoCommon::FireEmblemUpscale::ProgramId,
         VideoCommon::FireEmblemUpscale::OutputProgramKey, option);
@@ -817,7 +817,7 @@ bool KeplerCompute::FinishDlssEvaluation() {
         dlss_chain.pending.clear();
         using namespace VideoCommon::FireEmblemUpscale;
         if (UseReplacement(StarFoxProgramId, StarFoxOutputProgramKey,
-                           std::getenv("EDEN_NX2_DLSS_REPLACEMENT"))) {
+                           std::getenv("LICHII_NX2_DLSS_REPLACEMENT"))) {
             return TryFireEmblemUpscale(false);
         }
         dlss_motion_vectors.reset();
@@ -962,11 +962,11 @@ void KeplerCompute::TraceDlssContract(u64 native_key, bool warn_unvalidated) {
     static bool reported{};
     if (warn_unvalidated && !reported) {
         reported = true;
-        LOG_WARNING(HW_GPU, "Fast Fusion temporal replacement is not selected: motion, depth, jitter and reset contract is unvalidated; native dispatches retained. EDEN_NX2_DLSS_CONTRACT_TRACE enables bounded evidence capture");
+        LOG_WARNING(HW_GPU, "Fast Fusion temporal replacement is not selected: motion, depth, jitter and reset contract is unvalidated; native dispatches retained. LICHII_NX2_DLSS_CONTRACT_TRACE enables bounded evidence capture");
     }
-    static const bool enabled = std::getenv("EDEN_NX2_DLSS_CONTRACT_TRACE") != nullptr;
+    static const bool enabled = std::getenv("LICHII_NX2_DLSS_CONTRACT_TRACE") != nullptr;
     static const u32 skip = [] {
-        const char* value = std::getenv("EDEN_NX2_DLSS_CONTRACT_SKIP");
+        const char* value = std::getenv("LICHII_NX2_DLSS_CONTRACT_SKIP");
         return value ? static_cast<u32>(std::min<unsigned long>(std::strtoul(value, nullptr, 10), 1000000UL)) : 0U;
     }();
     if (!enabled || dlss_contract_trace_count >= skip + 24) {
@@ -1012,7 +1012,7 @@ void KeplerCompute::TraceDlssContract(u64 native_key, bool warn_unvalidated) {
 bool KeplerCompute::TryFireEmblemUpscale(bool allow_history) {
     using namespace VideoCommon::FireEmblemUpscale;
     static const bool requested_history = [] {
-        const char* const option = std::getenv("EDEN_NX2_DLSS_REPLACEMENT");
+        const char* const option = std::getenv("LICHII_NX2_DLSS_REPLACEMENT");
         return option && (std::string_view{option} == "fsr" || std::string_view{option} == "dlss");
     }();
     const bool use_history = allow_history && requested_history;
@@ -1107,7 +1107,7 @@ Texture::TSCEntry KeplerCompute::GetTSCEntry(u32 tsc_index) const {
     return tsc_entry;
 }
 
-// Split GPU thread with macros on its front half (gpu_split.h, EDEN_NX2_SPLIT=2): the front
+// Split GPU thread with macros on its front half (gpu_split.h, LICHII_NX2_SPLIT=2): the front
 // runs compute macros against its own copy of the native registers (which hold the last value
 // written to each, on the back too) and loads and binds the compute macro code itself.
 struct KeplerCompute::FrontState {

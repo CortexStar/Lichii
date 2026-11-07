@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
@@ -721,7 +721,7 @@ void ConfigurePerGame::OnDetectNupIcon() {
                     return out;
                 }
 
-                // 2. Check Eden official boxart repository
+                // 2. Check the boxart repository
                 if (!slug.empty()) {
                     std::vector<std::string> candidate_slugs{slug};
                     if (!slug.starts_with("the-legend-of-")) {

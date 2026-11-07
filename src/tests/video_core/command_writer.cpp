@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <cstdlib>
@@ -46,7 +46,7 @@ TEST_CASE("Command writer classification excludes only plain compute and DMA sta
             if (!native) {
                 REQUIRE(writer == compute.execution_mask[method]);
             } else {
-                const bool traced = std::getenv("EDEN_NATIVE_DRAW_DIAGNOSTICS") != nullptr &&
+                const bool traced = std::getenv("LICHII_NATIVE_DRAW_DIAGNOSTICS") != nullptr &&
                                     (method == 0x5a || (method >= 0xc6 && method <= 0x108));
                 const bool effect = traced || method == 0x45 || method == 0x46 || method == 0x47 ||
                                     method == 0x48 || method == 0xae || method == 0xaf ||

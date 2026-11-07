@@ -1,5 +1,5 @@
 #!/usr/bin/env perl
-# SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+# SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 use strict;
 use warnings;

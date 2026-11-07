@@ -72,7 +72,7 @@ returns, and the game's simulation step are different measurements.
 ## Vblank catch-up and guest time
 
 `StartVsyncTimer` uses a separate CoreTiming looping event, normally at 60 Hz.
-`EDEN_NX2_VSYNC_HZ` can override that experimental event rate. Guest present intervals
+`LICHII_NX2_VSYNC_HZ` can override that experimental event rate. Guest present intervals
 do not change its rate. The display-refresh query still reports 60 Hz.
 
 `CoreTiming::Advance` reschedules a looping event from its scheduled time, not its
@@ -98,7 +98,7 @@ The separate `SpeedLimiter::DoSpeedLimiting` returns immediately in multicore mo
 
 ## Additional read-only evidence in the next trace
 
-`EDEN_DKB_FRAME_TRACE=1` now also emits `DKB vsync` at most once per second per vi2
+`LICHII_DKB_FRAME_TRACE=1` now also emits `DKB vsync` at most once per second per vi2
 session. The callback continues to signal the same events and returns the same result.
 All new fields are diagnostic only:
 
@@ -152,7 +152,7 @@ this investigation.
 
 Before the next upstream merge, the atomic-and-pacing tree built both `yuzu-cmd`
 and `tests` with Clang 20 and Ninja using all eight available cores. All 496 test
-cases passed with frame tracing disabled and with `EDEN_DKB_FRAME_TRACE=1`.
+cases passed with frame tracing disabled and with `LICHII_DKB_FRAME_TRACE=1`.
 The combined atomic/pacing filter passed 10 cases and 13,800 assertions.
 
 The remaining simulation-speed claim needs a trace tied to a clearly identified

@@ -62,7 +62,7 @@ struct Fixture {
 
     std::vector<u32> Emit(const std::string& name) {
         auto code = Backend::SPIRV::EmitSPIRV(profile, program);
-        if (const char* directory = std::getenv("EDEN_STORAGE_ALIGNMENT_TEST_OUTPUT")) {
+        if (const char* directory = std::getenv("LICHII_STORAGE_ALIGNMENT_TEST_OUTPUT")) {
             std::filesystem::create_directories(directory);
             std::ofstream file{std::filesystem::path{directory} / (name + ".spv"),
                                std::ios::binary};

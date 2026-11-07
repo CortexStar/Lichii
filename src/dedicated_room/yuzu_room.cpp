@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2017 Citra Emulator Project
@@ -349,7 +349,7 @@ void LaunchRoom(int argc, char** argv, bool called_by_option) {
             std::make_unique<WebService::VerifyUserJWT>(Settings::values.web_api_url.GetValue());
 #else
         LOG_INFO(Network,
-                 "Eden Web Services is not available with this build: validation is disabled.");
+                 "Lichii Web Services is not available with this build: validation is disabled.");
         verify_backend = std::make_unique<Network::VerifyUser::NullBackend>();
 #endif
     } else {

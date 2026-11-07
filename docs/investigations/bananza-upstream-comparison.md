@@ -57,7 +57,7 @@ In the current merged working tree, SPIR-V's `native_global_bounds` branch still
 
 ## Geometry and conversion differences
 
-`GraphicsEnvironment` in the fork already accepts native geometry shaders and passes the geometry-stage flag to `LowerToMaxwell`. PR363 enables the same stage by default, with `EDEN_NX2_EXPERIMENTAL_GEOMETRY=0` as an override. Upstream nx2 lacks that geometry-stage adapter. There is no missing default-enable change to port into the fork.
+`GraphicsEnvironment` in the fork already accepts native geometry shaders and passes the geometry-stage flag to `LowerToMaxwell`. PR363 enables the same stage by default, with `LICHII_NX2_EXPERIMENTAL_GEOMETRY=0` as an override. Upstream nx2 lacks that geometry-stage adapter. There is no missing default-enable change to port into the fork.
 
 The lowering implementations are not interchangeable:
 
@@ -65,7 +65,7 @@ The lowering implementations are not interchangeable:
 - Both the fork and PR363 turn the geometry ISBERD map form into a register move. The fork also validates geometry output and finalization modes, predicates, streams, and invocation registers. The existing `ampere_geometry_lowering.cpp` tests cover those paths.
 - PR363's LDC widths 0 through 5, VOTEU destination expansion, ceiling F2I, signed-byte conversion, and unsigned 16-bit truncation already have local implementations. The fork has tighter reserved-bit validation and broader conversion handling. Its byte conversion clamps before conversion rather than adopting PR363's two-step narrowing sequence.
 - PR363 accepts signed 16-bit truncation mode `0x0021e900`. The fork rejects it, and two existing rejection tests explicitly cover that choice. No Bananza capture supplied to this task demonstrates that this extra mode is needed. It is recorded as a coverage difference, not silently enabled or used to weaken the existing tests.
-- PR363 enables software HMMA by default through `EDEN_NX2_TENSOR`. The fork already lowers HMMA without that opt-in and requests its compact matrix path in `shader_environment.cpp`. Replacing it with PR363's large expansion would discard local work.
+- PR363 enables software HMMA by default through `LICHII_NX2_TENSOR`. The fork already lowers HMMA without that opt-in and requests its compact matrix path in `shader_environment.cpp`. Replacing it with PR363's large expansion would discard local work.
 - PR363 extends `IsGeneric` through `Generic31W`; the fork already uses that bound. Upstream nx2 still ends at `Generic31X`.
 
 No changes were made to `shader_environment.cpp` or `lower_to_maxwell.h`. The geometry, conversion, and vote tests passed against their existing implementations.
@@ -74,7 +74,7 @@ No changes were made to `shader_environment.cpp` or `lower_to_maxwell.h`. The ge
 
 The fork's `TryNativeIndirectReset` in `vk_rasterizer.cpp` already runs by default. It matches the complete 44-word captured program from `native_indirect_reset.h`, requires a non-indexed single-instance point draw, and rejects mesh draws. It reads the shader and pointer list through safe `ReadBlock` calls, then writes `{0, 1, 0, 0, 0}` to each validated target.
 
-PR363's `TryNx2IndirectReset` is default-on with an `EDEN_NX2_RESETFIX=0` override. `PipelineCache::IsIndirectResetShader` identifies it by native-program hash `0x72fd62555e7196cd`, source size `128 + 11 * 16`, and an enabled vertex-B stage. It reads the list descriptor's address and byte size at `c[0][0x110]`, while the fork reads only the address.
+PR363's `TryNx2IndirectReset` is default-on with an `LICHII_NX2_RESETFIX=0` override. `PipelineCache::IsIndirectResetShader` identifies it by native-program hash `0x72fd62555e7196cd`, source size `128 + 11 * 16`, and an enabled vertex-B stage. It reads the list descriptor's address and byte size at `c[0][0x110]`, while the fork reads only the address.
 
 Concrete differences for the rasterizer owner:
 
@@ -106,7 +106,7 @@ Use the build configuration in [the diagnostic guide](bananza-diagnostics.md), t
 ```sh
 ctest --test-dir build --output-on-failure
 build/bin/tests '[shader][storage_buffer],[native_reset],[video_core][ampere],[async_draw]'
-EDEN_DKB_FRAME_TRACE=1 build/bin/tests '[dkb_frame_trace]'
+LICHII_DKB_FRAME_TRACE=1 build/bin/tests '[dkb_frame_trace]'
 ```
 
 The upstream changes can be inspected without moving the shared checkout:
