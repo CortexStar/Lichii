@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <limits>
 #include <array>
 #include <cstdlib>
@@ -163,12 +164,16 @@ constexpr VkBorderColor ConvertBorderColor(const std::array<float, 4>& color) {
     return usage;
 }
 
+// False when the driver could not build the GPU ASTC decoder (Apple's shader compiler crashes on
+// it for AMD GPUs under MoltenVK). Every ASTC image then decodes on the CPU.
+std::atomic_bool gpu_astc_decoder_available{true};
+
 // An ASTC 2D array whose RGBA8 decode exceeds 1 GiB (title 1's 8192x8192x68 terrain textures).
 // These stay on the GPU decoder as RGBA8 with trimmed levels (TrimmedHostInfo) even when other
 // ASTC images are re-compressed to BC1/BC3 on the CPU: re-compressing them would not fit either.
 [[nodiscard]] bool IsHugeAstcArray(const Device& device, const ImageInfo& info) {
     if (!IsPixelFormatASTC(info.format) || device.IsOptimalAstcSupported() ||
-        info.type != ImageType::e2D || info.size.depth != 1) {
+        !gpu_astc_decoder_available || info.type != ImageType::e2D || info.size.depth != 1) {
         return false;
     }
     u64 bytes = 0;
@@ -322,7 +327,8 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
 // decode, so streamed textures are ready the frame they are first used instead of seconds later.
 [[nodiscard]] bool WillUseGpuBcnTranscode(const Device& device, const ImageInfo& info) {
     if (!IsPixelFormatASTC(info.format) || device.IsOptimalAstcSupported() ||
-        IsHugeAstcArray(device, info) || info.type != ImageType::e2D || info.size.depth != 1) {
+        !gpu_astc_decoder_available || IsHugeAstcArray(device, info) ||
+        info.type != ImageType::e2D || info.size.depth != 1) {
         return false;
     }
     return Settings::values.accelerate_astc.GetValue() == Settings::AstcDecodeMode::Gpu &&
@@ -330,7 +336,8 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
 }
 
 [[nodiscard]] bool WillUseAcceleratedAstcDecode(const Device& device, const ImageInfo& info) {
-    if (!IsPixelFormatASTC(info.format) || device.IsOptimalAstcSupported()) {
+    if (!IsPixelFormatASTC(info.format) || device.IsOptimalAstcSupported() ||
+        !gpu_astc_decoder_available) {
         return false;
     }
     if (IsHugeAstcArray(device, info)) {
@@ -1228,13 +1235,24 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
     // Before anything below reads astc_recompression (passes, view formats).
     UseBc3ForSwitch2OnSmallCards(device);
     // Huge ASTC arrays always decode on the GPU (IsHugeAstcArray), whatever the decode setting.
+    gpu_astc_decoder_available = true;
     if (Settings::values.accelerate_astc.GetValue() == Settings::AstcDecodeMode::Gpu ||
         !device.IsOptimalAstcSupported()) {
-        astc_decoder_pass.emplace(device, scheduler, descriptor_pool, staging_buffer_pool,
-                                  compute_pass_descriptor_queue, memory_allocator);
-        if (Settings::GetAstcRecompression() != Settings::AstcRecompression::Uncompressed) {
-            bc_encoder_pass.emplace(device, scheduler, descriptor_pool,
-                                    compute_pass_descriptor_queue);
+        try {
+            astc_decoder_pass.emplace(device, scheduler, descriptor_pool, staging_buffer_pool,
+                                      compute_pass_descriptor_queue, memory_allocator);
+            if (Settings::GetAstcRecompression() != Settings::AstcRecompression::Uncompressed) {
+                bc_encoder_pass.emplace(device, scheduler, descriptor_pool,
+                                        compute_pass_descriptor_queue);
+            }
+        } catch (const vk::Exception& exception) {
+            LOG_WARNING(Render_Vulkan,
+                        "The driver could not build the GPU ASTC decoder ({}): ASTC textures "
+                        "decode on the CPU",
+                        exception.what());
+            astc_decoder_pass.reset();
+            bc_encoder_pass.reset();
+            gpu_astc_decoder_available = false;
         }
     }
     if (!device.IsKhrImageFormatListSupported()) {
@@ -2935,6 +2953,9 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
             if (WillUseAcceleratedAstcDecode(runtime->device, info) ||
                 WillUseGpuBcnTranscode(runtime->device, info)) {
                 flags |= VideoCommon::ImageFlagBits::AcceleratedUpload;
+            } else if (!gpu_astc_decoder_available) {
+                // Without the GPU decoder, decode off the GPU thread as CpuAsynchronous does.
+                flags |= VideoCommon::ImageFlagBits::AsynchronousDecode;
             }
             break;
         case Settings::AstcDecodeMode::CpuAsynchronous:
