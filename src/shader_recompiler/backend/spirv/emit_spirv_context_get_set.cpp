@@ -489,7 +489,8 @@ void EmitSetPatch(EmitContext& ctx, IR::Patch patch, Id value) {
         return value != nullptr ? static_cast<float>(std::atof(value)) : 16.0f;
     }();
     if (!IR::IsGeneric(patch) && tess_cap > 0.0f) {
-        value = ctx.OpFMin(ctx.F32[1], value, ctx.Const(tess_cap));
+        const Id cap{ctx.Const(tess_cap)};
+        value = ctx.OpSelect(ctx.F32[1], ctx.OpFOrdGreaterThan(ctx.U1, value, cap), cap, value);
     }
     ctx.OpStore(pointer, value);
 }

@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <version>
 #include <boost/container/static_vector.hpp>
 
 #include <dynarmic/common/spin_lock.h>
@@ -21,6 +22,36 @@ namespace Dynarmic {
 
 using VAddr = std::uint64_t;
 using Vector = std::array<std::uint64_t, 2>;
+
+namespace ExclusiveDetail {
+
+inline void StoreRelease(VAddr& target, VAddr value) {
+#ifdef __cpp_lib_atomic_ref
+    std::atomic_ref<VAddr>{target}.store(value, std::memory_order_release);
+#else
+    __atomic_store_n(&target, value, __ATOMIC_RELEASE);
+#endif
+}
+
+inline VAddr LoadRelaxed(VAddr& target) {
+#ifdef __cpp_lib_atomic_ref
+    return std::atomic_ref<VAddr>{target}.load(std::memory_order_relaxed);
+#else
+    return __atomic_load_n(&target, __ATOMIC_RELAXED);
+#endif
+}
+
+inline bool CompareExchange(VAddr& target, VAddr& expected, VAddr desired) {
+#ifdef __cpp_lib_atomic_ref
+    return std::atomic_ref<VAddr>{target}.compare_exchange_strong(expected, desired,
+                                                                 std::memory_order_acq_rel);
+#else
+    return __atomic_compare_exchange_n(&target, &expected, desired, false, __ATOMIC_ACQ_REL,
+                                       __ATOMIC_ACQUIRE);
+#endif
+}
+
+} // namespace ExclusiveDetail
 
 class ExclusiveMonitor {
 public:
@@ -39,7 +70,7 @@ public:
         const VAddr masked_address = address & RESERVATION_GRANULE_MASK;
 
 #ifdef ARCHITECTURE_arm64
-        __atomic_store_n(&exclusive_addresses[processor_id], masked_address, __ATOMIC_RELEASE);
+        ExclusiveDetail::StoreRelease(exclusive_addresses[processor_id], masked_address);
         const T value = op();
         std::memcpy(exclusive_values[processor_id].data(), &value, sizeof(T));
 #else

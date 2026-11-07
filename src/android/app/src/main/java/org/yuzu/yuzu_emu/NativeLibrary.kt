@@ -55,6 +55,7 @@ object NativeLibrary {
         fun onEmulationStopped(status: Int)
         fun onProgramChanged(programIndex: Int)
         fun onEmulationError(resultCode: Int)
+        fun onCoreError(error: CoreError, details: String)
     }
 
     @Volatile
@@ -322,8 +323,12 @@ object NativeLibrary {
      * @return true: continue; false: abort
      */
     fun onCoreError(error: CoreError?, details: String): Boolean {
-        if (emulationHost != null) {
+        emulationHost?.let { host ->
+            if (error == null) {
+                return true
+            }
             Log.error("[NativeLibrary] Core error $error: $details")
+            host.onCoreError(error, details)
             return false
         }
         val emulationActivity = sEmulationActivity.get()

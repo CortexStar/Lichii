@@ -34,18 +34,16 @@ bool ExclusiveMonitor::CheckAndClear(std::size_t processor_id, VAddr address) {
     const VAddr masked_address = address & RESERVATION_GRANULE_MASK;
 
 #ifdef ARCHITECTURE_arm64
-    VAddr* const own = &exclusive_addresses[processor_id];
+    VAddr& own = exclusive_addresses[processor_id];
     VAddr expected = masked_address;
-    if (__atomic_load_n(own, __ATOMIC_RELAXED) != masked_address ||
-        !__atomic_compare_exchange_n(own, &expected, INVALID_EXCLUSIVE_ADDRESS, false,
-                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    if (ExclusiveDetail::LoadRelaxed(own) != masked_address ||
+        !ExclusiveDetail::CompareExchange(own, expected, INVALID_EXCLUSIVE_ADDRESS)) {
         return false;
     }
     for (VAddr& other_address : exclusive_addresses) {
-        if (__atomic_load_n(&other_address, __ATOMIC_RELAXED) == masked_address) {
+        if (ExclusiveDetail::LoadRelaxed(other_address) == masked_address) {
             expected = masked_address;
-            __atomic_compare_exchange_n(&other_address, &expected, INVALID_EXCLUSIVE_ADDRESS, false,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+            ExclusiveDetail::CompareExchange(other_address, expected, INVALID_EXCLUSIVE_ADDRESS);
         }
     }
     return true;
@@ -68,7 +66,7 @@ bool ExclusiveMonitor::CheckAndClear(std::size_t processor_id, VAddr address) {
 void ExclusiveMonitor::Clear() {
 #ifdef ARCHITECTURE_arm64
     for (VAddr& address : exclusive_addresses) {
-        __atomic_store_n(&address, INVALID_EXCLUSIVE_ADDRESS, __ATOMIC_RELEASE);
+        ExclusiveDetail::StoreRelease(address, INVALID_EXCLUSIVE_ADDRESS);
     }
 #else
     Lock();
@@ -79,7 +77,7 @@ void ExclusiveMonitor::Clear() {
 
 void ExclusiveMonitor::ClearProcessor(std::size_t processor_id) {
 #ifdef ARCHITECTURE_arm64
-    __atomic_store_n(&exclusive_addresses[processor_id], INVALID_EXCLUSIVE_ADDRESS, __ATOMIC_RELEASE);
+    ExclusiveDetail::StoreRelease(exclusive_addresses[processor_id], INVALID_EXCLUSIVE_ADDRESS);
 #else
     Lock();
     exclusive_addresses[processor_id] = INVALID_EXCLUSIVE_ADDRESS;

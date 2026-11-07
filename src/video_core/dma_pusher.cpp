@@ -198,15 +198,10 @@ bool DmaPusher::Step() {
         // (the split only starts with unsafe reads; the settings can change mid-game).
         const bool use_safe = !VideoCommon::GpuSplit::Get().Active() &&
                               (Settings::IsDMALevelDefault() ? Settings::IsGPULevelHigh() : Settings::IsDMALevelSafe());
-        if (!gpu_written && VideoCommon::GpuSplit::Get().Active()) {
-            const size_t entry_bytes = size_t{header.size} * sizeof(u32);
-            if (!IsKnownCleanCommandEntry(dma_state.dma_get, entry_bytes) &&
-                VideoCommon::GpuSplit::Get().WaitForWriters()) {
-                gpu_written = IsGpuWrittenCommands(dma_state.dma_get, entry_bytes);
-            }
-            if (!gpu_written) {
-                NoteCleanCommandEntry(dma_state.dma_get, entry_bytes);
-            }
+        if (!gpu_written && VideoCommon::GpuSplit::Get().Active() &&
+            VideoCommon::GpuSplit::Get().WaitForWriters()) {
+            gpu_written =
+                IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
         }
         // Resume and GPU-written entries need live words, even after a flush cleared dirty state.
         const bool submitted = (command_list.snapshot_suspensions & 1) == 0 &&
@@ -599,80 +594,6 @@ void DmaPusher::RefreshDeferredEntries(CommandList& list) {
                                        entry.size * sizeof(u32));
     }
     list.deferred_entries.clear();
-}
-
-namespace {
-struct CleanCommandPages {
-    std::vector<u64> bits;
-    std::vector<size_t> touched;
-    u64 generation = ~u64{0};
-
-    void Sync() {
-        const u64 now = Tegra::g_nx2_gpu_map_generation.load(std::memory_order_acquire);
-        if (now == generation) {
-            return;
-        }
-        generation = now;
-        if (bits.empty()) {
-            bits.resize((u64{1} << (36 - Tegra::Nx2WrittenPageBits)) / 64);
-        }
-        for (const size_t word : touched) {
-            bits[word] = 0;
-        }
-        touched.clear();
-    }
-};
-CleanCommandPages g_clean_command_pages;
-
-bool CleanCommandPagesEnabled() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("EDEN_NX2_CLEAN_LIST_PAGES");
-        return value == nullptr || value[0] != '0';
-    }();
-    return enabled;
-}
-} // namespace
-
-bool DmaPusher::IsKnownCleanCommandEntry(GPUVAddr address, size_t size) {
-    if (!CleanCommandPagesEnabled() || size == 0) {
-        return false;
-    }
-    auto& clean = g_clean_command_pages;
-    clean.Sync();
-    for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < address + size; page += 0x1000) {
-        const auto device = memory_manager.GpuToCpuAddress(page);
-        if (!device) {
-            return false;
-        }
-        const u64 index = *device >> Tegra::Nx2WrittenPageBits;
-        if (index >= clean.bits.size() * 64 || ((clean.bits[index / 64] >> (index % 64)) & 1) == 0) {
-            return false;
-        }
-    }
-    return true;
-}
-
-void DmaPusher::NoteCleanCommandEntry(GPUVAddr address, size_t size) {
-    if (!CleanCommandPagesEnabled() || size == 0) {
-        return;
-    }
-    auto& clean = g_clean_command_pages;
-    clean.Sync();
-    for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < address + size; page += 0x1000) {
-        const auto device = memory_manager.GpuToCpuAddress(page);
-        if (!device) {
-            continue;
-        }
-        const u64 index = *device >> Tegra::Nx2WrittenPageBits;
-        if (index >= clean.bits.size() * 64) {
-            continue;
-        }
-        u64& word = clean.bits[index / 64];
-        if (word == 0) {
-            clean.touched.push_back(index / 64);
-        }
-        word |= u64{1} << (index % 64);
-    }
 }
 
 bool DmaPusher::IsGpuWrittenCommands(GPUVAddr address, size_t size) {

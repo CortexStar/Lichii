@@ -50,13 +50,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.yuzu.yuzu_emu.NativeLibrary
+import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.disk_shader_cache.DiskShaderCacheProgress
 import org.yuzu.yuzu_emu.model.Game
 import org.yuzu.yuzu_emu.utils.Log
 import org.yuzu.yuzu_emu.utils.NativeConfig
 
 class EmulationActivity : ComponentActivity(), NativeLibrary.EmulationHost, SurfaceHolder.Callback {
-    private enum class State { STOPPED, RUNNING, PAUSED, STOPPING }
+    private enum class State { STOPPED, RUNNING, PAUSED, STOPPING, FINISHED }
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -160,6 +161,7 @@ class EmulationActivity : ComponentActivity(), NativeLibrary.EmulationHost, Surf
                 State.RUNNING -> NativeLibrary.surfaceChanged(holder.surface)
                 State.PAUSED -> if (!menuOpen) resumeLocked()
                 State.STOPPING -> {}
+                State.FINISHED -> {}
             }
         }
         tryStart()
@@ -221,7 +223,7 @@ class EmulationActivity : ComponentActivity(), NativeLibrary.EmulationHost, Surf
 
     override fun onEmulationStopped(status: Int) {
         Log.info("[EmulationActivity] Emulation stopped, status $status")
-        synchronized(this) { state = State.STOPPED }
+        synchronized(this) { state = State.FINISHED }
         mainHandler.post { if (errorText == null) finishAnimated() }
     }
 
@@ -230,7 +232,7 @@ class EmulationActivity : ComponentActivity(), NativeLibrary.EmulationHost, Surf
     }
 
     override fun onEmulationError(resultCode: Int) {
-        synchronized(this) { state = State.STOPPED }
+        synchronized(this) { state = State.FINISHED }
         val text = when (resultCode) {
             2, 7 -> "The game file could not be loaded."
             3 -> "System files (firmware) are missing."
@@ -239,6 +241,19 @@ class EmulationActivity : ComponentActivity(), NativeLibrary.EmulationHost, Surf
             else -> "Emulation failed to start (code $resultCode)."
         }
         Log.error("[EmulationActivity] Start failed: code $resultCode")
+        mainHandler.post { errorText = text }
+    }
+
+    override fun onCoreError(error: NativeLibrary.CoreError, details: String) {
+        val text = when (error) {
+            NativeLibrary.CoreError.ErrorSystemFiles -> getString(
+                R.string.system_archive_not_found_message,
+                details.ifEmpty { getString(R.string.system_archive_general) }
+            ).substringBefore('\n')
+            NativeLibrary.CoreError.ErrorSavestate ->
+                "${getString(R.string.save_load_error)}: $details"
+            NativeLibrary.CoreError.ErrorUnknown -> getString(R.string.fatal_error)
+        }
         mainHandler.post { errorText = text }
     }
 

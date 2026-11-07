@@ -2547,8 +2547,8 @@ ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
                                      RelaxedOptions options) {
     std::optional<DAddr> cpu_addr = ImageCpuAddress(gpu_addr, CalculateGuestSizeInBytes(info));
     if (!cpu_addr) {
-        static u32 logged{};
-        if (logged++ < 64) {
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
             const u32 guest_size = CalculateGuestSizeInBytes(info);
             u32 mapped = 0;
             while (mapped < guest_size && gpu_memory->GpuToCpuAddress(gpu_addr + mapped)) {

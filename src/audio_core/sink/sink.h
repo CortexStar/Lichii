@@ -28,7 +28,7 @@ inline bool IsControllerAudioDevice(std::string name) {
         c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
     }
     for (const char* pattern : {"dualsense", "dualshock", "wireless controller", "playstation",
-                                "ps5 controller", "ps4 controller", "xbox", "gamepad",
+                                "ps5 controller", "ps4 controller", "xbox controller", "gamepad",
                                 "game controller"}) {
         if (name.find(pattern) != std::string::npos) {
             return true;
