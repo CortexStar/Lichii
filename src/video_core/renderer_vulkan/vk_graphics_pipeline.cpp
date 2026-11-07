@@ -37,6 +37,7 @@
 #include "common/settings.h"
 #include "shader_recompiler/exception.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/renderer_vulkan/vk_oot_object_motion.h"
 
 #if defined(__clang__) && defined(NDEBUG)
 #define LAMBDA_FORCEINLINE __attribute__((always_inline))
@@ -70,6 +71,21 @@ VkShaderStageFlagBits StageFlag(const Shader::Info& info, VkShaderStageFlagBits 
         return VK_SHADER_STAGE_MESH_BIT_EXT;
     }
     return slot_stage;
+}
+
+// Ocarina of Time object motion: the history buffer (vertex) or motion image (fragment), bound
+// after the stage's own images (DescriptorLayoutBuilder::Add).
+void PushOotMotionDescriptor(GuestDescriptorQueue& queue, const Shader::Info& info) {
+    if (!info.oot_motion.history && !info.oot_motion.image) {
+        return;
+    }
+    const OotObjectMotion* const motion = OotObjectMotion::Get();
+    if (info.oot_motion.history) {
+        queue.AddBuffer(motion->HistoryBuffer(), motion->HistoryAddress(), 0,
+                        motion->HistorySize());
+    } else {
+        queue.AddBuffer(motion->PixelBuffer(), motion->PixelAddress(), 0, motion->PixelBytes());
+    }
 }
 
 DescriptorLayoutBuilder MakeBuilder(const Device& device, std::span<const Shader::Info> infos,
@@ -746,6 +762,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             Profile::Scope scope{Profile::Zone::PushDescriptors};
             PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
                                  rescaling, samplers_it, views_it);
+            PushOotMotionDescriptor(guest_descriptor_queue, stage_infos[stage]);
         }
         const auto& info{stage_infos[stage]};
         if (info.uses_render_area) {

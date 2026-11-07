@@ -140,7 +140,8 @@ inline void WriteDescriptorBuffer(const Device& device, const DescriptorBufferLa
            Shader::NumDescriptors(info.texture_buffer_descriptors) +
            Shader::NumDescriptors(info.image_buffer_descriptors) +
            Shader::NumDescriptors(info.texture_descriptors) +
-           Shader::NumDescriptors(info.image_descriptors);
+           Shader::NumDescriptors(info.image_descriptors) +
+           (info.oot_motion.history || info.oot_motion.image ? 1 : 0);
 }
 
 class DescriptorLayoutBuilder {
@@ -246,6 +247,9 @@ public:
         using Shader::Backend::SPIRV::RenderAreaLayout;
         using Shader::Backend::SPIRV::RescalingLayout;
         const u32 size_offset = is_compute ? sizeof(RescalingLayout::down_factor) : 0u;
+        // Every graphics layout covers the OoT object motion words, so push constants stay
+        // compatible across pipelines (the down factor is only pushed when it changes).
+        const u32 graphics_size = Shader::Backend::SPIRV::OOT_MOTION_PUSH_END;
         const VkPushConstantRange range{
             .stageFlags = static_cast<VkShaderStageFlags>(
                 is_compute ? VK_SHADER_STAGE_COMPUTE_BIT
@@ -255,8 +259,9 @@ public:
                                        VK_SHADER_STAGE_MESH_BIT_EXT
                                  : VK_SHADER_STAGE_ALL_GRAPHICS)),
             .offset = 0,
-            .size = static_cast<u32>(sizeof(RescalingLayout)) - size_offset +
-                    static_cast<u32>(sizeof(RenderAreaLayout)),
+            .size = is_compute ? static_cast<u32>(sizeof(RescalingLayout)) - size_offset +
+                                     static_cast<u32>(sizeof(RenderAreaLayout))
+                               : graphics_size,
         };
         return device->GetLogical().CreatePipelineLayout({
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -308,9 +313,20 @@ public:
         Add(VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, stage, info.image_buffer_descriptors);
         Add(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, stage, info.texture_descriptors);
         Add(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, stage, info.image_descriptors);
+        if (info.oot_motion.history || info.oot_motion.image) {
+            AddSingle(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, stage);
+        }
     }
 
 private:
+    void AddSingle(VkDescriptorType type, VkShaderStageFlags stage) {
+        struct Single {
+            u32 count;
+        };
+        const std::array<Single, 1> single{{{1}}};
+        Add(type, stage, single);
+    }
+
     template <typename Descriptors>
     void Add(VkDescriptorType type, VkShaderStageFlags stage, const Descriptors& descriptors) {
         const size_t num{descriptors.size()};
