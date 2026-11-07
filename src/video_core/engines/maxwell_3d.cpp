@@ -1362,12 +1362,14 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
             // where every macro failed and nothing drew). Run it on the interpreter instead: it
             // decodes the words as they are, and a macro that really is outside the uploaded RAM
             // fails there too and is reported as before. Only calls that wrote nothing outside
-            // their registers are replayed; the FIFO is replayed from a copy below.
-            std::vector<u32> replay_parameters{fs.parameters};
+            // their registers are replayed.
+            // MME_DMA_READ_FIFOED appends to fs.parameters through emit, so the replay reads the
+            // live FIFO: the interpreter takes that vector and the words land in the same place
+            // the JIT's call would have put them. A replay that fails too is undone.
+            std::vector<u32> before_replay{fs.parameters};
             const auto replayed = engine.native_interpreter.Execute(
-                engine.native_code, start, replay_parameters, read, emit);
+                engine.native_code, start, fs.parameters, read, emit);
             if (replayed.success) {
-                fs.parameters = std::move(replay_parameters);
                 result = replayed;
                 static std::atomic<u32> fallbacks{};
                 if (fallbacks.fetch_add(1, std::memory_order_relaxed) % 4096 == 0) {
@@ -1376,6 +1378,8 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
                                 "ran it on the interpreter ({} calls so far)",
                                 start, fallbacks.load(std::memory_order_relaxed));
                 }
+            } else {
+                fs.parameters = std::move(before_replay);
             }
         }
 #else
