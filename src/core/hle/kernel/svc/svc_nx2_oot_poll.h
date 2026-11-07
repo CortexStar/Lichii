@@ -12,8 +12,11 @@ class System;
 namespace Kernel::Svc {
 
 /// Ocarina of Time: svc 0xF3, placed by the built-in patch "Resource poll backoff" on the path where
-/// the game's resource request loop (main+0xF7A0) would rescan its pending requests at once. Sleeps
-/// the calling thread briefly and leaves every register as it was. Returns false (and does nothing)
+/// the game's resource request loop (main+0xF7A0) would walk its pending requests again at once
+/// because one of them was not ready. If the walk that just ended was a pure re-check (it issued no
+/// load, the request list and the loop state did not change, no exit is pending), it sleeps the
+/// calling thread for a time proportional to the walk's own length; otherwise it returns at once,
+/// as the original branch would. Leaves every register as it was. Returns false (and does nothing)
 /// for any other SVC.
 bool CallNx2OotPollBackoff(Core::System& system, u32 imm);
 

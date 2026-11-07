@@ -294,11 +294,10 @@ public:
     /// to its image that preparing the view again would act on (CPU writes, aliasing, deletion,
     /// rescaling). The backend keeps its descriptor for the binding in `payload`.
     struct alignas(64) BindingMemo {
+        // Line 0: key and what the lookup compares first.
         u32 tic_handle;
         u32 tsc_index; ///< ~0U: no sampler
         u32 kind;      ///< the caller's binding kind (BINDING_KIND_COMPUTE included); 0: empty
-        u32 tic_entry; ///< TIC entry index read, ~0U: none (out of the pool)
-        u32 tsc_entry; ///< TSC entry index read, ~0U: none
         ImageViewId view;
         SamplerId sampler;
         ImageId image;
@@ -306,33 +305,55 @@ public:
         u32 tsc_limit;
         GPUVAddr tic_pool;
         GPUVAddr tsc_pool;
-        u64 epoch;
         const void* channel;
+        u32 tic_entry; ///< TIC entry index read, ~0U: none (out of the pool)
+        u32 tsc_entry; ///< TSC entry index read, ~0U: none
+        // Line 1
+        u64 epoch;
         u64 image_serial;
         u64 map_serial;
         u64 touch_tick;
         std::array<u64, 3> payload;
-        u32 rescaled;
+        u16 rescaled;
+        u8 aliased;       ///< its image had aliases when recorded: the lookup checks their ticks
+        u8 map_dependent; ///< a null or buffer view whose resolution depends on the mappings
+        // Line 2
         TICEntry tic;
         TSCEntry tsc;
     };
     static constexpr u32 BINDING_KIND_COMPUTE = 1U << 31;
 
+    /// What every binding of one draw or dispatch is looked up and recorded against.
+    struct BindingLookup {
+        const void* channel;
+        GPUVAddr tic_pool;
+        GPUVAddr tsc_pool;
+        u32 tic_limit;
+        u32 tsc_limit;
+        u64 map_serial;
+        u64 clock; ///< BindingClock() when the lookups began
+        bool compute;
+    };
+
+    /// Taken after SynchronizeDescriptors, before the draw's or dispatch's first FindBinding.
+    [[nodiscard]] BindingLookup BeginBindingLookup(bool compute) const noexcept;
+
     /// The memo of this binding when resolving it again would give the same view, sampler and
     /// descriptor with nothing to prepare; nullptr otherwise. Touches the image in the LRU once
     /// per frame, as preparing the view would.
-    [[nodiscard]] BindingMemo* FindBinding(u32 tic_handle, u32 tsc_index, u32 kind);
+    [[nodiscard]] BindingMemo* FindBinding(const BindingLookup& lookup, u32 tic_handle,
+                                           u32 tsc_index, u32 kind);
 
     /// Changes with every event that can make a binding memo stale.
     [[nodiscard]] u64 BindingClock() const noexcept {
         return binding_clock;
     }
 
-    /// Remembers a binding FillImageViews/GetSamplerId just resolved, when nothing happened since
-    /// BindingClock() was `clock` and its image needs no preparation.
-    void RecordBinding(u32 tic_handle, u32 tsc_index, u32 kind, ImageViewId view_id,
-                       SamplerId sampler_id, const void* payload, size_t payload_size,
-                       bool rescaled, u64 clock);
+    /// Remembers a binding FillImageViews/GetSamplerId just resolved, when nothing happened to
+    /// its image since `lookup` was taken and the image needs no preparation.
+    void RecordBinding(const BindingLookup& lookup, u32 tic_handle, u32 tsc_index, u32 kind,
+                       ImageViewId view_id, SamplerId sampler_id, const void* payload,
+                       size_t payload_size, bool rescaled);
 
     /// Updates the Render Targets if they can be rescaled
     /// @retval True if the Render Targets have been rescaled.
@@ -651,9 +672,12 @@ private:
     ImageId rt_depth_image_id{};
     u64 texture_bindings_serial = 0;
     u64 bindings_epoch = 1; ///< See BindingsEpoch(); 0 never matches a cached binding
-    /// EDEN_NX2_BINDMEMO: 2-way sets of BindingMemo (allocated on first use), the serial of each
-    /// image slot's last event, and the clock both serials and binding_memo_epoch are drawn from.
+    /// EDEN_NX2_BINDMEMO: 4-way sets of BindingMemo with a tag per way (0: empty) and the next way
+    /// each set replaces (allocated on first use), the serial of each image slot's last event,
+    /// and the clock both serials and binding_memo_epoch are drawn from.
     std::vector<BindingMemo> binding_memos;
+    std::vector<u32> binding_tags;
+    std::vector<u8> binding_victims;
     std::vector<u64> image_binding_serials;
     u64 binding_clock = 1;
     u64 binding_memo_epoch = 1; ///< every memo: an image rescaled

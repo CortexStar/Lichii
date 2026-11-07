@@ -19,6 +19,7 @@
 #include "common/settings.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
+#include "video_core/nx2_bindmemo_stats.h"
 #include "video_core/renderer_vulkan/vertex_repack.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
 
@@ -731,8 +732,10 @@ void PipelineStateWatch::Setup(Maxwell3D& maxwell3d, const DynamicFeatures& feat
     auto& tables = maxwell3d.dirty.tables;
     constexpr u8 flag = Dirty::PipelineState;
     value_registers.clear();
+    watched_registers.clear();
     for (const auto& [first, count] : RefreshRegisterRuns(features)) {
         for (u32 reg = first; reg < first + count; ++reg) {
+            watched_registers.push_back(reg);
             if (tables[0][reg] == flag || tables[1][reg] == flag) {
                 continue;
             }
@@ -751,6 +754,11 @@ void PipelineStateWatch::Setup(Maxwell3D& maxwell3d, const DynamicFeatures& feat
     value_registers.erase(std::unique(value_registers.begin(), value_registers.end()),
                           value_registers.end());
     values.resize(value_registers.size());
+    watched_registers.push_back(static_cast<u32>(MAXWELL3D_REG_INDEX(transform_feedback_enabled)));
+    std::ranges::sort(watched_registers);
+    watched_registers.erase(std::unique(watched_registers.begin(), watched_registers.end()),
+                            watched_registers.end());
+    watched_values.clear();
     blending_gated = !features.has_extended_dynamic_state_3_blend;
     dynamic_vertex_input = features.has_dynamic_vertex_input;
     engine = &maxwell3d;
@@ -764,6 +772,12 @@ void PipelineStateWatch::Store(Maxwell3D& maxwell3d, const DynamicFeatures& feat
     for (size_t index = 0; index < value_registers.size(); ++index) {
         values[index] = regs[value_registers[index]];
     }
+    if (VideoCommon::Nx2BindMemo::PipeSkipValuesEnabled()) {
+        watched_values.resize(watched_registers.size());
+        for (size_t index = 0; index < watched_registers.size(); ++index) {
+            watched_values[index] = regs[watched_registers[index]];
+        }
+    }
     topology = maxwell3d.draw_manager.draw_state.topology;
     engine_state = maxwell3d.engine_state;
     dual_source_blend = ComputeAttachment0DualSourceBlend(maxwell3d.regs);
@@ -773,26 +787,49 @@ void PipelineStateWatch::Store(Maxwell3D& maxwell3d, const DynamicFeatures& feat
 
 bool PipelineStateWatch::StateUnchanged(Maxwell3D& maxwell3d,
                                         const FixedPipelineState& state) noexcept {
+    using VideoCommon::Nx2BindMemo::Note;
+    using Stat = VideoCommon::Nx2BindMemo::Stat;
     if (!valid || engine != &maxwell3d) {
+        Note(Stat::PipeMissNotSetUp);
         return false;
     }
     auto& flags = maxwell3d.dirty.flags;
-    if (flags[Dirty::PipelineState] || (blending_gated && flags[Dirty::Blending])) {
+    const u32* const regs = maxwell3d.regs.reg_array.data();
+    bool flag_values_same = false;
+    if (flags[Dirty::PipelineState]) {
+        // Written since the last Refresh: unchanged if each holds the value it had then again.
+        if (!VideoCommon::Nx2BindMemo::PipeSkipValuesEnabled() ||
+            watched_values.size() != watched_registers.size()) {
+            Note(Stat::PipeMissFlag);
+            return false;
+        }
+        for (size_t index = 0; index < watched_registers.size(); ++index) {
+            if (regs[watched_registers[index]] != watched_values[index]) {
+                Note(Stat::PipeMissFlag);
+                return false;
+            }
+        }
+        flag_values_same = true;
+    }
+    if (blending_gated && flags[Dirty::Blending]) {
+        Note(Stat::PipeMissBlending);
         return false;
     }
     if (flags[Dirty::VertexInput] &&
         (!dynamic_vertex_input ||
          FixedPipelineState::DynamicAttributeTypes(maxwell3d.regs) != state.attribute_types)) {
+        Note(Stat::PipeMissVertexInput);
         return false;
     }
     if (maxwell3d.draw_manager.draw_state.topology != topology ||
         maxwell3d.engine_state != engine_state ||
         ComputeAttachment0DualSourceBlend(maxwell3d.regs) != dual_source_blend) {
+        Note(Stat::PipeMissDrawState);
         return false;
     }
-    const u32* const regs = maxwell3d.regs.reg_array.data();
     for (size_t index = 0; index < value_registers.size(); ++index) {
         if (regs[value_registers[index]] != values[index]) {
+            Note(Stat::PipeMissValues);
             return false;
         }
     }
@@ -800,10 +837,16 @@ bool PipelineStateWatch::StateUnchanged(Maxwell3D& maxwell3d,
         const auto& transform = maxwell3d.regs.viewport_transform;
         for (size_t index = 0; index < transform.size(); ++index) {
             if (static_cast<u16>(transform[index].swizzle.raw) != state.viewport_swizzles[index]) {
+                Note(Stat::PipeMissSwizzles);
                 return false;
             }
         }
         flags[Dirty::ViewportSwizzles] = false;
+    }
+    if (flag_values_same) {
+        // The registers equal the last Store's again: the flag may stand for them as cleared.
+        flags[Dirty::PipelineState] = false;
+        Note(Stat::PipeFlagValuesSame);
     }
     return true;
 }

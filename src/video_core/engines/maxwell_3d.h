@@ -3236,9 +3236,11 @@ public:
     /// `repeats - 1` more identical instances.
     void RunDrawBatch(Core::System& system, const u64* methods, u32 count, u32 repeats);
     /// GpuSplit's back (Kind::CbWrite, EDEN_NX2_FRONT_CB_ENCODE): `count` (1-4) constant buffer
-    /// data words (`first`, then `rest`), to const_buffer.buffer + nibble i of `nibbles`, as the
-    /// single writes would.
-    void BackCbWrite(Core::System& system, u32 nibbles, u32 first, const u32* rest, u32 count);
+    /// data words (`first`, then the others two per u64 of `rest`, low half first), to
+    /// const_buffer.buffer + nibble i of `nibbles`, as the single writes would.
+    void BackCbWrite(Core::System& system, u32 nibbles, u32 first, const u64* rest, u32 count);
+    /// Whether `engine` is a Maxwell3D (GpuSplit's back profile zones; any thread).
+    [[nodiscard]] static bool IsMaxwell3D(const EngineInterface* engine);
     /// GpuSplit's back (Kind::CbBind): a write of bind group `stage`'s raw_config.
     void BackCbBind(Core::System& system, u32 stage, u32 argument);
 

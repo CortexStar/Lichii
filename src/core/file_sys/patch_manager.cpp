@@ -244,7 +244,10 @@ bool OotPollBackoffEnabled() {
 
 // The resource request thread (main+0xF7A0) rescans its pending requests at once when one is not
 // ready (`tbz w8, #0, loop` at main+0x14ABC, w8 = "all done"). That branch now goes through the
-// padding at main+0x17088: `svc #0xf3` (a short sleep, svc_nx2_oot_poll.cpp) and `b loop`.
+// padding at main+0x17088: `svc #0xf3` and `b loop`. The SVC (svc_nx2_oot_poll.cpp) sleeps in
+// proportion to the walk only if the walk was a pure re-check; otherwise it returns at once. This
+// is the only re-walk-without-waiting in state 3: the other loop-back, after 15 loads issued in one
+// walk (main+0x15158), is progress and stays immediate.
 constexpr std::array<u8, 4> OOT_POLL_RESCAN_ORIGINAL{0x28, 0x70, 0x05, 0x36}; // tbz w8, #0, 0xf8c0
 constexpr std::array<u8, 4> OOT_POLL_RESCAN_BRANCH{0x68, 0x2E, 0x01, 0x36};   // tbz w8, #0, 0x17088
 constexpr std::array<u8, 8> OOT_POLL_PADDING_ORIGINAL{};

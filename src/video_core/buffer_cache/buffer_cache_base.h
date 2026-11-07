@@ -277,7 +277,9 @@ public:
         return !AsyncBufferDownloads();
     }
 
-    bool InlineMemory(DAddr dest_address, size_t copy_size, std::span<const u8> inlined_buffer);
+    /// `pages_clean` (optional): set when no page the write touches holds GPU-written data.
+    bool InlineMemory(DAddr dest_address, size_t copy_size, std::span<const u8> inlined_buffer,
+                      bool* pages_clean = nullptr);
 
     void BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr, u32 size);
 
@@ -665,10 +667,23 @@ private:
     /// Host buffer writes other than UploadNativeBank over [device_addr, device_addr + size).
     void InvalidateBankShadows(DAddr device_addr, u64 size);
 
+    /// UploadHotPages wrote `bytes` over the device page `page`: bank shadow pages that are
+    /// exactly this page take them as what the host holds (EDEN_NX2_SHADOW_REFRESH), others are
+    /// invalidated.
+    void RefreshBankShadows(DAddr page, const u8* bytes);
+
+    /// UploadNativeBank wrote `bytes` over [device_addr, device_addr + size): hot pages wholly
+    /// inside take them as what the host holds (EDEN_NX2_SHADOW_REFRESH), others are invalidated.
+    void RefreshHotShadows(DAddr device_addr, const u8* bytes, u64 size);
+
     std::map<DAddr, std::unique_ptr<BankShadow>> bank_shadows;
 
-    /// A range SynchronizeBuffer left clean (EDEN_NX2_SYNC_SKIP): clean while its buffer saw no
-    /// CPU-dirty mark (Buffer::cpu_dirty_gen, cpu_dirty_epoch) and no buffer came or went.
+    /// A range SynchronizeBuffer left clean (EDEN_NX2_SYNC_SKIP): clean while no CPU-dirty mark
+    /// fell in it (the 256 KiB regions it covers when it covers at most MAX_SKIP_REGIONS of them,
+    /// else its buffer: Buffer::cpu_dirty_gen), no mark not tied to a range (cpu_dirty_epoch) and
+    /// no buffer came or went. `hot_mask` (EDEN_NX2_HOT_SYNC_SKIP): the hot pages in the range,
+    /// bit k for the k-th device page from the range's first; they are always dirty, and a hit
+    /// compares them.
     struct SyncSkip {
         const Buffer* buffer{};
         DAddr device_addr{};
@@ -676,15 +691,61 @@ private:
         u64 gen{};
         u64 epoch{};
         u64 binding_epoch{};
+        u64 region_sum{};
+        u64 hot_mask{};
     };
     static constexpr u32 SYNC_SKIP_BITS = 10;
     std::array<SyncSkip, size_t{1} << SYNC_SKIP_BITS> sync_skip{};
     /// Bumped by CPU-dirty marks not tied to one range (cached writes, deleted buffers).
     u64 cpu_dirty_epoch = 1;
 
+    /// CPU-dirty marks per 256 KiB device region (EDEN_NX2_SKIP_REGIONS), regions folded onto
+    /// SKIP_REGION_SLOTS counters (a shared counter only drops more entries). The counters only
+    /// grow, so their sum over a range is unchanged exactly when none of them changed.
+    static constexpr u32 SKIP_REGION_BITS = 18;
+    static constexpr size_t SKIP_REGION_SLOTS = 4096;
+    static constexpr u64 MAX_SKIP_REGIONS = 64;
+    std::array<u64, SKIP_REGION_SLOTS> skip_region_gen{};
+
+    /// The number of regions [device_addr, device_addr + size) covers (1 for an empty range).
+    [[nodiscard]] static u64 SkipRegionCount(DAddr device_addr, u64 size) noexcept {
+        const u64 first = device_addr >> SKIP_REGION_BITS;
+        const u64 last = (device_addr + (size == 0 ? 0 : size - 1)) >> SKIP_REGION_BITS;
+        return last - first + 1;
+    }
+
+    [[nodiscard]] u64 SkipRegionSum(DAddr device_addr, u64 size) const noexcept {
+        const u64 first = device_addr >> SKIP_REGION_BITS;
+        const u64 count = SkipRegionCount(device_addr, size);
+        u64 sum = 0;
+        for (u64 region = first; region != first + count; ++region) {
+            sum += skip_region_gen[region % SKIP_REGION_SLOTS];
+        }
+        return sum;
+    }
+
+    void BumpSkipRegions(DAddr device_addr, u64 size) noexcept {
+        const u64 first = device_addr >> SKIP_REGION_BITS;
+        const u64 count = SkipRegionCount(device_addr, size);
+        if (count >= SKIP_REGION_SLOTS) {
+            for (u64& gen : skip_region_gen) {
+                ++gen;
+            }
+            return;
+        }
+        for (u64 region = first; region != first + count; ++region) {
+            ++skip_region_gen[region % SKIP_REGION_SLOTS];
+        }
+    }
+
     /// CPU-dirty marks over [device_addr, device_addr + size): their buffers' syncs can't be
     /// skipped until they ran again.
     void NoteCpuDirty(DAddr device_addr, u64 size);
+
+    /// A SYNC_SKIP hit on a range holding hot pages (`hot_mask` from the range's first device
+    /// page): compares and uploads them. Empty when one of them needs the full walk.
+    [[nodiscard]] std::optional<bool> SyncSkippedHotPages(Buffer& buffer, DAddr device_addr,
+                                                          u64 hot_mask);
 
     /// A page the guest rewrites between most of its syncs (EDEN_NX2_HOT_PAGES): it stays
     /// unprotected and CPU-dirty (Type::Hot in the tracker), and each sync compares its guest
@@ -698,9 +759,14 @@ private:
     struct PageHeat {
         u32 heat{};
         u64 frame{};
+        u64 no_promote_until{}; ///< Demoted for its cost: not promoted before this frame
     };
     static constexpr size_t MAX_HOT_PAGES = 2048;
     static constexpr u32 HOT_PAGE_HEAT = 16;
+    /// EDEN_NX2_HOT_DEMOTE: unchanged compares in a row that cost more than the guest fault and
+    /// re-protection the hot page saves (~0.4 us a compare against several us a fault).
+    static constexpr u32 HOT_DEMOTE_UNCHANGED = 8;
+    static constexpr u64 HOT_COOLDOWN_FRAMES = 512;
     std::unordered_map<DAddr, std::unique_ptr<HotPage>> hot_pages;
     std::unordered_map<DAddr, PageHeat> page_heat;
     std::vector<DAddr> hot_changed_pages;
@@ -930,6 +996,28 @@ private:
     std::array<StorageResolveCache, NUM_STAGES> graphics_storage_resolve{};
     StorageResolveCache compute_storage_resolve{};
 
+    /// One storage binding's last lookup when it resolved to a single buffer (no segments), kept
+    /// on the same terms as StorageResolveCache (EDEN_NX2_STORAGE_MEMO). Index NUM_STAGES is
+    /// compute.
+    struct StorageBindingMemo {
+        u64 epoch{}; ///< binding_epoch when stored; 0 never matches
+        u64 map_serial{};
+        size_t as_id{};
+        const void* channel{};
+        DAddr device_addr{};
+        GPUVAddr gpu_addr{};
+        u32 size{};
+        bool is_written{};
+        BufferId buffer_id{};
+    };
+    std::array<std::array<StorageBindingMemo, NUM_STORAGE_BUFFERS>, NUM_STAGES + 1>
+        storage_binding_memo{};
+
+    /// Resolves one storage binding (FindBuffer, then ResolveMultiRangeStorage), from its memo
+    /// when nothing it depends on changed.
+    void ResolveStorageBinding(size_t memo_stage, u32 index, Binding& binding, bool is_written,
+                               std::vector<MultiRangeSegment>& pool);
+
     /// A vertex or index buffer binding and what it was resolved from: the same GPU range, the
     /// same mappings and the same set of buffers resolve to it again (EDEN_NX2_BUFCACHE_GEOMEMO).
     struct GeometryMemo {
@@ -945,6 +1033,21 @@ private:
     std::array<GeometryMemo, NUM_VERTEX_BUFFERS> vertex_memo{};
     GeometryMemo index_memo{};
     std::array<GeometryMemo, NUM_COMPUTE_UNIFORM_BUFFERS> compute_uniform_memo{};
+
+    /// The last BindGraphicsUniformBuffer of a (stage, slot) and what it translated to, valid
+    /// while that binding is the one it set (DisableGraphicsUniformBuffer clears it) and the
+    /// mappings and the set of buffers stay the same (EDEN_NX2_UBO_REBIND).
+    struct UniformBindMemo {
+        u64 epoch{}; ///< binding_epoch when stored; 0 never matches
+        u64 map_serial{};
+        size_t as_id{};
+        const void* channel{};
+        GPUVAddr gpu_addr{};
+        DAddr device_addr{};
+        u32 size{};
+    };
+    std::array<std::array<UniformBindMemo, NUM_GRAPHICS_UNIFORM_BUFFERS>, NUM_STAGES>
+        uniform_bind_memo{};
 
     [[nodiscard]] bool ReuseGeometry(const GeometryMemo& memo, GPUVAddr begin, GPUVAddr end,
                                      u64 extra) const;

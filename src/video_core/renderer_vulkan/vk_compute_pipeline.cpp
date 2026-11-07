@@ -433,25 +433,36 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     for (const auto& desc : info.image_descriptors) {
         add_image(desc, desc.is_written);
     }
+    // EDEN_NX2_BINDMEMO: the bindings in the memo are taken from it, the others are resolved
+    // (EDEN_NX2_BINDMEMO_PARTIAL) and recorded once their descriptors are pushed.
     boost::container::small_vector<TextureCache::BindingMemo*, 64> memos;
-    bool memo_hit = false;
-    u64 memo_clock = 0;
-    if (use_bind_memo) {
+    BindingMisses misses;
+    TextureCache::BindingLookup lookup{};
+    bool aliased_hit = false;
+    const bool memo_usable = use_bind_memo && binding_kinds.size() == views.size() &&
+                             sampler_handles.size() ==
+                                 Shader::NumDescriptors(info.texture_descriptors);
+    if (memo_usable) {
         VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::FillImageViews};
         memos.resize(views.size());
         samplers.resize(sampler_handles.size());
-        memo_hit = FindImageBindings(texture_cache, binding_kinds,
-                                     std::span(views.data(), views.size()),
-                                     std::span(sampler_handles.data(), sampler_handles.size()),
-                                     samplers.data(), memos.data());
-        if (!memo_hit) {
-            memo_clock = texture_cache.BindingClock();
-            for (size_t index = 0; index < sampler_handles.size(); ++index) {
-                samplers[index] = texture_cache.GetSamplerId(sampler_handles[index], true);
+        lookup = texture_cache.BeginBindingLookup(true);
+        FindImageBindings(texture_cache, lookup, binding_kinds,
+                          std::span(views.data(), views.size()),
+                          std::span(sampler_handles.data(), sampler_handles.size()),
+                          samplers.data(), memos.data(), misses, aliased_hit);
+        ResolveMissedBindings(texture_cache, lookup, std::span(views.data(), views.size()),
+                              std::span(sampler_handles.data(), sampler_handles.size()),
+                              std::span(samplers.data(), samplers.size()), memos.data(),
+                              std::span(misses.data(), misses.size()), aliased_hit,
+                              true);
+    } else {
+        if (use_bind_memo) {
+            samplers.clear();
+            for (const u32 handle : sampler_handles) {
+                samplers.push_back(texture_cache.GetSamplerId(handle, true));
             }
         }
-    }
-    if (!memo_hit) {
         VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::FillImageViews};
         texture_cache.FillImageViews(std::span(views.data(), views.size()), true);
     }
@@ -586,28 +597,28 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     RescalingPushConstant rescaling;
     const VideoCommon::SamplerId* samplers_it{samplers.data()};
     const VideoCommon::ImageViewInOut* views_it{views.data()};
-    if (!shadow && memo_hit) {
-        TextureCache::BindingMemo* const* memos_it{memos.data()};
-        PushMemoDescriptors(texture_cache, guest_descriptor_queue, info, rescaling, memos_it);
-    } else if (!shadow) {
-        // A resolved dispatch leaves its descriptors here to be remembered.
+    if (!shadow) {
+        // Resolved bindings leave their descriptors here to be remembered.
         boost::container::small_vector<DescriptorUpdateEntry, 16> record_descriptors;
         boost::container::small_vector<u8, 16> record_rescaled;
         std::optional<ImageBindingRecord> record;
-        if (use_bind_memo) {
-            record_descriptors.resize(views.size());
-            record_rescaled.resize(views.size());
-            record = ImageBindingRecord{record_descriptors.data(), record_rescaled.data(),
-                                        views.data()};
+        if (memo_usable) {
+            if (!misses.empty()) {
+                record_descriptors.resize(views.size());
+                record_rescaled.resize(views.size());
+            }
+            record = ImageBindingRecord{views.data(), memos.data(),
+                                        misses.empty() ? nullptr : record_descriptors.data(),
+                                        misses.empty() ? nullptr : record_rescaled.data()};
         }
         PushImageDescriptors(texture_cache, guest_descriptor_queue, info, rescaling, samplers_it,
                              views_it, record ? &*record : nullptr);
-        if (record) {
-            RecordImageBindings(texture_cache, binding_kinds,
+        if (record && !misses.empty()) {
+            RecordImageBindings(texture_cache, lookup, binding_kinds,
                                 std::span(views.data(), views.size()),
                                 std::span(sampler_handles.data(), sampler_handles.size()),
-                                std::span(samplers.data(), samplers.size()),
-                                record_descriptors.data(), record_rescaled.data(), memo_clock);
+                                std::span(samplers.data(), samplers.size()), memos.data(),
+                                record_descriptors.data(), record_rescaled.data());
         }
     } else {
         auto sampled_info{info};

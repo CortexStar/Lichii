@@ -624,21 +624,55 @@ std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainCPUBuffer(
 template <class P>
 void BufferCache<P>::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr,
                                                u32 size) {
-    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
-    if (!device_addr) {
-        channel_state->uniform_buffers[stage][index] = NULL_BINDING;
+    UniformBindMemo& memo = uniform_bind_memo[stage][index];
+    Binding& current = channel_state->uniform_buffers[stage][index];
+    // EDEN_NX2_UBO_REBIND: the binding this slot's last bind set, bound again with the same GPU
+    // range while the mappings (map serial) and the set of buffers (binding_epoch: DeleteBuffer
+    // resets bindings to deleted buffers, any buffer creation or join bumps it) are unchanged.
+    // The translation gives the same device range again and the buffer it resolved to is still
+    // what FindBuffer returns: keep it, with its buffer_id, instead of translating again here and
+    // looking the buffer up again in UpdateUniformBuffers. The contents are read at the draw as
+    // before (BindHostGraphicsUniformBuffer). FindBuffer waits for the buffer's writes with
+    // accurate GPU fences: keep that.
+    if (Nx2BufCache::g_ubo_rebind && memo.epoch == binding_epoch && memo.gpu_addr == gpu_addr &&
+        memo.size == size && memo.channel == static_cast<const void*>(channel_state) &&
+        current.device_addr == memo.device_addr && current.size == size &&
+        memo.as_id == gpu_memory->GetID() && memo.map_serial == gpu_memory->MapSerial() &&
+        !Settings::IsGPUFenceBehaviorAccurate()) {
+        Nx2BufCache::Note(Nx2BufCache::Stat::UboRebindKept);
+        // As a bind UpdateUniformBuffers resolves again: OpenGL binds the host buffer again.
+        if constexpr (HAS_PERSISTENT_UNIFORM_BUFFER_BINDINGS) {
+            channel_state->dirty_uniform_buffers[stage] |= 1U << index;
+        }
         return;
     }
-    const Binding binding{
+    // The serial before the translation: a map in between makes the memo miss next time.
+    const u64 map_serial = gpu_memory->MapSerial();
+    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
+    if (!device_addr) {
+        current = NULL_BINDING;
+        memo.epoch = 0;
+        return;
+    }
+    current = Binding{
         .device_addr = *device_addr,
         .size = size,
         .buffer_id = BufferId{},
     };
-    channel_state->uniform_buffers[stage][index] = binding;
+    memo = UniformBindMemo{
+        .epoch = binding_epoch,
+        .map_serial = map_serial,
+        .as_id = gpu_memory->GetID(),
+        .channel = channel_state,
+        .gpu_addr = gpu_addr,
+        .device_addr = *device_addr,
+        .size = size,
+    };
 }
 
 template <class P>
 void BufferCache<P>::DisableGraphicsUniformBuffer(size_t stage, u32 index) {
+    uniform_bind_memo[stage][index].epoch = 0;
     auto& current = channel_state->uniform_buffers[stage][index];
     if (current.device_addr == 0 && current.size == 0 && current.buffer_id == NULL_BUFFER_ID)
         [[likely]] {
@@ -2141,13 +2175,52 @@ void BufferCache<P>::UpdateStorageBuffers(size_t stage) {
     ForEachEnabledBit(enabled, [&](u32 index) {
         // Resolve buffer
         Binding& binding = channel_state->storage_buffers[stage][index];
-        const BufferId buffer_id = FindBuffer(binding.device_addr, binding.size, false);
-        binding.buffer_id = buffer_id;
         const bool is_written = ((written >> index) & 1) != 0;
-        ResolveMultiRangeStorage(binding, is_written, graphics_segments);
+        ResolveStorageBinding(stage, index, binding, is_written, graphics_segments);
     });
     StoreStorageResolve(cache, channel_state->storage_buffers[stage], enabled, written,
                         graphics_segments, start_epoch);
+}
+
+template <class P>
+void BufferCache<P>::ResolveStorageBinding(size_t memo_stage, u32 index, Binding& binding,
+                                           bool is_written, std::vector<MultiRangeSegment>& pool) {
+    StorageBindingMemo& memo = storage_binding_memo[memo_stage][index];
+    // FindBuffer waits for the buffer's writes with accurate GPU fences: keep that.
+    const bool use_memo = Nx2BufCache::g_storage_memo && BindCacheEnabled() &&
+                          !Settings::IsGPUFenceBehaviorAccurate();
+    // Before the lookup: a mapping change during it leaves a memo that never matches.
+    const u64 map_serial = gpu_memory->MapSerial();
+    const size_t as_id = gpu_memory->GetID();
+    if (use_memo && memo.epoch == binding_epoch && memo.device_addr == binding.device_addr &&
+        memo.gpu_addr == binding.gpu_addr && memo.size == binding.size &&
+        memo.is_written == is_written && memo.map_serial == map_serial && memo.as_id == as_id &&
+        memo.channel == static_cast<const void*>(channel_state)) {
+        // What FindBuffer and a ResolveMultiRangeStorage finding one range gave last time.
+        binding.buffer_id = memo.buffer_id;
+        binding.segment_first = 0;
+        binding.segment_count = 0;
+        Nx2BufCache::Note(Nx2BufCache::Stat::StorageMemoHit);
+        return;
+    }
+    binding.buffer_id = FindBuffer(binding.device_addr, binding.size, false);
+    ResolveMultiRangeStorage(binding, is_written, pool);
+    memo.epoch = 0;
+    if (use_memo && binding.segment_count == 0) {
+        // binding_epoch after the lookup: a buffer it created is part of what the memo holds,
+        // and any later creation or deletion drops the memo.
+        memo = StorageBindingMemo{
+            .epoch = binding_epoch,
+            .map_serial = map_serial,
+            .as_id = as_id,
+            .channel = channel_state,
+            .device_addr = binding.device_addr,
+            .gpu_addr = binding.gpu_addr,
+            .size = binding.size,
+            .is_written = is_written,
+            .buffer_id = binding.buffer_id,
+        };
+    }
 }
 
 template <class P>
@@ -2305,9 +2378,8 @@ void BufferCache<P>::UpdateComputeStorageBuffers() {
     ForEachEnabledBit(enabled, [&](u32 index) {
         // Resolve buffer
         Binding& binding = channel_state->compute_storage_buffers[index];
-        binding.buffer_id = FindBuffer(binding.device_addr, binding.size, false);
         const bool is_written = ((written >> index) & 1) != 0;
-        ResolveMultiRangeStorage(binding, is_written, compute_segments);
+        ResolveStorageBinding(NUM_STAGES, index, binding, is_written, compute_segments);
     });
     StoreStorageResolve(compute_storage_resolve, channel_state->compute_storage_buffers, enabled,
                         written, compute_segments, start_epoch);
@@ -2814,15 +2886,32 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
     // still clean (EDEN_NX2_SYNC_SKIP). Draws sync the same multi-megabyte storage bindings
     // and vertex buffers again and again, each a walk over every tracker manager they cover.
     SyncSkip* skip_entry = nullptr;
+    // A range over few 256 KiB regions is tied to the CPU-dirty marks in them, not to those in
+    // its whole buffer: OoT's inline constant buffer writes mark its 100 MiB heap buffer before
+    // nearly every draw (EDEN_NX2_SKIP_REGIONS).
+    const bool by_regions =
+        Nx2BufCache::g_skip_regions && SkipRegionCount(device_addr, size) <= MAX_SKIP_REGIONS;
     if (Nx2BufCache::g_sync_skip && skip_clean) {
         skip_entry = &sync_skip[((device_addr ^ (u64{size} << 40)) * 0x9E3779B97F4A7C15ULL) >>
                                 (64 - SYNC_SKIP_BITS)];
         if (skip_entry->buffer == &buffer && skip_entry->device_addr == device_addr &&
-            skip_entry->size == size && skip_entry->gen == buffer.cpu_dirty_gen &&
-            skip_entry->epoch == cpu_dirty_epoch && skip_entry->binding_epoch == binding_epoch) {
-            return true;
+            skip_entry->size == size && skip_entry->epoch == cpu_dirty_epoch &&
+            skip_entry->binding_epoch == binding_epoch &&
+            (by_regions ? skip_entry->region_sum == SkipRegionSum(device_addr, size)
+                        : skip_entry->gen == buffer.cpu_dirty_gen)) {
+            if (skip_entry->hot_mask == 0) {
+                Nx2BufCache::Note(Nx2BufCache::Stat::SyncSkipHit);
+                return true;
+            }
+            // The rest of the range is clean: only its hot pages (never clean) need a look.
+            if (const std::optional<bool> synced =
+                    SyncSkippedHotPages(buffer, device_addr, skip_entry->hot_mask)) {
+                Nx2BufCache::Note(Nx2BufCache::Stat::SyncSkipHotHit);
+                return *synced;
+            }
         }
     }
+    Nx2BufCache::Note(Nx2BufCache::Stat::SyncWalk);
     const auto for_each_upload_range = [&](auto&& func) {
         if (skip_clean) {
             memory_tracker.ForEachDirtyUploadRange(device_addr, size, func);
@@ -2830,19 +2919,27 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
             memory_tracker.ForEachUploadRange(device_addr, size, func);
         }
     };
-    // The range is clean now unless a hot page (always dirty) lies in it.
+    // The range is clean now unless a hot page (always dirty) lies in it. Such a range keeps its
+    // entry with the hot pages listed (EDEN_NX2_HOT_SYNC_SKIP) when they all fit the mask, all
+    // synced from their copies and none was promoted or demoted.
     bool range_has_hot = false;
+    bool hot_skip_ok = Nx2BufCache::g_hot_sync_skip;
+    u64 hot_mask = 0;
+    const DAddr hot_base = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
     const auto store_skip = [&] {
-        if (skip_entry != nullptr && !range_has_hot) {
-            *skip_entry = SyncSkip{
-                .buffer = &buffer,
-                .device_addr = device_addr,
-                .size = size,
-                .gen = buffer.cpu_dirty_gen,
-                .epoch = cpu_dirty_epoch,
-                .binding_epoch = binding_epoch,
-            };
+        if (skip_entry == nullptr || (range_has_hot && !hot_skip_ok)) {
+            return;
         }
+        *skip_entry = SyncSkip{
+            .buffer = &buffer,
+            .device_addr = device_addr,
+            .size = size,
+            .gen = buffer.cpu_dirty_gen,
+            .epoch = cpu_dirty_epoch,
+            .binding_epoch = binding_epoch,
+            .region_sum = by_regions ? SkipRegionSum(device_addr, size) : 0,
+            .hot_mask = range_has_hot ? hot_mask : 0,
+        };
     };
 #ifdef __ANDROID__
     const bool use_optimized_vertex_buffers = Settings::values.use_optimized_vertex_buffers.GetValue();
@@ -2889,12 +2986,21 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
                     range_has_hot = true;
                     for (DAddr page = device_addr_out; page < device_addr_out + range_size;
                          page += DEVICE_PAGESIZE) {
+                        const u64 bit = (page - hot_base) / DEVICE_PAGESIZE;
+                        if (page >= hot_base && bit < 64) {
+                            hot_mask |= u64{1} << bit;
+                        } else {
+                            hot_skip_ok = false;
+                        }
                         if (!SyncHotPage(page)) {
+                            hot_skip_ok = false;
                             add_dirty(page, DEVICE_PAGESIZE);
                         }
                     }
                 });
             if (!hot_promote_pages.empty() || !hot_demote_pages.empty()) {
+                // Promotions mark CPU-dirty and demoted pages are still dirty: walk next time.
+                hot_skip_ok = false;
                 ApplyHotPageChanges();
             }
             if (!hot_changed_pages.empty()) {
@@ -3016,11 +3122,15 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
 
 template <class P>
 bool BufferCache<P>::InlineMemory(DAddr dest_address, size_t copy_size,
-                                  std::span<const u8> inlined_buffer) {
+                                  std::span<const u8> inlined_buffer, bool* pages_clean) {
     // Pages without GPU-written data are the common case: test that before the buffer lookup.
     DAddr aligned_start = Common::AlignDown(dest_address, DEVICE_PAGESIZE);
     DAddr aligned_end = Common::AlignUp(dest_address + copy_size, DEVICE_PAGESIZE);
-    if (!IsRegionGpuModified(aligned_start, aligned_end - aligned_start)) {
+    const bool clean = !IsRegionGpuModified(aligned_start, aligned_end - aligned_start);
+    if (pages_clean != nullptr) {
+        *pages_clean = clean;
+    }
+    if (clean) {
         return false;
     }
     const bool is_dirty = IsRegionRegistered(dest_address, copy_size);
@@ -3078,6 +3188,10 @@ void BufferCache<P>::UploadNativeBank(Buffer& buffer, DAddr device_addr, u64 upl
         boost::container::small_vector<BufferCopy, 17> copies;
         u64 total_size = 0;
         u32 page = 0;
+        // As hot pages: guest bytes over a page the GPU wrote may be older than its results there
+        // (not, or no longer, in gpu_modified_ranges). Such pages keep the usual tracking.
+        const bool bank_gpu_written = gpu_modified_ranges.Intersects(device_addr, upload_size) ||
+                                      Tegra::Nx2MayBeGpuWritten(device_addr, upload_size);
         for (u64 offset = 0; offset < upload_size && page < 32; ++page) {
             const DAddr address = device_addr + offset;
             const u64 length = (std::min<u64>)(
@@ -3085,9 +3199,11 @@ void BufferCache<P>::UploadNativeBank(Buffer& buffer, DAddr device_addr, u64 upl
             const u32 bit = 1U << page;
             const u8* const guest = device_memory.template GetPointer<u8>(address);
             u8* const saved = shadow.bytes.data() + offset;
-            if (guest == nullptr) {
+            if (guest == nullptr ||
+                (bank_gpu_written && (gpu_modified_ranges.Intersects(address, length) ||
+                                      Tegra::Nx2MayBeGpuWritten(address, length)))) {
                 shadow.valid &= ~bit;
-            } else if ((shadow.valid & bit) == 0 || std::memcmp(saved, guest, length) != 0) {
+            } else if ((shadow.valid & bit) == 0 || !Nx2BufCache::BytesEqual(saved, guest, length)) {
                 std::memcpy(saved, guest, length);
                 shadow.valid |= bit;
                 if (!copies.empty() &&
@@ -3119,7 +3235,9 @@ void BufferCache<P>::UploadNativeBank(Buffer& buffer, DAddr device_addr, u64 upl
         const bool can_reorder = runtime.CanReorderUpload(buffer, copies_span);
         runtime.CopyBuffer(buffer, upload_staging.buffer, copies_span, true, can_reorder);
         for (const BufferCopy& copy : copies) {
-            InvalidateHotShadows(device_addr + (copy.dst_offset - base_offset), copy.size);
+            const u64 bank_offset = copy.dst_offset - base_offset;
+            RefreshHotShadows(device_addr + bank_offset, shadow.bytes.data() + bank_offset,
+                              copy.size);
         }
         Nx2BufCache::Note(Nx2BufCache::Stat::BankUpload);
         Nx2BufCache::Note(Nx2BufCache::Stat::BankUploadBytes, total_size);
@@ -3129,6 +3247,38 @@ void BufferCache<P>::UploadNativeBank(Buffer& buffer, DAddr device_addr, u64 upl
 template <class P>
 void BufferCache<P>::NoteCpuDirty(DAddr device_addr, u64 size) {
     ForEachBufferInRange(device_addr, size, [](BufferId, Buffer& buffer) { ++buffer.cpu_dirty_gen; });
+    BumpSkipRegions(device_addr, size);
+}
+
+template <class P>
+std::optional<bool> BufferCache<P>::SyncSkippedHotPages(Buffer& buffer, DAddr device_addr,
+                                                        u64 hot_mask) {
+    hot_changed_pages.clear();
+    hot_promote_pages.clear();
+    hot_demote_pages.clear();
+    const DAddr base = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
+    for (u64 mask = hot_mask; mask != 0; mask &= mask - 1) {
+        const DAddr page = base + static_cast<DAddr>(std::countr_zero(mask)) * DEVICE_PAGESIZE;
+        if (!SyncHotPage(page)) {
+            // No longer hot (or unmapped, or GPU-written): the walk uploads it from guest memory.
+            // The copies refreshed above are not on the host yet: the walk must upload them too.
+            for (const DAddr changed : hot_changed_pages) {
+                if (const auto it = hot_pages.find(changed); it != hot_pages.end()) {
+                    it->second->valid = false;
+                }
+            }
+            return std::nullopt;
+        }
+    }
+    if (!hot_demote_pages.empty()) {
+        // Unchanged long enough: protected again, and still CPU-dirty for the next sync's walk.
+        ApplyHotPageChanges();
+    }
+    if (hot_changed_pages.empty()) {
+        return true;
+    }
+    UploadHotPages(buffer);
+    return false;
 }
 
 template <class P>
@@ -3139,6 +3289,10 @@ void BufferCache<P>::NoteDirtyPages(DAddr device_addr, u64 size) {
     }
     for (DAddr page = device_addr; page < device_addr + size; page += DEVICE_PAGESIZE) {
         PageHeat& heat = page_heat[page];
+        // Demoted for costing more compares than it saved faults: not again for a while.
+        if (Nx2BufCache::g_hot_demote && frame_tick < heat.no_promote_until) {
+            continue;
+        }
         // Each frame without a dirty sync cools the page by one: a page dirty at the syncs of
         // every frame (or many times in one frame) heats up, one dirty every other frame doesn't.
         const u64 idle = frame_tick > heat.frame + 1 ? frame_tick - heat.frame - 1 : 0;
@@ -3170,10 +3324,20 @@ bool BufferCache<P>::SyncHotPage(DAddr page) {
         hot.valid = false;
         return false;
     }
-    if (hot.valid && std::memcmp(hot.bytes.data(), guest, DEVICE_PAGESIZE) == 0) {
+    if (hot.valid && Nx2BufCache::BytesEqual(hot.bytes.data(), guest, DEVICE_PAGESIZE)) {
         Nx2BufCache::Note(Nx2BufCache::Stat::HotSame);
-        // Unchanged for many syncs over several frames: protect it again.
-        if (++hot.unchanged >= 64 && frame_tick >= hot.changed_frame + 4) {
+        ++hot.unchanged;
+        if (Nx2BufCache::g_hot_demote) {
+            // Synced many times per change (a page rewritten once a frame in a bank bound at
+            // every draw): the compares cost more than the fault and re-protection a change
+            // costs a protected page. Protect it again and keep it out for a while.
+            if (hot.unchanged >= HOT_DEMOTE_UNCHANGED) {
+                hot_demote_pages.push_back(page);
+                page_heat[page].no_promote_until = frame_tick + HOT_COOLDOWN_FRAMES;
+                Nx2BufCache::Note(Nx2BufCache::Stat::HotCostDemote);
+            }
+        } else if (hot.unchanged >= 64 && frame_tick >= hot.changed_frame + 4) {
+            // Unchanged for many syncs over several frames: protect it again.
             hot_demote_pages.push_back(page);
         }
         return true;
@@ -3191,6 +3355,8 @@ void BufferCache<P>::ApplyHotPageChanges() {
     for (const DAddr page : hot_demote_pages) {
         if (hot_pages.erase(page) != 0) {
             memory_tracker.MarkRegionHot(page, DEVICE_PAGESIZE, false);
+            // Still CPU-dirty, now as a plain page: SYNC_SKIP entries over it must walk again.
+            NoteCpuDirty(page, DEVICE_PAGESIZE);
             Nx2BufCache::Note(Nx2BufCache::Stat::HotDemote);
         }
     }
@@ -3257,7 +3423,7 @@ void BufferCache<P>::UploadHotPages(Buffer& buffer) {
         any_buffer_uploaded = true;
     }
     for (const DAddr page : hot_changed_pages) {
-        InvalidateBankShadows(page, DEVICE_PAGESIZE);
+        RefreshBankShadows(page, hot_pages[page]->bytes.data());
         // What WriteMemory does for a noticed CPU write: derived vertex data is rebuilt.
         MarkVertexBuffersStale(page, DEVICE_PAGESIZE);
     }
@@ -3306,6 +3472,70 @@ void BufferCache<P>::InvalidateHotShadows(DAddr device_addr, u64 size) {
     for (auto& [page, hot] : hot_pages) {
         if (page >= begin && page < end) {
             hot->valid = false;
+        }
+    }
+}
+
+template <class P>
+void BufferCache<P>::RefreshBankShadows(DAddr page, const u8* bytes) {
+    if (bank_shadows.empty()) {
+        return;
+    }
+    if (!Nx2BufCache::g_shadow_refresh) {
+        InvalidateBankShadows(page, DEVICE_PAGESIZE);
+        return;
+    }
+    constexpr DAddr bank_span = 0x10000;
+    auto it = bank_shadows.lower_bound(page > bank_span ? page - bank_span : 0);
+    for (; it != bank_shadows.end() && it->first < page + DEVICE_PAGESIZE; ++it) {
+        const DAddr bank = it->first;
+        if (bank + bank_span <= page) {
+            continue;
+        }
+        BankShadow& shadow = *it->second;
+        // UploadNativeBank splits a bank at device page boundaries: a device page wholly inside
+        // the bank is one shadow page, at the same offset.
+        if (page >= bank && page + DEVICE_PAGESIZE <= bank + bank_span) {
+            const u64 index = (page >> Core::DEVICE_PAGEBITS) - (bank >> Core::DEVICE_PAGEBITS);
+            if (index < 32) {
+                std::memcpy(shadow.bytes.data() + (page - bank), bytes, DEVICE_PAGESIZE);
+                shadow.valid |= 1U << index;
+            }
+            continue;
+        }
+        const DAddr first = (std::max)(bank, page);
+        const DAddr end = (std::min)(bank + bank_span, page + DEVICE_PAGESIZE);
+        const u64 first_index = (first >> Core::DEVICE_PAGEBITS) - (bank >> Core::DEVICE_PAGEBITS);
+        const u64 last_index = ((end - 1) >> Core::DEVICE_PAGEBITS) - (bank >> Core::DEVICE_PAGEBITS);
+        for (u64 index = first_index; index <= last_index && index < 32; ++index) {
+            shadow.valid &= ~(1U << index);
+        }
+    }
+}
+
+template <class P>
+void BufferCache<P>::RefreshHotShadows(DAddr device_addr, const u8* bytes, u64 size) {
+    if (hot_pages.empty() || size == 0) {
+        return;
+    }
+    if (!Nx2BufCache::g_shadow_refresh) {
+        InvalidateHotShadows(device_addr, size);
+        return;
+    }
+    const DAddr begin = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
+    const DAddr end = Common::AlignUp(device_addr + size, DEVICE_PAGESIZE);
+    for (DAddr page = begin; page < end; page += DEVICE_PAGESIZE) {
+        const auto it = hot_pages.find(page);
+        if (it == hot_pages.end()) {
+            continue;
+        }
+        HotPage& hot = *it->second;
+        if (page >= device_addr && page + DEVICE_PAGESIZE <= device_addr + size) {
+            // The host holds these bytes now, as after UploadHotPages.
+            std::memcpy(hot.bytes.data(), bytes + (page - device_addr), DEVICE_PAGESIZE);
+            hot.valid = true;
+        } else {
+            hot.valid = false;
         }
     }
 }

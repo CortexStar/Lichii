@@ -311,7 +311,9 @@ public:
     /// Whether Refresh would leave `state` as it is: no flag raised, the same draw topology,
     /// engine hint and dual-source blending, the value-compared registers unchanged, and the
     /// parts Refresh redoes under a raised VertexInput (dynamic) or ViewportSwizzles flag equal
-    /// to what it would compute. Clears ViewportSwizzles then, as Refresh would.
+    /// to what it would compute. Clears ViewportSwizzles then, as Refresh would. A raised flag
+    /// passes when every watched register holds its value at the last Store again
+    /// (EDEN_NX2_PIPE_SKIP_VALUES); the flag is cleared then.
     [[nodiscard]] bool StateUnchanged(Tegra::Engines::Maxwell3D& maxwell3d,
                                       const FixedPipelineState& state) noexcept;
 
@@ -330,6 +332,10 @@ private:
     const Tegra::Engines::Maxwell3D* engine{};
     std::vector<u32> value_registers;
     std::vector<u32> values;
+    /// Every register of RefreshRegisterRuns and its value at the last Store, compared when
+    /// Dirty::PipelineState was raised (EDEN_NX2_PIPE_SKIP_VALUES).
+    std::vector<u32> watched_registers;
+    std::vector<u32> watched_values;
     Maxwell::PrimitiveTopology topology{};
     Tegra::Engines::Maxwell3D::EngineHint engine_state{};
     bool dual_source_blend{};

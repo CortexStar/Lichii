@@ -136,7 +136,7 @@ bool DmaPusher::Step() {
 
     if (header.size > 0) {
         if (header.sync && g_nx2_ampere.load(std::memory_order_relaxed)) {
-            VideoCommon::GpuSplit::Get().NoteSync();
+            VideoCommon::GpuSplit::Get().NoteSync(VideoCommon::UnboundedCause::GpSync);
             VideoCommon::GpuSplit::Get().NoteUnboundedWrite(false,
                                                             VideoCommon::UnboundedCause::GpSync);
         }

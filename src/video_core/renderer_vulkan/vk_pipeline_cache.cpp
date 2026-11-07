@@ -34,6 +34,7 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_bindmemo_stats.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/pipeline_cache_files.h"
 #include "video_core/renderer_vulkan/async_draw_policy.h"
@@ -774,21 +775,49 @@ void PipelineCache::SaveUsedPipelines() {
 }
 
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
-    const bool shaders_dirty = maxwell3d->dirty.flags[VideoCommon::Dirty::Shaders];
+    namespace Memo = VideoCommon::Nx2BindMemo;
+    using Stat = Memo::Stat;
+    Memo::Note(Stat::PipeCalls);
+    bool shaders_dirty = maxwell3d->dirty.flags[VideoCommon::Dirty::Shaders];
+    // EDEN_NX2_PIPE_SHADER_SAME: the shader registers were written; the stages may hash the same.
+    const bool compare_shaders =
+        shaders_dirty && key_pipeline != nullptr && Memo::PipeShaderSameEnabled();
+    decltype(graphics_key.unique_hashes) previous_hashes{};
+    if (compare_shaders) {
+        previous_hashes = graphics_key.unique_hashes;
+    }
     if (!RefreshStages(graphics_key.unique_hashes)) {
         current_pipeline = nullptr;
         key_pipeline = nullptr;
         return nullptr;
     }
+    const bool shaders_same = compare_shaders && previous_hashes == graphics_key.unique_hashes;
+    if (shaders_same) {
+        shaders_dirty = false;
+    }
     // EDEN_NX2_PIPE_SKIP: when nothing Refresh reads changed, the state part of the key stands;
     // with the same shaders too, so does the pipeline the last lookup found for it.
     const bool skip = PipelineSkipEnabled();
-    const bool state_same = skip && graphics_key.state.xfb_enabled == 0 &&
-                            state_watch.StateUnchanged(*maxwell3d, graphics_key.state);
-    if (state_same && !shaders_dirty && key_pipeline != nullptr &&
-        key_pipeline == current_pipeline) {
-        current_pipeline->MarkUsed(frame_count);
-        return BuiltPipeline(current_pipeline);
+    bool state_same = false;
+    if (skip) {
+        if (graphics_key.state.xfb_enabled != 0) {
+            Memo::Note(Stat::PipeMissXfb);
+        } else {
+            state_same = state_watch.StateUnchanged(*maxwell3d, graphics_key.state);
+        }
+    }
+    if (state_same && !shaders_dirty) {
+        if (key_pipeline != nullptr && key_pipeline == current_pipeline) {
+            Memo::Note(Stat::PipeSkip);
+            if (shaders_same) {
+                Memo::Note(Stat::PipeSkipShadersSame);
+            }
+            current_pipeline->MarkUsed(frame_count);
+            return BuiltPipeline(current_pipeline);
+        }
+        Memo::Note(Stat::PipeMissKeyStale);
+    } else if (state_same) {
+        Memo::Note(Stat::PipeStateSameShadersChanged);
     }
     if (!state_same) {
         graphics_key.state.Refresh(*maxwell3d, dynamic_features);
@@ -801,12 +830,14 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
     if (current_pipeline) {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
         if (next) {
+            Memo::Note(next == current_pipeline ? Stat::PipeNextSame : Stat::PipeNextTransition);
             current_pipeline = next;
             current_pipeline->MarkUsed(frame_count);
             key_pipeline = current_pipeline;
             return BuiltPipeline(current_pipeline);
         }
     }
+    Memo::Note(Stat::PipeSlowPath);
     return CurrentGraphicsPipelineSlowPath();
 }
 
@@ -1164,6 +1195,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
 
 void PipelineCache::TickFrame() {
     ++frame_count;
+    VideoCommon::Nx2BindMemo::Report();
     while (!evicted_pipelines.empty() && scheduler.IsFree(evicted_pipelines.front().first)) {
         evicted_pipelines.pop_front();
     }

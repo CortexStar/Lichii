@@ -530,40 +530,53 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             config_stage(4);
         }
     }
+    // EDEN_NX2_BINDMEMO: the bindings in the memo are taken from it, the others are resolved
+    // (EDEN_NX2_BINDMEMO_PARTIAL) and recorded once their descriptors are pushed.
     boost::container::small_vector<TextureCache::BindingMemo*, 160> memos;
-    bool memo_hit = false;
-    u64 memo_clock = 0;
-    if (use_bind_memo) {
+    BindingMisses misses;
+    TextureCache::BindingLookup lookup{};
+    bool aliased_hit = false;
+    const bool memo_usable = use_bind_memo && binding_kinds.size() == views.size() &&
+                             sampler_handles.size() == num_textures;
+    if (memo_usable) {
         Profile::Scope scope{Profile::Zone::FillImageViews};
         memos.resize(views.size());
         samplers.resize(sampler_handles.size());
-        memo_hit = FindImageBindings(texture_cache, binding_kinds,
-                                     std::span(views.data(), views.size()),
-                                     std::span(sampler_handles.data(), sampler_handles.size()),
-                                     samplers.data(), memos.data());
-        if (!memo_hit) {
-            memo_clock = texture_cache.BindingClock();
-            for (size_t index = 0; index < sampler_handles.size(); ++index) {
-                samplers[index] = texture_cache.GetSamplerId(sampler_handles[index], false);
+        lookup = texture_cache.BeginBindingLookup(false);
+        FindImageBindings(texture_cache, lookup, binding_kinds,
+                          std::span(views.data(), views.size()),
+                          std::span(sampler_handles.data(), sampler_handles.size()),
+                          samplers.data(), memos.data(), misses, aliased_hit);
+        ResolveMissedBindings(texture_cache, lookup, std::span(views.data(), views.size()),
+                              std::span(sampler_handles.data(), sampler_handles.size()),
+                              std::span(samplers.data(), samplers.size()), memos.data(),
+                              std::span(misses.data(), misses.size()), aliased_hit,
+                              Spec::has_images);
+    } else {
+        if (use_bind_memo) {
+            samplers.clear();
+            for (const u32 handle : sampler_handles) {
+                samplers.push_back(texture_cache.GetSamplerId(handle, false));
             }
         }
-    }
-    ASSERT(views.size() == num_image_elements);
-    ASSERT(samplers.size() == num_textures);
-    if (!memo_hit) {
         Profile::Scope scope{Profile::Zone::FillImageViews};
         texture_cache.FillImageViews(std::span(views.data(), views.size()), false,
                                      Spec::has_images);
     }
-    // A resolved draw leaves its descriptors here to be remembered.
+    ASSERT(views.size() == num_image_elements);
+    ASSERT(samplers.size() == num_textures);
+    // Resolved bindings leave their descriptors here to be remembered.
     boost::container::small_vector<DescriptorUpdateEntry, 32> record_descriptors;
     boost::container::small_vector<u8, 32> record_rescaled;
     std::optional<ImageBindingRecord> record;
-    if (use_bind_memo && !memo_hit) {
-        record_descriptors.resize(views.size());
-        record_rescaled.resize(views.size());
-        record = ImageBindingRecord{record_descriptors.data(), record_rescaled.data(),
-                                    views.data()};
+    if (memo_usable) {
+        if (!misses.empty()) {
+            record_descriptors.resize(views.size());
+            record_rescaled.resize(views.size());
+        }
+        record = ImageBindingRecord{views.data(), memos.data(),
+                                    misses.empty() ? nullptr : record_descriptors.data(),
+                                    misses.empty() ? nullptr : record_rescaled.data()};
     }
     if (RecordingSampledTextures()) {
         sampled_images.clear();
@@ -687,7 +700,6 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     RenderAreaPushConstant render_area;
     const VideoCommon::SamplerId* samplers_it{samplers.data()};
     const VideoCommon::ImageViewInOut* views_it{views.data()};
-    TextureCache::BindingMemo* const* memos_it{memos.data()};
     const auto prepare_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         {
             Profile::Scope scope{Profile::Zone::BindStageBuffers};
@@ -695,14 +707,8 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         }
         {
             Profile::Scope scope{Profile::Zone::PushDescriptors};
-            if (memo_hit) {
-                PushMemoDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
-                                    rescaling, memos_it);
-            } else {
-                PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
-                                     rescaling, samplers_it, views_it,
-                                     record ? &*record : nullptr);
-            }
+            PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
+                                 rescaling, samplers_it, views_it, record ? &*record : nullptr);
         }
         const auto& info{stage_infos[stage]};
         if (info.uses_render_area) {
@@ -729,11 +735,12 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     if constexpr (Spec::enabled_stages[4]) {
         prepare_stage(4);
     }
-    if (record) {
-        RecordImageBindings(texture_cache, binding_kinds, std::span(views.data(), views.size()),
+    if (record && !misses.empty()) {
+        RecordImageBindings(texture_cache, lookup, binding_kinds,
+                            std::span(views.data(), views.size()),
                             std::span(sampler_handles.data(), sampler_handles.size()),
-                            std::span(samplers.data(), samplers.size()),
-                            record_descriptors.data(), record_rescaled.data(), memo_clock);
+                            std::span(samplers.data(), samplers.size()), memos.data(),
+                            record_descriptors.data(), record_rescaled.data());
     }
     if (buffer_cache.any_buffer_uploaded) {
         buffer_cache.runtime.PostCopyBarrier();

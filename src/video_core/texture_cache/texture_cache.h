@@ -33,6 +33,7 @@
 #include "video_core/texture_cache/util.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_bindmemo_stats.h"
 #include "video_core/render_trace.h"
 #include "video_core/textures/decoders.h"
 
@@ -656,27 +657,35 @@ SamplerId TextureCache<P>::GetSamplerId(u32 index, bool compute) {
 
 namespace BindingMemoDetail {
 constexpr size_t NUM_SETS = 2048;
+constexpr size_t NUM_WAYS = 4;
 
-[[nodiscard]] inline size_t SetIndex(u32 tic_handle, u32 tsc_index, u32 kind) noexcept {
-    u32 hash = (tic_handle * 0x9E3779B1U) ^ (tsc_index * 0x85EBCA77U) ^ (kind * 0xC2B2AE3DU);
-    hash ^= hash >> 15;
-    hash *= 0x2C1B3C6DU;
-    hash ^= hash >> 12;
-    return hash & (NUM_SETS - 1);
+[[nodiscard]] inline u64 KeyHash(u32 tic_handle, u32 tsc_index, u32 kind) noexcept {
+    u64 hash = ((u64{tsc_index} << 32) | tic_handle) ^ (u64{kind} * 0x9E3779B97F4A7C15ULL);
+    hash = (hash ^ (hash >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    hash = (hash ^ (hash >> 27)) * 0x94D049BB133111EBULL;
+    return hash ^ (hash >> 31);
 }
 
-/// Whether guest memory at `gpu_addr` holds `expected` (a TIC or TSC entry).
+/// The first way of the key's set.
+[[nodiscard]] inline size_t FirstWay(u64 hash) noexcept {
+    return static_cast<size_t>(hash & (NUM_SETS - 1)) * NUM_WAYS;
+}
+
+/// Never 0, which marks an empty way.
+[[nodiscard]] inline u32 Tag(u64 hash) noexcept {
+    return static_cast<u32>(hash >> 32) | 1U;
+}
+
+/// Reads a TIC or TSC entry from guest memory.
 template <typename T>
-[[nodiscard]] bool GuestHolds(const Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr,
-                              const T& expected) noexcept {
+void ReadGuest(const Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, T& out) noexcept {
     const bool one_page =
         (gpu_addr & Core::Memory::YUZU_PAGEMASK) + sizeof(T) <= Core::Memory::YUZU_PAGESIZE;
     if (const u8* const host = one_page ? gpu_memory.GetPointer(gpu_addr) : nullptr) {
-        return std::memcmp(host, &expected, sizeof(T)) == 0;
+        std::memcpy(&out, host, sizeof(T));
+        return;
     }
-    T current;
-    gpu_memory.ReadBlockUnsafe(gpu_addr, &current, sizeof(T));
-    return current == expected;
+    gpu_memory.ReadBlockUnsafe(gpu_addr, &out, sizeof(T));
 }
 } // namespace BindingMemoDetail
 
@@ -690,76 +699,151 @@ void TextureCache<P>::BumpBindingSerial(ImageId image_id) {
 }
 
 template <class P>
-typename TextureCache<P>::BindingMemo* TextureCache<P>::FindBinding(u32 tic_handle, u32 tsc_index,
-                                                                     u32 kind) {
-    if (binding_memos.empty()) {
-        return nullptr;
-    }
-    BindingMemo* memo = &binding_memos[BindingMemoDetail::SetIndex(tic_handle, tsc_index, kind) * 2];
-    if (memo->kind != kind || memo->tic_handle != tic_handle || memo->tsc_index != tsc_index) {
-        ++memo;
-        if (memo->kind != kind || memo->tic_handle != tic_handle ||
-            memo->tsc_index != tsc_index) {
-            return nullptr;
-        }
-    }
-    if (memo->epoch != binding_memo_epoch || memo->channel != channel_state) {
-        return nullptr;
-    }
-    const bool compute = (kind & BINDING_KIND_COMPUTE) != 0;
+typename TextureCache<P>::BindingLookup TextureCache<P>::BeginBindingLookup(
+    bool compute) const noexcept {
     const auto& image_table =
         compute ? channel_state->compute_image_table : channel_state->graphics_image_table;
-    if (image_table.current_gpu_addr != memo->tic_pool ||
-        image_table.current_limit != memo->tic_limit) {
-        return nullptr;
-    }
-    if (memo->tic_entry != ~0U &&
-        !BindingMemoDetail::GuestHolds(
-            *gpu_memory, image_table.current_gpu_addr + u64{memo->tic_entry} * sizeof(TICEntry),
-            memo->tic)) {
-        return nullptr;
-    }
-    if (tsc_index != ~0U) {
-        const auto& sampler_table =
-            compute ? channel_state->compute_sampler_table : channel_state->graphics_sampler_table;
-        if (sampler_table.current_gpu_addr != memo->tsc_pool ||
-            sampler_table.current_limit != memo->tsc_limit) {
-            return nullptr;
-        }
-        if (memo->tsc_entry != ~0U &&
-            !BindingMemoDetail::GuestHolds(
-                *gpu_memory,
-                sampler_table.current_gpu_addr + u64{memo->tsc_entry} * sizeof(TSCEntry),
-                memo->tsc)) {
-            return nullptr;
-        }
-    }
-    if (memo->image && memo->image != NULL_IMAGE_ID) {
-        const size_t index = memo->image.Value();
-        if (index >= image_binding_serials.size() ||
-            image_binding_serials[index] != memo->image_serial) {
-            return nullptr;
-        }
-        if (memo->touch_tick != frame_tick) {
-            lru_cache.Touch(slot_images[memo->image].lru_index, frame_tick);
-            memo->touch_tick = frame_tick;
-        }
-    } else if (memo->map_serial != gpu_memory->MapSerial()) {
-        // Null and buffer views: whether the TIC entry's address is mapped decided them.
-        return nullptr;
-    }
-    return memo;
+    const auto& sampler_table =
+        compute ? channel_state->compute_sampler_table : channel_state->graphics_sampler_table;
+    return BindingLookup{
+        .channel = channel_state,
+        .tic_pool = image_table.current_gpu_addr,
+        .tsc_pool = sampler_table.current_gpu_addr,
+        .tic_limit = image_table.current_limit,
+        .tsc_limit = sampler_table.current_limit,
+        .map_serial = gpu_memory->MapSerial(),
+        .clock = binding_clock,
+        .compute = compute,
+    };
 }
 
 template <class P>
-void TextureCache<P>::RecordBinding(u32 tic_handle, u32 tsc_index, u32 kind, ImageViewId view_id,
-                                    SamplerId sampler_id, const void* payload,
-                                    size_t payload_size, bool rescaled, u64 clock) {
-    if (clock != binding_clock || payload_size > sizeof(BindingMemo::payload) || kind == 0 ||
-        !view_id) {
+typename TextureCache<P>::BindingMemo* TextureCache<P>::FindBinding(const BindingLookup& lookup,
+                                                                     u32 tic_handle,
+                                                                     u32 tsc_index, u32 kind) {
+    using Nx2BindMemo::Note;
+    using Nx2BindMemo::Stat;
+    using namespace BindingMemoDetail;
+    Note(Stat::Lookups);
+    if (binding_memos.empty()) {
+        Note(Stat::MissNoEntry);
+        return nullptr;
+    }
+    const u64 hash = KeyHash(tic_handle, tsc_index, kind);
+    const size_t first = FirstWay(hash);
+    const u32 tag = Tag(hash);
+    Stat miss = Stat::MissNoEntry;
+    // Read once for every candidate of the key (EDEN_NX2_BINDMEMO_MULTI keeps one per contents).
+    TICEntry guest_tic{};
+    TSCEntry guest_tsc{};
+    u32 guest_tic_entry = ~0U;
+    u32 guest_tsc_entry = ~0U;
+    for (size_t way = 0; way < NUM_WAYS; ++way) {
+        if (binding_tags[first + way] != tag) {
+            continue;
+        }
+        BindingMemo& memo = binding_memos[first + way];
+        if (memo.kind != kind || memo.tic_handle != tic_handle || memo.tsc_index != tsc_index) {
+            continue;
+        }
+        if (memo.channel != lookup.channel) {
+            miss = Stat::MissChannel;
+            continue;
+        }
+        if (memo.tic_pool != lookup.tic_pool || memo.tic_limit != lookup.tic_limit ||
+            (tsc_index != ~0U &&
+             (memo.tsc_pool != lookup.tsc_pool || memo.tsc_limit != lookup.tsc_limit))) {
+            miss = Stat::MissPool;
+            continue;
+        }
+        if (memo.epoch != binding_memo_epoch) {
+            miss = Stat::MissEpoch;
+            continue;
+        }
+        const ImageId image_id = memo.image;
+        const bool has_image = image_id && image_id != NULL_IMAGE_ID;
+        if (has_image) {
+            const size_t index = image_id.Value();
+            if (index >= image_binding_serials.size() ||
+                image_binding_serials[index] != memo.image_serial) {
+                miss = Stat::MissImage;
+                continue;
+            }
+        } else if (memo.map_dependent != 0 && memo.map_serial != lookup.map_serial) {
+            // Null and buffer views: whether the TIC entry's address is mapped decided them.
+            miss = Stat::MissMap;
+            continue;
+        }
+        if (memo.tic_entry != ~0U) {
+            if (guest_tic_entry != memo.tic_entry) {
+                ReadGuest(*gpu_memory, lookup.tic_pool + u64{memo.tic_entry} * sizeof(TICEntry),
+                          guest_tic);
+                guest_tic_entry = memo.tic_entry;
+            }
+            if (std::memcmp(&guest_tic, &memo.tic, sizeof(TICEntry)) != 0) {
+                miss = Stat::MissTic;
+                continue;
+            }
+        }
+        if (tsc_index != ~0U && memo.tsc_entry != ~0U) {
+            if (guest_tsc_entry != memo.tsc_entry) {
+                ReadGuest(*gpu_memory, lookup.tsc_pool + u64{memo.tsc_entry} * sizeof(TSCEntry),
+                          guest_tsc);
+                guest_tsc_entry = memo.tsc_entry;
+            }
+            if (std::memcmp(&guest_tsc, &memo.tsc, sizeof(TSCEntry)) != 0) {
+                miss = Stat::MissTsc;
+                continue;
+            }
+        }
+        if (has_image && memo.aliased != 0) {
+            // PrepareImage would copy from an alias newer than the image (SynchronizeAliases).
+            const ImageBase& image = slot_images[image_id];
+            bool newer_alias = false;
+            for (const AliasedImage& alias : image.aliased_images) {
+                if (slot_images[alias.id].modification_tick > image.modification_tick) {
+                    newer_alias = true;
+                    break;
+                }
+            }
+            if (newer_alias) {
+                miss = Stat::MissAlias;
+                continue;
+            }
+        }
+        if (memo.touch_tick != frame_tick) {
+            if (has_image) {
+                lru_cache.Touch(slot_images[image_id].lru_index, frame_tick);
+            }
+            memo.touch_tick = frame_tick;
+        }
+        Note(Stat::Hits);
+        return &memo;
+    }
+    Note(miss);
+    return nullptr;
+}
+
+template <class P>
+void TextureCache<P>::RecordBinding(const BindingLookup& lookup, u32 tic_handle, u32 tsc_index,
+                                    u32 kind, ImageViewId view_id, SamplerId sampler_id,
+                                    const void* payload, size_t payload_size, bool rescaled) {
+    using Nx2BindMemo::Note;
+    using Nx2BindMemo::Stat;
+    using namespace BindingMemoDetail;
+    if (payload_size > sizeof(BindingMemo::payload) || kind == 0 || !view_id) {
+        Note(Stat::RefuseOther);
         return;
     }
-    const bool compute = (kind & BINDING_KIND_COMPUTE) != 0;
+    if (binding_memo_epoch > lookup.clock || channel_state != lookup.channel) {
+        Note(Stat::RefuseEpoch);
+        return;
+    }
+    if (!Nx2BindMemo::ImageClockEnabled() && binding_clock != lookup.clock) {
+        Note(Stat::RefuseClock);
+        return;
+    }
+    const bool compute = lookup.compute;
     // The entries the resolution read are in the tables; they must still give these ids.
     const auto read_entry = [](const auto& table, u32 index, auto id) {
         return !table.invalidated && index / 64 < table.read_descriptors.size() &&
@@ -769,40 +853,57 @@ void TextureCache<P>::RecordBinding(u32 tic_handle, u32 tsc_index, u32 kind, Ima
     };
     const auto& image_table =
         compute ? channel_state->compute_image_table : channel_state->graphics_image_table;
+    const auto& sampler_table =
+        compute ? channel_state->compute_sampler_table : channel_state->graphics_sampler_table;
+    if (image_table.current_gpu_addr != lookup.tic_pool ||
+        image_table.current_limit != lookup.tic_limit ||
+        (tsc_index != ~0U && (sampler_table.current_gpu_addr != lookup.tsc_pool ||
+                              sampler_table.current_limit != lookup.tsc_limit))) {
+        Note(Stat::RefuseOther);
+        return;
+    }
     u32 tic_entry = ~0U;
     const u32 header_index = Tegra::Texture::TextureHeaderIndex(
         tic_handle, image_table.current_limit, gpu_memory->UsesNativeTiling());
     if (header_index <= image_table.current_limit) {
         if (!read_entry(image_table, header_index, view_id)) {
+            Note(Stat::RefuseTable);
             return;
         }
         tic_entry = header_index;
     } else if (view_id != NULL_IMAGE_VIEW_ID) {
+        Note(Stat::RefuseOther);
         return;
     }
     u32 tsc_entry = ~0U;
-    GPUVAddr tsc_pool = 0;
-    u32 tsc_limit = 0;
     if (tsc_index != ~0U) {
-        const auto& sampler_table =
-            compute ? channel_state->compute_sampler_table : channel_state->graphics_sampler_table;
-        tsc_pool = sampler_table.current_gpu_addr;
-        tsc_limit = sampler_table.current_limit;
         if (tsc_index <= sampler_table.current_limit) {
             if (!read_entry(sampler_table, tsc_index, sampler_id)) {
+                Note(Stat::RefuseTable);
                 return;
             }
             tsc_entry = tsc_index;
         } else if (sampler_id != NULL_SAMPLER_ID) {
+            Note(Stat::RefuseOther);
             return;
         }
     }
     const ImageId image_id = slot_image_views[view_id].image_id;
+    const bool has_image = image_id && image_id != NULL_IMAGE_ID;
     u64 image_serial = 0;
-    if (image_id && image_id != NULL_IMAGE_ID) {
+    bool aliased = false;
+    if (has_image) {
         const ImageBase& image = slot_images[image_id];
-        if (!image.aliased_images.empty() || True(image.flags & ImageFlagBits::CpuModified)) {
+        if (True(image.flags & ImageFlagBits::CpuModified)) {
+            Note(Stat::RefuseCpuModified);
             return;
+        }
+        if (!image.aliased_images.empty()) {
+            if (!Nx2BindMemo::AliasEnabled()) {
+                Note(Stat::RefuseAliased);
+                return;
+            }
+            aliased = true;
         }
         const size_t index = image_id.Value();
         if (index >= image_binding_serials.size()) {
@@ -810,53 +911,99 @@ void TextureCache<P>::RecordBinding(u32 tic_handle, u32 tsc_index, u32 kind, Ima
                                          0);
         }
         image_serial = image_binding_serials[index];
-    }
-    if (binding_memos.empty()) {
-        binding_memos.resize(BindingMemoDetail::NUM_SETS * 2);
-    }
-    BindingMemo* const set =
-        &binding_memos[BindingMemoDetail::SetIndex(tic_handle, tsc_index, kind) * 2];
-    const auto same_key = [&](const BindingMemo& memo) {
-        return memo.kind == kind && memo.tic_handle == tic_handle && memo.tsc_index == tsc_index;
-    };
-    BindingMemo* memo = &set[0];
-    if (!same_key(set[0])) {
-        if (same_key(set[1])) {
-            memo = &set[1];
-        } else {
-            set[1] = set[0]; // the newest binding of the set goes first
+        // Drawn from the clock: newer than the lookups means an event on it during this draw,
+        // perhaps after it was prepared.
+        if (image_serial > lookup.clock) {
+            Note(Stat::RefuseImageEvent);
+            return;
         }
     }
-    memo->tic_handle = tic_handle;
-    memo->tsc_index = tsc_index;
-    memo->kind = kind;
-    memo->tic_entry = tic_entry;
-    memo->tsc_entry = tsc_entry;
-    memo->view = view_id;
-    memo->sampler = sampler_id;
-    memo->image = image_id;
-    memo->tic_limit = image_table.current_limit;
-    memo->tsc_limit = tsc_limit;
-    memo->tic_pool = image_table.current_gpu_addr;
-    memo->tsc_pool = tsc_pool;
-    memo->epoch = binding_memo_epoch;
-    memo->channel = channel_state;
-    memo->image_serial = image_serial;
-    memo->map_serial = gpu_memory->MapSerial();
-    memo->tic = tic_entry != ~0U ? image_table.descriptors[tic_entry] : TICEntry{};
-    if (tsc_entry != ~0U) {
-        const auto& sampler_table =
-            compute ? channel_state->compute_sampler_table : channel_state->graphics_sampler_table;
-        memo->tsc = sampler_table.descriptors[tsc_entry];
-    } else {
-        memo->tsc = TSCEntry{};
+    const TICEntry tic = tic_entry != ~0U ? image_table.descriptors[tic_entry] : TICEntry{};
+    const TSCEntry tsc = tsc_entry != ~0U ? sampler_table.descriptors[tsc_entry] : TSCEntry{};
+    bool map_dependent = !has_image;
+    if (map_dependent && view_id == NULL_IMAGE_VIEW_ID && Nx2BindMemo::NullMapEnabled()) {
+        // VisitImageView and IsValidEntry give the null view for these whatever is mapped.
+        const GPUVAddr address = tic.Address();
+        map_dependent = !(tic_entry == ~0U || address == 0 || address >= (1ULL << 40));
     }
-    memo->touch_tick = frame_tick;
-    memo->payload = {};
+    if (binding_memos.empty()) {
+        binding_memos.resize(NUM_SETS * NUM_WAYS);
+        binding_tags.assign(NUM_SETS * NUM_WAYS, 0);
+        binding_victims.assign(NUM_SETS, 0);
+    }
+    const u64 hash = KeyHash(tic_handle, tsc_index, kind);
+    const size_t first = FirstWay(hash);
+    const u32 tag = Tag(hash);
+    const bool multi = Nx2BindMemo::MultiEnabled();
+    size_t target = NUM_WAYS;
+    for (size_t way = 0; way < NUM_WAYS; ++way) {
+        if (binding_tags[first + way] != tag) {
+            continue;
+        }
+        const BindingMemo& memo = binding_memos[first + way];
+        if (memo.kind != kind || memo.tic_handle != tic_handle || memo.tsc_index != tsc_index) {
+            continue;
+        }
+        // One entry per key, or per key and contents (a descriptor slot holding another texture).
+        if (!multi ||
+            (memo.channel == lookup.channel && memo.tic_pool == image_table.current_gpu_addr &&
+             memo.tic_limit == image_table.current_limit &&
+             memo.tsc_pool == sampler_table.current_gpu_addr &&
+             memo.tsc_limit == sampler_table.current_limit &&
+             std::memcmp(&memo.tic, &tic, sizeof(TICEntry)) == 0 &&
+             std::memcmp(&memo.tsc, &tsc, sizeof(TSCEntry)) == 0)) {
+            target = way;
+            break;
+        }
+    }
+    if (target == NUM_WAYS) {
+        for (size_t way = 0; way < NUM_WAYS; ++way) {
+            if (binding_tags[first + way] == 0) {
+                target = way;
+                break;
+            }
+        }
+    }
+    if (target == NUM_WAYS) {
+        const size_t set = first / NUM_WAYS;
+        target = binding_victims[set];
+        binding_victims[set] = static_cast<u8>((target + 1) % NUM_WAYS);
+        if (binding_memos[first + target].touch_tick == frame_tick) {
+            Note(Stat::EvictedLive);
+        }
+    }
+    binding_tags[first + target] = tag;
+    BindingMemo& memo = binding_memos[first + target];
+    memo.tic_handle = tic_handle;
+    memo.tsc_index = tsc_index;
+    memo.kind = kind;
+    memo.view = view_id;
+    memo.sampler = sampler_id;
+    memo.image = image_id;
+    memo.tic_limit = image_table.current_limit;
+    memo.tsc_limit = sampler_table.current_limit;
+    memo.tic_pool = image_table.current_gpu_addr;
+    memo.tsc_pool = sampler_table.current_gpu_addr;
+    memo.channel = channel_state;
+    memo.tic_entry = tic_entry;
+    memo.tsc_entry = tsc_entry;
+    memo.epoch = binding_memo_epoch;
+    memo.image_serial = image_serial;
+    memo.map_serial = lookup.map_serial;
+    memo.touch_tick = frame_tick;
+    memo.payload = {};
     if (payload_size != 0) {
-        std::memcpy(memo->payload.data(), payload, payload_size);
+        std::memcpy(memo.payload.data(), payload, payload_size);
     }
-    memo->rescaled = rescaled ? 1U : 0U;
+    memo.rescaled = static_cast<u16>(rescaled ? 1 : 0);
+    memo.aliased = static_cast<u8>(aliased ? 1 : 0);
+    memo.map_dependent = static_cast<u8>(map_dependent ? 1 : 0);
+    memo.tic = tic;
+    memo.tsc = tsc;
+    Note(Stat::Records);
+    if (aliased) {
+        Note(Stat::RecordsAliased);
+    }
 }
 
 template <class P>

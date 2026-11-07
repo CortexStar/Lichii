@@ -2403,7 +2403,11 @@ void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
     bool uploaded = false;
     // A run of inline writes into one page: the first finds the page free of GPU-written data
     // under the buffer cache lock, the rest skip the lock while no GPU write was marked since
-    // and no command list page exists (EDEN_NX2_I2M_COALESCE). Only this thread marks GPU writes.
+    // and the page holds no command list (EDEN_NX2_I2M_COALESCE). Only this thread marks GPU
+    // writes. The skipped Nx2NoteListHostWrite acts only on command list pages, so the page's
+    // own bit is enough (EDEN_NX2_I2M_LIST_PAGE=0: no skip once any command list page exists,
+    // which in OoT is the whole run).
+    static const bool per_page_list = VideoCommon::Nx2BufCache::EnvOn("EDEN_NX2_I2M_LIST_PAGE");
     struct CleanPage {
         const void* cache{};
         DAddr page{~DAddr{0}};
@@ -2417,18 +2421,25 @@ void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
         VideoCommon::Nx2BufCache::g_i2m_coalesce && defer && one_page &&
         clean.cache == &buffer_cache && clean.page == device_page &&
         clean.serial == buffer_cache.gpu_modified_serial.load(std::memory_order_relaxed) &&
-        !Tegra::g_nx2_has_command_list_pages.load(std::memory_order_relaxed);
+        (per_page_list ? !Tegra::Nx2IsCommandListPage(device_page)
+                       : !Tegra::g_nx2_has_command_list_pages.load(std::memory_order_relaxed));
     if (!known_clean) {
         std::scoped_lock lock{buffer_cache.mutex};
         // Guest memory has the words now: a command list copy of the page no longer does.
         buffer_cache.Nx2NoteListHostWrite(*cpu_addr, copy_size);
-        uploaded = buffer_cache.InlineMemory(*cpu_addr, copy_size, memory);
+        // For a write within one page InlineMemory checks exactly that page for GPU-written
+        // data: its answer sets the memo, without a second lookup.
+        bool page_clean = false;
+        uploaded = buffer_cache.InlineMemory(*cpu_addr, copy_size, memory,
+                                             per_page_list ? &page_clean : nullptr);
         if (!uploaded && !defer) {
             buffer_cache.WriteMemory(*cpu_addr, copy_size);
         }
         clean.cache = nullptr;
         if (VideoCommon::Nx2BufCache::g_i2m_coalesce && !uploaded && one_page &&
-            !buffer_cache.IsRegionGpuModified(device_page, Core::DEVICE_PAGESIZE)) {
+            (per_page_list ? page_clean
+                           : !buffer_cache.IsRegionGpuModified(device_page,
+                                                               Core::DEVICE_PAGESIZE))) {
             clean = CleanPage{
                 .cache = &buffer_cache,
                 .page = device_page,

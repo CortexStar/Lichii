@@ -6,7 +6,13 @@
 #include <array>
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
+
+#if defined(_M_X64) || defined(__x86_64__) || defined(__SSE2__)
+#include <emmintrin.h>
+#define NX2_BUFCACHE_SSE2 1
+#endif
 
 #include "common/common_types.h"
 #include "common/logging.h"
@@ -55,12 +61,72 @@ inline const bool g_compute_bindcache = EnvOn("EDEN_NX2_COMPUTE_BINDCACHE");
 /// for GPU-written data, even right after a write that found the same page clean.
 inline const bool g_i2m_coalesce = EnvOn("EDEN_NX2_I2M_COALESCE");
 
+/// EDEN_NX2_UBO_REBIND=0: every graphics uniform buffer bind translates its GPU address again and
+/// makes the next draw look its buffer up again, even when it binds the slot's current range.
+inline const bool g_ubo_rebind = EnvOn("EDEN_NX2_UBO_REBIND");
+
 /// EDEN_NX2_SYNC_SKIP=0: every sync walks the tracker over its range, even one left clean by
 /// an earlier sync with no CPU write marked in the buffer since.
 inline const bool g_sync_skip = EnvOn("EDEN_NX2_SYNC_SKIP");
 
 /// EDEN_NX2_BUFCACHE_MARK=0: GPU writes re-add ranges that are already GPU-modified.
 inline const bool g_mark_guards = EnvOn("EDEN_NX2_BUFCACHE_MARK");
+
+/// EDEN_NX2_HOT_DEMOTE=0: a hot page stays hot until 64 unchanged syncs over 4 frames (which a
+/// page rewritten once a frame never reaches), instead of being protected again after
+/// HOT_DEMOTE_UNCHANGED unchanged syncs in a row and kept out of the hot set for
+/// HOT_COOLDOWN_FRAMES frames.
+inline const bool g_hot_demote = EnvOn("EDEN_NX2_HOT_DEMOTE");
+
+/// EDEN_NX2_HOT_SYNC_SKIP=0: a range holding a hot page is walked at every sync (no SYNC_SKIP
+/// entry), instead of keeping the entry and comparing only its hot pages.
+inline const bool g_hot_sync_skip = EnvOn("EDEN_NX2_HOT_SYNC_SKIP");
+
+/// EDEN_NX2_SKIP_REGIONS=0: a SYNC_SKIP entry is dropped by any CPU-dirty mark in its buffer
+/// (the whole 100 MiB heap buffer each draw in OoT), instead of only by marks in the 256 KiB
+/// regions the range covers.
+inline const bool g_skip_regions = EnvOn("EDEN_NX2_SKIP_REGIONS");
+
+/// EDEN_NX2_PAGE_CMP=0: hot page and bank shadow compares call memcmp instead of the inline
+/// SSE2 loop.
+inline const bool g_page_compare = EnvOn("EDEN_NX2_PAGE_CMP");
+
+/// EDEN_NX2_SHADOW_REFRESH=0: a bank upload invalidates the hot page copies it overwrites (and a
+/// hot upload the bank shadow pages), so the next sync uploads the page again, instead of
+/// taking the uploaded bytes as the new copy.
+inline const bool g_shadow_refresh = EnvOn("EDEN_NX2_SHADOW_REFRESH");
+
+/// EDEN_NX2_STORAGE_MEMO=0: when a stage's storage bindings miss the resolve cache, every
+/// binding is looked up again, instead of reusing the ones unchanged since their last lookup.
+inline const bool g_storage_memo = EnvOn("EDEN_NX2_STORAGE_MEMO");
+
+/// Whether [a, a + size) and [b, b + size) hold the same bytes. Inline (memcmp is an out-of-line
+/// ucrt call that clang does not expand for 4 KiB), 128 bytes per step with an early exit.
+[[nodiscard]] inline bool BytesEqual(const u8* a, const u8* b, size_t size) {
+#ifdef NX2_BUFCACHE_SSE2
+    if (g_page_compare) {
+        size_t offset = 0;
+        for (; offset + 128 <= size; offset += 128) {
+            const auto load = [&](const u8* base, size_t index) {
+                return _mm_loadu_si128(reinterpret_cast<const __m128i*>(base + offset + index * 16));
+            };
+            __m128i acc = _mm_xor_si128(load(a, 0), load(b, 0));
+            acc = _mm_or_si128(acc, _mm_xor_si128(load(a, 1), load(b, 1)));
+            acc = _mm_or_si128(acc, _mm_xor_si128(load(a, 2), load(b, 2)));
+            acc = _mm_or_si128(acc, _mm_xor_si128(load(a, 3), load(b, 3)));
+            acc = _mm_or_si128(acc, _mm_xor_si128(load(a, 4), load(b, 4)));
+            acc = _mm_or_si128(acc, _mm_xor_si128(load(a, 5), load(b, 5)));
+            acc = _mm_or_si128(acc, _mm_xor_si128(load(a, 6), load(b, 6)));
+            acc = _mm_or_si128(acc, _mm_xor_si128(load(a, 7), load(b, 7)));
+            if (_mm_movemask_epi8(_mm_cmpeq_epi8(acc, _mm_setzero_si128())) != 0xFFFF) {
+                return false;
+            }
+        }
+        return offset == size || std::memcmp(a + offset, b + offset, size - offset) == 0;
+    }
+#endif
+    return std::memcmp(a, b, size) == 0;
+}
 
 /// Whether one range of `set` covers [addr, addr + size) (interval sets join touching ranges).
 template <typename Set, typename Addr>
@@ -179,6 +245,12 @@ enum class Stat : u32 {
     HotDemote,
     HotSame,
     HotUpload,
+    HotCostDemote,
+    SyncSkipHit,
+    SyncSkipHotHit,
+    SyncWalk,
+    StorageMemoHit,
+    UboRebindKept,
     Count,
 };
 
@@ -216,14 +288,19 @@ inline void Report() {
              "bank uploads {:.0f} ({:.0f} KiB), skipped {:.0f} | sync uploads {:.0f} ({:.0f} KiB) "
              "| storage resolve contiguous {:.0f}, queried {:.0f} | GPU writes {:.0f} ({:.0f} "
              "already marked) | inline writes direct {:.0f}, walked {:.0f} | hot pages "
-             "promoted {:.0f}, demoted {:.0f}, unchanged {:.0f}, uploaded {:.0f}",
+             "promoted {:.0f}, demoted {:.0f} ({:.0f} by cost), unchanged {:.0f}, uploaded {:.0f} | "
+             "sync skipped {:.0f} ({:.0f} comparing hot pages), walked {:.0f} | storage memo "
+             "hits {:.0f} | UBO rebinds kept {:.0f}",
              rate(Stat::UboStream), rate(Stat::UboClassic), rate(Stat::UboClassicUpload),
              rate(Stat::BankUpload),
              rate(Stat::BankUploadBytes) / 1024.0, rate(Stat::BankSkip), rate(Stat::SyncUpload),
              rate(Stat::SyncUploadBytes) / 1024.0, rate(Stat::ResolveContig),
              rate(Stat::ResolveQuery), rate(Stat::MarkWritten), rate(Stat::MarkAddSkipped),
              rate(Stat::InlineFast), rate(Stat::InlineSlow), rate(Stat::HotPromote),
-             rate(Stat::HotDemote), rate(Stat::HotSame), rate(Stat::HotUpload));
+             rate(Stat::HotDemote), rate(Stat::HotCostDemote), rate(Stat::HotSame),
+             rate(Stat::HotUpload), rate(Stat::SyncSkipHit), rate(Stat::SyncSkipHotHit),
+             rate(Stat::SyncWalk), rate(Stat::StorageMemoHit),
+             rate(Stat::UboRebindKept));
     g_stats_start = now;
 }
 

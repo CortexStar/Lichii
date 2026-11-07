@@ -23,6 +23,7 @@
 #include "common/thread.h"
 #include "core/core.h"
 #include "video_core/engines/engine_interface.h"
+#include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
@@ -46,6 +47,87 @@ void Pause() {
 }
 
 [[maybe_unused]] std::atomic<u32> g_back_thread_id{};
+
+// EDEN_NX2_RING_PREFETCH=0: the back reads each ring line only when it gets to it.
+const bool g_ring_prefetch = Nx2Switch("EDEN_NX2_RING_PREFETCH", true);
+/// How far ahead of the entry it runs the back prefetches ring words (16 lines).
+constexpr u64 RingPrefetchWords = 128;
+
+// EDEN_NX2_DELTA_CHAIN=0: a StateDelta entry returns to BackLoop before the entry it was sent
+// with runs, instead of running it straight after (one pass of the loop's bookkeeping fewer).
+const bool g_delta_chain = Nx2Switch("EDEN_NX2_DELTA_CHAIN", true);
+
+void PrefetchRingLine(const u64* address) {
+#if defined(__clang__) || defined(__GNUC__)
+    __builtin_prefetch(address, 0, 3);
+#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+    _mm_prefetch(reinterpret_cast<const char*>(address), _MM_HINT_T0);
+#else
+    (void)address;
+#endif
+}
+
+// Back thread only, profiling only: the engine of the method entries is a Maxwell3D (zone
+// "method 3D"), and the Call entries by thunk (each sending site's lambda has its own).
+bool g_back_engine_3d = false;
+struct CallStats {
+    u64 thunk;
+    u64 ticks;
+    u64 count;
+};
+std::array<CallStats, 24> g_call_stats{};
+u64 g_call_window_ns = 0;
+u64 g_call_window_ticks = 0;
+
+void NoteCall(u64 thunk, u64 ticks) {
+    for (auto& stats : g_call_stats) {
+        if (stats.thunk == thunk || stats.thunk == 0) {
+            stats.thunk = thunk;
+            stats.ticks += ticks;
+            ++stats.count;
+            return;
+        }
+    }
+    // More sites than slots: the rest add to the last one.
+    g_call_stats.back().ticks += ticks;
+    ++g_call_stats.back().count;
+}
+
+void ResetCalls() {
+    g_call_stats = {};
+    g_call_window_ns = Nx2Profile::Now();
+    g_call_window_ticks = Nx2Profile::Ticks();
+}
+
+/// Logs the Call entries per second by thunk, as offsets in the executable (llvm-symbolizer
+/// --relative-address names the sending site), then starts a new window.
+void ReportCalls() {
+    const u64 now = Nx2Profile::Now();
+    const u64 now_ticks = Nx2Profile::Ticks();
+    const double window = static_cast<double>((std::max)(now - g_call_window_ns, u64{1}));
+    const double window_ticks =
+        static_cast<double>((std::max)(now_ticks - g_call_window_ticks, u64{1}));
+    u64 base = 0;
+#ifdef _WIN32
+    base = reinterpret_cast<u64>(GetModuleHandleW(nullptr));
+#endif
+    std::string text;
+    for (const auto& stats : g_call_stats) {
+        if (stats.count == 0) {
+            continue;
+        }
+        text += fmt::format(" {:#x} {:.0f}/s {:.2f} ms,",
+                            stats.thunk >= base ? stats.thunk - base : stats.thunk,
+                            static_cast<double>(stats.count) * 1e9 / window,
+                            static_cast<double>(stats.ticks) * 1000.0 / window_ticks);
+    }
+    if (!text.empty()) {
+        text.pop_back();
+        LOG_INFO(HW_GPU, "GPU back thread calls per second by thunk (offset, inclusive):{}",
+                 text);
+    }
+    ResetCalls();
+}
 
 } // Anonymous namespace
 
@@ -138,6 +220,12 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     list_exact = narrow && Nx2Switch("EDEN_NX2_LIST_EXACT", true);
     sync_gpu_semaphores = narrow && Nx2Switch("EDEN_NX2_SYNC_GPU_SEMAPHORES", true);
     publish_idle = Nx2Switch("EDEN_NX2_PUBLISH_IDLE", true);
+    static const bool qmd_predict_switch = Nx2Switch("EDEN_NX2_QMD_PREDICT", true);
+    static const bool acquire_sync_at_switch = Nx2Switch("EDEN_NX2_ACQUIRE_SYNC_AT", true);
+    static const bool publish_waits_switch = Nx2Switch("EDEN_NX2_PUBLISH_WAITS", true);
+    qmd_predict = narrow_compute && sem_predict && qmd_predict_switch;
+    acquire_sync_at = narrow && acquire_sync_at_switch;
+    publish_waits = publish_waits_switch;
     diag = narrow && Nx2Switch("EDEN_NX2_NARROW_DIAG", false);
     if (narrow) {
         page_slots = std::make_unique<PageSlot[]>(PageBuckets * 4);
@@ -152,10 +240,11 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         LOG_INFO(HW_GPU,
                  "GPU thread split narrow switches: compute {} render_enable {} dma_recorded {} "
                  "list_sync {} sem_predict {} sem_predict_landed {} acquire_poll {} list_exact {} "
-                 "sync_gpu_semaphores {} diag {}",
+                 "sync_gpu_semaphores {} qmd_predict {} acquire_sync_at {} publish_waits {} "
+                 "diag {}",
                  narrow_compute, narrow_render_enable, narrow_dma_recorded, narrow_list_sync,
                  sem_predict, sem_predict_landed, acquire_poll, list_exact, sync_gpu_semaphores,
-                 diag);
+                 qmd_predict, acquire_sync_at, publish_waits, diag);
     }
 }
 
@@ -195,6 +284,9 @@ void GpuSplit::Stop() {
     acquire_poll = false;
     list_exact = false;
     sync_gpu_semaphores = false;
+    qmd_predict = false;
+    acquire_sync_at = false;
+    publish_waits = false;
     for (auto& page : gpu_semaphore_pages) {
         page.store(0, std::memory_order_relaxed);
     }
@@ -204,6 +296,9 @@ void GpuSplit::Stop() {
     unbounded_writer_position = 0;
     acquire_position = 0;
     write_floor = 0;
+    guest_write_position = 0;
+    release_barrier = 0;
+    last_sync_cause = UnboundedCause::Sync;
     queued_releases.reset();
     page_slots.reset();
     word_slots.reset();
@@ -290,11 +385,47 @@ void GpuSplit::Drain(DrainSite site) {
 }
 
 bool GpuSplit::WaitForWriters() {
+    // Held-back work goes first: a writer in it is noted before the target is taken.
+    RunPendingFlush();
     return WaitFor(std::min(last_writer_position, write_position), DrainSite::ListWriters);
 }
 
 bool GpuSplit::WaitForSync() {
+    RunPendingFlush();
     return WaitFor(std::min(last_sync_position, write_position), DrainSite::ListSync);
+}
+
+void GpuSplit::NoteSyncAt(u64 position, UnboundedCause cause) {
+    if (!acquire_sync_at) {
+        NoteSync(cause);
+        return;
+    }
+    const u64 sync = (std::min)(position, write_position);
+    if (sync >= last_sync_position) {
+        last_sync_position = sync;
+        last_sync_cause = cause;
+    }
+}
+
+void GpuSplit::NoteSyncDone(UnboundedCause cause) {
+    if (!acquire_sync_at) {
+        NoteSync(cause);
+        return;
+    }
+    consumed_cache = consumed.load(std::memory_order_acquire);
+    NoteSyncAt(consumed_cache, cause);
+}
+
+u64 GpuSplit::GuestReadTarget(const void* space, GPUVAddr address, u64 size) {
+    consumed_cache = consumed.load(std::memory_order_acquire);
+    return (std::min)(PendingWriteTarget(space, address, size, guest_write_position),
+                      write_position);
+}
+
+bool GpuSplit::WaitForGuestRead(u64 target) {
+    RunPendingFlush();
+    return WaitForAttributed((std::min)(target, write_position), DrainSite::QmdRead,
+                             UnboundedCause::Record);
 }
 
 bool GpuSplit::NarrowVerify() {
@@ -627,7 +758,7 @@ bool GpuSplit::WaitForWritersTo(const void* space, GPUVAddr address, u64 size, b
     UnboundedCause cause = writer_cause;
     if (sync_only) {
         base = last_sync_position;
-        cause = UnboundedCause::Sync;
+        cause = last_sync_cause;
     }
     const u64 target = PendingWriteTarget(space, address, size, base);
     if (target != base) {
@@ -696,6 +827,14 @@ void GpuSplit::MaybeReportDiag() {
              static_cast<double>(diag_acquires[1]) / seconds,
              static_cast<double>(diag_acquires[2] + diag_acquires[3]) / seconds,
              static_cast<double>(diag_acquires[3]) / seconds);
+    if (qmd_predict) {
+        std::string qmd;
+        for (size_t i = 0; i < diag_qmd.size(); ++i) {
+            qmd += fmt::format(" {} {:.0f}/s,", qmd_diag_names[i],
+                               static_cast<double>(diag_qmd[i]) / seconds);
+        }
+        LOG_INFO(HW_GPU, "Narrow diag: QMD prediction:{}", qmd);
+    }
     std::string dma;
     for (u32 pass = 0; pass < 12; ++pass) {
         size_t best = diag_macro_dma.size();
@@ -726,6 +865,7 @@ void GpuSplit::MaybeReportDiag() {
     diag_waits = {};
     diag_wait_ticks = {};
     diag_acquires = {};
+    diag_qmd = {};
     diag_window_start = now;
     diag_window_ticks = Nx2Profile::Ticks();
 }
@@ -741,7 +881,7 @@ GpuSplit::QueuedRelease* GpuSplit::FindRelease(const void* space, GPUVAddr addre
     return nullptr;
 }
 
-void GpuSplit::NoteRelease(const void* space, GPUVAddr address, u32 value) {
+void GpuSplit::NoteRelease(const void* space, GPUVAddr address, u32 value, bool at_least) {
     if (!sem_predict || queued_releases == nullptr) {
         return;
     }
@@ -783,20 +923,37 @@ void GpuSplit::NoteRelease(const void* space, GPUVAddr address, u32 value) {
     release->landed_slot = slot;
     release->sent += device ? 1 : 0;
     release->used = true;
+    release->at_least = at_least;
 }
 
 std::optional<u32> GpuSplit::PredictedSemaphore(const void* space, GPUVAddr address) {
+    const std::optional<SemaphorePrediction> prediction = PredictedRelease(space, address);
+    if (!prediction || prediction->at_least) {
+        return std::nullopt;
+    }
+    return prediction->value;
+}
+
+std::optional<SemaphorePrediction> GpuSplit::PredictedRelease(const void* space,
+                                                              GPUVAddr address) {
     if (!sem_predict || queued_releases == nullptr) {
         return std::nullopt;
     }
     consumed_cache = consumed.load(std::memory_order_acquire);
     const QueuedRelease* const release = FindRelease(space, address);
-    // A write sent after the release (a copy, a compute report) may change the word.
-    if (release == nullptr || WrittenSince(space, address, release->position)) {
+    // A write sent after the release (a copy, a compute report) may change the word; so may
+    // work the front lost track of (NoteReleaseBarrier).
+    if (release == nullptr || release->position < release_barrier ||
+        WrittenSince(space, address, release->position)) {
         return std::nullopt;
     }
+    const SemaphorePrediction prediction{
+        .value = release->value,
+        .at_least = release->at_least,
+        .position = release->position,
+    };
     if (release->position > consumed_cache) {
-        return release->value;
+        return prediction;
     }
     if (!sem_predict_landed || release->sent == 0) {
         return std::nullopt;
@@ -813,7 +970,7 @@ std::optional<u32> GpuSplit::PredictedSemaphore(const void* space, GPUVAddr addr
     if (now != release->before && now != release->value) {
         return std::nullopt;
     }
-    return release->value;
+    return prediction;
 }
 
 void GpuSplit::ForgetRelease(const void* space, GPUVAddr address) {
@@ -829,6 +986,11 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
     consumed_cache = consumed.load(std::memory_order_acquire);
     if (consumed_cache >= target) {
         return false;
+    }
+    // EDEN_NX2_PUBLISH_WAITS: the back gets the held-back work (a register delta, a draw batch)
+    // too, so it has that to run once it reaches the target instead of waiting for the front.
+    if (publish_waits) {
+        RunPendingFlush();
     }
     Nx2Profile::Scope scope{Nx2Profile::Zone::WriterWait};
     wait_target.store(target, std::memory_order_seq_cst);
@@ -914,6 +1076,9 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
         return 0;
     case Kind::Engine:
         back_engine = reinterpret_cast<Tegra::Engines::EngineInterface*>(entry[1]);
+        if (Nx2Profile::Enabled()) [[unlikely]] {
+            g_back_engine_3d = Tegra::Engines::Maxwell3D::IsMaxwell3D(back_engine);
+        }
         return 2;
     case Kind::Method: {
         const u32 method = static_cast<u32>((head >> 8) & 0xffff);
@@ -967,14 +1132,17 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
             }
             return (head & HasSegment) != 0 ? 2 : 1;
         }
+        // Profiling (fast_maxwell3d off): Maxwell3D's methods and the other engines' apart.
+        const Nx2Profile::Zone zone =
+            g_back_engine_3d ? Nx2Profile::Zone::Method3D : Nx2Profile::Zone::Method;
         if ((head & Direct) != 0) {
-            Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+            Nx2Profile::Scope method_scope{zone};
             engine->ConsumeSink(*system);
             engine->CallMethod(*system, method, argument, true);
         } else if (!engine->execution_mask[method]) {
             engine->method_sink.emplace_back(method, argument);
         } else {
-            Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+            Nx2Profile::Scope method_scope{zone};
             engine->ConsumeSink(*system);
             if ((head & HasSegment) != 0) {
                 engine->current_dma_segment = entry[1];
@@ -999,43 +1167,81 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
     }
     case Kind::Call: {
         const size_t payload = static_cast<size_t>((head >> 8) & 0xffffff);
-        reinterpret_cast<void (*)(const u64*)>(entry[1])(entry + 2);
+        const auto thunk = reinterpret_cast<void (*)(const u64*)>(entry[1]);
+        if (Nx2Profile::Enabled()) [[unlikely]] {
+            // By thunk (one per sending site): inclusive time, logged with the zones.
+            Nx2Profile::Scope call_scope{Nx2Profile::Zone::Call};
+            const u64 start = Nx2Profile::Ticks();
+            thunk(entry + 2);
+            NoteCall(entry[1], Nx2Profile::Ticks() - start);
+        } else {
+            thunk(entry + 2);
+        }
         return 2 + payload;
     }
     case Kind::StateDelta: {
         // Only Maxwell3D sends these (FrontState).
         const u32 count = static_cast<u32>(head >> 32);
-        static_cast<Tegra::Engines::Maxwell3D*>(back_engine)
-            ->ApplyFrontDelta(*system, entry + 1, count);
-        return 1 + size_t{count};
+        {
+            Nx2Profile::Scope delta_scope{Nx2Profile::Zone::DeltaApply};
+            static_cast<Tegra::Engines::Maxwell3D*>(back_engine)
+                ->ApplyFrontDelta(*system, entry + 1, count);
+        }
+        const size_t size = 1 + size_t{count};
+        // EDEN_NX2_DELTA_CHAIN: the front sends a delta right before the entry that made it go
+        // (FrontFlushPending, from Reserve): run that entry now when it is published too, as
+        // BackLoop would next. Only kinds that never return 0 (Wrap) or chain again.
+        if (g_delta_chain && size < words) {
+            const Kind next = static_cast<Kind>(entry[size] & 0xf);
+            if (next == Kind::Method || next == Kind::CbWrite || next == Kind::CbBind ||
+                next == Kind::DrawBatch) {
+                if (Nx2Profile::Enabled()) [[unlikely]] {
+                    Nx2Profile::Add(Nx2Profile::Counter::RingEntries, 1);
+                }
+                return size + Execute(entry + size, words - size);
+            }
+        }
+        return size;
     }
     case Kind::DrawBatch: {
         const u32 count = static_cast<u32>((head >> 8) & 0xff);
         const u32 repeats = static_cast<u32>(head >> 32);
+        Nx2Profile::Scope batch_scope{Nx2Profile::Zone::DrawBatch};
         static_cast<Tegra::Engines::Maxwell3D*>(back_engine)
             ->RunDrawBatch(*system, entry + 1, count, repeats);
         return 1 + size_t{count};
     }
     case Kind::CbWrite: {
         const u32 count = static_cast<u32>((head >> 8) & 7);
-        Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
-        // The words after the first (at most 3, see GpuSplit::CbWrite), out of the u64 storage.
-        std::array<u32, 3> rest{};
-        if (count > 1) {
-            std::memcpy(rest.data(), entry + 1,
-                        size_t{(std::min)(count, u32{4}) - 1} * sizeof(u32));
-        }
+        Nx2Profile::Scope cb_scope{Nx2Profile::Zone::CbWrite};
+        // The words after the first (at most 3, see GpuSplit::CbWrite) stay in the ring words
+        // after the head.
         static_cast<Tegra::Engines::Maxwell3D*>(back_engine)
             ->BackCbWrite(*system, static_cast<u32>((head >> 12) & 0xffff),
-                          static_cast<u32>(head >> 32), rest.data(), count);
+                          static_cast<u32>(head >> 32), entry + 1, count);
         return 1 + size_t{count} / 2;
     }
     case Kind::CbBind: {
-        Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+        Nx2Profile::Scope bind_scope{Nx2Profile::Zone::CbBind};
         static_cast<Tegra::Engines::Maxwell3D*>(back_engine)
             ->BackCbBind(*system, static_cast<u32>((head >> 8) & 0xff),
                          static_cast<u32>(head >> 32));
         return 1;
+    }
+    case Kind::Writes: {
+        // Only KeplerCompute sends these (FrontQueueWrite).
+        const u32 count = static_cast<u32>(head >> 32);
+        const size_t data = (head & HasSegment) != 0 ? 2 : 1;
+        Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+        if ((head & HasSegment) != 0) {
+            back_engine->current_dma_segment = entry[1];
+        }
+        if (Nx2Profile::Enabled()) [[unlikely]] {
+            Nx2Profile::Add(Nx2Profile::Counter::FusedWrites, count);
+        }
+        static_cast<Tegra::Engines::KeplerCompute*>(back_engine)
+            ->BackWrites(*system, entry + data, count);
+        return data + size_t{count};
     }
     }
     return 1;
@@ -1055,10 +1261,17 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
 #endif
     u64 read_position = 0;
     const bool back_lean = Nx2Switch("EDEN_NX2_BACK_LEAN", true);
+    const bool profiling = Nx2Profile::Enabled();
+    g_back_engine_3d = false;
+    if (profiling) {
+        ResetCalls();
+    }
     // Counts across batches, so a stream of short batches still checks hook requests.
     u32 entries = 0;
     while (!stop_token.stop_requested()) {
-        Nx2Profile::Report("GPU back thread");
+        if (Nx2Profile::Report("GPU back thread")) [[unlikely]] {
+            ReportCalls();
+        }
         u64 available = published.load(std::memory_order_acquire);
         if (available == read_position) {
             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
@@ -1072,7 +1285,10 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             }
             if (available == read_position && idle_hook != nullptr) {
                 hook_requested.store(false, std::memory_order_seq_cst);
-                idle_hook(idle_argument);
+                {
+                    Nx2Profile::Scope hook_scope{Nx2Profile::Zone::IdleHook};
+                    idle_hook(idle_argument);
+                }
                 available = published.load(std::memory_order_acquire);
             }
             if (available == read_position) {
@@ -1093,17 +1309,37 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         if (back_idle.load(std::memory_order_relaxed)) {
             back_idle.store(false, std::memory_order_relaxed);
         }
+        Nx2Profile::Scope ring_scope{Nx2Profile::Zone::RingDecode};
         u64 last_store = read_position;
+        // EDEN_NX2_RING_PREFETCH: the ring lines ahead of the entry, up to a line short of what
+        // the front published (a line it may still be writing would only bounce between the two
+        // cores). The front wrote them moments ago: they sit in its core's caches.
+        u64 prefetched = read_position;
         while (read_position != available) {
             const size_t index = read_position & RingMask;
+            if (g_ring_prefetch) {
+                const u64 ahead = (std::min)(read_position + RingPrefetchWords,
+                                             available > 8 ? available - 8 : u64{0});
+                prefetched = (std::max)(prefetched, read_position);
+                while (prefetched + 8 <= ahead) {
+                    prefetched += 8;
+                    PrefetchRingLine(&ring[prefetched & RingMask]);
+                }
+            }
             const size_t size =
                 Execute(&ring[index], std::min<u64>(available - read_position, RingWords - index));
-            read_position += size != 0 ? size : RingWords - index;
+            const size_t advance = size != 0 ? size : RingWords - index;
+            read_position += advance;
+            if (profiling) [[unlikely]] {
+                Nx2Profile::Add(Nx2Profile::Counter::RingEntries, size != 0 ? 1 : 0);
+                Nx2Profile::Add(Nx2Profile::Counter::RingWords, advance);
+            }
             // EDEN_NX2_BACK_LEAN: the hook request (another thread's cache line) every 4 entries.
             if ((!back_lean || (++entries & 3) == 0) &&
                 hook_requested.load(std::memory_order_relaxed) &&
                 idle_hook != nullptr) [[unlikely]] {
                 hook_requested.store(false, std::memory_order_seq_cst);
+                Nx2Profile::Scope hook_scope{Nx2Profile::Zone::IdleHook};
                 idle_hook(idle_argument);
             }
             // Hand ring space back now and then while working through a long batch, and at once

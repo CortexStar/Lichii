@@ -44,6 +44,7 @@ enum class DrainSite : u32 {
     NarrowMacroDmaRead, ///< MacroDmaRead narrowed (WaitForWritesTo)
     NarrowAcquire,      ///< Acquire narrowed: an acquire already met
     NarrowListWriters,  ///< ListWriters narrowed (WaitForWritersTo)
+    QmdRead,            ///< EDEN_NX2_QMD_PREDICT: a QMD the front reads has a queued write
     Count,
 };
 
@@ -51,7 +52,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> 
     "other",       "fetch drain",     "acquire",    "semaphore flush", "fence release",
     "list writers", "list sync",      "list flush", "macro dma read",  "macro dma flush",
     "gp sync fence", "map",           "front start", "front verify",   "macro dma read (narrow)",
-    "acquire (narrow)", "list writers (narrow)",
+    "acquire (narrow)", "list writers (narrow)", "qmd read",
 };
 
 /// What made the front note an unbounded write (EDEN_NX2_NARROW_DIAG attributes waits to it).
@@ -77,6 +78,8 @@ enum class UnboundedCause : u8 {
     Overflow,         ///< The pending write records overflowed
     Record,           ///< (Wait attribution only) a recorded write overlapping the read
     Sync,             ///< (Wait attribution only) the last host-level wait
+    AcquireSync,      ///< (Wait attribution only) the last host-level wait: an acquire met in memory
+    PredictedSync,    ///< (Wait attribution only) the last host-level wait: a predicted acquire
     Count,
 };
 
@@ -87,7 +90,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(UnboundedCause::Cou
         "compute upload", "compute report",    "compute other",   "block-linear DMA",
         "fermi2d/inline", "puller WFI",        "syncpoint acquire", "MemOpB",
         "GP sync",        "GPU thread cmd",    "overflow",        "record",
-        "sync",
+        "sync",           "acquire sync",      "predicted acquire sync",
 };
 
 /// Which unbounded position a narrowed front read waits for (GpuSplit::WaitForWritesTo).
@@ -95,6 +98,30 @@ enum class NarrowBase : u8 {
     Read,     ///< Every unbounded write (macro DMA reads)
     Acquire,  ///< Every unbounded write and dispatch (semaphore acquires)
     Recorded, ///< Only the recorded writes (and the write floor): EDEN_NX2_NARROW_DMA_RECORDED
+};
+
+/// EDEN_NX2_QMD_PREDICT: how the front's reads of QMDs went (EDEN_NX2_NARROW_DIAG counts them).
+enum class QmdDiag : u8 {
+    Clean,    ///< Guest memory, nothing queued writes it
+    Overlay,  ///< The words of the inline QMD queued last over it
+    Waited,   ///< Waited for the queued writes over it, then guest memory
+    Resync,   ///< Unknown (GPU-written page, all zero): drained and copied the back's table
+    Grid,     ///< A QMD with a grid ran
+    Release,  ///< A release recorded (plain or max)
+    Count,
+};
+
+inline constexpr std::array<const char*, static_cast<size_t>(QmdDiag::Count)> qmd_diag_names{
+    "clean", "overlay", "waited", "resync", "grids", "releases",
+};
+
+/// A queued release's value at a semaphore word (GpuSplit::PredictedRelease).
+struct SemaphorePrediction {
+    u32 value;
+    /// A max release: the word will hold at least `value`.
+    bool at_least;
+    /// The end of the work that releases it (a met acquire orders what follows behind it).
+    u64 position;
 };
 
 /// An EDEN_NX2_* on/off switch: '0' off, anything else on, unset `default_on`.
@@ -229,6 +256,27 @@ public:
                    (u64{argument} << 32);
         Commit(1);
     }
+    // EDEN_NX2_COMPUTE_FUSE (KeplerCompute::FrontQueueWrite): a run of compute method writes in
+    // one entry instead of one entry each.
+    /// Bits of a run word: method (bits 0-15) | WriteIsLast | WriteDirect | argument << 32.
+    static constexpr u64 WriteIsLast = u64{1} << 16; ///< The call's is_last_call
+    static constexpr u64 WriteDirect = u64{1} << 17; ///< Sent as MacroWrite (no method sink)
+    /// `count` writes run in order on the back as the Method and MacroWrite entries they stand
+    /// for (KeplerCompute::BackWrites). `segment`: current_dma_segment of the last of them sent
+    /// with one, stored before the run.
+    void Writes(Tegra::Engines::EngineInterface* engine, const u64* writes, u32 count,
+                const GPUVAddr* segment) {
+        SelectEngine(engine);
+        const size_t head = segment != nullptr ? 2 : 1;
+        u64* const entry = Reserve(head + size_t{count});
+        entry[0] = static_cast<u64>(Kind::Writes) | (segment != nullptr ? HasSegment : 0) |
+                   (u64{count} << 32);
+        if (segment != nullptr) {
+            entry[1] = *segment;
+        }
+        std::memcpy(entry + head, writes, size_t{count} * sizeof(u64));
+        Commit(head + size_t{count});
+    }
     /// Work the front holds back (a register delta, a draw batch): `hook(argument)` sends it
     /// before anything else is sent and before a Drain. Another holder's work is sent first.
     using PendingFlush = void (*)(void*);
@@ -296,6 +344,14 @@ public:
 
     /// Makes what was sent visible to the back.
     void Publish();
+    /// EDEN_NX2_PUBLISH_WAITS: before the front yields or sleeps, sends the held-back work and
+    /// publishes, so the back doesn't idle on work the front already decoded.
+    void PublishBeforeWait() {
+        if (publish_waits) {
+            RunPendingFlush();
+            Publish();
+        }
+    }
     /// Waits until the back executed everything sent so far.
     void Drain(DrainSite site = DrainSite::Other);
 
@@ -309,9 +365,16 @@ public:
     /// A host-level wait was just sent (a syncpoint acquire, a host WFI, a GP entry with its sync
     /// bit; semaphore acquires drain): the guest's GPU work before it is complete before the
     /// commands after it are fetched.
-    void NoteSync() {
+    void NoteSync(UnboundedCause cause = UnboundedCause::Sync) {
         last_sync_position = write_position;
+        last_sync_cause = cause;
     }
+    /// EDEN_NX2_ACQUIRE_SYNC_AT: a met acquire only orders the fetch after the work before the
+    /// release that met it (sent before `position`), not after everything sent before the
+    /// acquire; without it NoteSync. The sync never moves back.
+    void NoteSyncAt(u64 position, UnboundedCause cause);
+    /// NoteSyncAt for an acquire met in guest memory: the release that wrote it ran on the back.
+    void NoteSyncDone(UnboundedCause cause);
     /// Waits until the back executed the work sent before the last NoteSync. Returns whether any
     /// of it was still queued.
     bool WaitForSync();
@@ -354,6 +417,9 @@ public:
     void NoteUnboundedWrite(bool writer = false, UnboundedCause cause = UnboundedCause::Unknown) {
         if (narrow) {
             unbounded_position = write_position;
+            if (!BarrierOnly(cause)) {
+                guest_write_position = write_position;
+            }
             unbounded_cause = cause;
             acquire_position = write_position;
             acquire_cause = cause;
@@ -383,6 +449,74 @@ public:
         writer_cause = cause;
         if (diag) [[unlikely]] {
             ++diag_notes[static_cast<size_t>(cause)];
+        }
+    }
+    /// Unbounded writes that write no guest memory themselves on the back: barriers, and
+    /// dispatches, whose shader stores go to the host GPU's copies (GuestReadTarget).
+    [[nodiscard]] static constexpr bool BarrierOnly(UnboundedCause cause) {
+        switch (cause) {
+        case UnboundedCause::Wfi3D:
+        case UnboundedCause::TexInvalidate:
+        case UnboundedCause::PullerWfi:
+        case UnboundedCause::MemOpB:
+        case UnboundedCause::GpSync:
+        case UnboundedCause::ComputeLaunch:
+            return true;
+        default:
+            return false;
+        }
+    }
+    // EDEN_NX2_QMD_PREDICT: the front runs a copy of the QMD scheduler (KeplerCompute), so it
+    // knows where each QMD runs and what it releases. Those releases are noted as writes and
+    // releases (NoteWrite, NoteRelease), so acquires on them are predicted, and a launch is no
+    // dispatch for acquires (NoteDispatch) unless a grid ran.
+    [[nodiscard]] bool QmdPredict() const {
+        return qmd_predict;
+    }
+    /// EDEN_NX2_QMD_PREDICT: a QMD with a grid ran in the work just sent. Its releases were
+    /// noted; its shader stores hold command list reads and, without EDEN_NX2_ACQUIRE_POLL
+    /// (whose polled reads already don't wait for them), semaphore acquires.
+    void NoteComputeGrid() {
+        if (!narrow) {
+            return;
+        }
+        unbounded_writer_position = write_position;
+        writer_cause = UnboundedCause::ComputeLaunch;
+        if (!acquire_poll) {
+            acquire_position = write_position;
+            acquire_cause = UnboundedCause::ComputeLaunch;
+        }
+        if (diag) [[unlikely]] {
+            ++diag_notes[static_cast<size_t>(UnboundedCause::ComputeLaunch)];
+        }
+    }
+    /// Work sent so far may have written semaphore words with values the front doesn't know
+    /// (the QMD mirror started over): no release sent before now is predicted any more.
+    void NoteReleaseBarrier() {
+        release_barrier = write_position;
+    }
+    /// The position the front waits for before reading [address, address + size) of `space`
+    /// so that guest memory then holds what the back reads there when it gets to the work sent
+    /// so far: the recorded writes over it and the unbounded writes that write guest memory
+    /// (not BarrierOnly). Also refreshes ConsumedPosition.
+    [[nodiscard]] u64 GuestReadTarget(const void* space, GPUVAddr address, u64 size);
+    /// What the back consumed, as last loaded.
+    [[nodiscard]] u64 ConsumedPosition() const {
+        return consumed_cache;
+    }
+    /// What the back consumed, loaded now (refreshes ConsumedPosition).
+    u64 LoadConsumed() {
+        return consumed_cache = consumed.load(std::memory_order_acquire);
+    }
+    /// The end of the work sent so far.
+    [[nodiscard]] u64 WritePosition() const {
+        return write_position;
+    }
+    /// Waits for GuestReadTarget's `target` (a QMD read).
+    bool WaitForGuestRead(u64 target);
+    void NoteQmdDiag(QmdDiag kind) {
+        if (diag) [[unlikely]] {
+            ++diag_qmd[static_cast<size_t>(kind)];
         }
     }
     /// EDEN_NX2_NARROW_COMPUTE: compute work is unbounded only where it launches or writes.
@@ -432,7 +566,12 @@ public:
         return sem_predict;
     }
     /// A release of `value` at `address` of `space` (a Tegra::MemoryManager) was just sent.
-    void NoteRelease(const void* space, GPUVAddr address, u32 value);
+    /// `at_least`: a max release (the word becomes max(word, value)).
+    void NoteRelease(const void* space, GPUVAddr address, u32 value, bool at_least = false);
+    /// The latest queued (or, EDEN_NX2_SEM_PREDICT_LANDED, run but not landed) release at
+    /// `address` of `space`, as PredictedSemaphore, with max releases as lower bounds.
+    [[nodiscard]] std::optional<SemaphorePrediction> PredictedRelease(const void* space,
+                                                                      GPUVAddr address);
     /// The value of the latest still-queued release at `address` of `space`, if any.
     /// EDEN_NX2_SEM_PREDICT_LANDED: also once the back ran it while guest memory still holds the
     /// word from before it (a fence still holds the write back) or its value, and nothing the
@@ -486,6 +625,7 @@ private:
         DrawBatch,  ///< Bits 8-15 count, 32-63 repeats; then count words (method | arg << 32)
         CbWrite,    ///< Bits 8-10 count (1-4), 12-27 register nibbles, 32-63 word 0; then words
         CbBind,     ///< Bits 8-15 stage, 32-63 argument (Maxwell3D bind group raw_config)
+        Writes,     ///< Bits 32-63 count; flag HasSegment (word 1); then count run words (KeplerCompute)
     };
     static constexpr u64 IsLast = 1 << 4;
     static constexpr u64 HasSegment = 1 << 5;
@@ -616,6 +756,9 @@ private:
     bool list_exact{};
     bool sync_gpu_semaphores{};
     bool publish_idle{};
+    bool qmd_predict{};
+    bool acquire_sync_at{};
+    bool publish_waits{};
     bool diag{};
     /// NoteGpuSemaphore's pages (page + 1, open addressing); saturated: every page counts.
     static constexpr size_t GpuSemaphoreSlots = 1024;
@@ -644,6 +787,11 @@ private:
     u64 acquire_position{};
     /// The latest pending write slot that gave way (every narrowed read waits for it).
     u64 write_floor{};
+    /// Unbounded writes that may write guest memory themselves (not BarrierOnly).
+    u64 guest_write_position{};
+    /// Releases sent before it are not predicted (NoteReleaseBarrier).
+    u64 release_barrier{};
+    UnboundedCause last_sync_cause{UnboundedCause::Sync};
     UnboundedCause unbounded_cause{};
     UnboundedCause acquire_cause{};
     UnboundedCause writer_cause{};
@@ -661,6 +809,7 @@ private:
         u32 landed_base;
         u32 sent;
         bool used;
+        bool at_least; ///< A max release
     };
     static constexpr size_t ReleaseBuckets = 256; ///< 4 slots each
     [[nodiscard]] QueuedRelease* FindRelease(const void* space, GPUVAddr address);
@@ -675,6 +824,7 @@ private:
                static_cast<size_t>(DrainSite::Count)>
         diag_wait_ticks{};
     std::array<u64, 4> diag_acquires{};
+    std::array<u64, static_cast<size_t>(QmdDiag::Count)> diag_qmd{};
     /// Per macro (by start method): DMA reads into data RAM, FIFOed, words.
     std::array<std::array<u64, 3>, 0x100> diag_macro_dma{};
     u64 diag_window_start{};
