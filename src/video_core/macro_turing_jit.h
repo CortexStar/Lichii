@@ -71,6 +71,7 @@ public:
         StepLimit,
     };
 
+    /// Message for an error code from Result::error, for logs.
     static std::string_view ErrorText(Word error) {
         constexpr std::array<std::string_view, 13> texts{
             "",
@@ -99,6 +100,9 @@ public:
         compiled_generation = generation;
     }
 
+    /// Runs the compiled program from instruction `start` to its end, a stop or a failure.
+    /// @param parameters Load FIFO; MME_DMA_READ_FIFOED appends to it through `emit`.
+    /// @param data_ram   MME data RAM the program reads and writes.
     template <typename Read, typename Emit>
     Result Execute(Word start, std::vector<Word>& parameters, std::span<Word> data_ram, Read read,
                    Emit emit) {
@@ -132,6 +136,7 @@ private:
     struct Thunks {
         Read& read;
         Emit& emit;
+        /// Emits one method write out of the program, and records that the call wrote.
         static bool CallEmit(State* state, Word method, Word value) {
             state->side_effects = 1;
             const bool ok = static_cast<Thunks*>(state->user)->emit(method, value);
@@ -140,6 +145,7 @@ private:
             state->params_size = static_cast<Word>(state->fifo->size());
             return ok;
         }
+        /// Reads a register the program asked for through the MME read operand.
         static Word CallRead(State* state, Word address) {
             return static_cast<Thunks*>(state->user)->read(address);
         }
