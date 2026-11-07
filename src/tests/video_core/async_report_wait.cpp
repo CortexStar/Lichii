@@ -81,6 +81,13 @@ TEST_CASE("Nx2AsyncReport never issued counts nothing", "[video_core][nx2]") {
     REQUIRE(Tegra::Nx2AsyncReportsSettled(address, 4));
 }
 
+TEST_CASE("Nx2AsyncReportsSettled treats an empty range as settled", "[video_core][nx2]") {
+    Tegra::Nx2IssueAsyncReport(0);
+    REQUIRE(Tegra::Nx2AsyncReportsSettled(0, 0));
+    Tegra::Nx2WaitAsyncReportsSettled(0, 0);
+    Tegra::Nx2CompleteAsyncReport(0);
+}
+
 TEST_CASE("Nx2WaitAsyncReportsSettled ignores reports outside the range", "[video_core][nx2]") {
     constexpr u64 address = 0x30'0000;
     Tegra::Nx2IssueAsyncReport(address + 0x100);

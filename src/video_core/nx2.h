@@ -96,6 +96,9 @@ inline std::array<std::atomic<u32>, Nx2AsyncReportSlots> g_nx2_async_reports_com
 }
 
 [[nodiscard]] inline bool Nx2AsyncReportsSettled(u64 device_address, u64 size) {
+    if (size == 0) {
+        return true;
+    }
     for (u64 slot = device_address >> 4; slot <= (device_address + size - 1) >> 4; ++slot) {
         const u64 index = slot % Nx2AsyncReportSlots;
         if (g_nx2_async_reports_completed[index].load(std::memory_order_acquire) !=
