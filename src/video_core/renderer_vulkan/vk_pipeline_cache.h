@@ -182,6 +182,8 @@ private:
         GraphicsPipelineCacheKey key;
         std::unique_ptr<GraphicsPipeline> pipeline; ///< Null when it is skipped or failed.
         GraphicsEnvironmentArray envs;              ///< For the disk cache.
+        /// The detached environments could not answer translation (DetachedEnvironmentMiss).
+        bool translate_on_gpu_thread{};
     };
 
     void SerializeGraphicsPipeline(const GraphicsPipelineCacheKey& key,
@@ -193,6 +195,10 @@ private:
     /// Builds graphics_key's pipeline from shaders an earlier pipeline translated, null if none fit.
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipelineFromReusedShaders(
         GraphicsEnvironments& environments);
+
+    /// Detaches the environments of graphics_key's programs from the engine and guest memory.
+    /// False when one cannot be (the pipeline is then translated on the GPU thread).
+    [[nodiscard]] bool DetachGraphicsEnvironments(GraphicsEnvironmentArray& envs);
 
     /// Queues the translation of graphics_key's pipeline on a translation worker and waits for
     /// it within the native wait budget. True when it was adopted into graphics_cache in time.
@@ -322,6 +328,10 @@ private:
     std::mutex translated_mutex;
     std::vector<TranslatedGraphicsPipeline> translated_graphics;
     std::atomic<size_t> num_translated{};
+    /// Keys whose translation needs more than detached environments hold (GPU thread only).
+    ::Common::unordered_set<GraphicsPipelineCacheKey> synchronous_graphics;
+    /// Set when the cache is destroyed: queued translations return without translating.
+    std::atomic_bool stop_translations{};
     /// Zero without asynchronous shaders, or on drivers that break with parallel compiles.
     const size_t num_translation_threads;
     /// Declared last so it is destroyed first: its threads finish the translation they are
