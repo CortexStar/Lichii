@@ -19,6 +19,7 @@
 
 #include "common/alignment.h"
 #include "shader_recompiler/environment.h"
+#include "shader_recompiler/exception.h"
 #include "shader_recompiler/frontend/ir/basic_block.h"
 #include "shader_recompiler/frontend/ir/breadth_first_search.h"
 #include "shader_recompiler/frontend/ir/ir_emitter.h"
@@ -1656,6 +1657,11 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
             // Never more storage buffers than a stage binds: without the table entries, then.
             info = std::move(with_tables);
         }
+    }
+    if (info.set.size() > max_ssbos) {
+        // Binding only some of them would drop the accesses through the others.
+        throw NotImplementedException("Binding {} storage buffers to a stage that binds {}",
+                                      info.set.size(), max_ssbos);
     }
     program.info.native_global_bounds |= info.native_runtime_bounds;
     for (const StorageBufferAddr& storage_buffer : info.set) {
