@@ -1634,9 +1634,11 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     if (!reused && !allow_translation) {
         return nullptr;
     }
+    // emit_pools is copied, not moved: it may own `pools`, which the catch handler below still
+    // walks after a translation exception.
     std::optional<GraphicsShaders> shaders{
         BuildGraphicsShaders(pools, key, translation_key, envs, reused.get(), build_in_parallel,
-                             std::move(emit_pools), std::move(reservation))};
+                             emit_pools, std::move(reservation))};
     if (!shaders) {
         return nullptr;
     }
