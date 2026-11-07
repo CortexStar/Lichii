@@ -45,7 +45,7 @@
 #include "video_core/texture_cache/util.h"
 #include "video_core/dlss_contract.h"
 #include "video_core/vulkan_common/vulkan_device.h"
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
 #include "video_core/vulkan_common/streamline.h"
 #endif
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
@@ -1741,7 +1741,7 @@ bool TextureCacheRuntime::WantsTemporalUpscaleDepth() const {
     if (force_standin) {
         return false;
     }
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
     if (Streamline::IsDlssAvailable() && !dlss_unsupported) {
         return true;
     }
@@ -1750,7 +1750,7 @@ bool TextureCacheRuntime::WantsTemporalUpscaleDepth() const {
 }
 
 bool TextureCacheRuntime::UsesNvidiaDlss() const {
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
     static const bool force_fsr = [] {
         const char* const value = std::getenv("LICHII_NX2_DLSS_REPLACEMENT");
         return value && std::string_view{value} == "fsr";
@@ -1788,7 +1788,7 @@ bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageVie
             : 1000.0f / 30.0f;
     const bool reset = !fsr3_last_evaluation || frame_time_ms > 250.0f;
     fsr3_last_evaluation = now;
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
     if (UpscaleWithDlss(dst_framebuffer, input_color, motion_vectors, depth, render_size, jitter,
                         motion_scale, reset)) {
         return true;
@@ -1895,7 +1895,7 @@ void TextureCacheRuntime::DrawUpscaledOutput(Framebuffer* dst_framebuffer, VkIma
     });
 }
 
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
 bool TextureCacheRuntime::UpscaleWithDlss(Framebuffer* dst_framebuffer, ImageView& input_color,
                                           ImageView& motion_vectors, ImageView& depth,
                                           std::array<u32, 2> render_size,

@@ -88,8 +88,8 @@ static void LoadNx2Switches(const char* argv0) {
                  name == "LICHII_NATIVE_DRAW_DIAGNOSTICS" || name == "LICHII_NATIVE_FRAME_CAPTURE" ||
                  name == "LICHII_NATIVE_SHADER_OVERRIDE_DIR" || name == "LICHII_PUNCH_HOLE" ||
                  name == "LICHII_STARFOX_WINDOW_TRACE" || name == "LICHII_VI2_MAX_RESOLUTION_MODE" ||
-                 name == "EGLANTINE_EXPERIMENTAL_STATIC_VERTEX_REPACK" ||
-                 name == "EGLANTINE_TEST_VERTEX_REPACK");
+                 name == "LICHII_EXPERIMENTAL_STATIC_VERTEX_REPACK" ||
+                 name == "LICHII_TEST_VERTEX_REPACK");
     });
 #ifdef _WIN32
     const auto config_base = Common::FS::GetAppDataRoamingDirectory();

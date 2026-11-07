@@ -42,7 +42,7 @@
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_surface.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
 #include "video_core/vulkan_common/streamline.h"
 #endif
 #ifdef __ANDROID__
@@ -134,7 +134,7 @@ try
     , gpu(gpu_)
     , library(OpenLibrary(context.get()))
     , dld()
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
     , streamline_started(Streamline::Start())
 #endif
     // Create raw Vulkan instance first
