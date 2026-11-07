@@ -82,7 +82,8 @@ The tested route faced the Deku Tree from the same Kokiri Forest autosave:
 5. Remain neutral for another 600 presents, then stop normally.
 
 Submit steps through `input_sequence` using `tools/nx2/debug_mcp.py` from the
-patched base. For example, the primary step is:
+patched base, with `--server 127.0.0.1:6547` to match the server address above.
+For example, the primary step is:
 
 ```json
 {"method":"input_sequence","params":{"steps":[{"buttons":["ZL"],"frames":600}]}}
