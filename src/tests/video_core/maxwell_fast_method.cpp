@@ -891,6 +891,40 @@ TEST_CASE("Split command list fetches wait only for the writers before the last 
     split.Drain(VideoCommon::DrainSite::Other);
 }
 
+TEST_CASE("Split tells whether compute or copy work it was sent is still queued",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    Fixture f;
+    f.system.Initialize();
+    VideoCommon::GpuSplit split;
+    std::atomic<bool> release{};
+    Access::Start(split, f.system);
+    SCOPE_EXIT {
+        split.Stop();
+    };
+    // Runs before Stop: a failed check must not leave the back in the entry below.
+    SCOPE_EXIT {
+        release = true;
+    };
+    REQUIRE_FALSE(split.WritersPending());
+    split.Defer([&release] {
+        while (!release.load()) {
+            std::this_thread::yield();
+        }
+    });
+    split.NoteWriter();
+    split.Publish();
+    REQUIRE(split.WritersPending());
+    release = true;
+    split.Drain(VideoCommon::DrainSite::Other);
+    REQUIRE_FALSE(split.WritersPending());
+    // Other work does not count.
+    split.Defer([] {});
+    split.Publish();
+    REQUIRE_FALSE(split.WritersPending());
+    split.Drain(VideoCommon::DrainSite::Other);
+}
+
 TEST_CASE("Split restart resets writer positions without replaying old releases",
           "[video_core][gpu_split_dependencies]") {
     using Access = VideoCommon::GpuSplitTestAccess;

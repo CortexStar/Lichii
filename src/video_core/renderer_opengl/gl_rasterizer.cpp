@@ -23,6 +23,7 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_drain_check.h"
 #include "video_core/renderer_opengl/gl_device.h"
 #include "video_core/renderer_opengl/gl_query_cache.h"
 #include "video_core/renderer_opengl/gl_rasterizer.h"
@@ -446,6 +447,12 @@ void RasterizerOpenGL::ResetCounter(VideoCommon::QueryType type) {
 
 void RasterizerOpenGL::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                              VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) {
+    if (VideoCommon::Nx2DrainCheck::g_enabled && type == VideoCommon::QueryType::Payload)
+        [[unlikely]] {
+        if (const auto released = gpu_memory->GpuToCpuAddress(gpu_addr)) {
+            VideoCommon::Nx2DrainCheck::NoteRelease(*released);
+        }
+    }
     const auto query_cache_type = MaxwellToVideoCoreQuery(type);
     if (!query_cache_type.has_value()) {
         return QueryFallback(gpu_addr, type, flags, payload, subreport);

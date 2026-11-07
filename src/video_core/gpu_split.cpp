@@ -233,6 +233,11 @@ bool GpuSplit::WaitForSyncedWriters() {
                    DrainSite::ListWriters);
 }
 
+bool GpuSplit::WritersPending() const {
+    return consumed.load(std::memory_order_acquire) <
+           std::min(last_writer_position, write_position);
+}
+
 bool GpuSplit::WaitFor(u64 target, DrainSite site) {
     consumed_cache = consumed.load(std::memory_order_acquire);
     if (consumed_cache >= target) {

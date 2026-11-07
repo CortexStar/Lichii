@@ -73,6 +73,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_debug_control.h"
+#include "video_core/nx2_drain_check.h"
 #include "video_core/nx2_profile.h"
 
 namespace Vulkan {
@@ -1934,6 +1935,12 @@ void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
 
 void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                              VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) {
+    if (VideoCommon::Nx2DrainCheck::g_enabled && type == VideoCommon::QueryType::Payload)
+        [[unlikely]] {
+        if (const auto released = gpu_memory->GpuToCpuAddress(gpu_addr)) {
+            VideoCommon::Nx2DrainCheck::NoteRelease(*released);
+        }
+    }
     query_cache.CounterReport(gpu_addr, type, flags, payload, subreport);
 }
 

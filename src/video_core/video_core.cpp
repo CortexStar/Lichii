@@ -15,6 +15,7 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/nx2_cmdpage_diag.h"
 #include "video_core/nx2_download_trace.h"
+#include "video_core/nx2_drain_check.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/renderer_base.h"
 #include "video_core/renderer_null/renderer_null.h"
@@ -54,6 +55,7 @@ void CreateGPU(std::optional<Tegra::GPU>& gpu, Core::Frontend::EmuWindow& emu_wi
     VideoCommon::Nx2Profile::ReadSwitch();
     Tegra::Nx2CmdPageDiag::ReadSwitch();
     VideoCommon::Nx2DownloadTrace::ReadSwitch();
+    VideoCommon::Nx2DrainCheck::ReadSwitch();
 
     const auto nvdec_value = Settings::values.nvdec_emulation.GetValue();
     const bool use_nvdec = nvdec_value != Settings::NvdecEmulation::Off;

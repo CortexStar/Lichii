@@ -217,6 +217,9 @@ public:
     void RecordParsedEntry(const CommandListHeader& header, std::span<const CommandHeader> commands);
     /// Whether the entry lies on device pages the GPU has written (NX2).
     bool IsGpuWrittenCommands(GPUVAddr address, size_t size);
+    /// EDEN_NX2_DRAIN_CHECK: checks an entry on pages no GPU work had written against the compute
+    /// and copy work it did not wait for (Nx2DrainCheck).
+    void CheckUnwaitedWriters(GPUVAddr address, size_t size);
     /// Copies the list's words from memory again, as of suspension count `now`.
     void RefreshSnapshot(CommandList& list, u64 now);
     /// Copies the list's deferred entries (CommandList::deferred_entries) from memory.

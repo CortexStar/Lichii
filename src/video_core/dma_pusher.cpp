@@ -27,6 +27,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
+#include "video_core/nx2_drain_check.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace Tegra {
@@ -206,6 +207,9 @@ bool DmaPusher::Step() {
             VideoCommon::GpuSplit::Get().WaitForSyncedWriters()) {
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
+        }
+        if (VideoCommon::Nx2DrainCheck::g_enabled && !gpu_written) [[unlikely]] {
+            CheckUnwaitedWriters(dma_state.dma_get, size_t{header.size} * sizeof(u32));
         }
         // Resume and GPU-written entries need live words, even after a flush cleared dirty state.
         const bool submitted = (command_list.snapshot_suspensions & 1) == 0 &&
@@ -601,6 +605,24 @@ bool DmaPusher::IsGpuWrittenCommands(GPUVAddr address, size_t size) {
         }
     }
     return false;
+}
+
+void DmaPusher::CheckUnwaitedWriters(GPUVAddr address, size_t size) {
+    auto& split = VideoCommon::GpuSplit::Get();
+    if (!split.Active() || !split.WritersPending()) {
+        return;
+    }
+    // The list did not wait for compute or copy work sent after the last sync. At the list's
+    // place, the back has run that work: did it make the list's pages GPU-written?
+    VideoCommon::Nx2DrainCheck::NoteListUnwaited();
+    split.Defer([memory = &memory_manager, address, size] {
+        bool written = false;
+        for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < address + size; page += 0x1000) {
+            const auto device = memory->GpuToCpuAddress(page);
+            written = written || (device && Tegra::Nx2IsGpuWritten(*device));
+        }
+        VideoCommon::Nx2DrainCheck::NoteListChecked(written);
+    });
 }
 
 bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count) {
