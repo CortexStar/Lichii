@@ -33,17 +33,28 @@ constexpr auto SAMPLE_INTERVAL = std::chrono::milliseconds{500};
 
 #ifdef _WIN32
 
+/**
+ * Combines a FILETIME's two 32-bit halves into one 64-bit tick count.
+ */
 u64 ToU64(const FILETIME& ft) {
     return (u64(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
 }
 
+/**
+ * Returns an ASCII-lowercased copy of the string.
+ */
 std::string Lower(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return char(std::tolower(c)); });
     return s;
 }
 
-// GPU counter instances look like "pid_1234_luid_0x00000000_0x0000D1B5_phys_0_eng_0_engtype_3D".
-// The luid identifies the adapter, so per-process values can be summed per GPU.
+/**
+ * Extracts the adapter key ("luid_0x..._0x...") from a PDH GPU counter instance name.
+ * Instances look like "pid_1234_luid_0x00000000_0x0000D1B5_phys_0_eng_0_engtype_3D"; the
+ * luid identifies the adapter, so per-process values can be summed per GPU.
+ * Returns an empty string if the name has no luid.
+ */
 std::string AdapterKey(const wchar_t* instance) {
     std::string name;
     for (const wchar_t* c = instance; *c; ++c) {
@@ -58,15 +69,28 @@ std::string AdapterKey(const wchar_t* instance) {
     return name.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
 }
 
+/**
+ * Formats a DXGI adapter LUID the same way PDH counter instance names do,
+ * so DXGI adapters can be matched against PDH counters.
+ */
 std::string AdapterKey(const LUID& luid) {
     char buf[32];
-    std::snprintf(buf, sizeof(buf), "luid_0x%08lx_0x%08lx", static_cast<unsigned long>(luid.HighPart),
+    std::snprintf(buf, sizeof(buf), "luid_0x%08lx_0x%08lx",
+                  static_cast<unsigned long>(luid.HighPart),
                   static_cast<unsigned long>(luid.LowPart));
     return buf;
 }
 
+/**
+ * Windows sampler: CPU from GetSystemTimes, RAM from GlobalMemoryStatusEx, GPU load and VRAM
+ * from the PDH counters Task Manager uses, and the VRAM total from DXGI.
+ */
 class Sampler {
 public:
+    /**
+     * Opens the PDH query, adds the GPU counters and primes them, then finds the
+     * adapter whose VRAM is reported. Missing counters leave their fields empty.
+     */
     Sampler() {
         if (PdhOpenQueryW(nullptr, 0, &query) == ERROR_SUCCESS) {
             PdhAddEnglishCounterW(query, L"\\GPU Engine(*engtype_3D)\\Utilization Percentage", 0,
@@ -78,12 +102,19 @@ public:
         FindMainAdapter();
     }
 
+    /**
+     * Closes the PDH query, which also frees its counters.
+     */
     ~Sampler() {
         if (query) {
             PdhCloseQuery(query);
         }
     }
 
+    /**
+     * Fills in every measurement available. CPU and GPU load are rates, so they stay
+     * empty on the first call and are computed against the previous call after that.
+     */
     void Sample(SystemMonitor::Snapshot& out) {
         FILETIME idle, kernel, user;
         if (GetSystemTimes(&idle, &kernel, &user)) {
@@ -91,7 +122,8 @@ public:
             const u64 total = (k - last_kernel) + (u - last_user);
             if (last_kernel != 0 && total > 0) {
                 const u64 idle_delta = i - last_idle;
-                out.cpu_percent = 100.0 * double(total - std::min(idle_delta, total)) / double(total);
+                const u64 busy = total - std::min(idle_delta, total);
+                out.cpu_percent = 100.0 * double(busy) / double(total);
             }
             last_idle = i;
             last_kernel = k;
@@ -126,17 +158,22 @@ public:
         if (vram_counter && main_adapter_vram > 0) {
             ForEachItem(vram_counter, PDH_FMT_LARGE, [&](const PDH_FMT_COUNTERVALUE_ITEM_W& item) {
                 if (AdapterKey(item.szName) == main_adapter_key) {
-                    out.vram = SystemMonitor::Usage{u64(item.FmtValue.largeValue), main_adapter_vram};
+                    out.vram =
+                        SystemMonitor::Usage{u64(item.FmtValue.largeValue), main_adapter_vram};
                 }
             });
         }
     }
 
 private:
-    // The adapter with the most dedicated memory is the one games render on
+    /**
+     * Picks the hardware adapter with the most dedicated memory, which is the one
+     * games render on, and records its key and VRAM total.
+     */
     void FindMainAdapter() {
         IDXGIFactory1* factory = nullptr;
-        if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory)))) {
+        if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1),
+                                      reinterpret_cast<void**>(&factory)))) {
             return;
         }
         IDXGIAdapter1* adapter = nullptr;
@@ -152,11 +189,16 @@ private:
         factory->Release();
     }
 
+    /**
+     * Reads every instance of a (wildcard) counter in the given format and calls
+     * func for each one with valid data. Reuses one buffer across calls.
+     */
     template <typename F>
     void ForEachItem(PDH_HCOUNTER counter, DWORD format, F&& func) {
         DWORD size = 0;
         DWORD count = 0;
-        if (PdhGetFormattedCounterArrayW(counter, format, &size, &count, nullptr) != PDH_MORE_DATA) {
+        if (PdhGetFormattedCounterArrayW(counter, format, &size, &count, nullptr) !=
+            PDH_MORE_DATA) {
             return;
         }
         buffer.resize(size);
@@ -187,6 +229,10 @@ private:
 
 #elif defined(__linux__)
 
+/**
+ * Reads a single value from a text file such as a sysfs attribute.
+ * Returns nothing if the file is missing or doesn't parse.
+ */
 template <typename T>
 std::optional<T> ReadValue(const std::filesystem::path& path) {
     std::ifstream file(path);
@@ -197,27 +243,40 @@ std::optional<T> ReadValue(const std::filesystem::path& path) {
     return std::nullopt;
 }
 
+/**
+ * Linux sampler: CPU from /proc/stat, RAM from /proc/meminfo, and GPU load and VRAM
+ * from amdgpu's sysfs attributes. Other GPU drivers leave GPU and VRAM empty.
+ */
 class Sampler {
 public:
+    /**
+     * Finds the amdgpu device with the most VRAM, if any. Only amdgpu exposes
+     * load and VRAM through sysfs.
+     */
     Sampler() {
-        // Only amdgpu exposes load and VRAM through sysfs
         std::error_code ec;
         u64 best_total = 0;
         for (const auto& entry : std::filesystem::directory_iterator("/sys/class/drm", ec)) {
             const auto device = entry.path() / "device";
             const auto total = ReadValue<u64>(device / "mem_info_vram_total");
-            if (total && *total > best_total && std::filesystem::exists(device / "gpu_busy_percent")) {
+            if (total && *total > best_total &&
+                std::filesystem::exists(device / "gpu_busy_percent")) {
                 best_total = *total;
                 gpu_device = device;
             }
         }
     }
 
+    /**
+     * Fills in every measurement available. CPU load is a rate, so it stays empty
+     * on the first call and is computed against the previous call after that.
+     */
     void Sample(SystemMonitor::Snapshot& out) {
         if (std::ifstream stat("/proc/stat"); stat) {
             std::string cpu;
             u64 user, nice, system, idle, iowait, irq, softirq, steal;
-            if (stat >> cpu >> user >> nice >> system >> idle >> iowait >> irq >> softirq >> steal) {
+            if (stat >> cpu >> user >> nice >> system >> idle >> iowait >> irq >> softirq >>
+                steal) {
                 const u64 idle_all = idle + iowait;
                 const u64 total = user + nice + system + idle_all + irq + softirq + steal;
                 if (last_total != 0 && total > last_total) {
@@ -267,8 +326,14 @@ private:
 
 #else
 
+/**
+ * Fallback for platforms without a sampler: every measurement stays empty.
+ */
 class Sampler {
 public:
+    /**
+     * Leaves the snapshot empty.
+     */
     void Sample(SystemMonitor::Snapshot&) {}
 };
 
@@ -280,28 +345,42 @@ SystemMonitor::SystemMonitor() = default;
 
 SystemMonitor::~SystemMonitor() = default;
 
+/**
+ * Starts the sampling thread. Does nothing if it is already running.
+ */
 void SystemMonitor::Start() {
     if (!thread.joinable()) {
         thread = std::jthread([this](std::stop_token token) { Run(token); });
     }
 }
 
+/**
+ * Stops and joins the sampling thread, then clears the last snapshot so stale
+ * values aren't shown the next time sampling starts.
+ */
 void SystemMonitor::Stop() {
     thread = {};
     std::scoped_lock lock{mutex};
     snapshot = {};
 }
 
+/**
+ * Returns a copy of the most recent snapshot.
+ */
 SystemMonitor::Snapshot SystemMonitor::Get() const {
     std::scoped_lock lock{mutex};
     return snapshot;
 }
 
+/**
+ * Sampling thread body. Runs at low priority so it never competes with emulation threads,
+ * creates the sampler here so its setup stays off the UI thread, then publishes a new
+ * snapshot every SAMPLE_INTERVAL until stopped.
+ */
 void SystemMonitor::Run(std::stop_token token) {
     Common::SetCurrentThreadName("SystemMonitor");
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
 
-    // Counter setup (PDH, DXGI) is slow enough that it stays off the UI thread
     Sampler sampler;
     do {
         Snapshot next;

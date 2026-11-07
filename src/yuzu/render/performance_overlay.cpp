@@ -50,17 +50,23 @@ const QColor VRAM_ACCENT{255, 159, 46};
 
 constexpr double GIB = 1024.0 * 1024.0 * 1024.0;
 
-// Rounds a graph's scale up to a step so it doesn't rescale every sample
+/**
+ * Rounds a graph's scale up to the next multiple of `step`, but never below `floor`,
+ * so the graph doesn't rescale on every sample.
+ */
 double NiceCeil(double value, double step, double floor) {
     return std::max(floor, std::ceil(value / step) * step);
 }
 
+/**
+ * Returns a copy of `base` at the given pixel size and weight. With `tabular`, digits
+ * are fixed-width so values don't jitter as they change.
+ */
 QFont MakeFont(const QFont& base, int pixel_size, QFont::Weight weight, bool tabular = false) {
     QFont font = base;
     font.setPixelSize(pixel_size);
     font.setWeight(weight);
     if (tabular) {
-        // Fixed-width digits so values don't jitter as they change
         font.setFeature(QFont::Tag("tnum"), 1);
     }
     return font;
@@ -68,6 +74,10 @@ QFont MakeFont(const QFont& base, int pixel_size, QFont::Weight weight, bool tab
 
 } // namespace
 
+/**
+ * Sets up the frameless translucent window, fonts and fixed size, then follows the main
+ * window's position and stats updates.
+ */
 // TODO(crueter): Reset samples when user changes turbo, slow, etc.
 PerformanceOverlay::PerformanceOverlay(MainWindow* parent)
     : QWidget(parent), m_mainWindow{parent} {
@@ -89,11 +99,18 @@ PerformanceOverlay::PerformanceOverlay(MainWindow* parent)
 
 PerformanceOverlay::~PerformanceOverlay() = default;
 
+/**
+ * Keeps the overlay at its offset from the main window.
+ */
 void PerformanceOverlay::resetPosition(const QPoint& _) {
     auto pos = m_mainWindow->pos();
     move(pos.x() + m_offset.x(), pos.y() + m_offset.y());
 }
 
+/**
+ * Records FPS (skipping freezes below 3 fps from the graph) and frametime, takes the
+ * newest host snapshot and schedules a repaint.
+ */
 void PerformanceOverlay::updateStats(const Core::PerfStatsResults& results,
                                      const VideoCore::ShaderNotify& shaders) {
     const double fps = results.average_game_fps;
@@ -117,9 +134,11 @@ void PerformanceOverlay::updateStats(const Core::PerfStatsResults& results,
     update();
 }
 
+/**
+ * Draws text with a one-pixel drop shadow so it stays readable over bright game frames.
+ */
 void PerformanceOverlay::drawText(QPainter& p, const QPointF& pos, const QString& text,
                                   const QFont& font, const QColor& color) const {
-    // Drop shadow keeps the text readable when the panel sits over bright game frames
     p.setFont(font);
     p.setPen(QColor(0, 0, 0, 170));
     p.drawText(pos + QPointF(1, 1), text);
@@ -127,7 +146,10 @@ void PerformanceOverlay::drawText(QPainter& p, const QPointF& pos, const QString
     p.drawText(pos, text);
 }
 
-// Draws "<value> <unit>" right-aligned to `right` and returns where the value starts
+/**
+ * Draws "<value> <unit>" right-aligned to `right` on the given baseline, with the unit
+ * in the smaller dim font. Returns the x position where the value text starts.
+ */
 qreal PerformanceOverlay::drawValue(QPainter& p, qreal right, qreal baseline, const QString& value,
                                     const QFont& value_font, const QColor& value_color,
                                     const QString& unit) const {
@@ -142,6 +164,10 @@ qreal PerformanceOverlay::drawValue(QPainter& p, qreal right, qreal baseline, co
     return x;
 }
 
+/**
+ * Draws the FPS history as a white line with a fading fill, newest sample at the right
+ * edge. The scale tops out a little above the highest sample in the window.
+ */
 void PerformanceOverlay::drawFpsGraph(QPainter& p, const QRectF& r) const {
     if (m_fpsSamples.size() < 2) {
         return;
@@ -182,8 +208,13 @@ void PerformanceOverlay::drawFpsGraph(QPainter& p, const QRectF& r) const {
     p.drawPath(line);
 }
 
+/**
+ * Draws one meter cell: colored label, value and unit, and a rounded fill bar that
+ * turns red at 90% or more. Without a fraction only the empty track is drawn.
+ */
 void PerformanceOverlay::drawMeter(QPainter& p, const QRectF& r, const Meter& meter) const {
-    const qreal baseline = r.top() + (METER_LABEL_H + QFontMetricsF(m_metricFont).capHeight()) / 2.0;
+    const qreal baseline =
+        r.top() + (METER_LABEL_H + QFontMetricsF(m_metricFont).capHeight()) / 2.0;
 
     drawText(p, QPointF(r.left(), baseline), meter.label, m_labelFont, meter.accent);
     drawValue(p, r.right(), baseline, meter.value, m_metricFont, VALUE_COLOR, meter.unit);
@@ -215,6 +246,10 @@ void PerformanceOverlay::drawMeter(QPainter& p, const QRectF& r, const Meter& me
                       METER_BAR_H / 2);
 }
 
+/**
+ * Paints the card top to bottom: FPS row, edge-to-edge FPS graph, frametime row,
+ * divider and the 2x2 CPU/GPU/RAM/VRAM grid, with the border drawn last.
+ */
 void PerformanceOverlay::paintEvent(QPaintEvent* event) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
@@ -302,23 +337,31 @@ void PerformanceOverlay::paintEvent(QPaintEvent* event) {
     p.drawPath(card_path);
 }
 
+/**
+ * Starts host sampling when the overlay becomes visible.
+ */
 void PerformanceOverlay::showEvent(QShowEvent* event) {
     m_monitor.Start();
     QWidget::showEvent(event);
 }
 
+/**
+ * Stops host sampling and clears the last snapshot while the overlay is hidden.
+ */
 void PerformanceOverlay::hideEvent(QHideEvent* event) {
     m_monitor.Stop();
     m_system = {};
     QWidget::hideEvent(event);
 }
 
+/**
+ * Begins a left-button drag. On Wayland, where move() is ignored for top-level
+ * windows, hands the drag to the compositor instead.
+ */
 void PerformanceOverlay::mousePressEvent(QMouseEvent* event) {
     if (event->button() != Qt::LeftButton) {
         return;
     }
-    // Wayland ignores move() on top-level windows, so the overlay sat where the compositor put it:
-    // let the compositor drag it instead.
     if (QGuiApplication::platformName().startsWith(QStringLiteral("wayland")) && windowHandle() &&
         windowHandle()->startSystemMove()) {
         return;
@@ -326,6 +369,10 @@ void PerformanceOverlay::mousePressEvent(QMouseEvent* event) {
     m_drag_start_pos = event->pos();
 }
 
+/**
+ * Moves the overlay with the cursor during a drag and remembers its new offset from
+ * the main window.
+ */
 void PerformanceOverlay::mouseMoveEvent(QMouseEvent* event) {
     // drag
     if (event->buttons() & Qt::LeftButton) {
@@ -335,6 +382,9 @@ void PerformanceOverlay::mouseMoveEvent(QMouseEvent* event) {
     }
 }
 
+/**
+ * Emits closed() so the main window can uncheck the menu action.
+ */
 void PerformanceOverlay::closeEvent(QCloseEvent* event) {
     emit closed();
 }
