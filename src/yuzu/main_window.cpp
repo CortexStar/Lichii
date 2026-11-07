@@ -3561,7 +3561,12 @@ void MainWindow::ResetWindowSize(u32 width, u32 height) {
     if (single_window && isMaximized()) {
         showNormal();
     } else if (!single_window && render_window->isMaximized()) {
-        render_window->showNormal();
+        // A stopped game hides the render window; showNormal() would show it again.
+        if (render_window->isHidden()) {
+            render_window->setWindowState(render_window->windowState() & ~Qt::WindowMaximized);
+        } else {
+            render_window->showNormal();
+        }
     }
     const bool show_status_bar = ui->action_Show_Status_Bar->isChecked();
     const auto status_bar_height = (single_window && show_status_bar) ? statusBar()->height() : 0;
