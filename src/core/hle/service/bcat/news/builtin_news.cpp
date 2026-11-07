@@ -46,17 +46,17 @@ std::mutex images_mutex;
 
 
 std::filesystem::path GetCachePath() {
-    return Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "news" / "github_releases.json";
+    return Common::FS::GetLichiiPath(Common::FS::LichiiPath::CacheDir) / "news" / "github_releases.json";
 }
 
 std::filesystem::path GetDefaultLogoPath(bool large) {
-    return Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "news" /
+    return Common::FS::GetLichiiPath(Common::FS::LichiiPath::CacheDir) / "news" /
            (large ? "eden_logo_large.jpg" : "eden_logo_small.jpg");
 }
 
 std::filesystem::path GetNewsImagePath(std::string_view news_id, bool large) {
     const std::string filename = fmt::format("{}_{}.jpg", news_id, large ? "large" : "small");
-    return Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "news" / "images" / filename;
+    return Common::FS::GetLichiiPath(Common::FS::LichiiPath::CacheDir) / "news" / "images" / filename;
 }
 
 u32 HashToNewsId(std::string_view key) {

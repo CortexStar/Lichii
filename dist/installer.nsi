@@ -162,6 +162,7 @@ Section Uninstall
 
   ; Be a bit careful to not delete files a user may have put into the install directory.
   Delete "$INSTDIR\lichii.exe"
+  Delete "$INSTDIR\lichii-cli.exe"
   Delete "$INSTDIR\eden-cli.exe"
   Delete "$INSTDIR\uninst.exe"
   Delete "$INSTDIR\LICENSE.txt"

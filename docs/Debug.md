@@ -38,7 +38,7 @@ You must have GDB installed for aarch64 to debug the target. Install it through 
   - `sudo emerge --ask crossdev`
   - `sudo crossdev -t aarch64-unknown-linux-gnu --ex-gdb`
 
-Run `./build/bin/eden-cli -c <path to your config file (see logs where you run Eden normally to see where it is)> -d -g <path to game>`, or `Enable GDB Stub` at General > Debug, then hook up an aarch64-gdb:
+Run `./build/bin/lichii-cli -c <path to your config file (see logs where you run Lichii normally to see where it is)> -d -g <path to game>`, or `Enable GDB Stub` at General > Debug, then hook up an aarch64-gdb:
 
 - `target remote localhost:6543`
 

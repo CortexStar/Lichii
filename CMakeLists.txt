@@ -286,7 +286,7 @@ option(NIGHTLY_BUILD "Use Nightly qualifiers in the update checker and build met
 cmake_dependent_option(YUZU_ROOM "Enable dedicated room functionality" ON "NOT ANDROID" OFF)
 cmake_dependent_option(YUZU_ROOM_STANDALONE "Enable standalone room executable" ON "YUZU_ROOM" OFF)
 
-cmake_dependent_option(YUZU_CMD "Compile the eden-cli executable" ON "NOT ANDROID" OFF)
+cmake_dependent_option(YUZU_CMD "Compile the lichii-cli executable" ON "NOT ANDROID" OFF)
 
 cmake_dependent_option(YUZU_CRASH_DUMPS "Compile crash dump (Minidump) support" OFF "WIN32 OR LINUX" OFF)
 
@@ -761,8 +761,7 @@ if(ENABLE_QT AND UNIX AND NOT APPLE)
         DESTINATION "share/icons/hicolor/256x256/apps"
         RENAME "io.github.zortos293.lichii.png")
 
-    # TODO: these files need to be updated.
-    install(FILES "dist/dev.eden_emu.eden.xml"
+    install(FILES "dist/io.github.zortos293.lichii.xml"
         DESTINATION "share/mime/packages")
     install(FILES "dist/io.github.zortos293.lichii.metainfo.xml"
         DESTINATION "share/metainfo")

@@ -51,7 +51,7 @@ NsightAftermathTracker::NsightAftermathTracker() {
         return;
     }
     const auto directory = CreateAftermathDumpDirectory(
-        Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "gpucrash");
+        Common::FS::GetLichiiPath(Common::FS::LichiiPath::LogDir) / "gpucrash");
     if (!directory) {
         LOG_ERROR(Render_Vulkan, "Failed to create Nsight Aftermath dump directory");
         return;
