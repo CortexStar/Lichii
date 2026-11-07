@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <span>
+#include <vector>
 
 #include "common/common_types.h"
 
@@ -44,5 +45,45 @@ private:
     u64 cutoff{};
     size_t equal_remaining{};
 };
+
+/// A pipeline unused for long enough to be evicted.
+struct EvictionCandidate {
+    u64 last_use;
+    /// False for a pipeline prebuilt from the disk cache that no draw has used yet.
+    bool used;
+};
+
+/// Picks which of `candidates` to evict and returns their indices in ascending order. The first
+/// `max_protected` never-used candidates are kept. Of the rest, the `count` oldest are evicted.
+/// Protected ones are left out before the oldest are chosen: they are the oldest of all (last use
+/// 0), so they would otherwise take the places of evictable ones and nothing would be evicted.
+inline std::vector<size_t> SelectPipelinesToEvict(std::span<const EvictionCandidate> candidates,
+                                                  size_t max_protected, size_t count) {
+    std::vector<size_t> unprotected;
+    std::vector<u64> last_uses;
+    unprotected.reserve(candidates.size());
+    last_uses.reserve(candidates.size());
+    size_t protected_count = 0;
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        if (!candidates[i].used && protected_count < max_protected) {
+            ++protected_count;
+            continue;
+        }
+        unprotected.push_back(i);
+        last_uses.push_back(candidates[i].last_use);
+    }
+    if (count >= unprotected.size()) {
+        return unprotected;
+    }
+    OldestPipelineSelection oldest{last_uses, count};
+    std::vector<size_t> selected;
+    selected.reserve(count);
+    for (const size_t i : unprotected) {
+        if (oldest.Take(candidates[i].last_use)) {
+            selected.push_back(i);
+        }
+    }
+    return selected;
+}
 
 } // namespace Vulkan
