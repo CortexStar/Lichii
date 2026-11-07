@@ -1049,6 +1049,7 @@ struct Maxwell3D::FrontState {
     bool instance_loop{};
     /// The inline upload being sent, when its words land linearly (FrontDmaRead).
     bool upload_known{};
+    bool upload_range{}; ///< The upload writes [upload_device, upload_device + upload_size)
     u64 upload_device{};
     u32 upload_size{};
     u32 upload_offset{};
@@ -1488,30 +1489,28 @@ void Maxwell3D::FrontNoteMemoryWrite(VideoCommon::GpuSplit& split, FrontState& f
         if (((launch >> 4) & 3) == 2) {
             unknown("upload release");
         }
-        fs.upload_known = device && linear && lines == 1 && (*device & 3) == 0 &&
-                          memory_manager.GpuToCpuAddress(address + size - 1) ==
-                              *device + size - 1;
+        // A linear upload on device memory contiguous across its pages writes one byte range;
+        // block-linear ones write elsewhere.
+        fs.upload_range = device && linear && size != 0 && size <= (u64{64} << 20) &&
+                          FrontContiguous(address, size, *device);
+        fs.upload_known = fs.upload_range && lines == 1 && (*device & 3) == 0;
         fs.upload_device = device.value_or(0);
         fs.upload_size = static_cast<u32>((std::min<u64>)(size, ~0U));
         fs.upload_offset = 0;
         if (!fs.upload_known) {
-            if (!device || size == 0 || size > (u64{64} << 20)) {
-                return unknown("upload unmapped or huge");
+            if (!fs.upload_range) {
+                return unknown("upload block-linear, unmapped or huge");
             }
-            split.NoteMemoryWrite(*device, size, "upload (not linear)");
+            split.NoteMemoryWrite(*device, size, "upload (several lines)");
         }
         return;
     }
     // inline_data words of the current upload.
     if (!fs.upload_known) {
-        const auto device = memory_manager.GpuToCpuAddress(
-            (GPUVAddr{fs.regs[base + 2]} << 32) | fs.regs[base + 3]);
-        if (!device) {
-            return unknown("upload data unmapped");
+        if (!fs.upload_range) {
+            return unknown("upload data block-linear, unmapped or huge");
         }
-        split.NoteMemoryWrite(*device, fs.regs[base] * u64{(std::max)(fs.regs[base + 1], 1U)} +
-                                           u64{fs.regs[base + 4]} * fs.regs[base + 1],
-                              "upload data");
+        split.NoteMemoryWrite(fs.upload_device, fs.upload_size, "upload data");
         return;
     }
     const u32 remaining_bytes =
@@ -1522,6 +1521,16 @@ void Maxwell3D::FrontNoteMemoryWrite(VideoCommon::GpuSplit& split, FrontState& f
         split.NoteMemoryWrite(fs.upload_device + fs.upload_offset + whole * 4, remaining_bytes % 4);
     }
     fs.upload_offset += (std::min<u32>)(count * 4, remaining_bytes);
+}
+
+bool Maxwell3D::FrontContiguous(GPUVAddr address, u64 size, u64 device) const {
+    for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < address + size; page += 0x1000) {
+        const GPUVAddr at = (std::max)(page, address);
+        if (memory_manager.GpuToCpuAddress(at) != device + (at - address)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool Maxwell3D::FrontDmaReadQueued(VideoCommon::GpuSplit& split, FrontState& fs, u32 macro,
