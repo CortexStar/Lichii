@@ -33,7 +33,7 @@ TOOLS = [
         "name": "status",
         "description": "Game title, program id, build, renderer, paused state, presented frame "
                        "count, fps and frame times (median, p90, p99, max, over 100 ms, fence "
-                       "wait; measured over fps_window_ms), dump directory, live log filter and "
+                       "wait; measured over fps_window_ms, at most the newest 4096 presents), dump directory, live log filter and "
                        "the shader hashes rejected at runtime.",
         "inputSchema": {
             "type": "object",
