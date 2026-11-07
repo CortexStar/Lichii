@@ -96,7 +96,11 @@ std::FILE* OpenJitMap() {
         }
         std::FILE* f = std::fopen(path, "a");
         if (f) {
-            std::setvbuf(f, nullptr, _IONBF, 0);
+            // Fully buffered: OoT compiles over 3 million blocks across the six cores, and an
+            // unbuffered fprintf per block (several writes each, under the mutex) slowed the game
+            // to a frame every 12 s. JitMapCounters flushes once a second per core, so a killed
+            // run loses at most the last second.
+            std::setvbuf(f, nullptr, _IOFBF, 4 << 20);
         }
         return f;
     }();
@@ -126,6 +130,7 @@ void JitMapCounters(const void* jit, const std::uint64_t* counters, std::size_t 
         std::fprintf(f, " %llu", static_cast<unsigned long long>(counters[i]));
     }
     std::fprintf(f, "\n");
+    std::fflush(f);
 }
 
 void JitMapClear(const void* begin, const void* end) {
