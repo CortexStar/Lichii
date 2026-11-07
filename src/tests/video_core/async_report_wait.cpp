@@ -35,6 +35,52 @@ TEST_CASE("Nx2WaitAsyncReportsSettled waits for every report in the range", "[vi
     REQUIRE(completed.load() == 2);
 }
 
+namespace {
+
+u32 Issued(u64 address) {
+    return Tegra::g_nx2_async_reports_issued[Tegra::Nx2AsyncReportSlot(address)].load();
+}
+
+u32 Completed(u64 address) {
+    return Tegra::g_nx2_async_reports_completed[Tegra::Nx2AsyncReportSlot(address)].load();
+}
+
+} // Anonymous namespace
+
+TEST_CASE("Nx2AsyncReport completes an issued report once", "[video_core][nx2]") {
+    constexpr u64 address = 0x40'0000;
+    const u32 issued = Issued(address);
+    const u32 completed = Completed(address);
+    {
+        Tegra::Nx2AsyncReport report{address};
+        report.Issue();
+        REQUIRE_FALSE(Tegra::Nx2AsyncReportsSettled(address, 4));
+        report.Complete();
+        report.Complete();
+    }
+    REQUIRE(Issued(address) == issued + 1);
+    REQUIRE(Completed(address) == completed + 1);
+}
+
+TEST_CASE("Nx2AsyncReport dropped unrun still settles its slot", "[video_core][nx2]") {
+    constexpr u64 address = 0x50'0000;
+    {
+        Tegra::Nx2AsyncReport report{address};
+        report.Issue();
+    }
+    REQUIRE(Tegra::Nx2AsyncReportsSettled(address, 4));
+}
+
+TEST_CASE("Nx2AsyncReport never issued counts nothing", "[video_core][nx2]") {
+    constexpr u64 address = 0x60'0000;
+    const u32 completed = Completed(address);
+    {
+        Tegra::Nx2AsyncReport report{address};
+    }
+    REQUIRE(Completed(address) == completed);
+    REQUIRE(Tegra::Nx2AsyncReportsSettled(address, 4));
+}
+
 TEST_CASE("Nx2WaitAsyncReportsSettled ignores reports outside the range", "[video_core][nx2]") {
     constexpr u64 address = 0x30'0000;
     Tegra::Nx2IssueAsyncReport(address + 0x100);

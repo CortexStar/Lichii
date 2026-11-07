@@ -126,6 +126,39 @@ inline void Nx2CompleteAsyncReport(u64 device_address) {
     }
 }
 
+/// One asynchronous report's issued/completed pair. Complete counts it once, and destruction
+/// does if nothing did: an operation dropped without running (fences discarded when emulation
+/// stops) would otherwise leave its slot unequal for good, and a later wait on that slot would
+/// never end. Owned by the report's operation (shared by its copies); not thread-safe, as the
+/// operation runs or is dropped on one thread at a time.
+class Nx2AsyncReport {
+public:
+    explicit Nx2AsyncReport(u64 device_address_) : device_address{device_address_} {}
+    ~Nx2AsyncReport() {
+        Complete();
+    }
+    Nx2AsyncReport(const Nx2AsyncReport&) = delete;
+    Nx2AsyncReport& operator=(const Nx2AsyncReport&) = delete;
+
+    void Issue() {
+        if (!issued) {
+            issued = true;
+            Nx2IssueAsyncReport(device_address);
+        }
+    }
+    void Complete() {
+        if (issued && !completed) {
+            completed = true;
+            Nx2CompleteAsyncReport(device_address);
+        }
+    }
+
+private:
+    u64 device_address;
+    bool issued{};
+    bool completed{};
+};
+
 /// Blocks until every report issued so far to [device_address, device_address + size) is in
 /// memory. Only for the thread that issues reports, so none can be issued while it waits; the
 /// fences carrying them must already be submitted. A slot shared with another address only
