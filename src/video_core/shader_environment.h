@@ -123,8 +123,10 @@ protected:
     size_t native_source_size{};
     std::shared_ptr<const LoweredNativeCode> lowered_native;
 
+    /// With `unflushed`, reads the descriptor without flushing GPU caches (any thread).
     Tegra::Texture::TICEntry ReadTextureInfo(GPUVAddr tic_addr, u32 tic_limit,
-                                             bool via_header_index, u32 raw);
+                                             bool via_header_index, u32 raw,
+                                             bool unflushed = false);
 
     Tegra::MemoryManager* gpu_memory{};
     GPUVAddr program_base{};
@@ -177,9 +179,41 @@ public:
 
     std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32 bank, u32 offset) override;
 
+    /// Copies what translation reads from the 3D engine and stops using the engine, so the
+    /// program can be translated on a worker thread while the GPU thread moves on.
+    void Detach();
+
+    /// Bytes of constant buffer contents copied by Detach (0 if not detached).
+    [[nodiscard]] size_t SnapshotSizeBytes() const noexcept;
+
 private:
+    /// The 3D engine state a detached environment reads instead of the engine.
+    struct EngineSnapshot {
+        struct ConstBuffer {
+            bool enabled{};
+            u32 size{};
+            /// Contents when the environment was detached, one word longer than `size` so a
+            /// read at any offset below `size` stays inside the copy.
+            std::vector<u32> words;
+        };
+        std::array<ConstBuffer, Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers> const_buffers;
+
+        /// The texture pool is not copied (it can hold thousands of entries), only located.
+        GPUVAddr texture_pool{};
+        u32 texture_pool_limit{};
+        bool via_header_index{};
+
+        u32 viewport_scale_offset_enabled{};
+        ::Common::unordered_map<u64, Tegra::Engines::Maxwell3D::HLEReplacementAttributeType>
+            replace_table;
+    };
+
+    /// Texture descriptor (TIC entry) of a texture handle, from the engine or the snapshot.
+    Tegra::Texture::TICEntry ReadTextureDescriptor(u32 handle);
+
     Tegra::Engines::Maxwell3D* maxwell3d{};
     size_t stage_index{};
+    std::optional<EngineSnapshot> snapshot;
 };
 
 class ComputeEnvironment final : public GenericEnvironment {
