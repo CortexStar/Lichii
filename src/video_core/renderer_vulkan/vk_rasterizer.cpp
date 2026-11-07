@@ -840,6 +840,26 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
             }
         }
     }
+    // The game draws Navi's glow, fireflies and dust right after the fog. They write no depth and
+    // move on their own, so DLSS must not take them from its history.
+    constexpr u64 fog_fragment = 0x3ddfb1d7a854c849ULL;
+    if (hashes[5] == fog_fragment && oot_live_dlss && OcarinaDlssEnabled() &&
+        oot_camera_sample_frame == render_trace_frame && !frame_dump.Capturing()) {
+        const auto scene_id = texture_cache.GetRenderTargets().color_buffer_ids[0];
+        if (scene_id) {
+            const auto& scene = texture_cache.GetImageView(scene_id);
+            if (scene.format == VideoCore::Surface::PixelFormat::B10G11R11_FLOAT &&
+                scene.size.width == oot_motion.extent.width &&
+                scene.size.height == oot_motion.extent.height && !scene.IsRescaled() &&
+                scene.range == VideoCommon::SubresourceRange{}) {
+                oot_effects_scene = scene.Handle(Shader::TextureType::Color2D);
+                oot_effects_address = scene.gpu_addr;
+                oot_effects_frame = render_trace_frame;
+                oot_live_dlss->SaveEffectsBase(oot_effects_scene, oot_motion.extent,
+                                               render_trace_frame);
+            }
+        }
+    }
 #endif
     static u32 native_capture_count{};
     if (maxwell3d->GetNativeMacroEngine().native_turing &&
@@ -1760,13 +1780,18 @@ void RasterizerVulkan::DispatchCompute() {
 #ifdef EGLANTINE_STREAMLINE
     const bool can_replace = OcarinaDlssEnabled() && pipeline->CanReplaceOcarinaUpscale() &&
                              !indirect_address && !frame_dump.Capturing();
+    // Until a dispatch overwrites the scene, each direct one binds only after the effects are
+    // marked. The indirect path records its bind at once.
+    const bool marking_effects = oot_effects_frame == render_trace_frame && OcarinaDlssEnabled() &&
+                                 !indirect_address && !frame_dump.Capturing();
 #else
     constexpr bool can_replace = false;
+    constexpr bool marking_effects = false;
 #endif
     ComputePipeline::BindCommand deferred_bind;
     if (!pipeline->Configure(*kepler_compute, *gpu_memory, scheduler, buffer_cache,
                              texture_cache, texture_cache_runtime, byte_addressed_shadow,
-                             can_replace ? &deferred_bind : nullptr)) {
+                             can_replace || marking_effects ? &deferred_bind : nullptr)) {
         if (kepler_compute->IsNativeMode()) throw Shader::RuntimeError("Native compute resources unavailable");
         return;
     }
@@ -1852,6 +1877,15 @@ void RasterizerVulkan::DispatchCompute() {
     scheduler.RequestOutsideRenderPassOperationContext();
     record_read_barrier();
 #ifdef EGLANTINE_STREAMLINE
+    if (marking_effects) {
+        const auto written = pipeline->WrittenImages();
+        if (std::ranges::any_of(written, [this](VideoCommon::ImageViewId id) {
+                return texture_cache.GetImageView(id).gpu_addr == oot_effects_address;
+            })) {
+            oot_live_dlss->MarkEffects(oot_effects_scene, render_trace_frame);
+            oot_effects_frame.reset();
+        }
+    }
     const auto* const replacement =
         can_replace && !byte_addressed_shadow && TryOcarinaDlss(*pipeline, true)
             ? oot_live_dlss.get()
@@ -1890,7 +1924,7 @@ void RasterizerVulkan::DispatchCompute() {
             TextureCacheRuntime::CopyByteAddressedShadow(cmdbuf, *byte_addressed_shadow, true);
         }
     });
-    if (can_replace) {
+    if (can_replace || marking_effects) {
         // The deferred native binding may follow DLSS's command buffer bindings.
         scheduler.InvalidateState();
     }

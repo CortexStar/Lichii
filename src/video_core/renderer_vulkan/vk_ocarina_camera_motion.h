@@ -39,6 +39,12 @@ public:
     void SaveSceneReference(VkImageView color);
     /// Composite the HUD from the guest image over the matching 4K scene.
     void Composite4k(VkImageView native_composite, u64 frame);
+    /// Copy the scene colour once the fog is drawn, before the glows and particles that have no
+    /// motion vectors of their own.
+    void SaveEffectsBase(VkImageView scene, VkExtent2D extent, u64 frame);
+    /// Mark the pixels those glows and particles changed since SaveEffectsBase, so Record can
+    /// tell DLSS to use this frame's colour there.
+    void MarkEffects(VkImageView scene, u64 frame);
     VkImage CompositedImage() const;
     VkImageView CompositedView() const;
 
