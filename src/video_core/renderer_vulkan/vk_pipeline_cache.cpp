@@ -1396,21 +1396,27 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     }
     auto it{graphics_cache.find(graphics_key)};
     if (it == graphics_cache.end()) {
-        if (translating_graphics.contains(graphics_key)) {
+        std::unique_ptr<GraphicsPipeline> new_pipeline;
+        if (const auto in_flight{translating_graphics.find(graphics_key)};
+            in_flight != translating_graphics.end()) {
             // Its translation is still running on a translation worker.
-            return nullptr;
-        }
-        ReportNewPipelineKey(graphics_key);
-        std::unique_ptr<GraphicsPipeline> new_pipeline{background_pipelines.Take(graphics_key)};
-        if (!new_pipeline && CanTranslateAsynchronously()) {
-            GraphicsEnvironments environments;
-            GetGraphicsEnvironments(environments, graphics_key.unique_hashes);
-            new_pipeline = CreateGraphicsPipelineFromReusedShaders(environments);
-            if (!new_pipeline && DetachGraphicsEnvironments(environments.envs)) {
-                if (!QueueGraphicsTranslation(std::move(environments.envs))) {
-                    return nullptr;
+            if (!WaitForGraphicsTranslation(in_flight->second)) {
+                return nullptr;
+            }
+            it = graphics_cache.find(graphics_key);
+        } else {
+            ReportNewPipelineKey(graphics_key);
+            new_pipeline = background_pipelines.Take(graphics_key);
+            if (!new_pipeline && CanTranslateAsynchronously()) {
+                GraphicsEnvironments environments;
+                GetGraphicsEnvironments(environments, graphics_key.unique_hashes);
+                new_pipeline = CreateGraphicsPipelineFromReusedShaders(environments);
+                if (!new_pipeline && DetachGraphicsEnvironments(environments.envs)) {
+                    if (!QueueGraphicsTranslation(std::move(environments.envs))) {
+                        return nullptr;
+                    }
+                    it = graphics_cache.find(graphics_key);
                 }
-                it = graphics_cache.find(graphics_key);
             }
         }
         if (it == graphics_cache.end()) {
@@ -2258,28 +2264,44 @@ bool PipelineCache::DetachGraphicsEnvironments(GraphicsEnvironmentArray& envs) {
 
 bool PipelineCache::QueueGraphicsTranslation(GraphicsEnvironmentArray envs) {
     std::promise<void> done;
-    std::future<void> translated{done.get_future()};
-    translating_graphics.insert(graphics_key);
+    std::shared_future<void> translated{done.get_future().share()};
+    translating_graphics.emplace(graphics_key, translated);
     translation_workers.QueueWork([this, key = graphics_key, envs = std::move(envs),
                                    done = std::move(done)]() mutable {
         TranslateGraphicsPipeline(key, std::move(envs), std::move(done));
     });
     ++async_translations.queued;
+    return WaitForGraphicsTranslation(std::move(translated));
+}
 
+bool PipelineCache::WaitForGraphicsTranslation(std::shared_future<void> translated) {
     const PendingDrawPolicy policy{CurrentPendingDrawPolicy()};
-    // No wait while more translations are pending than there are translation threads.
-    if (DecideNativePending(policy.mode, policy.can_discard, native_wait_budget_us) !=
-            NativeDrawAction::WaitTimed ||
-        translating_graphics.size() > num_translation_threads) {
-        return false;
+    NativeDrawAction action{policy.can_discard ? NativeDrawAction::Skip : NativeDrawAction::Wait};
+    if (policy.native) {
+        action = DecideNativePending(policy.mode, policy.can_discard, native_wait_budget_us);
     }
-    const auto begin = std::chrono::steady_clock::now();
-    const bool in_time = translated.wait_for(std::chrono::microseconds{native_wait_budget_us}) ==
-                         std::future_status::ready;
-    ChargeNativeWait(begin);
-    if (!in_time) {
-        ++async_translations.timed_out;
+    switch (action) {
+    case NativeDrawAction::Skip:
         return false;
+    case NativeDrawAction::Wait:
+        translated.wait();
+        break;
+    case NativeDrawAction::WaitTimed: {
+        // No wait while more translations are pending than there are translation threads.
+        if (translating_graphics.size() > num_translation_threads) {
+            return false;
+        }
+        const auto begin = std::chrono::steady_clock::now();
+        const bool in_time =
+            translated.wait_for(std::chrono::microseconds{native_wait_budget_us}) ==
+            std::future_status::ready;
+        ChargeNativeWait(begin);
+        if (!in_time) {
+            ++async_translations.timed_out;
+            return false;
+        }
+        break;
+    }
     }
     AdoptTranslatedGraphicsPipelines();
     return true;

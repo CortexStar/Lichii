@@ -201,8 +201,13 @@ private:
     [[nodiscard]] bool DetachGraphicsEnvironments(GraphicsEnvironmentArray& envs);
 
     /// Queues the translation of graphics_key's pipeline on a translation worker and waits for
-    /// it within the native wait budget. True when it was adopted into graphics_cache in time.
+    /// it as WaitForGraphicsTranslation does.
     bool QueueGraphicsTranslation(GraphicsEnvironmentArray envs);
+
+    /// Waits for a queued translation as the current draw's pending policy allows: until it is
+    /// done for a draw that cannot be skipped, within the native wait budget for a bounded one.
+    /// True when the translation finished and its result was adopted.
+    bool WaitForGraphicsTranslation(std::shared_future<void> translated);
 
     /// Runs on a translation worker thread.
     void TranslateGraphicsPipeline(const GraphicsPipelineCacheKey& key,
@@ -322,8 +327,10 @@ private:
     DynamicFeatures dynamic_features;
     PipelinePrebuild<GraphicsPipelineCacheKey, GraphicsPipeline> background_pipelines;
 
-    /// Keys whose pipeline is being translated on a translation worker (GPU thread only).
-    ::Common::unordered_set<GraphicsPipelineCacheKey> translating_graphics;
+    /// Keys whose pipeline is being translated on a translation worker, with the future that
+    /// becomes ready when the result waits for adoption (GPU thread only).
+    ::Common::unordered_map<GraphicsPipelineCacheKey, std::shared_future<void>>
+        translating_graphics;
     /// Finished translations, handed from the translation workers to the GPU thread.
     std::mutex translated_mutex;
     std::vector<TranslatedGraphicsPipeline> translated_graphics;
