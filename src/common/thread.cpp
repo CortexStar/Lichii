@@ -530,10 +530,14 @@ void SetCurrentThreadName(const char* name) {
         pthread_setname_np(pthread_self(), buf);
     }
 #elif defined(_WIN32)
-    // MinGW with the POSIX threading model does not support pthread_setname_np
-    // See for reference
-    // https://gitlab.freedesktop.org/mesa/mesa/-/blame/main/src/util/u_thread.c?ref_type=heads#L75
-    (void)name;
+    // MinGW: pthread_setname_np is missing, but SetThreadDescription (Windows 10+) works and
+    // lets profilers and samplers see the names.
+    using SetThreadDescriptionFn = HRESULT(WINAPI*)(HANDLE, PCWSTR);
+    if (auto pf = reinterpret_cast<SetThreadDescriptionFn>(reinterpret_cast<void*>(
+            GetProcAddress(GetModuleHandleW(L"KernelBase.dll"), "SetThreadDescription")));
+        pf != nullptr) {
+        pf(GetCurrentThread(), Common::UTF8ToUTF16W(name).c_str());
+    }
 #else
     pthread_setname_np(pthread_self(), name);
 #endif
