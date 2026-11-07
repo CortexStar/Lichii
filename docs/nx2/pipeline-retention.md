@@ -38,3 +38,7 @@ pairs on a Ryzen 7 5800X3D / RTX 5070. That experiment used an unbounded diagnos
 treatment; its 24–40% reductions must not be attributed to this bounded-target
 implementation or to current `nx2` without a new comparison. Independent fixed-view
 stalls remain a separate investigation.
+
+An [initial current-base paired trial](benchmarks/bounded-pipeline-retention/README.md)
+compares this implementation against nx2 including #550 with equal warmed cache
+state. It is reported separately from the historical keep-all experiment.

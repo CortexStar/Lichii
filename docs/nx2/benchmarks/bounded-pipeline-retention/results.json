@@ -1,0 +1,74 @@
+{
+  "protocol": "v2-fixed-ZL-return-no-NVML-during-windows",
+  "upstream_base": "92f0212408f00b459c152c2fb9dcbcf38bcb4ce1",
+  "reported_scm_revision": "494fde8e481b65369d28874a53f02c0e9c4e113b",
+  "policy_source_commit": "4edb6ef29",
+  "seed_cache_sha256": {
+    "launched.json": "6a33888f8a3e0d5c609d1980f50599ab0b5d72ef1cebe06a41598e50dde092c5",
+    "shader/vulkan_static_pipelines.bin": "e8ccffd509ccfb39abc055677a1e226a7447063453604f5a3bca168eeb78ec47",
+    "game_list/0400486024DEC000.pv.txt": "19964ae2fa80ce2eefa3c568812741bb6b91476e6eb365d6149ce34c26bd714d",
+    "shader/0400486024dec000/vulkan.fork-v53.bin": "6b85532e692fdfa7eb67773243165699c84da6b22fc35753e24646ee39e13cb4",
+    "shader/0400486024dec000/vulkan_used.fork-v53.bin": "c8f7f15e87ca6b84d5a262c50e8edf692fcd4c6e4b0a424a072c7a9a10de939a",
+    "shader/0400486024dec000/vulkan.fork-v54.bin": "08b5d26b342043baf177ed8f5a0c0720c79a9d52f01168765fe0007b992f20ee",
+    "shader/0400486024dec000/vulkan_used.fork-v54.bin": "5d7f7b856e69678d65b7ef10cdf305da503daece48e73c4d38c22c01a0d7d08f"
+  },
+  "runs": [
+    {
+      "run": "ca1",
+      "mode": "normal",
+      "frames": 600,
+      "fps": 42.53767337202541,
+      "p50_ms": 23.007655,
+      "p95_ms": 26.35206405,
+      "p99_ms": 44.92645388999995,
+      "max_ms": 95.737207,
+      "over_100ms": 0,
+      "over_500ms": 0,
+      "total_over_100ms": 0,
+      "loaded_pipelines": 643,
+      "binary_sha256": "1ae8ede89d2de19007a155217400e75b2c7a118d854edc0de68f7b6680e8795e",
+      "evicted_pipelines_full_log": 250,
+      "forced_shutdown_after_measurement": true
+    },
+    {
+      "run": "cb1",
+      "mode": "keep",
+      "frames": 600,
+      "fps": 44.32508125255577,
+      "p50_ms": 22.362039,
+      "p95_ms": 26.07866595,
+      "p99_ms": 29.52882789,
+      "max_ms": 31.408979,
+      "over_100ms": 0,
+      "over_500ms": 0,
+      "total_over_100ms": 0,
+      "loaded_pipelines": 643,
+      "binary_sha256": "b1da4b4171489b16c731603fd45719a9a9e1a4cfe7d51961c7fc421d17f2fb26",
+      "evicted_pipelines_full_log": 0,
+      "forced_shutdown_after_measurement": false
+    }
+  ],
+  "pairs": [
+    {
+      "normal": "ca1",
+      "keep": "cb1",
+      "normal_p99_ms": 44.92645388999995,
+      "keep_p99_ms": 29.52882789,
+      "p99_reduction_percent": 34.27296095458641
+    }
+  ],
+  "normal_run_medians": {
+    "fps": 42.53767337202541,
+    "p50_ms": 23.007655,
+    "p95_ms": 26.35206405,
+    "p99_ms": 44.92645388999995,
+    "max_ms": 95.737207
+  },
+  "keep_run_medians": {
+    "fps": 44.32508125255577,
+    "p50_ms": 22.362039,
+    "p95_ms": 26.07866595,
+    "p99_ms": 29.52882789,
+    "max_ms": 31.408979
+  }
+}

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Verify the recorded return-window statistics using Python's standard library."""
+import argparse
 import csv
 import json
 import math
@@ -17,9 +18,12 @@ def percentile(values, fraction):
 
 
 def main():
-    expected = json.loads((ROOT / "results.json").read_text())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data-dir", type=Path, default=ROOT)
+    root = parser.parse_args().data_dir
+    expected = json.loads((root / "results.json").read_text())
     groups = {}
-    with (ROOT / "return-intervals.csv").open(newline="") as source:
+    with (root / "return-intervals.csv").open(newline="") as source:
         for row in csv.DictReader(source):
             groups.setdefault(row["run"], []).append(row)
     assert set(groups) == {row["run"] for row in expected["runs"]}
@@ -63,7 +67,8 @@ def main():
             computed = statistics.median(summaries[row["run"]][key]
                                          for row in expected["runs"] if row["mode"] == mode)
             assert math.isclose(computed, value, abs_tol=1e-7), (mode, key)
-    print("Verified six windows, 3600 intervals, three pairs and run medians.")
+    print(f"Verified {len(groups)} windows, {sum(map(len, groups.values()))} intervals, "
+          f"{len(expected['pairs'])} pairs and run medians.")
 
 
 if __name__ == "__main__":
