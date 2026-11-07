@@ -477,7 +477,21 @@ jobs:
               throw "build/release/bin/$exe was not produced"
             }
           }
-          windeployqt --release --no-translations build/release/bin/lichii.exe
+          # The yuzu target's post-build step already deployed Qt into plugins/ and wrote qt.conf
+          # (src/yuzu/CMakeLists.txt). This pass only adds the compiler runtime (vc_redist.x64.exe);
+          # it uses the same plugin dir and exclusions so it doesn't add a second, unused plugin set
+          # at the top level or the software OpenGL and D3D compilers the emulator doesn't load.
+          windeployqt --release --no-translations --no-opengl-sw --no-system-d3d-compiler `
+            --no-system-dxc-compiler --plugindir build/release/bin/plugins build/release/bin/lichii.exe
+          foreach ($file in 'qt.conf', 'plugins/platforms/qwindows.dll') {
+            if (-not (Test-Path "build/release/bin/$file")) {
+              throw "build/release/bin/$file is missing: the Qt deployment did not run"
+            }
+          }
+          # Debug symbols are a separate download: they are over half the package and only needed
+          # to symbolize crash dumps.
+          New-Item -ItemType Directory -Force symbols | Out-Null
+          Move-Item build/release/bin/*.pdb symbols/
 
       # A dynamic MinGW build is not portable on its own: windeployqt6 brings the Qt libraries and
       # plugins, then every non-system DLL the binaries and those plugins pull in gets copied next to
@@ -582,6 +596,15 @@ jobs:
         with:
           name: lichii-${{ matrix.platform }}-${{ github.sha }}
           path: build/release/bin/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Windows debug symbols
+        if: matrix.platform == 'windows-x86_64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: lichii-${{ matrix.platform }}-symbols-${{ github.sha }}
+          path: symbols/
           if-no-files-found: error
           retention-days: 7
 
@@ -724,6 +747,8 @@ jobs:
             row "amd64 / x86_64 (MSVC)" "$(link "MSVC zip" lichii-windows-x86_64.zip)" "" "Use if you run into graphical issues on other builds"
             row "amd64 / x86_64 (MinGW)" "" "$(link "PGO zip" lichii-windows-x86_64-pgo.zip)" "Built with MinGW clang; bundles its own DLLs, no Visual C++ redistributable needed"
           } | table)
+
+          $(symbols=$(link "lichii-windows-x86_64-symbols.zip" lichii-windows-x86_64-symbols.zip); [[ -z "$symbols" ]] || echo "Debug symbols for the MSVC build (\`lichii.pdb\`, \`eden-cli.pdb\`, for reading crash dumps): ${symbols}")
 
           ## macOS
 
