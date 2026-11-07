@@ -1175,8 +1175,12 @@ void PipelineCache::EvictUnusedPipelines() {
     size_t evicted = 0;
     for (auto it = graphics_cache.begin(); it != graphics_cache.end();) {
         GraphicsPipeline* const pipeline = it->second.get();
+        // A pipeline built from the disk cache at boot and not drawn with yet has LastUse() 0:
+        // evicting it throws away the boot prebuild, and the game translates it again on the GPU
+        // thread when it reaches that content (OoT: 1174 of 1346 evicted on the title screen,
+        // 684 rebuilt in 10 s on entering the field).
         if (pipeline == nullptr || pipeline == current_pipeline || !pipeline->IsBuilt() ||
-            pipeline->LastUse() >= cutoff) {
+            pipeline->LastUse() == 0 || pipeline->LastUse() >= cutoff) {
             ++it;
             continue;
         }
