@@ -238,9 +238,6 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         OnBack([rasterizer = dma_pusher.rasterizer, sequence_address, properties, payload] {
             rasterizer->Query(sequence_address, VideoCommon::QueryType::Payload, properties, payload, 0);
         });
-        if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
-            split.NoteSemaphoreWrite(sequence_address);
-        }
     } else if (g_nx2_ampere) {
         // Switch 2 waits on semaphores the CPU (or another channel) releases, e.g. once it has
         // written the commands this channel runs next: suspend the channel until the value is
@@ -258,28 +255,8 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             return;
         }
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireChecks, 1);
-        // Most acquires wait on a value the CPU released already (73% of ~2800/s in Ocarina of
-        // Time's Kokiri Forest), so the drain before the check only stalls both halves of the
-        // split GPU thread. When the word in guest memory, on a page no GPU copy holds newer data
-        // for, already meets the value and no release to it is still queued for the back, take
-        // the acquire without draining (checked against the drained read on 573k acquires: never
-        // contradicted).
-        if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
-            if (const auto device = dma_pusher.memory_manager.GpuToCpuAddress(acquire.address);
-                device && !Tegra::Nx2IsGpuWritten(*device) &&
-                !split.SemaphoreWritePending(acquire.address) &&
-                acquire.Matches(dma_pusher.memory_manager.Read<u32>(acquire.address))) {
-                // What the drain also did: the back gets what was sent (a release or syncpoint
-                // the CPU waits on may be among it: without this the title hung at boot), and
-                // command lists the GPU wrote before this point wait for it when read.
-                split.Publish();
-                split.NoteSync();
-                return;
-            }
-        }
         DrainBack();
-        const bool drained_match = acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address));
-        if (drained_match) {
+        if (acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
             return;
         }
         // Registered before the fences run, so a release among them that meets the value counts

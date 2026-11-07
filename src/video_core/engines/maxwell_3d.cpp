@@ -1213,18 +1213,6 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
     } else {
         split.Method(this, method, argument, is_last_call, nullptr);
     }
-    if (method == MAXWELL3D_REG_INDEX(report_semaphore.query)) {
-        // A release or report writes guest memory a semaphore acquire may wait on (Puller).
-        Regs::ReportSemaphore report{};
-        report.query.raw = value;
-        const auto operation = report.query.operation.Value();
-        if (operation == Regs::ReportSemaphore::Operation::Release ||
-            operation == Regs::ReportSemaphore::Operation::ReportOnly) {
-            split.NoteSemaphoreWrite(
-                (GPUVAddr{fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.address_high)]} << 32) |
-                fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.address_low)]);
-        }
-    }
 }
 
 void Maxwell3D::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
