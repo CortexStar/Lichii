@@ -347,8 +347,8 @@ jobs:
           "-DCMAKE_CXX_COMPILER=$LLVM_ROOT/bin/clang-cl.exe"
           "-DCMAKE_LINKER=$LLVM_ROOT/bin/lld-link.exe"
           "-DCMAKE_AR=$LLVM_ROOT/bin/llvm-lib.exe"
-          "-DCMAKE_C_FLAGS=/DWIN32 /D_WINDOWS -DNOMINMAX -flto=thin"
-          "-DCMAKE_CXX_FLAGS=/DWIN32 /D_WINDOWS /EHsc -DNOMINMAX -flto=thin"
+          "-DCMAKE_C_FLAGS=-DWIN32 -D_WINDOWS -DNOMINMAX -flto=thin"
+          "-DCMAKE_CXX_FLAGS=-DWIN32 -D_WINDOWS -EHsc -DNOMINMAX -flto=thin"
 
       - name: Configure macOS
         if: startsWith(matrix.platform, 'macos')
