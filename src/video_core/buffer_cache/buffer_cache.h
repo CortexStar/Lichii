@@ -3158,9 +3158,10 @@ bool BufferCache<P>::SyncHotPage(DAddr page) {
         return false;
     }
     HotPage& hot = *it->second;
-    // A page that came to hold a command list after promotion needs its write notifications.
+    // A page that came to hold a command list, or that the GPU wrote, after promotion needs its
+    // write notifications (see ApplyHotPageChanges).
     if (gpu_modified_ranges.Intersects(page, DEVICE_PAGESIZE) ||
-        Tegra::Nx2IsCommandListPage(page)) {
+        Tegra::Nx2IsCommandListPage(page) || Tegra::Nx2MayBeGpuWritten(page, DEVICE_PAGESIZE)) {
         hot_demote_pages.push_back(page);
         return false;
     }
@@ -3197,9 +3198,13 @@ void BufferCache<P>::ApplyHotPageChanges() {
         if (hot_pages.size() >= MAX_HOT_PAGES) {
             break;
         }
-        // GPU-written pages and command list pages need the write notifications.
+        // GPU-written pages and command list pages need the write notifications. So do pages
+        // the GPU has ever written (the sticky Ampere bitmap): a hot upload sends the whole guest
+        // page, and on a page a dispatch writes too that put stale guest bytes over GPU results
+        // that were not (or no longer) in gpu_modified_ranges. OoT's 8 KiB compute storage ring
+        // (CPU-written parameters next to GPU-written state) came out 8% too bright that way.
         if (hot_pages.contains(page) || gpu_modified_ranges.Intersects(page, DEVICE_PAGESIZE) ||
-            Tegra::Nx2IsCommandListPage(page)) {
+            Tegra::Nx2IsCommandListPage(page) || Tegra::Nx2MayBeGpuWritten(page, DEVICE_PAGESIZE)) {
             continue;
         }
         hot_pages.emplace(page, std::make_unique<HotPage>());
