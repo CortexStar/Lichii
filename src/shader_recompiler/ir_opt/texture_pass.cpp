@@ -1422,7 +1422,8 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
              inst->GetOpcode() == IR::Opcode::ImageSampleImplicitLod ||
              inst->GetOpcode() == IR::Opcode::ImageSampleExplicitLod) &&
             flags.type != TextureType::Buffer && flags.is_integer == 0 && flags.is_depth == 0 &&
-            cbuf.count == 1 && cbuf.handle_program == ~0U) {
+            cbuf.count == 1 && cbuf.handle_program == ~0U &&
+            !inst->GetAssociatedPseudoOperation(IR::Opcode::GetSparseFromOp)) {
             // Sample operations require a single-texel sampler at this draw, not at compilation.
             QuantizeDepth24Read(*texture_inst.block, *inst,
                                inst->GetOpcode() != IR::Opcode::ImageFetch);

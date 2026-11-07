@@ -24,6 +24,7 @@
 #include "shader_recompiler/host_translate_info.h"
 #include "shader_recompiler/ir_opt/passes.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
+#include "video_core/renderer_vulkan/surface_clip_viewport.h"
 #include "video_core/textures/depth_aspect.h"
 #include "video_core/xc2_cloud_policy.h"
 
@@ -457,6 +458,64 @@ TEST_CASE("D24 candidate guards floating point texture reads independently", "[x
     }
 }
 
+TEST_CASE("D24 rewriting preserves sparse texture residency", "[xbc2][depth24]") {
+    for (int operation = 0; operation < 3; ++operation) {
+        for (const bool sparse : {false, true}) {
+            CAPTURE(operation, sparse);
+            TextureEnvironment env;
+            Program program;
+            const auto result = Fetch(program, operation != 0, operation == 1);
+            IR::Inst* const texture = result.InstRecursive();
+            const auto original_opcode = texture->GetOpcode();
+            const IR::Opcode lowered_opcode =
+                operation == 0 ? IR::Opcode::ImageFetch
+                : operation == 1 ? IR::Opcode::ImageSampleImplicitLod
+                                 : IR::Opcode::ImageSampleExplicitLod;
+            IR::Inst* residency{};
+            if (sparse) {
+                IR::IREmitter ir{program.block};
+                const auto resident = ir.GetSparseFromOp(result);
+                residency = resident.InstRecursive();
+                ir.SetFragColor(1, 0,
+                                IR::F32{ir.Select(resident, ir.Imm32(1.0f), ir.Imm32(0.0f))});
+                program.ir.info.stores_frag_color[1] = true;
+                program.ir.info.uses_sparse_residency = true;
+            }
+            Shader::HostTranslateInfo host;
+            host.ApplyDescriptorLimitPolicy();
+            host.emulate_depth24_reads = true;
+            Shader::Optimization::TexturePass(env, program.ir, host);
+            CHECK(Count(program, original_opcode) == 0);
+            CHECK(Count(program, lowered_opcode) == 1);
+            CHECK(Count(program, IR::Opcode::QuantizeDepth24) == (sparse ? 0 : 1));
+            CHECK(program.ir.info.uses_depth24_fetch == !sparse);
+            if (sparse) {
+                CHECK(texture->GetOpcode() == lowered_opcode);
+                REQUIRE(texture->GetAssociatedPseudoOperation(IR::Opcode::GetSparseFromOp) ==
+                        residency);
+                CHECK(residency->Arg(0).InstRecursive() == texture);
+            }
+            const auto code = program.Emit();
+            const spv::Op sparse_opcode =
+                operation == 0 ? spv::Op::OpImageSparseFetch
+                : operation == 1 ? spv::Op::OpImageSparseSampleImplicitLod
+                                 : spv::Op::OpImageSparseSampleExplicitLod;
+            size_t sparse_reads{}, residency_checks{};
+            for (size_t offset = 5; offset < code.size();) {
+                const u32 words = code[offset] >> 16;
+                REQUIRE(words > 0);
+                REQUIRE(offset + words <= code.size());
+                const auto opcode = static_cast<spv::Op>(code[offset] & 0xffffU);
+                sparse_reads += opcode == sparse_opcode;
+                residency_checks += opcode == spv::Op::OpImageSparseTexelsResident;
+                offset += words;
+            }
+            CHECK(sparse_reads == (sparse ? 1 : 0));
+            CHECK(residency_checks == (sparse ? 1 : 0));
+        }
+    }
+}
+
 TEST_CASE("D24 candidate leaves render-area and compute shaders alone", "[xbc2][depth24]") {
     for (const bool render_area : {false, true}) {
         TextureEnvironment env;
@@ -741,6 +800,44 @@ TEST_CASE("D24 compute fixtures export the real helper for device validation",
             output.close();
             REQUIRE(output.good());
         }
+    }
+}
+
+TEST_CASE("Disabled viewport transform uses the surface clip and window origin",
+          "[xbc2][position]") {
+    using Maxwell = Tegra::Engines::Maxwell3D::Regs;
+    struct Case {
+        u32 width;
+        u32 height;
+        Maxwell::WindowOrigin::Mode origin;
+        std::array<f32, 4> expected;
+    };
+    using Origin = Maxwell::WindowOrigin::Mode;
+    const std::array cases{
+        Case{640, 360, Origin::UpperLeft, {17.0f, 23.0f, 640.0f, 360.0f}},
+        Case{640, 360, Origin::LowerLeft, {17.0f, 383.0f, 640.0f, -360.0f}},
+        Case{0, 360, Origin::UpperLeft, {17.0f, 23.0f, 1.0f, 360.0f}},
+        Case{0, 360, Origin::LowerLeft, {17.0f, 383.0f, 1.0f, -360.0f}},
+        Case{640, 0, Origin::UpperLeft, {17.0f, 23.0f, 640.0f, 1.0f}},
+        Case{640, 0, Origin::LowerLeft, {17.0f, 24.0f, 640.0f, -1.0f}},
+        Case{0, 0, Origin::UpperLeft, {17.0f, 23.0f, 1.0f, 1.0f}},
+        Case{0, 0, Origin::LowerLeft, {17.0f, 24.0f, 1.0f, -1.0f}},
+    };
+    Maxwell regs{};
+    regs.viewport_scale_offset_enabled = false;
+    regs.surface_clip.x = 17;
+    regs.surface_clip.y = 23;
+    // Stale programmed transforms must not replace the actual surface-clip viewport.
+    regs.viewport_transform[0].translate_x = 900.0f;
+    regs.viewport_transform[0].translate_y = 700.0f;
+    regs.viewport_transform[0].scale_x = 200.0f;
+    regs.viewport_transform[0].scale_y = 100.0f;
+    for (const auto& test : cases) {
+        CAPTURE(test.width, test.height, test.origin);
+        regs.surface_clip.width = test.width;
+        regs.surface_clip.height = test.height;
+        regs.window_origin.mode = test.origin;
+        CHECK(Vulkan::GetSurfaceClipViewport(regs) == test.expected);
     }
 }
 

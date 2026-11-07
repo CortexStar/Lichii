@@ -4171,8 +4171,7 @@ ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::ImageViewI
 
     const VkImageAspectFlags aspect_mask = ImageViewAspectMask(info);
     samples_depth24 = aspect_mask == VK_IMAGE_ASPECT_DEPTH_BIT &&
-        (format == PixelFormat::X8_D24_UNORM || format == PixelFormat::D24_UNORM_S8_UINT ||
-         format == PixelFormat::S8_UINT_D24_UNORM);
+                      Tegra::Texture::SamplesDepth24(format, info.Swizzle());
     std::array<SwizzleSource, 4> swizzle{
         SwizzleSource::R,
         SwizzleSource::G,

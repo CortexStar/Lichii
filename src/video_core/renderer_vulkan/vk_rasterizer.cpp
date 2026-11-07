@@ -52,6 +52,7 @@
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
+#include "video_core/renderer_vulkan/surface_clip_viewport.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
@@ -255,7 +256,9 @@ bool IsPrimitiveRestartSupported(const Device& device, VkPrimitiveTopology topol
 } // Anonymous namespace
 
 std::array<f32, 4> GetHostViewport0(const Device& device, const Maxwell& regs, bool is_rescaling) {
-    // PositionVaryingPass excludes the render-area path (viewport transform disabled).
+    if (!regs.viewport_scale_offset_enabled) {
+        return GetSurfaceClipViewport(regs);
+    }
     const float scale = is_rescaling ? Settings::values.resolution_info.up_factor : 1.0f;
     const VkViewport viewport{GetViewportState(device, regs, 0, scale)};
     return {viewport.x, viewport.y, viewport.width, viewport.height};
@@ -2505,19 +2508,12 @@ void RasterizerVulkan::UpdateViewportsState(Tegra::Engines::Maxwell3D::Regs& reg
     maxwell3d->dirty.flags[Dirty::Scissors] = true;
 
     if (!regs.viewport_scale_offset_enabled) {
-        float x = static_cast<float>(regs.surface_clip.x);
-        float y = static_cast<float>(regs.surface_clip.y);
-        float width = (std::max)(1.0f, static_cast<float>(regs.surface_clip.width));
-        float height = (std::max)(1.0f, static_cast<float>(regs.surface_clip.height));
-        if (regs.window_origin.mode != Maxwell::WindowOrigin::Mode::UpperLeft) {
-            y += height;
-            height = -height;
-        }
+        const auto surface_viewport = GetSurfaceClipViewport(regs);
         VkViewport viewport{
-            .x = x,
-            .y = y,
-            .width = width,
-            .height = height,
+            .x = surface_viewport[0],
+            .y = surface_viewport[1],
+            .width = surface_viewport[2],
+            .height = surface_viewport[3],
             .minDepth = 0.0f,
             .maxDepth = 1.0f,
         };
