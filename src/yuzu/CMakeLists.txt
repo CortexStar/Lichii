@@ -495,4 +495,15 @@ endif()
 # Remember that the linker is incredibly stupid.
 target_link_libraries(yuzu PRIVATE OpenSSL::SSL OpenSSL::Crypto SDL3::SDL3)
 
+# NX archive conversion and editing (nx_tools.cpp) runs nxformat in the process.
+if (LICHII_ENABLE_NX)
+    target_sources(yuzu PRIVATE nx_tools.h nx_tools.cpp)
+    target_link_libraries(yuzu PRIVATE nxformat::nxformat)
+    if (LICHII_NXFORMAT_RUNTIME)
+        add_custom_command(TARGET yuzu POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${LICHII_NXFORMAT_RUNTIME}" "$<TARGET_FILE_DIR:yuzu>")
+    endif()
+endif()
+
 create_target_directory_groups(yuzu)

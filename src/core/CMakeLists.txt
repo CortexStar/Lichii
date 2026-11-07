@@ -63,6 +63,8 @@ add_library(core STATIC
     file_sys/content_archive.h
     file_sys/control_metadata.cpp
     file_sys/control_metadata.h
+    file_sys/decrypted_nca.cpp
+    file_sys/decrypted_nca.h
     file_sys/errors.h
     file_sys/fs_directory.h
     file_sys/fs_file.h
@@ -1255,6 +1257,12 @@ target_link_libraries(core PRIVATE
     ZLIB::ZLIB)
 
 target_link_libraries(core PUBLIC httplib::httplib zstd::zstd)
+
+if (LICHII_ENABLE_NX)
+    target_sources(core PRIVATE loader/nx.cpp loader/nx.h)
+    target_link_libraries(core PUBLIC nxformat::reader)
+    target_compile_definitions(core PUBLIC LICHII_ENABLE_NX)
+endif()
 
 if (ENABLE_WEB_SERVICE)
     target_compile_definitions(core PUBLIC ENABLE_WEB_SERVICE)
