@@ -2504,16 +2504,18 @@ void MainWindow::OnGameListLoadFile(QString game_path, u64 program_id) {
 }
 
 void MainWindow::OnGameListImportShaderPack(u64 program_id) {
-    if (emulation_running) {
+    // A booting or closing game still reads and writes the shader cache folder.
+    if (emulation_running || boot_in_progress || close_pending) {
         QMessageBox::warning(this, tr("Import Shader Pack"),
                              tr("Stop the running game before importing a shader pack."));
         return;
     }
 
-    // Only loose .bin files: no zip reader is linked into the project.
+    // Only loose .bin files: no zip reader is linked into the project. Qt reads a filter's
+    // patterns only from the parentheses that end it, so the hint goes in the caption.
     const QStringList sources = QFileDialog::getOpenFileNames(
-        this, tr("Import Shader Pack"), QString{},
-        tr("Pipeline cache files (*.bin) - extract the zip first;;All files (*)"));
+        this, tr("Import Shader Pack (extract a zipped pack first)"), QString{},
+        tr("Pipeline cache files (*.bin);;All files (*)"));
     if (sources.isEmpty()) {
         return;
     }
