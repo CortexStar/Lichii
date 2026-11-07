@@ -54,6 +54,13 @@ add_executable(shader-sweep main.cpp diagnostics.cpp)
 target_link_libraries(shader-sweep PRIVATE common shader_recompiler)
 target_include_directories(shader-sweep PRIVATE ${REPOSITORY_ROOT}/src)
 create_target_directory_groups(shader-sweep)
+add_executable(pipeline-key-test test_pipeline_key.cpp)
+target_link_libraries(pipeline-key-test PRIVATE common)
+target_include_directories(pipeline-key-test PRIVATE ${REPOSITORY_ROOT}/src)
+if(YUZU_TESTS OR BUILD_TESTING)
+    add_test(NAME pipeline-key COMMAND pipeline-key-test)
+endif()
+
 add_executable(static-compute-match-test test_static_compute_match.cpp)
 target_include_directories(static-compute-match-test PRIVATE ${REPOSITORY_ROOT}/src)
 

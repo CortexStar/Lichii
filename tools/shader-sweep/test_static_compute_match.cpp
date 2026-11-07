@@ -10,6 +10,10 @@
 #include "video_core/shader_cache_io.h"
 
 int main() try {
+    static_assert(!Vulkan::NeedsNupBlendDepthVariant(true, true));
+    static_assert(Vulkan::NeedsNupBlendDepthVariant(false, true));
+    static_assert(Vulkan::NeedsNupBlendDepthVariant(true, false));
+    static_assert(Vulkan::NeedsNupBlendDepthVariant(false, false));
     static_assert(VideoCommon::ShaderCacheWriteNeedsGrace(1, 119999));
     static_assert(!VideoCommon::ShaderCacheWriteNeedsGrace(1, 120000));
     static_assert(!VideoCommon::ShaderCacheWriteNeedsGrace(0, 0));

@@ -15,6 +15,10 @@ constexpr bool FlushPipelineCacheDuringGameplay(bool switch2, bool vendor_cache)
     return !switch2 || !vendor_cache;
 }
 
+constexpr bool NeedsNupBlendDepthVariant(bool dynamic_depth, bool dynamic_blend) {
+    return !dynamic_depth || !dynamic_blend;
+}
+
 enum class CacheReadResult { Complete, Retry, Failed };
 
 template <typename Read>

@@ -263,6 +263,14 @@ struct FixedPipelineState {
 
     void Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFeatures& features);
 
+    // Mesh pipelines do not consume vertex input. Keep the union's divisor value
+    // intact on devices without dynamic vertex input.
+    void ClearMeshVertexInput() noexcept {
+        if (dynamic_vertex_input) {
+            attribute_types = 0;
+        }
+    }
+
     size_t Hash() const noexcept;
 
     bool operator==(const FixedPipelineState& rhs) const noexcept;

@@ -967,6 +967,12 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         return nullptr;
     }
     graphics_key.state.Refresh(*maxwell3d, dynamic_features);
+    // Preserve the dirty-state shadow when the next draw returns to vertex shaders.
+    const u64 vertex_input = graphics_key.state.attribute_types;
+    SCOPE_EXIT { graphics_key.state.attribute_types = vertex_input; };
+    if (maxwell3d->GetNativeMacroEngine().native_turing && maxwell3d->regs.IsMeshEnabled()) {
+        graphics_key.state.ClearMeshVertexInput();
+    }
 
     if (current_pipeline) {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
@@ -1181,8 +1187,10 @@ bool PipelineCache::PrewarmNupGraphics(std::stop_token stop,
             callback(VideoCore::LoadCallbackStage::ReadNupModels, done, total);
         }))
         return false;
+    const bool needs_blend_variant = NeedsNupBlendDepthVariant(
+        dynamic_features.has_extended_dynamic_state, dynamic_features.has_extended_dynamic_state_3_blend);
     const std::array states{NupPrewarmState(device, dynamic_features, false),
-                            NupPrewarmState(device, dynamic_features, true)};
+                            NupPrewarmState(device, dynamic_features, needs_blend_variant)};
     VkPhysicalDeviceMeshShaderPropertiesEXT mesh_limits{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT};
     if (device.IsExtMeshShaderSupported()) {
@@ -1275,8 +1283,10 @@ bool PipelineCache::PrewarmNupGraphics(std::stop_token stop,
                         }
                     }
                     auto job = std::make_shared<Job>();
-                    for (const auto& fixed : states)
+                    for (auto fixed : states) {
+                        if (layout.mesh) fixed.ClearMeshVertexInput();
                         job->states.push_back({fixed, std::nullopt});
+                    }
                     if (!layout.mesh)
                         job->inputs.assign(inputs.begin(), inputs.end());
                     for (size_t index = 0; index < layout.count; ++index) {
@@ -1647,6 +1657,11 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     const auto load_graphics{[&](std::ifstream& file, std::vector<FileEnvironment> envs) {
         GraphicsPipelineCacheKey key;
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
+        if (std::ranges::any_of(envs, [](const FileEnvironment& env) {
+                return env.ShaderStage() == Shader::Stage::Mesh;
+            })) {
+            key.state.ClearMeshVertexInput();
+        }
 
         if (!device.IsExtMeshShaderSupported() &&
             std::ranges::any_of(envs, [](const FileEnvironment& env) {

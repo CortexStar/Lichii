@@ -359,13 +359,17 @@ GraphicsPipeline::GraphicsPipeline(
                 shader_notify->MarkShaderComplete();
             }
         };
+        auto emission_end = begin;
+        auto driver_end = begin;
         try {
             if (emit_stages) {
                 spv_modules = emit_stages();
             }
+            emission_end = std::chrono::steady_clock::now();
             const VkRenderPass render_pass{render_pass_cache.Get(MakeRenderPassKey(key.state, device))};
             Validate();
             MakePipeline(render_pass);
+            driver_end = std::chrono::steady_clock::now();
         } catch (const Shader::Exception& exception) {
             LOG_ERROR(Render_Vulkan, "Graphics pipeline {:016x}: {}", key.Hash(), exception.what());
             throw;
@@ -392,8 +396,11 @@ GraphicsPipeline::GraphicsPipeline(
             if (elapsed > std::chrono::milliseconds{100} ||
                 (elapsed > std::chrono::milliseconds{2} && logged.fetch_add(1) < 400)) {
                 LOG_INFO(Render_Vulkan,
-                         "Nx2Perf async_pipelines: {:016x} worker emission and driver build {:.1f} ms",
-                         key.Hash(), std::chrono::duration<double, std::milli>(elapsed).count());
+                         "Nx2Perf async_pipelines: {:016x} worker emission and driver build {:.1f} ms "
+                         "(SPIR-V {:.1f} ms, driver {:.1f} ms)",
+                         key.Hash(), std::chrono::duration<double, std::milli>(elapsed).count(),
+                         std::chrono::duration<double, std::milli>(emission_end - begin).count(),
+                         std::chrono::duration<double, std::milli>(driver_end - emission_end).count());
             }
         }
     }};

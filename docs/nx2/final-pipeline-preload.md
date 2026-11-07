@@ -164,3 +164,34 @@ Still unproven:
 - Rendering and steady-state GPU throughput with pipeline libraries in this game.
 - Complete shutdown-save and subsequent-session reuse under the user's workload.
 - Recovery of resource/state values absent from the supported archive metadata.
+
+
+## Re-entry cache-key investigation
+
+A subsequent game session completed preload and clean shutdown saves. It recorded
+230 graphics builds with 230 distinct pipeline hashes, so the log did not show
+repeated compilation of an identical key. However, eight keys for one confirmed
+task/mesh/fragment group differed only in dynamic vertex-input types. Mesh pipelines
+do not consume that vertex-input state. Their seven redundant builds consumed
+169.1 ms in total on the GPU thread; this is accumulated work, not one frame time.
+
+The mesh key now clears dynamic vertex-input types consistently for runtime
+lookup, old captured cache records, and NUP prewarm. The original dirty-state
+shadow is restored after lookup so a subsequent vertex draw retains its input
+types. Static input/divisor state is unchanged. In a replay of the saved keys,
+1583 entries reduce to 1368; 230 logged runtime keys reduce to 207. A direct C++
+regression also reduces the nine extracted sample keys to two distinct keys.
+
+The public NVN/NVN2 reimplementation similarly normalizes irrelevant state in its
+[pipeline keys](https://github.com/seedds/nxnative/blob/bd979ced3ae6bad60bf86429a71d172297d93471/dm/gfx/nvn/nvn_pso_skey.h)
+and separates reusable pipeline bases from specialization in its
+[Metal backend](https://github.com/seedds/nxnative/blob/bd979ced3ae6bad60bf86429a71d172297d93471/dm/gfx/nvn/nvn_mtl.m).
+This is a reference implementation, not direct evidence of Nintendo's proprietary
+driver internals. Vulkan also specifies that mesh pipelines omit vertex-input
+state. The change uses that verified boundary rather than copying Metal behavior.
+
+The NUP preload also omits the second blend/depth baseline when both states are
+dynamic. Worker timing now reports SPIR-V emission separately from driver pipeline
+construction. The largest observed 908.5 ms build used another shader group with
+no duplicate key in the saved corpus, so this patch does not explain or claim to
+eliminate that stall. Gameplay validation remains required.
