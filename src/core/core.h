@@ -351,6 +351,11 @@ public:
 
     [[nodiscard]] FileSys::VirtualFilesystem GetFilesystem() const;
 
+    /// Where the application's main module was loaded (0 before one is), for built-in patches
+    /// that keep state in the game's memory (Ocarina of Time's photo mode).
+    void SetApplicationMainBase(u64 base);
+    [[nodiscard]] u64 GetApplicationMainBase() const;
+
     void RegisterCheatList(const std::vector<Memory::CheatEntry>& list,
                            const std::array<u8, 0x20>& build_id, u64 main_region_begin,
                            u64 main_region_size);

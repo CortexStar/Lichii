@@ -59,6 +59,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/photo_mode_state.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
@@ -682,6 +683,16 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
+    // Ocarina of Time's photo mode: no HUD. It draws into the anti-aliased image without depth and
+    // blends; the game also draws characters and foliage there, with the scene's depth.
+    if (VideoCore::PhotoMode::HideHud()) {
+        const auto& regs = maxwell3d->regs;
+        const u64 output = VideoCore::PhotoMode::OutputImage();
+        if (output != 0 && regs.rt[0].Address() == output && regs.depth_test_enable == 0 &&
+            regs.zeta_enable == 0 && regs.blend.enable[0] != 0) {
+            return;
+        }
+    }
     {
         // A draw's first and count can come from memory a skipped (rejected) compute program
         // should have written. Past 16M vertices they are garbage: building the quad index

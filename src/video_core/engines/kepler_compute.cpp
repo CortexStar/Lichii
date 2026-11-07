@@ -29,6 +29,7 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/game_dlss_status.h"
+#include "video_core/photo_mode_state.h"
 #include "video_core/memory_manager.h"
 #include "video_core/native_query_trace.h"
 #ifdef ARCHITECTURE_x86_64
@@ -1089,6 +1090,46 @@ void KeplerCompute::ProcessLaunch() {
     memory_manager.ReadBlockUnsafe(launch_desc_loc, &launch_description,
                                    LaunchParams::NUM_LAUNCH_PARAMETERS * sizeof(u32));
     rasterizer->DispatchCompute();
+}
+
+bool KeplerCompute::ProcessOcarinaPhotoPass(u64 program_id, u64 shader_hash) {
+    constexpr u64 OcarinaProgramId = 0x0400486024DEC000ULL;
+    // The anti-aliasing output pass writes the image the HUD is drawn into: the full-size pass, and
+    // one per ratio when the game renders below its output size.
+    constexpr std::array<u64, 5> OutputPassHashes{
+        0x6bd913e1f34e83ebULL, 0xe40f5efb5480e692ULL, 0x9160e500fc90ff21ULL,
+        0x98ace68338de9ef8ULL, 0x9302bc0d6d1d9bc1ULL};
+    constexpr u32 OutputImageOffset = 0xd0; ///< its texture handle in constant buffer 0
+    // The pass that lays the scene's haze over it (dropping it clears the distance).
+    constexpr u64 HazePassHash = 0x780c0536b89fc89eULL;
+    if (program_id != OcarinaProgramId) {
+        return false;
+    }
+    if (shader_hash == HazePassHash) {
+        return VideoCore::PhotoMode::HideHaze();
+    }
+    if (std::find(OutputPassHashes.begin(), OutputPassHashes.end(), shader_hash) ==
+        OutputPassHashes.end()) {
+        return false;
+    }
+    const auto& cbuf = launch_description.const_buffer_config[0];
+    const GPUVAddr address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
+    if (!(launch_description.const_buffer_enable_mask & 1) ||
+        cbuf.size.Value() < OutputImageOffset + sizeof(u32) ||
+        !memory_manager.IsFullyMappedRange(address + OutputImageOffset, sizeof(u32))) {
+        return false;
+    }
+    const u32 index = memory_manager.Read<u32>(address + OutputImageOffset) & 0xfffff;
+    if (index > regs.tic.limit ||
+        !memory_manager.IsFullyMappedRange(regs.tic.Address() + u64{index} * sizeof(Texture::TICEntry),
+                                           sizeof(Texture::TICEntry))) {
+        return false;
+    }
+    const auto image = GetTICEntry(index);
+    if (image.format == Texture::TextureFormat::B10G11R11) {
+        VideoCore::PhotoMode::SetOutputImage(image.Address());
+    }
+    return false;
 }
 
 Texture::TICEntry KeplerCompute::GetTICEntry(u32 tic_index) const {

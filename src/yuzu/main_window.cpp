@@ -19,6 +19,8 @@
 #ifdef HAS_RESHADE
 #include "configuration/configure_post_processing.h"
 #include "video_core/post_processing/fx_preset.h"
+#include "core/ocarina_photo_mode.h"
+#include "video_core/photo_mode_state.h"
 #endif
 #include "updater/update_dialog.h"
 
@@ -88,6 +90,8 @@
 #include <QProgressDialog>
 #include <QScreen>
 #include <QShortcut>
+#include <QPainter>
+#include <QRegion>
 #include <QStatusBar>
 #include <QtConcurrentRun>
 
@@ -1387,6 +1391,36 @@ void MainWindow::InitializeHotkeys() {
         SetFPSSuffix();
     });
 
+    connect_shortcut(QStringLiteral("Toggle Photo Mode"), [this] {
+        if (!emulation_running) {
+            return;
+        }
+        if (QtCommon::system->GetApplicationProcessProgramID() != Core::OcarinaPhotoMode::ProgramId) {
+            ShowOsdMessage(tr("Photo mode is for The Legend of Zelda: Ocarina of Time"));
+            return;
+        }
+        const bool entering = !Core::OcarinaPhotoMode::Active();
+        Core::OcarinaPhotoMode::RequestToggle();
+        if (entering) {
+            ShowOsdMessage(tr("Photo mode: left stick move, right stick look, ZR/ZL up/down, "
+                              "R fast, L slow, D-pad up/down zoom, left/right roll, X HUD, "
+                              "A freeze, L3 ratio, R3 haze, - hotsample, + picture, Y reset, "
+                              "B/F1 exit"),
+                           8000);
+        } else {
+            ShowOsdMessage(tr("Photo mode: OFF"));
+        }
+    });
+    connect_shortcut(QStringLiteral("Cycle Photo Ratio"), [] {
+        if (Core::OcarinaPhotoMode::Active()) {
+            Core::OcarinaPhotoMode::RequestRatioCycle();
+        }
+    });
+    connect_shortcut(QStringLiteral("Toggle Photo Hotsample"), [] {
+        if (Core::OcarinaPhotoMode::Active()) {
+            Core::OcarinaPhotoMode::RequestHotsampleToggle();
+        }
+    });
     connect_shortcut(QStringLiteral("Toggle Renderdoc Capture"), [] {
         if (Settings::values.enable_renderdoc_hotkey) {
             QtCommon::system->GetRenderdocAPI().ToggleCapture();
@@ -1528,6 +1562,8 @@ void MainWindow::ConnectWidgetEvents() {
     connect(this, &MainWindow::EmulationStopping, this, &MainWindow::SoftwareKeyboardExit);
 
     connect(&status_bar_update_timer, &QTimer::timeout, this, &MainWindow::UpdateStatusBar);
+    connect(&photo_overlay_timer, &QTimer::timeout, this, &MainWindow::UpdatePhotoOverlay);
+    photo_overlay_timer.start(100);
 
     connect(this, &MainWindow::UpdateThemedIcons, multiplayer_state,
             &MultiplayerState::UpdateThemedIcons);
@@ -1657,7 +1693,8 @@ void MainWindow::ConnectMenuEvents() {
 
     connect_menu(ui->action_Desktop, &MainWindow::OnCreateHomeMenuDesktopShortcut);
     connect_menu(ui->action_Application_Menu, &MainWindow::OnCreateHomeMenuApplicationMenuShortcut);
-    connect_menu(ui->action_Capture_Screenshot, &MainWindow::OnCaptureScreenshot);
+    // A lambda: triggered(bool checked) must not reach ask_where.
+    connect_menu(ui->action_Capture_Screenshot, [this] { OnCaptureScreenshot(); });
 
     // TAS
     connect_menu(ui->action_TAS_Start, &MainWindow::OnTasStartStop);
@@ -2004,6 +2041,7 @@ bool MainWindow::SelectAndSetCurrentUser(
 
 void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
                           StartGameType type) {
+    Core::OcarinaPhotoMode::Reset();
     if (nup_running && filename.toStdString() == nup_source_path) {
         QMessageBox::information(this, tr("Conversion in Progress"),
                                  tr("This game cannot be started while its dump is being "
@@ -4698,7 +4736,7 @@ void MainWindow::OnCreateHomeMenuApplicationMenuShortcut() {
     QtCommon::Game::CreateHomeMenuShortcut(QtCommon::Game::ShortcutTarget::Applications);
 }
 
-void MainWindow::OnCaptureScreenshot() {
+void MainWindow::OnCaptureScreenshot(bool ask_where) {
     if (QtCommon::emu_thread == nullptr || !QtCommon::emu_thread->IsRunning())
         return;
 
@@ -4716,7 +4754,7 @@ void MainWindow::OnCaptureScreenshot() {
         return;
 
 #ifdef _WIN32
-    if (UISettings::values.enable_screenshot_save_as) {
+    if (ask_where && UISettings::values.enable_screenshot_save_as) {
         OnPauseGame();
         filename = QFileDialog::getSaveFileName(this, tr("Capture Screenshot"), filename,
                                                 tr("PNG Image (*.png)"));
@@ -4889,10 +4927,222 @@ void MainWindow::OnTasStateChanged() {
     ui->action_TAS_Reset->setEnabled(emulation_running);
 }
 
+namespace {
+/// Photo mode's picture ratio: darkens what the picture leaves out of the game's image.
+class PhotoFrameOverlay final : public QWidget {
+public:
+    explicit PhotoFrameOverlay(QWidget* parent) : QWidget(parent) {
+        setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint |
+                       Qt::WindowTransparentForInput);
+        setAttribute(Qt::WA_TranslucentBackground);
+        setAttribute(Qt::WA_NoSystemBackground);
+        setAttribute(Qt::WA_ShowWithoutActivating);
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+    }
+
+    void SetFrame(const QRect& image, const QRect& crop) {
+        if (image != image_rect || crop != crop_rect) {
+            image_rect = image;
+            crop_rect = crop;
+            update();
+        }
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        QRegion outside(image_rect);
+        outside -= QRegion(crop_rect);
+        for (const QRect& rect : outside) {
+            painter.fillRect(rect, QColor(0, 0, 0, 170));
+        }
+        painter.setPen(QPen(QColor(255, 255, 255, 200), 1));
+        painter.drawRect(crop_rect.adjusted(0, 0, -1, -1));
+    }
+
+private:
+    QRect image_rect;
+    QRect crop_rect;
+};
+} // Anonymous namespace
+
+void MainWindow::EnterPhotoHotsample(u32 width, u32 height) {
+    QWidget* const window = ui->action_Single_Window_Mode->isChecked()
+                                ? static_cast<QWidget*>(this)
+                                : static_cast<QWidget*>(render_window);
+    photo_saved_geometry = window->saveGeometry();
+    photo_saved_flags = window->windowFlags();
+    if (window == this) {
+        photo_saved_menubar = ui->menubar->isVisible();
+        photo_saved_statusbar = statusBar()->isVisible();
+        ui->menubar->hide();
+        statusBar()->hide();
+    }
+    const qreal ratio = window->devicePixelRatioF();
+    const QRect screen = GuessCurrentScreen(window)->geometry();
+    window->hide();
+    window->setWindowFlags(window->windowFlags() | Qt::FramelessWindowHint);
+    window->setGeometry(screen.x(), screen.y(), static_cast<int>(width / ratio + 0.5),
+                        static_cast<int>(height / ratio + 0.5));
+    window->showNormal();
+#ifdef _WIN32
+    // The exact pixels (Qt's logical size rounds at fractional scales); larger than the screen
+    // is fine, as with UUU's hotsampling.
+    RECT position{};
+    const HWND hwnd = reinterpret_cast<HWND>(window->winId());
+    GetWindowRect(hwnd, &position);
+    SetWindowPos(hwnd, nullptr, position.left, position.top, static_cast<int>(width),
+                 static_cast<int>(height), SWP_NOZORDER | SWP_NOACTIVATE);
+#endif
+    photo_hotsampled = true;
+    render_window->OnFramebufferSizeChanged();
+    LOG_INFO(Frontend, "Photo hotsample: window {}x{}", width, height);
+}
+
+void MainWindow::LeavePhotoHotsample() {
+    QWidget* const window = ui->action_Single_Window_Mode->isChecked()
+                                ? static_cast<QWidget*>(this)
+                                : static_cast<QWidget*>(render_window);
+    VideoCore::PhotoMode::SetPresentCrop(0, 0);
+    window->hide();
+    window->setWindowFlags(photo_saved_flags);
+    window->restoreGeometry(photo_saved_geometry);
+    window->show();
+    if (window == this) {
+        ui->menubar->setVisible(photo_saved_menubar);
+        statusBar()->setVisible(photo_saved_statusbar);
+    }
+    photo_hotsampled = false;
+    render_window->OnFramebufferSizeChanged();
+    LOG_INFO(Frontend, "Photo hotsample: window restored");
+}
+
+void MainWindow::UpdatePhotoOverlay() {
+    const auto ratio = emulation_running ? Core::OcarinaPhotoMode::PictureRatio()
+                                         : std::array<u32, 2>{0, 0};
+    const u64 frame = VideoCore::PhotoMode::PresentedFrameSize();
+    // Hotsampling: the window becomes the picture (the ratio's crop at the internal resolution).
+    {
+        const bool want = emulation_running && Core::OcarinaPhotoMode::HotsampleActive();
+        static std::array<u32, 2> hotsampled_ratio{};
+        const std::array<u32, 2> crop_ratio = ratio[0] != 0 ? ratio : std::array<u32, 2>{16, 9};
+        if (photo_hotsampled && (!want || crop_ratio != hotsampled_ratio)) {
+            LeavePhotoHotsample();
+        }
+        if (want && !photo_hotsampled && frame != 0) {
+            // The full frame's size before the crop (the presented size is the crop's once on).
+            const f32 factor = Settings::values.resolution_info.up_factor;
+            const u32 full_width = static_cast<u32>((frame & 0xffffffff) * factor + 0.5f);
+            const u32 full_height = static_cast<u32>((frame >> 32) * factor + 0.5f);
+            const auto crop = Core::OcarinaPhotoMode::CropToRatio(full_width, full_height, crop_ratio);
+            hotsampled_ratio = crop_ratio;
+            VideoCore::PhotoMode::SetPresentCrop(crop_ratio[0], crop_ratio[1]);
+            EnterPhotoHotsample(crop[2], crop[3]);
+            ShowOsdMessage(tr("Hotsample: %1x%2 (Shift+F1 or - to go back)").arg(crop[2]).arg(crop[3]));
+        }
+        if (photo_hotsampled) {
+            if (photo_overlay != nullptr) {
+                photo_overlay->hide();
+            }
+            return;
+        }
+    }
+    if (ratio[0] != photo_ratio_width || ratio[1] != photo_ratio_height) {
+        photo_ratio_width = ratio[0];
+        photo_ratio_height = ratio[1];
+        if (emulation_running && Core::OcarinaPhotoMode::Active() && frame != 0) {
+            const f32 factor = Settings::values.resolution_info.up_factor;
+            const u32 width = static_cast<u32>((frame & 0xffffffff) * factor + 0.5f);
+            const u32 height = static_cast<u32>((frame >> 32) * factor + 0.5f);
+            const auto crop = Core::OcarinaPhotoMode::CropToRatio(width, height, ratio);
+            ShowOsdMessage(ratio[0] == 0
+                               ? tr("Photo ratio: full frame (%1x%2)").arg(width).arg(height)
+                               : tr("Photo ratio: %1:%2 (%3x%4)")
+                                     .arg(ratio[0])
+                                     .arg(ratio[1])
+                                     .arg(crop[2])
+                                     .arg(crop[3]));
+        }
+    }
+    if (ratio[0] == 0 || render_window == nullptr || !render_window->isVisible()) {
+        if (photo_overlay != nullptr) {
+            photo_overlay->hide();
+        }
+        return;
+    }
+    if (photo_overlay == nullptr) {
+        photo_overlay = new PhotoFrameOverlay(this);
+    }
+    // The game's image inside the render window, letterboxed to its own ratio.
+    const QSize size = render_window->size();
+    const double frame_width = frame != 0 ? static_cast<double>(frame & 0xffffffff) : 16.0;
+    const double frame_height = frame != 0 ? static_cast<double>(frame >> 32) : 9.0;
+    double image_width = size.width();
+    double image_height = image_width * frame_height / frame_width;
+    if (image_height > size.height()) {
+        image_height = size.height();
+        image_width = image_height * frame_width / frame_height;
+    }
+    const QRect image(static_cast<int>((size.width() - image_width) / 2),
+                      static_cast<int>((size.height() - image_height) / 2),
+                      static_cast<int>(image_width), static_cast<int>(image_height));
+    const auto crop = Core::OcarinaPhotoMode::CropToRatio(static_cast<u32>(image.width()),
+                                                          static_cast<u32>(image.height()), ratio);
+    const QRect crop_rect(image.x() + static_cast<int>(crop[0]), image.y() + static_cast<int>(crop[1]),
+                          static_cast<int>(crop[2]), static_cast<int>(crop[3]));
+    const QRect geometry(render_window->mapToGlobal(QPoint(0, 0)), size);
+    if (photo_overlay->geometry() != geometry) {
+        photo_overlay->setGeometry(geometry);
+    }
+    static_cast<PhotoFrameOverlay*>(photo_overlay)->SetFrame(image, crop_rect);
+    if (!photo_overlay->isVisible()) {
+        photo_overlay->show();
+        if (osd_label != nullptr && osd_label->isVisible()) {
+            osd_label->raise();
+        }
+    }
+}
+
+void MainWindow::ShowOsdMessage(const QString& text, int milliseconds) {
+    if (!osd_label) {
+        osd_label = new QLabel(this);
+        osd_label->setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint |
+                                  Qt::WindowStaysOnTopHint);
+        osd_label->setAttribute(Qt::WA_ShowWithoutActivating);
+        osd_label->setAttribute(Qt::WA_TransparentForMouseEvents);
+        osd_label->setStyleSheet(QStringLiteral(
+            "QLabel { background: rgba(0, 0, 0, 190); color: white; font-size: 18px; "
+            "padding: 8px 14px; border-radius: 6px; }"));
+        osd_timer.setSingleShot(true);
+        connect(&osd_timer, &QTimer::timeout, osd_label, &QWidget::hide);
+    }
+    osd_label->setText(text);
+    osd_label->adjustSize();
+    QWidget* const anchor = render_window != nullptr && render_window->isVisible()
+                                ? static_cast<QWidget*>(render_window)
+                                : static_cast<QWidget*>(this);
+    osd_label->move(anchor->mapToGlobal(QPoint(24, 24)));
+    osd_label->show();
+    osd_label->raise();
+    osd_timer.start(milliseconds);
+    statusBar()->showMessage(text, milliseconds);
+}
+
 void MainWindow::UpdateStatusBar() {
     if (QtCommon::emu_thread == nullptr || !QtCommon::system->IsPoweredOn()) {
         status_bar_update_timer.stop();
         return;
+    }
+    // Plus in Ocarina of Time's photo mode: a picture at the game's full internal size, cropped
+    // to the picture ratio, straight to the screenshots folder.
+    if (Core::OcarinaPhotoMode::TakeCaptureRequest()) {
+        const u64 frame = VideoCore::PhotoMode::PresentedFrameSize();
+        const f32 factor = Settings::values.resolution_info.up_factor;
+        const auto crop = Core::OcarinaPhotoMode::CropToRatio(
+            static_cast<u32>((frame & 0xffffffff) * factor + 0.5f),
+            static_cast<u32>((frame >> 32) * factor + 0.5f), Core::OcarinaPhotoMode::PictureRatio());
+        OnCaptureScreenshot(false);
+        ShowOsdMessage(tr("Photo saved (%1x%2)").arg(crop[2]).arg(crop[3]));
     }
 
     if (Settings::values.tas_enable)

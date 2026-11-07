@@ -29,6 +29,7 @@
 #include "video_core/post_processing/fx_chain.h"
 #endif
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
+#include "video_core/photo_mode_state.h"
 #include "video_core/renderer_vulkan/vk_blit_screen.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -224,6 +225,60 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     };
 
     RenderAppletCaptureLayer(framebuffers);
+
+    // Ocarina of Time's photo mode, hotsampling: only the centred crop of the game's largest layer
+    // at the picture ratio, so the window (sized to it by the frontend) and screenshots get it
+    // pixel for pixel.
+    std::vector<Tegra::FramebufferConfig> cropped_layers;
+    if (const u64 crop = VideoCore::PhotoMode::PresentCrop(); crop != 0 && !framebuffers.empty()) {
+        cropped_layers.assign(framebuffers.begin(), framebuffers.end());
+        auto largest = cropped_layers.begin();
+        for (auto it = cropped_layers.begin(); it != cropped_layers.end(); ++it) {
+            if (u64{it->width} * it->height > u64{largest->width} * largest->height) {
+                largest = it;
+            }
+        }
+        const auto& old_crop = largest->crop_rect;
+        const int left = old_crop.IsEmpty() ? 0 : old_crop.left;
+        const int top = old_crop.IsEmpty() ? 0 : old_crop.top;
+        const u64 width = old_crop.IsEmpty() ? largest->width : old_crop.GetWidth();
+        const u64 height = old_crop.IsEmpty() ? largest->height : old_crop.GetHeight();
+        const u64 ratio_width = crop & 0xffffffff;
+        const u64 ratio_height = crop >> 32;
+        u64 crop_width = width;
+        u64 crop_height = height;
+        if (width * ratio_height > height * ratio_width) {
+            crop_width = height * ratio_width / ratio_height;
+        } else {
+            crop_height = width * ratio_height / ratio_width;
+        }
+        const int x = left + static_cast<int>((width - crop_width) / 2);
+        const int y = top + static_cast<int>((height - crop_height) / 2);
+        largest->crop_rect = Common::Rectangle<int>{x, y, x + static_cast<int>(crop_width),
+                                                    y + static_cast<int>(crop_height)};
+        framebuffers = cropped_layers;
+    }
+    {
+        // The game's own frame size (its largest layer, after any crop), for full-size screenshots.
+        u64 best_area = 0;
+        u32 best_width = 0;
+        u32 best_height = 0;
+        for (const auto& framebuffer : framebuffers) {
+            const auto& crop = framebuffer.crop_rect;
+            const u32 width =
+                crop.GetWidth() > 0 ? static_cast<u32>(crop.GetWidth()) : framebuffer.width;
+            const u32 height =
+                crop.GetHeight() > 0 ? static_cast<u32>(crop.GetHeight()) : framebuffer.height;
+            if (u64{width} * height > best_area) {
+                best_area = u64{width} * height;
+                best_width = width;
+                best_height = height;
+            }
+        }
+        if (best_area != 0) {
+            VideoCore::PhotoMode::SetPresentedFrameSize(best_width, best_height);
+        }
+    }
 
     if (!render_window.IsShown()) {
         return;

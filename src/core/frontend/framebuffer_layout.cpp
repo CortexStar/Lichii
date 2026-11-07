@@ -10,6 +10,7 @@
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "core/frontend/framebuffer_layout.h"
+#include "video_core/photo_mode_state.h"
 
 namespace Layout {
 
@@ -26,7 +27,11 @@ static Common::Rectangle<u32> MaxRectangle(Common::Rectangle<u32> window_area, f
 FramebufferLayout DefaultFrameLayout(u32 width, u32 height) noexcept {
     ASSERT(width > 0 && height > 0);
     auto const window_aspect_ratio = float(height) / float(width);
-    auto const emulation_aspect_ratio = EmulationAspectRatio(Settings::values.aspect_ratio.GetValue(), window_aspect_ratio);
+    // Hotsampling (Ocarina of Time's photo mode): the window has the picture's own shape.
+    auto const emulation_aspect_ratio =
+        VideoCore::PhotoMode::PresentCrop() != 0
+            ? window_aspect_ratio
+            : EmulationAspectRatio(Settings::values.aspect_ratio.GetValue(), window_aspect_ratio);
     Common::Rectangle<u32> const screen_window_area{0, 0, width, height};
     auto screen = MaxRectangle(screen_window_area, emulation_aspect_ratio);
     if (window_aspect_ratio < emulation_aspect_ratio) {

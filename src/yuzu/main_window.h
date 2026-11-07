@@ -430,7 +430,8 @@ private slots:
     void LaunchFirmwareApplet(u64 program_id, std::optional<Service::NFP::CabinetMode> mode);
     void OnCreateHomeMenuDesktopShortcut();
     void OnCreateHomeMenuApplicationMenuShortcut();
-    void OnCaptureScreenshot();
+    /// ask_where: the Save As dialog when the settings want it (photo mode's picture skips it).
+    void OnCaptureScreenshot(bool ask_where = true);
     /// Checks for decryption keys; `prompt` asks to install them when they are missing.
     void OnCheckFirmwareDecryption(bool prompt = true);
 #ifdef __unix__
@@ -464,6 +465,12 @@ private:
     void UpdateFrameGenButton();
     void UpdateVolumeUI();
     void UpdateStatusBar();
+    /// A short message over the game (photo mode).
+    void ShowOsdMessage(const QString& text, int milliseconds = 2000);
+    /// Photo mode: the picture ratio's frame and the hotsample window (a 100 ms timer).
+    void UpdatePhotoOverlay();
+    void EnterPhotoHotsample(u32 width, u32 height);
+    void LeavePhotoHotsample();
     void UpdateGPUAccuracyButton();
     void UpdateStatusButtons();
     void UpdateUISettings();
@@ -550,6 +557,18 @@ private:
     QWidget* volume_popup = nullptr;
     QSlider* volume_slider = nullptr;
     QTimer status_bar_update_timer;
+    QLabel* osd_label = nullptr; ///< Short messages over the game, see ShowOsdMessage
+    QTimer osd_timer;
+    QWidget* photo_overlay = nullptr; ///< Photo mode's picture ratio frame
+    QTimer photo_overlay_timer;
+    u32 photo_ratio_width = 0;
+    u32 photo_ratio_height = 0;
+    /// Hotsampling: the window sized to the picture; what to restore after.
+    bool photo_hotsampled = false;
+    QByteArray photo_saved_geometry;
+    Qt::WindowFlags photo_saved_flags;
+    bool photo_saved_menubar = true;
+    bool photo_saved_statusbar = true;
 
     // Stores what suffix to add to the FPS counter, e.g. Unlocked.
     QString m_fpsSuffix{};

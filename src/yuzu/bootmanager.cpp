@@ -62,6 +62,14 @@
 #include "qt_common/qt_common.h"
 #include "video_core/gpu.h"
 #include "video_core/renderer_base.h"
+#include "core/ocarina_photo_mode.h"
+#include "video_core/photo_mode_state.h"
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include "yuzu/bootmanager.h"
 #include "yuzu/main_window.h"
 
@@ -187,8 +195,19 @@ void GRenderWindow::OnFramebufferSizeChanged() {
     // Screen changes potentially incur a change in screen DPI, hence we should update the
     // framebuffer size
     const qreal pixel_ratio = windowPixelRatio();
-    const u32 width = this->width() * pixel_ratio;
-    const u32 height = this->height() * pixel_ratio;
+    u32 width = this->width() * pixel_ratio;
+    u32 height = this->height() * pixel_ratio;
+#ifdef _WIN32
+    // Hotsampling: the surface's exact pixels (logical sizes round at fractional DPI scales).
+    if (VideoCore::PhotoMode::PresentCrop() != 0 && child_widget != nullptr) {
+        RECT rect{};
+        if (GetClientRect(reinterpret_cast<HWND>(child_widget->winId()), &rect) &&
+            rect.right > 0 && rect.bottom > 0) {
+            width = static_cast<u32>(rect.right);
+            height = static_cast<u32>(rect.bottom);
+        }
+    }
+#endif
     UpdateCurrentFramebufferLayout(width, height);
 }
 
@@ -805,6 +824,15 @@ void GRenderWindow::CaptureScreenshot(const QString& screenshot_path) {
 
     const Layout::FramebufferLayout layout{[]() {
         u32 height = UISettings::values.screenshot_height.GetValue();
+        // Auto: the frame the game presents, at the internal resolution (a Switch 2 game's 1440p
+        // frame at 1.5x is 3840x2160, not 1080 x 1.5).
+        if (const u64 frame = VideoCore::PhotoMode::PresentedFrameSize(); height == 0 && frame != 0) {
+            const f32 factor = Settings::values.resolution_info.up_factor;
+            const u32 frame_width = static_cast<u32>(frame & 0xffffffff);
+            const u32 frame_height = static_cast<u32>(frame >> 32);
+            return Layout::DefaultFrameLayout(static_cast<u32>(frame_width * factor + 0.5f),
+                                              static_cast<u32>(frame_height * factor + 0.5f));
+        }
         if (height == 0) {
             height = Settings::IsDockedMode() ? Layout::ScreenDocked::Height
                                               : Layout::ScreenUndocked::Height;
@@ -821,11 +849,20 @@ void GRenderWindow::CaptureScreenshot(const QString& screenshot_path) {
         [=, this](bool invert_y) {
             const std::string std_screenshot_path = screenshot_path.toStdString();
 #if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
-            if (screenshot_image.flipped(invert_y ? Qt::Vertical : (Qt::Orientations)0)
-                    .save(screenshot_path)) {
+            QImage image = screenshot_image.flipped(invert_y ? Qt::Vertical : (Qt::Orientations)0);
 #else
-            if (screenshot_image.mirrored(false, invert_y).save(screenshot_path)) {
+            QImage image = screenshot_image.mirrored(false, invert_y);
 #endif
+            // Ocarina of Time's photo mode: the picture ratio's centred crop, at full size
+            // (hotsampling crops in the presenter already).
+            if (const auto ratio = Core::OcarinaPhotoMode::PictureRatio();
+                ratio[0] != 0 && VideoCore::PhotoMode::PresentCrop() == 0) {
+                const auto crop = Core::OcarinaPhotoMode::CropToRatio(
+                    static_cast<u32>(image.width()), static_cast<u32>(image.height()), ratio);
+                image = image.copy(static_cast<int>(crop[0]), static_cast<int>(crop[1]),
+                                   static_cast<int>(crop[2]), static_cast<int>(crop[3]));
+            }
+            if (image.save(screenshot_path)) {
                 LOG_INFO(Frontend, "Screenshot saved to \"{}\"", std_screenshot_path);
             } else {
                 LOG_ERROR(Frontend, "Failed to save screenshot to \"{}\"", std_screenshot_path);

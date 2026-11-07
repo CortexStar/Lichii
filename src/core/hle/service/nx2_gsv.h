@@ -31,6 +31,7 @@
 #include "common/game_presets.h"
 #include "common/settings.h"
 #include "common/thread.h"
+#include "core/ocarina_photo_mode.h"
 #include "core/core.h"
 #include "core/arm/dynarmic/window_trace.h"
 #include "core/device_memory.h"
@@ -2197,6 +2198,7 @@ private:
         }
         system.GPU().RequestComposite(std::move(layers), std::move(fences));
         CaptureFrame();
+        Core::OcarinaPhotoMode::Update(system);
         DumpRanges();
         system.SpeedLimiter().DoSpeedLimiting(system.CoreTiming().GetGlobalTimeUs());
         system.GetPerfStats().EndSystemFrame();
