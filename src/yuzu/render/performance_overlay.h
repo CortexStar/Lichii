@@ -4,7 +4,11 @@
 #pragma once
 
 #include <deque>
+#include <optional>
+#include <QFont>
 #include <QWidget>
+
+#include "system_monitor.h"
 
 namespace VideoCore {
 class ShaderNotify;
@@ -12,14 +16,7 @@ class ShaderNotify;
 namespace Core {
 struct PerfStatsResults;
 }
-namespace Ui {
-class PerformanceOverlay;
-}
 
-class QLineSeries;
-class QChart;
-class QChartView;
-class QValueAxis;
 class MainWindow;
 
 class PerformanceOverlay : public QWidget {
@@ -31,42 +28,49 @@ public:
 
 protected:
     void paintEvent(QPaintEvent* event) override;
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
 
 private:
+    struct Meter {
+        QString label;
+        QString value;
+        QString unit;
+        std::optional<double> fraction;
+        QColor accent;
+    };
+
     void resetPosition(const QPoint& pos);
     void updateStats(const Core::PerfStatsResults& results, const VideoCore::ShaderNotify& shaders);
 
-    MainWindow* m_mainWindow = nullptr;
-    Ui::PerformanceOverlay* ui;
+    void drawFpsGraph(QPainter& p, const QRectF& r) const;
+    void drawMeter(QPainter& p, const QRectF& r, const Meter& meter) const;
+    qreal drawValue(QPainter& p, qreal right, qreal baseline, const QString& value,
+                    const QFont& value_font, const QColor& value_color, const QString& unit) const;
+    void drawText(QPainter& p, const QPointF& pos, const QString& text, const QFont& font,
+                  const QColor& color) const;
 
-    // colors
-    QColor m_background{127, 127, 127, 190};
+    MainWindow* m_mainWindow = nullptr;
 
     QPoint m_offset{25, 75};
-
-    // frametime
-    const size_t NUM_FRAMETIME_SAMPLES = 300;
-    std::deque<double> m_frametimeSamples;
-
-    // fps
-    const size_t NUM_FPS_SAMPLES = 120;
-    qreal m_xPos = 0;
-    std::deque<double> m_fpsSamples;
-    std::deque<QPointF> m_fpsPoints;
-
-    // drag
     QPoint m_drag_start_pos;
 
-    // fps chart
-    QLineSeries* m_fpsSeries = nullptr;
-    QChart* m_fpsChart = nullptr;
-    QChartView* m_fpsChartView = nullptr;
-    QValueAxis* m_fpsX = nullptr;
-    QValueAxis* m_fpsY = nullptr;
+    QFont m_labelFont;
+    QFont m_fpsFont;
+    QFont m_metricFont;
+    QFont m_unitFont;
+
+    static constexpr size_t NUM_FPS_SAMPLES = 120;
+    std::deque<double> m_fpsSamples;
+    std::optional<double> m_fps;
+    std::optional<double> m_frametime;
+
+    SystemMonitor m_monitor;
+    SystemMonitor::Snapshot m_system;
 
 signals:
     void closed();

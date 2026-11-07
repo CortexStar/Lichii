@@ -3,92 +3,91 @@
 
 #include "core/perf_stats.h"
 #include "performance_overlay.h"
-#include "ui_performance_overlay.h"
 
 #include "main_window.h"
 
-#include <QChart>
-#include <QChartView>
-#include <QGraphicsLayout>
+#include <algorithm>
+#include <array>
+#include <cmath>
+
+#include <QFontMetricsF>
 #include <QGuiApplication>
-#include <QLineSeries>
+#include <QLinearGradient>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QValueAxis>
+#include <QPainterPath>
 #include <QWindow>
+
+namespace {
+
+constexpr int WIDTH = 272;
+constexpr qreal PAD = 14.0;
+constexpr qreal FPS_ROW_H = 30.0;
+constexpr qreal GRAPH_H = 30.0;
+constexpr qreal FRAMETIME_ROW_H = 22.0;
+constexpr qreal METER_LABEL_H = 18.0;
+constexpr qreal METER_BAR_GAP = 5.0;
+constexpr qreal METER_BAR_H = 6.0;
+constexpr qreal METER_H = METER_LABEL_H + METER_BAR_GAP + METER_BAR_H;
+constexpr qreal METER_ROW_GAP = 12.0;
+constexpr qreal METER_COL_GAP = 14.0;
+constexpr qreal DIVIDER_TOP_GAP = 10.0;
+constexpr qreal DIVIDER_BOTTOM_GAP = 12.0;
+constexpr int HEIGHT = int(PAD + FPS_ROW_H + GRAPH_H + 8.0 + FRAMETIME_ROW_H + DIVIDER_TOP_GAP +
+                           1.0 + DIVIDER_BOTTOM_GAP + METER_H * 2 + METER_ROW_GAP + PAD);
+
+const QColor PANEL_COLOR{10, 11, 15, 220};
+const QColor BORDER_COLOR{255, 255, 255, 30};
+const QColor VALUE_COLOR{245, 245, 245};
+const QColor DIM_COLOR{140, 145, 158};
+const QColor TRACK_COLOR{255, 255, 255, 20};
+const QColor HOT_COLOR{255, 82, 82};
+const QColor FRAMETIME_ACCENT{63, 212, 255};
+const QColor CPU_ACCENT{79, 163, 255};
+const QColor GPU_ACCENT{118, 224, 91};
+const QColor RAM_ACCENT{192, 132, 252};
+const QColor VRAM_ACCENT{255, 159, 46};
+
+constexpr double GIB = 1024.0 * 1024.0 * 1024.0;
+
+// Rounds a graph's scale up to a step so it doesn't rescale every sample
+double NiceCeil(double value, double step, double floor) {
+    return std::max(floor, std::ceil(value / step) * step);
+}
+
+QFont MakeFont(const QFont& base, int pixel_size, QFont::Weight weight, bool tabular = false) {
+    QFont font = base;
+    font.setPixelSize(pixel_size);
+    font.setWeight(weight);
+    if (tabular) {
+        // Fixed-width digits so values don't jitter as they change
+        font.setFeature(QFont::Tag("tnum"), 1);
+    }
+    return font;
+}
+
+} // namespace
 
 // TODO(crueter): Reset samples when user changes turbo, slow, etc.
 PerformanceOverlay::PerformanceOverlay(MainWindow* parent)
-    : QWidget(parent), m_mainWindow{parent}, ui(new Ui::PerformanceOverlay) {
-    ui->setupUi(this);
-
+    : QWidget(parent), m_mainWindow{parent} {
     setAttribute(Qt::WA_TranslucentBackground);
     setWindowFlags(Qt::FramelessWindowHint | Qt::Tool);
+    setFixedSize(WIDTH, HEIGHT);
     raise();
 
-    // chart setup
-    m_fpsSeries = new QLineSeries(this);
+    m_labelFont = MakeFont(font(), 11, QFont::Bold);
+    m_labelFont.setLetterSpacing(QFont::PercentageSpacing, 110);
+    m_fpsFont = MakeFont(font(), 26, QFont::Bold, true);
+    m_metricFont = MakeFont(font(), 14, QFont::Bold, true);
+    m_unitFont = MakeFont(font(), 10, QFont::DemiBold);
 
-    QPen pen(Qt::red);
-    pen.setWidth(2);
-    m_fpsSeries->setPen(pen);
-
-    m_fpsChart = new QChart;
-    m_fpsChart->addSeries(m_fpsSeries);
-    m_fpsChart->legend()->hide();
-    m_fpsChart->setBackgroundBrush(Qt::black);
-    m_fpsChart->setBackgroundVisible(true);
-    m_fpsChart->layout()->setContentsMargins(2, 2, 2, 2);
-    m_fpsChart->setMargins(QMargins{4, 4, 4, 4});
-
-    // axes
-    m_fpsX = new QValueAxis(this);
-    m_fpsX->setRange(0, NUM_FPS_SAMPLES);
-    m_fpsX->setVisible(false);
-
-    m_fpsY = new QValueAxis(this);
-    m_fpsY->setRange(0, 60);
-    m_fpsY->setLabelFormat(QStringLiteral("%d"));
-    m_fpsY->setLabelsColor(Qt::white);
-
-    QFont axisFont = m_fpsY->labelsFont();
-    axisFont.setPixelSize(10);
-    m_fpsY->setLabelsFont(axisFont);
-    m_fpsY->setTickCount(3);
-
-    // gray-ish label w/ white lines
-    m_fpsY->setLabelsVisible(true);
-    m_fpsY->setGridLineColor(QColor(50, 50, 50));
-    m_fpsY->setLinePenColor(Qt::white);
-
-    m_fpsChart->addAxis(m_fpsX, Qt::AlignBottom);
-    m_fpsChart->addAxis(m_fpsY, Qt::AlignLeft);
-    m_fpsSeries->attachAxis(m_fpsX);
-    m_fpsSeries->attachAxis(m_fpsY);
-
-    // chart view
-    m_fpsChartView = new QChartView(m_fpsChart, this);
-    m_fpsChartView->setRenderHint(QPainter::Antialiasing);
-    m_fpsChartView->setMinimumHeight(100);
-
-    ui->verticalLayout->addWidget(m_fpsChartView, 1);
-
-    // thanks Debian.
-    QFont font = ui->fps->font();
-    font.setWeight(QFont::DemiBold);
-
-    ui->fps->setFont(font);
-    ui->frametime->setFont(font);
-
-    // pos/stats
     resetPosition(m_mainWindow->pos());
     connect(parent, &MainWindow::positionChanged, this, &PerformanceOverlay::resetPosition);
     connect(m_mainWindow, &MainWindow::statsUpdated, this, &PerformanceOverlay::updateStats);
 }
 
-PerformanceOverlay::~PerformanceOverlay() {
-    delete ui;
-}
+PerformanceOverlay::~PerformanceOverlay() = default;
 
 void PerformanceOverlay::resetPosition(const QPoint& _) {
     auto pos = m_mainWindow->pos();
@@ -97,96 +96,221 @@ void PerformanceOverlay::resetPosition(const QPoint& _) {
 
 void PerformanceOverlay::updateStats(const Core::PerfStatsResults& results,
                                      const VideoCore::ShaderNotify& shaders) {
-    auto fps = results.average_game_fps;
+    const double fps = results.average_game_fps;
     if (!std::isnan(fps)) {
         // don't sample measurements < 3 fps because they are probably outliers or freezes
         static constexpr double FPS_SAMPLE_THRESHOLD = 3.0;
-
-        QString fpsText = tr("%1 fps").arg(std::round(fps), 0, 'f', 0);
-        // if (!m_fpsSuffix.isEmpty()) fpsText = fpsText % QStringLiteral(" (%1)").arg(m_fpsSuffix);
-        ui->fps->setText(fpsText);
-
-        // sampling
         if (fps > FPS_SAMPLE_THRESHOLD) {
             m_fpsSamples.push_back(fps);
-            m_fpsPoints.push_back(QPointF{m_xPos++, fps});
+            if (m_fpsSamples.size() > NUM_FPS_SAMPLES) {
+                m_fpsSamples.pop_front();
+            }
         }
-
-        if (m_fpsSamples.size() > NUM_FPS_SAMPLES) {
-            m_fpsSamples.pop_front();
-            m_fpsPoints.pop_front();
-        }
-
-        // For the average only go back 10 samples max
-        if (m_fpsSamples.size() >= 2) {
-            const int back_search = std::min(size_t(10), m_fpsSamples.size() - 1);
-            double sum = std::accumulate(m_fpsSamples.end() - back_search, m_fpsSamples.end(), 0.0);
-            double avg = sum / back_search;
-
-            ui->fps_avg->setText(tr("Avg: %1").arg(avg, 0, 'f', 0));
-        }
-
-        // chart it :)
-        if (!m_fpsPoints.empty()) {
-            auto [min_it, max_it] = std::minmax_element(m_fpsSamples.begin(), m_fpsSamples.end());
-            double min_fps = *min_it;
-            double max_fps = *max_it;
-
-            ui->fps_min->setText(tr("Min: %1").arg(min_fps, 0, 'f', 0));
-            ui->fps_max->setText(tr("Max: %1").arg(max_fps, 0, 'f', 0));
-
-            m_fpsSeries->replace(QList<QPointF>(m_fpsPoints.begin(), m_fpsPoints.end()));
-
-            qreal x_min = std::max(0.0, m_xPos - NUM_FPS_SAMPLES);
-            qreal x_max = std::max(qreal(10), m_xPos);
-            m_fpsX->setRange(x_min, x_max);
-            m_fpsY->setRange(0.0, max_fps);
-        }
+        m_fps = fps;
     }
 
-    auto ft = results.frametime;
-    if (!std::isnan(ft)) {
-        // don't sample measurements > 500 ms because they are probably outliers
-        static constexpr double FT_SAMPLE_THRESHOLD = 500.0;
-
-        double ft_ms = results.frametime * 1000.0;
-        ui->frametime->setText(tr("%1 ms").arg(ft_ms, 0, 'f', 2));
-
-        // sampling
-        if (ft_ms <= FT_SAMPLE_THRESHOLD)
-            m_frametimeSamples.push_back(ft_ms);
-
-        if (m_frametimeSamples.size() > NUM_FRAMETIME_SAMPLES)
-            m_frametimeSamples.pop_front();
-
-        if (!m_frametimeSamples.empty()) {
-            auto [min_it, max_it] =
-                std::minmax_element(m_frametimeSamples.begin(), m_frametimeSamples.end());
-            ui->ft_min->setText(tr("Min: %1").arg(*min_it, 0, 'f', 1));
-            ui->ft_max->setText(tr("Max: %1").arg(*max_it, 0, 'f', 1));
-        }
-
-        // For the average only go back 10 samples max
-        if (m_frametimeSamples.size() >= 2) {
-            const int back_search = std::min(size_t(10), m_frametimeSamples.size() - 1);
-            double sum = std::accumulate(m_frametimeSamples.end() - back_search,
-                                         m_frametimeSamples.end(), 0.0);
-            double avg = sum / back_search;
-
-            ui->ft_avg->setText(tr("Avg: %1").arg(avg, 0, 'f', 1));
-        }
+    if (!std::isnan(results.frametime)) {
+        m_frametime = results.frametime * 1000.0;
     }
+
+    m_system = m_monitor.Get();
+    update();
+}
+
+void PerformanceOverlay::drawText(QPainter& p, const QPointF& pos, const QString& text,
+                                  const QFont& font, const QColor& color) const {
+    // Drop shadow keeps the text readable when the panel sits over bright game frames
+    p.setFont(font);
+    p.setPen(QColor(0, 0, 0, 170));
+    p.drawText(pos + QPointF(1, 1), text);
+    p.setPen(color);
+    p.drawText(pos, text);
+}
+
+// Draws "<value> <unit>" right-aligned to `right` and returns where the value starts
+qreal PerformanceOverlay::drawValue(QPainter& p, qreal right, qreal baseline, const QString& value,
+                                    const QFont& value_font, const QColor& value_color,
+                                    const QString& unit) const {
+    qreal x = right;
+    if (!unit.isEmpty()) {
+        x -= QFontMetricsF(m_unitFont).horizontalAdvance(unit);
+        drawText(p, QPointF(x, baseline), unit, m_unitFont, DIM_COLOR);
+        x -= 4;
+    }
+    x -= QFontMetricsF(value_font).horizontalAdvance(value);
+    drawText(p, QPointF(x, baseline), value, value_font, value_color);
+    return x;
+}
+
+void PerformanceOverlay::drawFpsGraph(QPainter& p, const QRectF& r) const {
+    if (m_fpsSamples.size() < 2) {
+        return;
+    }
+
+    const auto max_it = std::max_element(m_fpsSamples.begin(), m_fpsSamples.end());
+    const double scale_max = NiceCeil(*max_it * 1.1, 10.0, 30.0);
+
+    const qreal step = r.width() / qreal(NUM_FPS_SAMPLES - 1);
+    const qreal x0 = r.right() - step * qreal(m_fpsSamples.size() - 1);
+    const auto y_of = [&](double v) {
+        return r.bottom() - std::clamp(v / scale_max, 0.0, 1.0) * r.height();
+    };
+
+    QPainterPath line;
+    line.moveTo(x0, y_of(m_fpsSamples.front()));
+    for (size_t i = 1; i < m_fpsSamples.size(); ++i) {
+        line.lineTo(x0 + step * qreal(i), y_of(m_fpsSamples[i]));
+    }
+
+    QPainterPath fill = line;
+    fill.lineTo(r.right(), r.bottom());
+    fill.lineTo(x0, r.bottom());
+    fill.closeSubpath();
+
+    QLinearGradient gradient(r.topLeft(), r.bottomLeft());
+    gradient.setColorAt(0.0, QColor(255, 255, 255, 46));
+    gradient.setColorAt(1.0, QColor(255, 255, 255, 0));
+
+    p.setPen(Qt::NoPen);
+    p.setBrush(gradient);
+    p.drawPath(fill);
+
+    QPen pen(QColor(255, 255, 255, 230), 1.5);
+    pen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(pen);
+    p.setBrush(Qt::NoBrush);
+    p.drawPath(line);
+}
+
+void PerformanceOverlay::drawMeter(QPainter& p, const QRectF& r, const Meter& meter) const {
+    const qreal baseline = r.top() + (METER_LABEL_H + QFontMetricsF(m_metricFont).capHeight()) / 2.0;
+
+    drawText(p, QPointF(r.left(), baseline), meter.label, m_labelFont, meter.accent);
+    drawValue(p, r.right(), baseline, meter.value, m_metricFont, VALUE_COLOR, meter.unit);
+
+    const QRectF track(r.left(), r.top() + METER_LABEL_H + METER_BAR_GAP, r.width(), METER_BAR_H);
+    p.setPen(Qt::NoPen);
+    p.setBrush(TRACK_COLOR);
+    p.drawRoundedRect(track, METER_BAR_H / 2, METER_BAR_H / 2);
+
+    if (!meter.fraction) {
+        return;
+    }
+    const double fraction = std::clamp(*meter.fraction, 0.0, 1.0);
+    if (fraction <= 0.0) {
+        return;
+    }
+
+    const QColor color = fraction >= 0.9 ? HOT_COLOR : meter.accent;
+    QColor start = color;
+    start.setAlpha(150);
+    QLinearGradient gradient(track.topLeft(), track.topRight());
+    gradient.setColorAt(0.0, start);
+    gradient.setColorAt(1.0, color);
+
+    // Keep the fill at least as wide as it is tall so the rounded ends don't collapse
+    const qreal fill_w = std::max(track.width() * fraction, METER_BAR_H);
+    p.setBrush(gradient);
+    p.drawRoundedRect(QRectF(track.left(), track.top(), fill_w, track.height()), METER_BAR_H / 2,
+                      METER_BAR_H / 2);
 }
 
 void PerformanceOverlay::paintEvent(QPaintEvent* event) {
-    QPainter painter(this);
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setRenderHint(QPainter::TextAntialiasing);
 
-    painter.setRenderHint(QPainter::Antialiasing);
+    const QRectF card = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+    QPainterPath card_path;
+    card_path.addRoundedRect(card, 8, 8);
 
-    painter.setBrush(m_background);
-    painter.setPen(Qt::NoPen);
+    p.setPen(Qt::NoPen);
+    p.setBrush(PANEL_COLOR);
+    p.drawPath(card_path);
 
-    painter.drawRoundedRect(rect(), 10.0, 10.0);
+    const QString none = QStringLiteral("--");
+    const qreal inner_w = width() - PAD * 2;
+    qreal y = PAD;
+
+    // FPS
+    {
+        const qreal baseline = y + (FPS_ROW_H + QFontMetricsF(m_fpsFont).capHeight()) / 2.0;
+        drawText(p, QPointF(PAD, baseline), tr("FPS"), m_labelFont, DIM_COLOR);
+        drawValue(p, width() - PAD, baseline,
+                  m_fps ? QString::number(*m_fps, 'f', 0) : none, m_fpsFont, VALUE_COLOR,
+                  tr("fps"));
+        y += FPS_ROW_H;
+    }
+
+    // The graph runs edge to edge, clipped by the card's rounded corners
+    p.save();
+    p.setClipPath(card_path);
+    drawFpsGraph(p, QRectF(0, y, width(), GRAPH_H));
+    p.restore();
+    y += GRAPH_H + 8.0;
+
+    // Frametime
+    {
+        const qreal baseline =
+            y + (FRAMETIME_ROW_H + QFontMetricsF(m_metricFont).capHeight()) / 2.0;
+        drawText(p, QPointF(PAD, baseline), tr("FRAMETIME"), m_labelFont, DIM_COLOR);
+        drawValue(p, width() - PAD, baseline,
+                  m_frametime ? QString::number(*m_frametime, 'f', 2) : none, m_metricFont,
+                  FRAMETIME_ACCENT, tr("ms"));
+        y += FRAMETIME_ROW_H + DIVIDER_TOP_GAP;
+    }
+
+    p.setPen(QPen(QColor(255, 255, 255, 22), 1));
+    p.drawLine(QPointF(PAD, y + 0.5), QPointF(width() - PAD, y + 0.5));
+    y += 1.0 + DIVIDER_BOTTOM_GAP;
+
+    // Hardware meters
+    const auto percent = [&](const QString& label, const std::optional<double>& value,
+                             const QColor& accent) {
+        return Meter{label, value ? QString::number(*value, 'f', 0) : none,
+                     value ? QStringLiteral("%") : QString{},
+                     value ? std::optional<double>(*value / 100.0) : std::nullopt, accent};
+    };
+    const auto memory = [&](const QString& label,
+                            const std::optional<SystemMonitor::Usage>& usage,
+                            const QColor& accent) {
+        if (!usage) {
+            return Meter{label, none, {}, std::nullopt, accent};
+        }
+        return Meter{label, QString::number(double(usage->used) / GIB, 'f', 1),
+                     tr("/ %1 GB").arg(std::round(double(usage->total) / GIB), 0, 'f', 0),
+                     usage->Fraction(), accent};
+    };
+
+    const std::array<Meter, 4> meters{
+        percent(tr("CPU"), m_system.cpu_percent, CPU_ACCENT),
+        percent(tr("GPU"), m_system.gpu_percent, GPU_ACCENT),
+        memory(tr("RAM"), m_system.ram, RAM_ACCENT),
+        memory(tr("VRAM"), m_system.vram, VRAM_ACCENT),
+    };
+
+    const qreal col_w = (inner_w - METER_COL_GAP) / 2.0;
+    for (size_t i = 0; i < meters.size(); ++i) {
+        const qreal x = PAD + qreal(i % 2) * (col_w + METER_COL_GAP);
+        const qreal top = y + qreal(i / 2) * (METER_H + METER_ROW_GAP);
+        drawMeter(p, QRectF(x, top, col_w, METER_H), meters[i]);
+    }
+
+    // Border last so the graph doesn't paint over it
+    p.setPen(QPen(BORDER_COLOR, 1));
+    p.setBrush(Qt::NoBrush);
+    p.drawPath(card_path);
+}
+
+void PerformanceOverlay::showEvent(QShowEvent* event) {
+    m_monitor.Start();
+    QWidget::showEvent(event);
+}
+
+void PerformanceOverlay::hideEvent(QHideEvent* event) {
+    m_monitor.Stop();
+    m_system = {};
+    QWidget::hideEvent(event);
 }
 
 void PerformanceOverlay::mousePressEvent(QMouseEvent* event) {
