@@ -228,11 +228,6 @@ public:
     void Publish();
     /// Waits until the back executed everything sent so far.
     void Drain(DrainSite site = DrainSite::Other);
-    /// Waits until the back executed the entries sent before `position`. Returns whether any of
-    /// them was still queued.
-    bool WaitUntil(u64 position, DrainSite site) {
-        return WaitFor((std::min)(position, write_position), site);
-    }
 
     /// Compute or copy work was just sent: what can write GPU-written command lists.
     void NoteWriter() {

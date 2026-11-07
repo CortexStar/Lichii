@@ -1641,7 +1641,7 @@ bool Maxwell3D::FrontRunOnBack(Core::System& system, VideoCommon::GpuSplit& spli
     };
     if (fs.back_generation != engine.native_code_generation) [[unlikely]] {
         // The macros sent before run the code they were sent with, and check their records.
-        split.WaitUntil(fs.back_last, DrainSite::BackCode);
+        split.WaitForPosition(fs.back_last, DrainSite::BackCode);
         if (fs.back_escapes.load(std::memory_order_relaxed) != fs.back_escapes_seen) {
             take_escapes();
         }
@@ -1844,7 +1844,7 @@ std::vector<std::pair<u32, u32>> Maxwell3D::FrontRunTheOldWay(VideoCommon::GpuSp
 u32 Maxwell3D::FrontRegister(VideoCommon::GpuSplit& split, FrontState& fs, u32 method) {
     if (fs.back_regs[method] != 0) {
         const bool waited =
-            split.WaitUntil(fs.back_regs[method], VideoCommon::DrainSite::BackRegister);
+            split.WaitForPosition(fs.back_regs[method], VideoCommon::DrainSite::BackRegister);
         if (BackMacroChecks() != 0) [[unlikely]] {
             ++BackStats().reads;
             BackStats().read_waits += waited ? 1 : 0;
@@ -1865,7 +1865,7 @@ bool Maxwell3D::FrontTakeOver(VideoCommon::GpuSplit& split, FrontState& fs, u32 
     const bool tracked = fs.control == Control::Track || fs.control == Control::TrackWithFilter;
     if (fs.back_shadow[method] != 0 && fs.control == Control::Replay) {
         const bool waited =
-            split.WaitUntil(fs.back_shadow[method], VideoCommon::DrainSite::BackRegister);
+            split.WaitForPosition(fs.back_shadow[method], VideoCommon::DrainSite::BackRegister);
         if (BackMacroChecks() != 0) [[unlikely]] {
             ++BackStats().replays;
             BackStats().replay_waits += waited ? 1 : 0;
