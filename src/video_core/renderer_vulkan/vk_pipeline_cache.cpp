@@ -1180,7 +1180,7 @@ void PipelineCache::EvictUnusedPipelines() {
         // thread when it reaches that content (OoT: 1174 of 1346 evicted on the title screen,
         // 684 rebuilt in 10 s on entering the field).
         if (pipeline == nullptr || pipeline == current_pipeline || !pipeline->IsBuilt() ||
-            pipeline->LastUse() == 0 || pipeline->LastUse() >= cutoff) {
+            !pipeline->WasUsed() || pipeline->LastUse() >= cutoff) {
             ++it;
             continue;
         }
