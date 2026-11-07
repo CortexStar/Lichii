@@ -1869,7 +1869,7 @@ void RasterizerVulkan::DispatchCompute() {
     if (marking_effects) {
         const auto written = pipeline->WrittenImages();
         if (std::ranges::any_of(written, [this](VideoCommon::ImageViewId id) {
-                return texture_cache.GetImageView(id).gpu_addr == oot_effects_address;
+                return id && texture_cache.GetImageView(id).gpu_addr == oot_effects_address;
             })) {
             oot_live_dlss->MarkEffects(oot_effects_scene, render_trace_frame);
             oot_effects_frame.reset();
