@@ -746,7 +746,10 @@ void GpuSplit::NoteRelease(const void* space, GPUVAddr address, u32 value) {
         return;
     }
     const auto* const memory = static_cast<const Tegra::MemoryManager*>(space);
-    const u32 before = memory->Read<u32>(address);
+    const auto device = memory->GpuToCpuAddress(address);
+    // Unmapped (OoT releases to address 0 at boot): the read would return 0 anyway, and log an
+    // error for each release.
+    const u32 before = device ? memory->Read<u32>(address) : 0;
     QueuedRelease* release = FindRelease(space, address);
     if (release == nullptr) {
         // A free slot, else the oldest.
@@ -764,7 +767,6 @@ void GpuSplit::NoteRelease(const void* space, GPUVAddr address, u32 value) {
         }
         release->used = false;
     }
-    const auto device = memory->GpuToCpuAddress(address);
     const u32 slot = device ? static_cast<u32>(Tegra::Nx2LandedSlot(*device)) : 0;
     const u32 landed = Tegra::g_nx2_semaphore_landed[slot].load(std::memory_order_acquire);
     if (!release->used || release->landed_slot != slot ||
