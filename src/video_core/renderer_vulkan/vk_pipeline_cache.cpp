@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <fstream>
@@ -13,17 +14,17 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <thread>
 #include <unordered_set>
 #include <vector>
-#include <bit>
-#include <numeric>
 #include "common/cityhash.h"
-#include "common/scope_exit.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
+#include "common/memory_detect.h"
+#include "common/scope_exit.h"
 #include "common/thread_worker.h"
 #include "core/core.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
@@ -35,12 +36,14 @@
 #include "shader_recompiler/program_header.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/pipeline_cache_files.h"
 #include "video_core/renderer_vulkan/async_draw_policy.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
+#include "video_core/renderer_vulkan/pipeline_eviction_policy.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/pipeline_shader_emission.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
@@ -58,7 +61,6 @@
 #include "video_core/surface.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
-#include "video_core/gpu_logging/gpu_logging.h"
 
 #ifdef __ANDROID__
 #include "../../android/app/src/main/jni/android_settings.h"
@@ -741,6 +743,12 @@ bool PreloadAllPipelines() {
     }();
     return all;
 }
+
+size_t Switch2GraphicsPipelineCountTarget() {
+    static const size_t target =
+        Switch2PipelineCountTarget(Common::GetMemInfo().TotalPhysicalMemory);
+    return target;
+}
 } // Anonymous namespace
 
 PipelineCache::~PipelineCache() {
@@ -1357,33 +1365,53 @@ void PipelineCache::EvictUnusedPipelines() {
     if (device.IsMoltenVK()) {
         return;
     }
-    // Each built pipeline holds ~0.45 MB of driver memory and none was ever destroyed, so it grew
-    // with every place a session went (title 1: 1,500 on its title screen alone). One unused for
-    // this long is destroyed; it takes 2-3 ms to build again from the driver's pipeline cache.
+    // Each built pipeline holds ~0.45 MB of NVIDIA driver memory. Switch 2 titles target a count
+    // of 1/16 of host RAM, but recent, current, and protected prebuilt pipelines can leave the
+    // cache above that count. Selected pipelines stay resident until the scheduler is free, so
+    // this is not a memory cap. An old pipeline takes 2-3 ms to rebuild from driver cache.
     constexpr u64 EvictAfterFrames = 9000;
     if (frame_count <= EvictAfterFrames) {
         return;
     }
     const u64 cutoff = frame_count - EvictAfterFrames;
-    const u64 tick = scheduler.CurrentTick();
-    // ~0.9 GB of driver memory at ~0.45 MB each.
+    const bool switch2 = Settings::CurrentProgramIsSwitch2();
+    const size_t count_target = switch2 ? Switch2GraphicsPipelineCountTarget() : 0;
+    if (switch2 && graphics_cache.size() <= count_target) {
+        return;
+    }
+
+    std::vector<GraphicsPipeline*> candidates;
+    std::vector<EvictionCandidate> eviction_candidates;
+    for (const auto& entry : graphics_cache) {
+        GraphicsPipeline* const candidate = entry.second.get();
+        if (candidate == nullptr || candidate == current_pipeline || !candidate->IsBuilt() ||
+            candidate->LastUse() >= cutoff) {
+            continue;
+        }
+        candidates.push_back(candidate);
+        eviction_candidates.push_back({candidate->LastUse(), candidate->WasUsed()});
+    }
+    const size_t count =
+        switch2 ? GraphicsPipelinesToEvict(graphics_cache.size(), candidates.size(), count_target)
+                : candidates.size();
     constexpr size_t MaxUnusedPrebuiltPipelines = 2000;
-    size_t kept_prebuilt = 0;
+    const std::vector<size_t> selected =
+        SelectPipelinesToEvict(eviction_candidates, MaxUnusedPrebuiltPipelines, count);
+    if (selected.empty()) {
+        return;
+    }
+
+    std::vector<GraphicsPipeline*> doomed;
+    doomed.reserve(selected.size());
+    for (const size_t index : selected) {
+        doomed.push_back(candidates[index]);
+    }
+    std::ranges::sort(doomed);
+    const u64 tick = scheduler.CurrentTick();
     size_t evicted = 0;
     for (auto it = graphics_cache.begin(); it != graphics_cache.end();) {
         GraphicsPipeline* const pipeline = it->second.get();
-        if (pipeline == nullptr || pipeline == current_pipeline || !pipeline->IsBuilt() ||
-            pipeline->LastUse() >= cutoff) {
-            ++it;
-            continue;
-        }
-        // A pipeline built from the disk cache at boot that no draw has used yet stays, up to a
-        // budget: evicting it throws the prebuild away, and the game translates it again on the
-        // GPU thread when it reaches that content (OoT: 1174 of 1346 evicted on the title screen,
-        // 684 rebuilt in 10 s on entering the field). Past the budget they go like the rest, so a
-        // large cache can't hold their driver memory for the whole session.
-        if (!pipeline->WasUsed() && kept_prebuilt < MaxUnusedPrebuiltPipelines) {
-            ++kept_prebuilt;
+        if (!std::ranges::binary_search(doomed, pipeline)) {
             ++it;
             continue;
         }
@@ -1394,16 +1422,20 @@ void PipelineCache::EvictUnusedPipelines() {
         it = graphics_cache.erase(it);
         ++evicted;
     }
-    if (evicted == 0) {
-        return;
-    }
     for (auto& [key, pipeline] : graphics_cache) {
         if (pipeline) {
             pipeline->ClearTransitions();
         }
     }
-    LOG_INFO(Render_Vulkan, "Evicted {} graphics pipelines unused for {} frames, {} left", evicted,
-             EvictAfterFrames, graphics_cache.size());
+    if (switch2) {
+        LOG_INFO(Render_Vulkan,
+                 "Evicted {} least-recently-used graphics pipelines unused for {} frames "
+                 "(count target {}, {} left)",
+                 evicted, EvictAfterFrames, count_target, graphics_cache.size());
+    } else {
+        LOG_INFO(Render_Vulkan, "Evicted {} graphics pipelines unused for {} frames, {} left",
+                 evicted, EvictAfterFrames, graphics_cache.size());
+    }
 }
 
 /// Returns `pipeline` when it is built or the current draw must wait for it, and nullptr when the

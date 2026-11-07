@@ -1,0 +1,257 @@
+diff --git i/docs/nx2/debug-mcp.md w/docs/nx2/debug-mcp.md
+index 8a22eadb3..b44837958 100644
+--- i/docs/nx2/debug-mcp.md
++++ w/docs/nx2/debug-mcp.md
+@@ -154,7 +154,7 @@ server is on but idle, its thread sleeps in `epoll`/IOCP.
+ `Core::g_nx2_present_count` (`src/core/core.cpp:78`) over a short window. It does not call
+ `GetAndResetPerfStats`, which would reset the Qt status bar's counters.
+ 
+-**`frame_times`** `{seconds?, refresh_hz?}` waits for `seconds` (default 5, > 0, at most 60),
++**`frame_times`** `{seconds?, refresh_hz?, history?}` waits for `seconds` (default 5, > 0, at most 60),
+ interruptible on shutdown like `status`. It measures intervals between guest presents inside
+ that window, not display scanout or GPU execution time. `frames` counts those intervals;
+ `mean_ms`, `fps` (1000 / mean), `p50_ms`, `p90_ms`, `p99_ms`, `min_ms`, `max_ms` describe them.
+@@ -165,6 +165,13 @@ median. `intervals_ms` contains the last up to 120 intervals in chronological or
+ to 0.1 ms. With fewer than two presents, statistics are zero and the interval list is empty.
+ Only available samples from the 4096-timestamp ring are used; overflow sets `truncated: true`.
+ For example: `{"method":"frame_times","params":{"seconds":5,"refresh_hz":60}}`.
++With `history: true`, it returns immediately with available raw ring samples as
++`timestamps_ns: [{present, timestamp_ns}, ...]`, the `present_count` watermark, first and last
++sample IDs, `ring_wrapped`, and `truncated`. `ring_wrapped` means older IDs have fallen out of the
++4096-sample ring; `truncated` means a missing or overwritten timestamp was detected in the returned
++IDs. The newest count is excluded because its timestamp store may still be pending. Pair this with
++`input` or `input_sequence`'s `first_present` and `frames` to select the same presented-frame range
++after the input call completes, and verify that each requested ID is present.
+ 
+ **`screenshot`** `{height?, save?, timeout_s?}`. It requests a 16:9 layout from
+ `Layout::DefaultFrameLayout`, and the renderer blits the presented framebuffers into it. The
+diff --git i/src/core/debugger/nx2_debug_tools.cpp w/src/core/debugger/nx2_debug_tools.cpp
+index 2b68c58fb..aedfd7818 100644
+--- i/src/core/debugger/nx2_debug_tools.cpp
++++ w/src/core/debugger/nx2_debug_tools.cpp
+@@ -209,6 +209,9 @@ json Status(ToolState& state, const json& params) {
+ }
+ 
+ json FrameTimes(ToolState& state, const json& params) {
++    if (params.value("history", false)) {
++        return ReadFrameTimeHistory(g_nx2_present_count.load(std::memory_order_relaxed));
++    }
+     const double seconds = params.value("seconds", 5.0);
+     const double refresh_hz = params.value("refresh_hz", 60.0);
+     if (!std::isfinite(seconds) || seconds <= 0.0 || seconds > 60.0 ||
+@@ -300,6 +303,34 @@ json ReadFrameTimes(u64 before, u64 after, u64 begin_ns, u64 end_ns, double refr
+             {"truncated", truncated}};
+ }
+ 
++json ReadFrameTimeHistory(u64 present_count) {
++    const u64 capacity = g_nx2_present_times_ns.size();
++    const u64 last = present_count == 0 ? 0 : present_count - 1;
++    const u64 first = last > capacity ? last - capacity + 1 : u64{1};
++    bool truncated = false;
++    const bool ring_wrapped = first > 1;
++    json timestamps = json::array();
++    u64 previous_timestamp = 0;
++    for (u64 frame = first; frame <= last && frame != 0; ++frame) {
++        const u64 timestamp =
++            g_nx2_present_times_ns[frame % capacity].load(std::memory_order_relaxed);
++        if (timestamp == 0 || (previous_timestamp != 0 && timestamp <= previous_timestamp)) {
++            truncated = true;
++            previous_timestamp = 0;
++            continue;
++        }
++        timestamps.push_back({{"present", frame}, {"timestamp_ns", timestamp}});
++        previous_timestamp = timestamp;
++    }
++    return {
++        {"present_count", present_count},
++        {"first_present", timestamps.empty() ? u64{0} : timestamps.front()["present"].get<u64>()},
++        {"last_present", timestamps.empty() ? u64{0} : timestamps.back()["present"].get<u64>()},
++        {"timestamps_ns", std::move(timestamps)},
++        {"ring_wrapped", ring_wrapped},
++        {"truncated", truncated}};
++}
++
+ namespace {
+ 
+ json Screenshot(ToolState& state, const json& params) {
+diff --git i/src/core/debugger/nx2_debug_tools.h w/src/core/debugger/nx2_debug_tools.h
+index 634ee3ae8..80d0fca3d 100644
+--- i/src/core/debugger/nx2_debug_tools.h
++++ w/src/core/debugger/nx2_debug_tools.h
+@@ -95,6 +95,8 @@ struct InputStep {
+ /// Guest-present intervals within [begin_ns, end_ns], using only retained ring timestamps.
+ [[nodiscard]] nlohmann::json ReadFrameTimes(u64 before, u64 after, u64 begin_ns, u64 end_ns,
+                                           double refresh_hz);
++/// Returns a non-blocking snapshot of available present timestamps and their frame IDs.
++[[nodiscard]] nlohmann::json ReadFrameTimeHistory(u64 present_count);
+ 
+ /// The service when EDEN_NX2_DEBUG_SERVER is set and it can listen, otherwise null.
+ [[nodiscard]] std::unique_ptr<Service> MaybeStartService(System& system, std::string title,
+diff --git i/src/tests/core/nx2_debug_server.cpp w/src/tests/core/nx2_debug_server.cpp
+index 64131643e..426956e57 100644
+--- i/src/tests/core/nx2_debug_server.cpp
++++ w/src/tests/core/nx2_debug_server.cpp
+@@ -137,6 +137,67 @@ TEST_CASE("Debug frame times measure intervals and retain the ring tail", "[core
+     REQUIRE(pending["max_ms"] == 1.0);
+ }
+ 
++TEST_CASE("Debug frame time history returns a raw ring snapshot", "[core][nx2_debug_server]") {
++    auto& ring = Core::g_nx2_present_times_ns;
++    SCOPE_EXIT {
++        for (auto& timestamp : ring) {
++            timestamp.store(0);
++        }
++    };
++    for (auto& timestamp : ring) {
++        timestamp.store(0);
++    }
++    const auto empty = Core::Nx2Debug::ReadFrameTimeHistory(0);
++    REQUIRE(empty["timestamps_ns"].empty());
++    REQUIRE(empty["ring_wrapped"] == false);
++    REQUIRE(empty["truncated"] == false);
++    ring[1] = 1'000;
++    ring[2] = 17'667;
++    ring[3] = 51'001;
++
++    // The highest count may not have stored its timestamp yet, so it is excluded.
++    const auto history = Core::Nx2Debug::ReadFrameTimeHistory(4);
++    REQUIRE(history["present_count"] == 4);
++    REQUIRE(history["first_present"] == 1);
++    REQUIRE(history["last_present"] == 3);
++    REQUIRE(history["timestamps_ns"] == json::array({
++                                            json{{"present", 1}, {"timestamp_ns", 1'000}},
++                                            json{{"present", 2}, {"timestamp_ns", 17'667}},
++                                            json{{"present", 3}, {"timestamp_ns", 51'001}},
++                                        }));
++    REQUIRE(history["ring_wrapped"] == false);
++    REQUIRE(history["truncated"] == false);
++
++    const u64 count = ring.size() + 5;
++    for (u64 frame = 5; frame < count; ++frame) {
++        ring[frame % ring.size()] = frame * 1'000;
++    }
++    const auto overflow = Core::Nx2Debug::ReadFrameTimeHistory(count);
++    REQUIRE(overflow["timestamps_ns"].size() == ring.size());
++    REQUIRE(overflow["first_present"] == 5);
++    REQUIRE(overflow["last_present"] == count - 1);
++    REQUIRE(overflow["ring_wrapped"] == true);
++    REQUIRE(overflow["truncated"] == false);
++
++    for (auto& timestamp : ring) {
++        timestamp.store(0);
++    }
++    ring[1] = 1'000;
++    ring[2] = 2'000;
++    ring[4] = 4'000;
++    const auto gap = Core::Nx2Debug::ReadFrameTimeHistory(5);
++    REQUIRE(gap["truncated"] == true);
++    REQUIRE(gap["timestamps_ns"].size() == 3);
++    REQUIRE(gap["timestamps_ns"][2]["present"] == 4);
++
++    ring[3] = 3'000;
++    ring[4] = 2'500;
++    const auto nonmonotonic = Core::Nx2Debug::ReadFrameTimeHistory(5);
++    REQUIRE(nonmonotonic["truncated"] == true);
++    REQUIRE(nonmonotonic["timestamps_ns"].size() == 3);
++    REQUIRE(nonmonotonic["last_present"] == 3);
++}
++
+ TEST_CASE("Debug server requests map to handlers", "[core][nx2_debug_server]") {
+     const Handlers handlers = EchoHandlers();
+     REQUIRE(json::parse(Core::Nx2Debug::HandleRequest(
+diff --git i/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp w/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+index 670ef09fd..c3c825ef9 100644
+--- i/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
++++ w/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+@@ -8,6 +8,7 @@
+ #include <atomic>
+ #include <chrono>
+ #include <cstddef>
++#include <cstdlib>
+ #include <fstream>
+ #include <functional>
+ #include <iostream>
+@@ -73,6 +74,16 @@ using VideoCommon::FileEnvironment;
+ using VideoCommon::GenericEnvironment;
+ using VideoCommon::GraphicsEnvironment;
+ 
++bool TestKeepUnusedPipelines() {
++    static const bool enabled = [] {
++        const char* const value = std::getenv("LICHII_TEST_KEEP_PIPELINES");
++        const bool keep = value != nullptr && value[0] == '1' && value[1] == '\0';
++        LOG_INFO(Render_Vulkan, "LICHII_TEST_KEEP_PIPELINES is {}", keep ? "on" : "off");
++        return keep;
++    }();
++    return enabled;
++}
++
+ constexpr u32 CACHE_VERSION = VideoCommon::VulkanPipelineCacheVersion;
+ constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
+ constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
+@@ -453,6 +464,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
+       use_asynchronous_shaders{Settings::values.use_asynchronous_shaders.GetValue()},
+       use_vulkan_pipeline_cache{Settings::values.use_vulkan_driver_pipeline_cache.GetValue() &&
+                                 !DriverCachesPipelines(device_)},
++      test_keep_unused_pipelines{TestKeepUnusedPipelines()},
+       num_pipeline_workers{device.HasBrokenParallelShaderCompiling() ? 1ULL
+                                                                      : GetTotalPipelineWorkers()},
+       emission_budget{num_pipeline_workers},
+@@ -1155,6 +1167,9 @@ void PipelineCache::TickFrame() {
+ }
+ 
+ void PipelineCache::EvictUnusedPipelines() {
++    if (test_keep_unused_pipelines) {
++        return;
++    }
+     // Building a pipeline again on MoltenVK means a Metal compile mid-game, far dearer than the
+     // 2-3 ms below, so none are evicted there.
+     if (device.IsMoltenVK()) {
+diff --git i/src/video_core/renderer_vulkan/vk_pipeline_cache.h w/src/video_core/renderer_vulkan/vk_pipeline_cache.h
+index 08f00f243..0adad539b 100644
+--- i/src/video_core/renderer_vulkan/vk_pipeline_cache.h
++++ w/src/video_core/renderer_vulkan/vk_pipeline_cache.h
+@@ -178,6 +178,7 @@ private:
+     VideoCore::ShaderNotify& shader_notify;
+     bool use_asynchronous_shaders{};
+     bool use_vulkan_pipeline_cache{};
++    bool test_keep_unused_pipelines{};
+     const size_t num_pipeline_workers;
+     EmissionBudget emission_budget;
+ 
+diff --git i/tools/nx2/debug_mcp.py w/tools/nx2/debug_mcp.py
+index b6d91869b..0e95d80dd 100644
+--- i/tools/nx2/debug_mcp.py
++++ w/tools/nx2/debug_mcp.py
+@@ -44,12 +44,14 @@ TOOLS = [
+         "name": "frame_times",
+         "description": "Guest-present frame intervals over seconds (default 5, max 60): mean, "
+                        "fps, percentiles, VSync interval shares (refresh_hz defaults to 60), "
+-                       "stutters and the last 120 intervals. Reports ring overflow as truncated.",
++                       "stutters and the last 120 intervals. With history=true, returns available "
++                       "raw ring timestamps with present IDs without waiting.",
+         "inputSchema": {
+             "type": "object",
+             "properties": {
+                 "seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 60, "default": 5},
+                 "refresh_hz": {"type": "number", "exclusiveMinimum": 0, "default": 60},
++                "history": {"type": "boolean", "default": False},
+             },
+         },
+     },
+diff --git i/tools/nx2/test_debug_mcp.py w/tools/nx2/test_debug_mcp.py
+index f134e9d75..055858a44 100644
+--- i/tools/nx2/test_debug_mcp.py
++++ w/tools/nx2/test_debug_mcp.py
+@@ -118,6 +118,12 @@ class AdapterTest(unittest.TestCase):
+         self.assertEqual(debug_mcp.default_timeout("frame_times", {"seconds": 59.5}), 61)
+         self.assertEqual(debug_mcp.default_timeout("capture_frame", {}), 120)
+ 
++    def test_frame_time_history_is_forwarded(self):
++        arguments = {"history": True}
++        result = self.call("frame_times", arguments)
++        self.assertFalse(result["isError"])
++        self.assertEqual(self.fake.requests[-1]["params"], arguments)
++
+     def test_status_is_forwarded(self):
+         result = self.call("status", {"fps_window_ms": 0})
+         self.assertFalse(result["isError"])

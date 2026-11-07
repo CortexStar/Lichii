@@ -1,0 +1,177 @@
+{
+  "protocol": "v2-fixed-ZL-return",
+  "binary_sha256": "fbe26e8ae5e56cd96b23a78b9be03f4cdba7613fd6cf3e12f6870cf1f45f540d",
+  "pairs": [
+    {
+      "normal": "a3",
+      "keep": "b3",
+      "normal_p99_ms": 50.07483447,
+      "keep_p99_ms": 30.09339386,
+      "p99_reduction_percent": 39.90315858551853
+    },
+    {
+      "normal": "a4",
+      "keep": "b4",
+      "normal_p99_ms": 40.47749898999995,
+      "keep_p99_ms": 30.6569755,
+      "p99_reduction_percent": 24.261685467341078
+    },
+    {
+      "normal": "a5",
+      "keep": "b5",
+      "normal_p99_ms": 44.62493199999998,
+      "keep_p99_ms": 31.317559389999996,
+      "p99_reduction_percent": 29.82048826427341
+    }
+  ],
+  "normal_run_medians": {
+    "fps": 38.51107505989531,
+    "p50_ms": 25.4974425,
+    "p95_ms": 28.8726088,
+    "p99_ms": 44.62493199999998,
+    "max_ms": 127.952308
+  },
+  "keep_run_medians": {
+    "fps": 39.956849772156154,
+    "p50_ms": 24.9687525,
+    "p95_ms": 28.5652215,
+    "p99_ms": 30.6569755,
+    "max_ms": 36.171744
+  },
+  "base_sha": "222877d4f7c8945b2f31a87b76d09f0a92e4f1b8",
+  "runs": [
+    {
+      "run": "a3",
+      "mode": "normal",
+      "frames": 600,
+      "fps": 38.51107505989531,
+      "p50_ms": 25.4974425,
+      "p95_ms": 28.459889049999997,
+      "p99_ms": 50.07483447,
+      "max_ms": 118.771901,
+      "over_100ms": 1,
+      "over_500ms": 0,
+      "total_over_100ms": 118.771901,
+      "eviction_passes": 7,
+      "evicted_pipelines": 2537,
+      "rss_return_samples": 8,
+      "rss_return_median_mib": 10457.583984375,
+      "rss_run_peak_mib": 10497.9921875
+    },
+    {
+      "run": "b3",
+      "mode": "keep",
+      "frames": 600,
+      "fps": 39.63845599130101,
+      "p50_ms": 25.175221999999998,
+      "p95_ms": 28.590968499999992,
+      "p99_ms": 30.09339386,
+      "max_ms": 36.171744,
+      "over_100ms": 0,
+      "over_500ms": 0,
+      "total_over_100ms": 0,
+      "eviction_passes": 0,
+      "evicted_pipelines": 0,
+      "rss_return_samples": 7,
+      "rss_return_median_mib": 9928.16796875,
+      "rss_run_peak_mib": 10428.9140625
+    },
+    {
+      "run": "b4",
+      "mode": "keep",
+      "frames": 600,
+      "fps": 39.956849772156154,
+      "p50_ms": 24.9687525,
+      "p95_ms": 28.5652215,
+      "p99_ms": 30.6569755,
+      "max_ms": 34.343287,
+      "over_100ms": 0,
+      "over_500ms": 0,
+      "total_over_100ms": 0,
+      "eviction_passes": 0,
+      "evicted_pipelines": 0,
+      "rss_return_samples": 7,
+      "rss_return_median_mib": 10124.7734375,
+      "rss_run_peak_mib": 10543.7734375
+    },
+    {
+      "run": "a4",
+      "mode": "normal",
+      "frames": 600,
+      "fps": 38.38421337020418,
+      "p50_ms": 25.510192,
+      "p95_ms": 29.07821345,
+      "p99_ms": 40.47749898999995,
+      "max_ms": 127.952308,
+      "over_100ms": 1,
+      "over_500ms": 0,
+      "total_over_100ms": 127.952308,
+      "eviction_passes": 7,
+      "evicted_pipelines": 2075,
+      "rss_return_samples": 8,
+      "rss_return_median_mib": 10208.546875,
+      "rss_run_peak_mib": 10870.18359375
+    },
+    {
+      "run": "a5",
+      "mode": "normal",
+      "frames": 600,
+      "fps": 38.521893866021074,
+      "p50_ms": 25.399767,
+      "p95_ms": 28.8726088,
+      "p99_ms": 44.62493199999998,
+      "max_ms": 132.771611,
+      "over_100ms": 1,
+      "over_500ms": 0,
+      "total_over_100ms": 132.771611,
+      "eviction_passes": 8,
+      "evicted_pipelines": 2052,
+      "rss_return_samples": 8,
+      "rss_return_median_mib": 10076.150390625,
+      "rss_run_peak_mib": 10507.8046875
+    },
+    {
+      "run": "b5",
+      "mode": "keep",
+      "frames": 600,
+      "fps": 40.28886202739584,
+      "p50_ms": 24.8212805,
+      "p95_ms": 28.031797649999998,
+      "p99_ms": 31.317559389999996,
+      "max_ms": 38.539761,
+      "over_100ms": 0,
+      "over_500ms": 0,
+      "total_over_100ms": 0,
+      "eviction_passes": 0,
+      "evicted_pipelines": 0,
+      "rss_return_samples": 7,
+      "rss_return_median_mib": 10020.83984375,
+      "rss_run_peak_mib": 10692.9921875
+    }
+  ],
+  "seed_cache_sha256": {
+    "launched.json": "3907df878356fc272507e1ab3221fd8db71e1ae77f5ffac14c90146ce0e3915e",
+    "shader/vulkan_static_pipelines.bin": "e8ccffd509ccfb39abc055677a1e226a7447063453604f5a3bca168eeb78ec47",
+    "game_list/0400486024DEC000.pv.txt": "19964ae2fa80ce2eefa3c568812741bb6b91476e6eb365d6149ce34c26bd714d",
+    "shader/0400486024dec000/vulkan.fork-v53.bin": "6b85532e692fdfa7eb67773243165699c84da6b22fc35753e24646ee39e13cb4",
+    "shader/0400486024dec000/vulkan_used.fork-v53.bin": "c8f7f15e87ca6b84d5a262c50e8edf692fcd4c6e4b0a424a072c7a9a10de939a"
+  },
+  "build_validation": {
+    "CMAKE_BUILD_TYPE": "Release",
+    "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
+    "CMAKE_CXX_FLAGS_RELEASE": "-O3 -DNDEBUG",
+    "CMAKE_C_COMPILER": "/usr/bin/clang",
+    "ENABLE_WERROR": "ON",
+    "YUZU_USE_BUNDLED_QT": "OFF",
+    "YUZU_USE_BUNDLED_SDL3": "OFF",
+    "patch_sha256": "a02b6f871c2158a91914642b23e49b8d75da1683bbe0389492bda9bdd89bf20c",
+    "base_sha": "222877d4f7c8945b2f31a87b76d09f0a92e4f1b8",
+    "tests": {
+      "nx2_debug_server_cases": 18,
+      "nx2_debug_server_assertions": 178,
+      "pipeline_cases": 16,
+      "pipeline_assertions": 107,
+      "python_cases": 17
+    }
+  }
+}
