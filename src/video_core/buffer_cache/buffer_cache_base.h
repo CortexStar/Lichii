@@ -679,6 +679,7 @@ private:
     struct BankShadow {
         std::array<u8, 0x10000> bytes{};
         u32 valid{};
+        u64 compared_frame{}; ///< frame_tick of the last compare (EDEN_NX2_BANK_LRU)
     };
 
     /// The once-a-frame upload of a native uniform bank: only the pages whose guest bytes
@@ -697,7 +698,24 @@ private:
     /// inside take them as what the host holds (EDEN_NX2_SHADOW_REFRESH), others are invalidated.
     void RefreshHotShadows(DAddr device_addr, const u8* bytes, u64 size);
 
+    /// Whether a bank shadow covers part of [device_addr, device_addr + size).
+    [[nodiscard]] bool OverlapsBankShadow(DAddr device_addr, u64 size) const;
+
+    /// A host upload wrote `bytes` over [device_addr, device_addr + size): bank shadow pages it
+    /// wholly covers take them as what the host holds (EDEN_NX2_BANK_SYNC_REFRESH), pages it
+    /// partly covers are invalidated.
+    void RefreshBankShadowsFromUpload(DAddr device_addr, const u8* bytes, u64 size);
+
+    /// MappedUploadMemory for SynchronizeBuffer when bank shadows exist: a copy of up to 256 KiB
+    /// over a shadow reads guest memory once into a cached scratch, which feeds both the staging
+    /// buffer and RefreshBankShadowsFromUpload; a larger one invalidates the shadow pages.
+    void MappedUploadMemoryRefreshingBanks(Buffer& buffer, u64 total_size_bytes,
+                                           std::span<BufferCopy> copies);
+
     std::map<DAddr, std::unique_ptr<BankShadow>> bank_shadows;
+    std::vector<u8> bank_refresh_scratch;
+    /// Device pages a bank compare read this frame (EDEN_NX2_GPU_PROFILE only: overlap count).
+    Nx2BufCache::FrameAddressSet bank_pages_this_frame;
 
     /// A range SynchronizeBuffer left clean (EDEN_NX2_SYNC_SKIP): clean while no CPU-dirty mark
     /// fell in it (the 256 KiB regions it covers when it covers at most MAX_SKIP_REGIONS of them,

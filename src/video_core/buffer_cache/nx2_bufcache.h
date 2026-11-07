@@ -26,6 +26,12 @@ namespace VideoCommon::Nx2BufCache {
     return value == nullptr || value[0] != '0';
 }
 
+/// For switches that default to off: true only when the variable is set and not "0".
+[[nodiscard]] inline bool EnvOptIn(const char* name) {
+    const char* const value = std::getenv(name);
+    return value != nullptr && value[0] != '0';
+}
+
 /// EDEN_NX2_BUFCACHE_CONTIG=0: storage bindings always ask the virtual range cache for their
 /// segments, even when the mapping runs show the range is one device range.
 inline const bool g_contig_resolve = EnvOn("EDEN_NX2_BUFCACHE_CONTIG");
@@ -120,6 +126,25 @@ inline const bool g_dirty_write_skip = EnvOn("EDEN_NX2_DIRTY_WRITE_SKIP");
 /// mark it), for ranges up to 64 KiB.
 inline const bool g_write_gpu_bitmap = EnvOn("EDEN_NX2_WRITE_GPU_BITMAP");
 
+/// EDEN_NX2_BANK_PREFETCH=1: the once-a-frame bank compare prefetches the next page's guest and
+/// shadow bytes while comparing the current one (the hardware prefetchers stop at page
+/// boundaries). Default off: in OoT on a 3700X the compare took 82 ms/s with it against 70 ms/s
+/// without, for the same ~7.7k compares and ~107k pages per second.
+inline const bool g_bank_prefetch = EnvOptIn("EDEN_NX2_BANK_PREFETCH");
+
+/// EDEN_NX2_BANK_SYNC_FIRST=0: a classic bind compares (and uploads) its bank before syncing
+/// it, so a page the tracker saw written is uploaded by both, instead of syncing first.
+inline const bool g_bank_sync_first = EnvOn("EDEN_NX2_BANK_SYNC_FIRST");
+
+/// EDEN_NX2_BANK_SYNC_REFRESH=0: a sync upload over a bank shadow invalidates its pages, so the
+/// next bank compare uploads them again unchanged, instead of the shadow taking the bytes the
+/// sync uploaded.
+inline const bool g_bank_sync_refresh = EnvOn("EDEN_NX2_BANK_SYNC_REFRESH");
+
+/// EDEN_NX2_BANK_LRU=0: a new bank beyond the shadow cap drops every bank shadow (each bank
+/// then uploads whole again), instead of only the least recently compared one.
+inline const bool g_bank_lru = EnvOn("EDEN_NX2_BANK_LRU");
+
 /// Whether [a, a + size) and [b, b + size) hold the same bytes. Inline (memcmp is an out-of-line
 /// ucrt call that clang does not expand for 4 KiB), 128 bytes per step with an early exit.
 [[nodiscard]] inline bool BytesEqual(const u8* a, const u8* b, size_t size) {
@@ -146,6 +171,41 @@ inline const bool g_write_gpu_bitmap = EnvOn("EDEN_NX2_WRITE_GPU_BITMAP");
     }
 #endif
     return std::memcmp(a, b, size) == 0;
+}
+
+/// BytesEqual that also prefetches [next_a, next_a + size) and [next_b, next_b + size), the
+/// next page of the compare (null: none), one step ahead of the loads. Same result.
+[[nodiscard]] inline bool BytesEqualPrefetching(const u8* a, const u8* b, size_t size,
+                                                const u8* next_a, const u8* next_b) {
+#ifdef NX2_BUFCACHE_SSE2
+    if (g_bank_prefetch && g_page_compare && next_a != nullptr) {
+        size_t offset = 0;
+        for (; offset + 128 <= size; offset += 128) {
+            _mm_prefetch(reinterpret_cast<const char*>(next_a + offset), _MM_HINT_T0);
+            _mm_prefetch(reinterpret_cast<const char*>(next_a + offset + 64), _MM_HINT_T0);
+            _mm_prefetch(reinterpret_cast<const char*>(next_b + offset), _MM_HINT_T0);
+            _mm_prefetch(reinterpret_cast<const char*>(next_b + offset + 64), _MM_HINT_T0);
+            const auto load = [&](const u8* base, size_t index) {
+                return _mm_loadu_si128(reinterpret_cast<const __m128i*>(base + offset + index * 16));
+            };
+            __m128i acc = _mm_xor_si128(load(a, 0), load(b, 0));
+            acc = _mm_or_si128(acc, _mm_xor_si128(load(a, 1), load(b, 1)));
+            acc = _mm_or_si128(acc, _mm_xor_si128(load(a, 2), load(b, 2)));
+            acc = _mm_or_si128(acc, _mm_xor_si128(load(a, 3), load(b, 3)));
+            acc = _mm_or_si128(acc, _mm_xor_si128(load(a, 4), load(b, 4)));
+            acc = _mm_or_si128(acc, _mm_xor_si128(load(a, 5), load(b, 5)));
+            acc = _mm_or_si128(acc, _mm_xor_si128(load(a, 6), load(b, 6)));
+            acc = _mm_or_si128(acc, _mm_xor_si128(load(a, 7), load(b, 7)));
+            if (_mm_movemask_epi8(_mm_cmpeq_epi8(acc, _mm_setzero_si128())) != 0xFFFF) {
+                return false;
+            }
+        }
+        return offset == size || std::memcmp(a + offset, b + offset, size - offset) == 0;
+    }
+#endif
+    (void)next_a;
+    (void)next_b;
+    return BytesEqual(a, b, size);
 }
 
 /// Whether one range of `set` covers [addr, addr + size) (interval sets join touching ranges).
@@ -281,6 +341,13 @@ enum class Stat : u32 {
     SyncPrecheckClean, ///< syncs a SYNC_SKIP miss sent to the walk, found clean by the precheck
     WriteMemoryCalls,  ///< BufferCache::WriteMemory calls
     DirtyWriteSkip,    ///< of those, over pages all CPU-dirty already (EDEN_NX2_DIRTY_WRITE_SKIP)
+    UboClassicBank,    ///< classic binds of a native 64 KiB bank
+    UboClassicSmall,   ///< classic binds within the stream size (GPU-written, or no host buffer)
+    BankCompare,       ///< UploadNativeBank calls (once a frame per bank)
+    BankComparePages,  ///< bank pages compared with their shadow
+    BankPageRepeat,    ///< of those, pages another bank already compared this frame
+    BankShadowDrop,    ///< bank shadows dropped at the cap (all of them with EDEN_NX2_BANK_LRU=0)
+    BankSyncRefresh,   ///< bank shadow pages a sync upload refreshed (EDEN_NX2_BANK_SYNC_REFRESH)
     Count,
 };
 
@@ -295,6 +362,7 @@ enum class Sub : u32 {
     IndexBind,    ///< BindHostIndexBuffer
     VertexBind,   ///< BindHostVertexBuffers
     Sync,         ///< SynchronizeBuffer, every caller
+    UboBank,      ///< the once-a-frame bank compare and upload (inside UboClassic or UboStream)
     Count,
 };
 
@@ -424,6 +492,13 @@ inline void Report() {
              static_cast<double>(protects[2]) * 1e9 / static_cast<double>(window),
              static_cast<double>(protects[3]) * 1e9 / static_cast<double>(window),
              rate(Stat::WriteMemoryCalls), rate(Stat::DirtyWriteSkip));
+    LOG_INFO(HW_GPU,
+             "Buffer cache banks per second: classic binds of banks {:.0f}, within the stream "
+             "size {:.0f} | bank compares {:.0f} ({:.1f} ms), pages compared {:.0f}, already "
+             "compared this frame {:.0f} | shadows dropped {:.0f} | pages refreshed by syncs {:.0f}",
+             rate(Stat::UboClassicBank), rate(Stat::UboClassicSmall), rate(Stat::BankCompare),
+             ms(Sub::UboBank), rate(Stat::BankComparePages), rate(Stat::BankPageRepeat),
+             rate(Stat::BankShadowDrop), rate(Stat::BankSyncRefresh));
     g_sub_start_ticks = now_ticks;
     g_stats_start = now;
 }
