@@ -11,21 +11,25 @@ Ocarina of Time (`0400486024DEC000`) is the main test case, but the rules apply 
 
 ## Differences and how they are handled
 
+"Open" in the last column means the fix is a pull request that isn't merged yet: nx2 still behaves
+the old way there.
+
 | Guest (NVIDIA) behaviour | Vulkan, and what AMD does | What Lichii does | Change |
 |---|---|---|---|
 | `FMNMX` returns the operand that is not NaN, and saturation turns NaN into 0 | `FMin`, `FMax` and `FClamp` leave NaN undefined; AMD returns the NaN, and blurred or accumulated targets spread it over the screen | Min, max, clamp and saturate are emitted as `NMin`/`NMax`, clamp as `NMin(NMax(x, lo), hi)` | [#325] |
-| A bound render target that the fragment shader doesn't export keeps its old value | The attachment gets an undefined value; AMD writes whatever its export registers hold (format maximum, NaN) | Colour writes are masked for outputs the shader doesn't write | [#339], [#353] (from [#323]) |
+| A bound render target that the fragment shader doesn't export keeps its old value | The attachment gets an undefined value; AMD writes whatever its export registers hold (format maximum, NaN) | Nothing yet: the write mask still comes from the guest's registers only. The open PRs mask colour writes for outputs the shader doesn't write | [#339], [#353] (open; from [#323]) |
 | Storage buffers start at the guest's alignment, so 64- and 128-bit accesses are aligned | Bindings start at `minStorageBufferOffsetAlignment`, which is 4 bytes on AMD; vector views of the binding read the wrong words | Misaligned 64/128-bit accesses are split into 32-bit words | [#295] |
 | Demoted fragments stop writing where the guest's control flow says | Moving demotes to the end of the program over nested returns let helper lanes keep writing; AMD drew a black scene | Nested returns are counted before demotes move | [#127] |
 | Fragment subgroup shuffles | AMD's proprietary driver gets them wrong | Broadcast fallback on that driver | [#273] |
-| Depth-compare samples | Undefined on colour or integer images; AMD returned green | Depth-compare images stay floating point; uncomparable images get the null image | [#273], [#354] |
-| Native FP16 arithmetic | Turned off on AMD as a driver workaround | `EDEN_AMD_FP16=1` keeps it, for testing | [#378] |
+| Depth-compare samples | Undefined on colour or integer images; AMD returned green | Depth-compare images stay floating point. Binding the null image for depth-compare samples of uncomparable images is proposed in the open PR | [#273]; [#354] (open) |
+| Native FP16 arithmetic | Turned off on AMD as a driver workaround | Turned off, with no override yet. An `EDEN_AMD_FP16=1` switch to keep it for testing is proposed in the open PR | [#378] (open) |
 
 Not specific to AMD, but easy to mistake for an AMD bug:
 
 - Ocarina's volumetric fog reads its sky-light probes 104-122 MiB past a pointer it loads from a
   table. With the 64 MiB cap for read-only table pointers every probe read returned 0, the fog lost
-  its sky ambient and outdoor scenes turned into a white haze, on every vendor ([#292]).
+  its sky ambient and outdoor scenes turned into a white haze, on every vendor. The fix, a 256 MiB
+  cap, is in the open [#292].
 - Two of Ocarina's compute shaders take minutes to optimise in AMD's driver ([#200]); [#273] builds
   them unoptimised on that driver.
 
@@ -46,7 +50,9 @@ Check these before filing a new one.
 ## Settings for AMD users
 
 - Keep the split GPU thread on (`EDEN_NX2_SPLIT=2`, the default in `nx2_switches.txt`) and GPU
-  accuracy below High, which turns the split off.
+  accuracy below High, which turns the split off. One open report has textures flickering in that
+  setup on an RX 9070 XT ([#163]); High accuracy fixed the flicker there but cost most of the frame
+  rate, because it turns the split off.
 - Logging at `*:Info` costs CPU time in busy scenes. Use `*:Error` when you compare frame rates
   ([#403]).
 - The first run compiles every shader and can stall for minutes; later runs load the pipeline
@@ -57,14 +63,17 @@ Check these before filing a new one.
 1. Reproduce it with the live debug server (`EDEN_NX2_DEBUG_SERVER=127.0.0.1:6545`, see
    [debug-mcp.md](./debug-mcp.md)) and take a `capture_frame`. Find the first pass whose output
    holds NaN, values at the format maximum, or zeros where there should be data. The manifest's
-   per-channel statistics show this without opening every image.
+   per-channel statistics show this without opening every image, but only for formats the dump
+   decodes: other targets are listed with `"skipped":"format"` and multisampled ones with
+   `"skipped":"msaa"`, so check those passes separately.
 2. Bisect that pass's shaders with `reject_shaders`, one screenshot per step.
 3. For the draw or dispatch you find, ask what Vulkan leaves undefined there: NaN in min, max or
    clamp, outputs the shader doesn't write, misaligned or out-of-bounds storage access, values
    read before they are written, helper invocations, image views of the wrong kind. That is where
    AMD and NVIDIA differ.
-4. Check the bindings as well as the shader: a buffer bound too small reads 0 under robust buffer
-   access on every vendor ([#292]).
+4. Check the bindings as well as the shader. Reads past the end of a buffer bound too small return
+   zeros or other values from inside the buffer under robust buffer access, so a plausible value
+   doesn't prove the binding is large enough. Ocarina's fog read zeros this way ([#292]).
 5. If you can, compare with an NVIDIA run. A difference that also shows up there is an emulation
    bug, not an AMD one.
 
