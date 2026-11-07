@@ -6,6 +6,8 @@ New entries go under `## [Unreleased]`; `tools/ci/bump-version.sh` turns them in
 
 ## [Unreleased]
 
+- Configure and game Properties: **Share settings** copies a tab or all settings as a short code and pastes one back, setting that tab to match after a preview; nothing is saved until OK or Apply, and GPU, audio devices, paths and accounts are never included. See `docs/user/Settings.md`.
+
 ## [0.1.0]
 
 - Initial release candidate
