@@ -23,20 +23,6 @@ namespace AudioCore::Sink {
 
 constexpr char auto_device_name[] = "auto";
 
-inline bool IsControllerAudioDevice(std::string name) {
-    for (char& c : name) {
-        c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
-    }
-    for (const char* pattern : {"dualsense", "dualshock", "wireless controller", "playstation",
-                                "ps5 controller", "ps4 controller", "xbox controller", "gamepad",
-                                "game controller"}) {
-        if (name.find(pattern) != std::string::npos) {
-            return true;
-        }
-    }
-    return false;
-}
-
 /**
  * This class is an interface for an audio sink, holds multiple output streams and is responsible
  * for sinking samples to hardware. Used by Audio Render, Audio In and Audio Out.

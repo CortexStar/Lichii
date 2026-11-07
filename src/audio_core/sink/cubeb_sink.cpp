@@ -240,30 +240,7 @@ CubebSink::CubebSink(std::string_view target_device_name) {
         return;
     }
 
-    if (target_device_name == auto_device_name || target_device_name.empty()) {
-        cubeb_device_collection collection;
-        if (cubeb_enumerate_devices(ctx, CUBEB_DEVICE_TYPE_OUTPUT, &collection) == CUBEB_OK) {
-            const auto collection_end{collection.device + collection.count};
-            const auto name_of = [](const cubeb_device_info& info) {
-                return std::string(info.friendly_name ? info.friendly_name : "");
-            };
-            const auto preferred{std::find_if(collection.device, collection_end, [](const cubeb_device_info& info) {
-                return (info.preferred & CUBEB_DEVICE_PREF_MULTIMEDIA) != 0;
-            })};
-            if (preferred != collection_end && IsControllerAudioDevice(name_of(*preferred))) {
-                const auto replacement{std::find_if(collection.device, collection_end, [&](const cubeb_device_info& info) {
-                    return info.state == CUBEB_DEVICE_STATE_ENABLED &&
-                           !IsControllerAudioDevice(name_of(info));
-                })};
-                if (replacement != collection_end) {
-                    output_device = replacement->devid;
-                    LOG_INFO(Audio_Sink, "Default output '{}' is a game controller; using '{}'",
-                             name_of(*preferred), name_of(*replacement));
-                }
-            }
-            cubeb_device_collection_destroy(ctx, &collection);
-        }
-    } else {
+    if (target_device_name != auto_device_name && !target_device_name.empty()) {
         cubeb_device_collection collection;
         if (cubeb_enumerate_devices(ctx, static_cast<cubeb_device_type>(
                                             CUBEB_DEVICE_TYPE_INPUT | CUBEB_DEVICE_TYPE_OUTPUT),
