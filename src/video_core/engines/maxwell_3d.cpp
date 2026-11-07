@@ -1064,11 +1064,13 @@ bool FrontVerifyEnabled() {
 }
 
 // Draws and waits for idle in [method, method + amount), for the split's draw write tracking.
+// draw.begin counts too: in an instance loop the front skips draw.end and the back defers the
+// draw until something flushes it.
 void FrontNoteDraws(VideoCommon::GpuSplit& split, u32 method, u32 amount) {
     const auto covers = [method, amount](u32 index) {
         return method <= index && index < method + amount;
     };
-    if (covers(MAXWELL3D_REG_INDEX(draw.end)) || covers(MAXWELL3D_REG_INDEX(draw_inline_index)) ||
+    if (covers(MAXWELL3D_REG_INDEX(draw.begin)) || covers(MAXWELL3D_REG_INDEX(draw.end)) || covers(MAXWELL3D_REG_INDEX(draw_inline_index)) ||
         covers(MAXWELL3D_REG_INDEX(inline_index_2x16.even)) ||
         covers(MAXWELL3D_REG_INDEX(inline_index_4x8.index0)) ||
         covers(MAXWELL3D_REG_INDEX(vertex_array_instance_first)) ||

@@ -15,7 +15,6 @@
 #include <vector>
 
 #include "common/common_types.h"
-#include "video_core/nx2.h"
 
 namespace Core {
 class System;
@@ -178,9 +177,7 @@ public:
     }
     /// A draw was just sent. Draws write memory the front does not track (shader stores).
     void NoteDraw() {
-        if (Tegra::g_nx2_draws_write_memory.load(std::memory_order_relaxed)) {
-            draws_queued = true;
-        }
+        draws_queued = true;
     }
     /// A wait for idle was just sent: what the draws before it wrote is visible after it, as
     /// the writes of compute work are.

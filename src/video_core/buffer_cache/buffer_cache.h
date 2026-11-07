@@ -1610,22 +1610,11 @@ bool BufferCache<P>::BindMultiRangeStorage(const Binding& binding, bool is_writt
 }
 
 template <class P>
-void BufferCache<P>::NoteDrawWritesMemory() {
-    if (!Tegra::g_nx2_draws_write_memory.exchange(true, std::memory_order_relaxed)) {
-        LOG_INFO(HW_GPU, "A draw writes a storage or texture buffer: the split front now orders "
-                         "draws before macro DMA reads at waits for idle");
-    }
-}
-
-template <class P>
 void BufferCache<P>::BindHostGraphicsStorageBuffers(size_t stage) {
     u32 binding_index = 0;
     ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
         const Binding& binding = channel_state->storage_buffers[stage][index];
         const bool is_written = ((channel_state->written_storage_buffers[stage] >> index) & 1) != 0;
-        if (is_written) {
-            NoteDrawWritesMemory();
-        }
         if (BindMultiRangeStorage(binding, is_written, graphics_segments)) {
             return;
         }
@@ -1660,7 +1649,6 @@ void BufferCache<P>::BindHostGraphicsTextureBuffers(size_t stage) {
 
         const bool is_written = ((channel_state->written_texture_buffers[stage] >> index) & 1) != 0;
         if (is_written) {
-            NoteDrawWritesMemory();
             MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size);
         }
 

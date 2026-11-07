@@ -24,7 +24,6 @@ inline std::atomic<bool> g_nx2_ampere{false};
 
 // Set once a draw wrote a storage or texture buffer: from then on the split's front counts
 // draws as memory writers at the next wait for idle (macro DMA reads of what draws wrote).
-inline std::atomic<bool> g_nx2_draws_write_memory{false};
 
 // Device pages the GPU has written through the buffer cache (shader stores, copies), ever. Title 1
 // runs command lists the GPU writes each frame (20-byte entries its culling fills in); read
