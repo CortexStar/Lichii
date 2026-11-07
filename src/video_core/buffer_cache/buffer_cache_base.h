@@ -515,6 +515,8 @@ private:
 
     void BindHostGraphicsStorageBuffers(size_t stage);
 
+    void NoteDrawWritesMemory();
+
     void BindHostGraphicsTextureBuffers(size_t stage);
 
     void BindHostTransformFeedbackBuffers();

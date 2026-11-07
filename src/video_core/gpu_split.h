@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "video_core/nx2.h"
 
 namespace Core {
 class System;
@@ -173,6 +174,25 @@ public:
     /// commands after it are fetched.
     void NoteSync() {
         last_sync_position = write_position;
+        NoteIdle();
+    }
+    /// A draw was just sent. Draws write memory the front does not track (shader stores).
+    void NoteDraw() {
+        if (Tegra::g_nx2_draws_write_memory.load(std::memory_order_relaxed)) {
+            draws_queued = true;
+        }
+    }
+    /// A wait for idle was just sent: what the draws before it wrote is visible after it, as
+    /// the writes of compute work are.
+    void NoteIdle() {
+        if (draws_queued) {
+            draws_queued = false;
+            last_writer_position = write_position;
+        }
+    }
+    /// Increments each time the split stops: ring positions recorded before then are void.
+    [[nodiscard]] u64 Epoch() const {
+        return epoch;
     }
     /// Waits until the back executed the work sent before the last NoteSync. Returns whether any
     /// of it was still queued.
@@ -328,6 +348,8 @@ private:
     u64 write_position{};
     u64 last_writer_position{};
     u64 last_barrier_position{};
+    bool draws_queued{};
+    u64 epoch{};
     u32 last_barrier_source{};
     // Queued tracked writes: the ring position after the last write to each 64-byte block.
     static constexpr u64 WriteBlockShift = 6;

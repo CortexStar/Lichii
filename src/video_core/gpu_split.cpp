@@ -192,6 +192,8 @@ void GpuSplit::Stop() {
     write_position = 0;
     last_writer_position = 0;
     last_barrier_position = 0;
+    draws_queued = false;
+    ++epoch;
     write_blocks.clear();
     opaque_blocks.clear();
     front_words.clear();

@@ -158,6 +158,9 @@ private:
         u64 position;
     };
     std::unordered_map<GPUVAddr, QueuedRelease> queued_releases;
+    /// GpuSplit::Epoch when queued_releases was filled: a restarted split voids its positions.
+    u64 queued_releases_epoch{};
+    void CheckReleaseEpoch();
     /// Whether no queued write or undownloaded GPU write can change the semaphore at `address`.
     bool StableSemaphore(DmaPusher& dma_pusher, GPUVAddr address);
     void NoteRelease(GPUVAddr address, u32 payload);

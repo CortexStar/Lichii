@@ -260,11 +260,19 @@ bool Puller::StableSemaphore(DmaPusher& dma_pusher, GPUVAddr address) {
     return device && !Nx2IsGpuWritten(*device);
 }
 
+void Puller::CheckReleaseEpoch() {
+    if (const u64 epoch = VideoCommon::GpuSplit::Get().Epoch(); epoch != queued_releases_epoch) {
+        queued_releases.clear();
+        queued_releases_epoch = epoch;
+    }
+}
+
 void Puller::NoteRelease(GPUVAddr address, u32 payload) {
     auto& split = VideoCommon::GpuSplit::Get();
     if (!split.Active()) {
         return;
     }
+    CheckReleaseEpoch();
     if (queued_releases.size() >= 1024) {
         const u64 done = split.Consumed();
         std::erase_if(queued_releases, [done](const auto& entry) { return entry.second.position <= done; });
@@ -281,6 +289,7 @@ std::optional<u32> Puller::OwnQueuedRelease(DmaPusher& dma_pusher, GPUVAddr addr
     if (!split.Active() || Settings::IsGPULevelHigh()) {
         return std::nullopt;
     }
+    CheckReleaseEpoch();
     const auto it = queued_releases.find(address);
     if (it == queued_releases.end() || it->second.position <= split.Consumed()) {
         return std::nullopt;
@@ -390,7 +399,10 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             const auto wait_start = std::chrono::steady_clock::now();
             split.WaitForPosition(target, VideoCommon::DrainSite::Acquire);
             if (auto* stats = AcquireStats::Get()) stats->wait_ns += NsSince(wait_start);
-            if (acquire.Matches(dma_pusher.memory_manager.Read<u32>(acquire.address))) {
+            // A GPU-written word may be newer in a host buffer: the drain below flushes it.
+            const auto device = dma_pusher.memory_manager.GpuToCpuAddress(acquire.address);
+            if (device && !Nx2IsGpuWritten(*device) &&
+                acquire.Matches(dma_pusher.memory_manager.Read<u32>(acquire.address))) {
                 if (auto* stats = AcquireStats::Get()) stats->Note(AcquireStats::AfterWait);
                 split.NoteSync();
                 return;

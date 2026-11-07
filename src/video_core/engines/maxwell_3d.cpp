@@ -1063,6 +1063,31 @@ bool FrontVerifyEnabled() {
     return verify;
 }
 
+// Draws and waits for idle in [method, method + amount), for the split's draw write tracking.
+void FrontNoteDraws(VideoCommon::GpuSplit& split, u32 method, u32 amount) {
+    const auto covers = [method, amount](u32 index) {
+        return method <= index && index < method + amount;
+    };
+    if (covers(MAXWELL3D_REG_INDEX(draw.end)) || covers(MAXWELL3D_REG_INDEX(draw_inline_index)) ||
+        covers(MAXWELL3D_REG_INDEX(inline_index_2x16.even)) ||
+        covers(MAXWELL3D_REG_INDEX(inline_index_4x8.index0)) ||
+        covers(MAXWELL3D_REG_INDEX(vertex_array_instance_first)) ||
+        covers(MAXWELL3D_REG_INDEX(vertex_array_instance_subsequent)) ||
+        covers(MAXWELL3D_REG_INDEX(draw_texture.src_y0)) ||
+        covers(MAXWELL3D_REG_INDEX(index_buffer32_first)) ||
+        covers(MAXWELL3D_REG_INDEX(index_buffer16_first)) ||
+        covers(MAXWELL3D_REG_INDEX(index_buffer8_first)) ||
+        covers(MAXWELL3D_REG_INDEX(index_buffer32_subsequent)) ||
+        covers(MAXWELL3D_REG_INDEX(index_buffer16_subsequent)) ||
+        covers(MAXWELL3D_REG_INDEX(index_buffer8_subsequent))) {
+        split.NoteDraw();
+    }
+    // Sent after the draws, so a deferred draw it flushes on the back counts too.
+    if (covers(MAXWELL3D_REG_INDEX(wait_for_idle))) {
+        split.NoteIdle();
+    }
+}
+
 // Executable methods ProcessMethodCall handles itself; the rest go to the draw manager.
 bool FrontHandledOutsideDrawManager(u32 method) {
     constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
@@ -1222,6 +1247,7 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
     }
     if (execution_mask[method]) {
         FrontNoteWrites(split, fs, method, 1, &argument);
+        FrontNoteDraws(split, method, 1);
     }
 }
 
@@ -1434,6 +1460,7 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
     }
     split.MultiMethod(this, method, base_start, amount, methods_pending, nullptr);
     FrontNoteWrites(split, fs, method, amount, base_start);
+    FrontNoteDraws(split, method, amount);
 }
 
 void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split,
