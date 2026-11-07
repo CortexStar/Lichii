@@ -745,6 +745,10 @@ bool PreloadAllPipelines() {
 
 PipelineCache::~PipelineCache() {
     background_pipelines.Stop();
+    if (!device.CanReadPipelineCacheDuringBuilds()) {
+        // Drop queued builds, as destroying the workers would; running ones must end first.
+        workers.ClearRequests();
+    }
     workers.WaitForRequests();
     serialization_thread.WaitForRequests();
     SaveUsedPipelines();
