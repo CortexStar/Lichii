@@ -113,6 +113,9 @@ constexpr std::array B10G11R11_UFLOAT_PACK32{
 
 } // namespace Alternatives
 
+// VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME lives in vulkan_beta.h.
+constexpr std::string_view PORTABILITY_SUBSET_EXTENSION_NAME = "VK_KHR_portability_subset";
+
 template <typename T>
 void SetNext(void**& next, T& data) {
     *next = &data;
@@ -1220,6 +1223,11 @@ bool Device::GetSuitability(bool requires_swapchain) {
 
     FOR_EACH_VK_FEATURE_EXT(FEATURE_EXTENSION);
     FOR_EACH_VK_EXTENSION(EXTENSION);
+
+    // The spec requires enabling VK_KHR_portability_subset on devices that expose it.
+    if (supported_extensions.contains(PORTABILITY_SUBSET_EXTENSION_NAME)) {
+        loaded_extensions.emplace(PORTABILITY_SUBSET_EXTENSION_NAME);
+    }
 
     extensions.depth_stencil_resolve =
         extensions.depth_stencil_resolve &&
