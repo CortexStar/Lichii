@@ -194,6 +194,7 @@ void GpuSplit::Stop() {
     last_barrier_position = 0;
     write_blocks.clear();
     opaque_blocks.clear();
+    front_words.clear();
     latest_block_write = 0;
     latest_opaque_write = 0;
     last_sync_position = 0;

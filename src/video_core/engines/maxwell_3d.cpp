@@ -1037,14 +1037,6 @@ struct Maxwell3D::FrontState {
     bool draw_pending{true};
     bool skip_same{}; ///< SkipSameValueWrites() && FrontSkipSame(), read once
     u32 dma_reads{};
-    /// Constant buffer words sent inline, keyed by device address like the split's write
-    /// tracking (so GPU addresses aliasing one word meet): value and the ring position after
-    /// the upload.
-    struct ShadowWord {
-        u32 value;
-        u64 position;
-    };
-    std::unordered_map<DAddr, ShadowWord> cb_shadow;
     /// The inline-to-memory upload being sent writes [upload_begin, upload_end).
     bool upload_tracked{};
     GPUVAddr upload_begin{};
@@ -1259,11 +1251,12 @@ void Maxwell3D::FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& fs, u3
             return;
         }
         // The words themselves, for MME DMA reads of them while the back has not written them.
-        if (fs.cb_shadow.size() >= 16384) {
+        auto& front_words = split.FrontWords();
+        if (front_words.size() >= 16384) {
             const u64 done = split.Consumed();
-            std::erase_if(fs.cb_shadow, [done](const auto& entry) { return entry.second.position <= done; });
-            if (fs.cb_shadow.size() >= 16384) {
-                fs.cb_shadow.clear();
+            std::erase_if(front_words, [done](const auto& entry) { return entry.second.position <= done; });
+            if (front_words.size() >= 16384) {
+                front_words.clear();
             }
         }
         // Only the words ProcessCBMultiData writes: it drops those past the buffer's end.
@@ -1274,7 +1267,7 @@ void Maxwell3D::FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& fs, u3
         const u64 position = split.Position();
         DeviceWords(begin, count, [&](u32 i, std::optional<DAddr> device) {
             if (device) {
-                fs.cb_shadow[*device] = {values[i], position};
+                front_words[*device] = {values[i], position};
             }
             return true;
         });
@@ -1549,9 +1542,10 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
                 split.OpaqueReadyPosition(&memory_manager, source, source + read_bytes);
             shadow_words.clear();
             const bool complete = DeviceWords(source, words, [&](u32, std::optional<DAddr> device) {
-                const auto it = device ? fs.cb_shadow.find(*device) : fs.cb_shadow.end();
+                const auto& front_words = split.FrontWords();
+                const auto it = device ? front_words.find(*device) : front_words.end();
                 // Only words still queued: memory has the others, maybe rewritten by the CPU.
-                if (it == fs.cb_shadow.end() || it->second.position < opaque ||
+                if (it == front_words.end() || it->second.position < opaque ||
                     it->second.position <= consumed) {
                     return false;
                 }

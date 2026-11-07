@@ -245,6 +245,17 @@ public:
     /// The position after the last queued tracked write to [begin, end), untracked writes aside.
     [[nodiscard]] u64 TrackedWritePosition(const void* space, u64 begin, u64 end);
 
+    /// Front only: a constant buffer word sent inline and the ring position after its upload.
+    struct FrontWord {
+        u32 value;
+        u64 position;
+    };
+    /// Front only: the words of every channel, keyed by device address, so the last upload of a
+    /// word wins whichever channel sent it.
+    [[nodiscard]] std::unordered_map<u64, FrontWord>& FrontWords() {
+        return front_words;
+    }
+
 private:
     friend struct GpuSplitTestAccess;
 
@@ -323,6 +334,7 @@ private:
     static constexpr u64 MaxWriteBlocks = 1024;
     std::unordered_map<u64, u64> write_blocks;
     std::unordered_map<u64, u64> opaque_blocks;
+    std::unordered_map<u64, FrontWord> front_words;
     u64 latest_block_write{};
     u64 latest_opaque_write{};
     // Keyed by the backing memory (`space` is a Tegra::MemoryManager), so writes and reads
