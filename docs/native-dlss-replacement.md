@@ -107,8 +107,11 @@ from the upstream implementation remain available for diagnostic comparisons.
 ## Build and distribution
 
 FSR needs no external runtime. Keep `externals/FidelityFX-SDK/LICENSE.txt` and its attribution
-with distributions. The vendored files are unmodified AMD MIT sources from FidelityFX SDK
-v1.1.4, commit `c6efa6bf7f2027b3ec94f28578bb5965eabb9e55`.
+with distributions. The vendored files are AMD MIT sources from FidelityFX SDK v1.1.4, commit
+`c6efa6bf7f2027b3ec94f28578bb5965eabb9e55`, unmodified except `gpu/fsr1/ffx_fsr1.h`: its RCAS
+lower limiter is taken from SDK v2.0.0 (FSR upscaler 3.1.5, "Fix for possible negative rcas
+output"), commit `f4c1da8e92f3fe563b5c28c44e6267ce6b6b8eb2`. The SDK's fsr3upscaler GPU headers
+differ between those tags only in copyright years and an include path.
 
 For the optional Windows NVIDIA path, obtain only the MIT Streamline headers and license
 from NVIDIA-RTX/Streamline tag `v2.14.16`, commit
