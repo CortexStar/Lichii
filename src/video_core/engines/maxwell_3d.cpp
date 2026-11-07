@@ -1310,11 +1310,6 @@ void Maxwell3D::FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& fs, u3
         const GPUVAddr begin = address(MAXWELL3D_REG_INDEX(report_semaphore.address_high),
                                        MAXWELL3D_REG_INDEX(report_semaphore.address_low));
         note(begin, begin + 16);
-        for (const GPUVAddr page : {begin, begin + 15}) {
-            if (const auto device = memory_manager.GpuToCpuAddress(page)) {
-                Tegra::Nx2MarkReportPages(*device, 1);
-            }
-        }
     }
 }
 
@@ -1652,20 +1647,30 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
             },
             VideoCommon::DrainSite::MacroDmaFlush);
     }
-    // A read of a page reports were sent to writes out the reports the query cache still holds,
-    // waiting for their host results (Lichii #215), or the guest reads stale occlusion counts.
+    // A read of reports the query cache still holds writes them out first, waiting for their
+    // host results (Lichii #215), or the guest reads stale occlusion counts. The wait above ran
+    // the queued reports the read may see, so the back has registered them.
     const bool reads_reports = [&] {
         if (!shadow_words.empty() || words == 0) {
             return false;
         }
-        for (GPUVAddr page = source >> 12; page <= (source + read_bytes - 1) >> 12; ++page) {
-            const auto device = memory_manager.GpuToCpuAddress(page << 12);
-            if (device && Tegra::Nx2IsReportPage(*device)) {
+        for (GPUVAddr begin = source; begin < source + read_bytes;) {
+            const GPUVAddr end = std::min<GPUVAddr>((begin | 0xfff) + 1, source + read_bytes);
+            const auto device = memory_manager.GpuToCpuAddress(begin);
+            if (device && Tegra::Nx2ReportsPending(*device, end - begin)) {
                 return true;
             }
+            begin = end;
         }
         return false;
     }();
+    if (static const bool stats = std::getenv("EDEN_NX2_MME_DMA_STATS") != nullptr; stats) {
+        static u64 reads{}, flushes{};
+        flushes += reads_reports ? 1 : 0;
+        if ((++reads & 0xffff) == 0) {
+            LOG_INFO(HW_GPU, "MME DMA reads: {} of {} flushed pending reports", flushes, reads);
+        }
+    }
     if (reads_reports) {
         split.Run(
             [this, source, read_bytes] {
