@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <functional>
@@ -747,6 +748,60 @@ TEST_CASE("Split consumption does not complete deferred downstream callbacks",
         deferred.clear();
     });
     REQUIRE(output == std::array<u32, 3>{1, 2, 3});
+}
+
+TEST_CASE("Split back runs a requested tick while it waits for work and between entries",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    Fixture f;
+    f.system.Initialize();
+    VideoCommon::GpuSplit split;
+    std::atomic<u32> ticks{};
+    std::atomic<bool> entered{};
+    std::atomic<bool> release{};
+    u32 ticks_at_second{~0U};
+    split.SetTickHook([](void* counter) { static_cast<std::atomic<u32>*>(counter)->fetch_add(1); },
+                      &ticks);
+    // Before the back runs, a request does nothing, nor is it kept for later.
+    split.RequestTick();
+    Access::Start(split, f.system);
+    SCOPE_EXIT {
+        split.Stop();
+    };
+    // Runs before Stop: a failed check must not leave the back in the entry below.
+    SCOPE_EXIT {
+        release = true;
+    };
+    const auto wait_until = [](const auto& done) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        while (!done() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        return done();
+    };
+    REQUIRE(wait_until([&] { return split.BackRunning(); }));
+    // The back has nothing to do and goes to sleep: a request wakes it and runs at once.
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    REQUIRE(ticks.load() == 0);
+    split.RequestTick();
+    REQUIRE(wait_until([&] { return ticks.load() == 1; }));
+    // The back runs an entry: the request runs once it ends, before the next entry.
+    split.Defer([&] {
+        entered = true;
+        while (!release.load()) {
+            std::this_thread::yield();
+        }
+    });
+    split.Defer([&] { ticks_at_second = ticks.load(); });
+    split.Publish();
+    REQUIRE(wait_until([&] { return entered.load(); }));
+    split.RequestTick();
+    std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    REQUIRE(ticks.load() == 1);
+    release = true;
+    split.Drain(VideoCommon::DrainSite::Other);
+    REQUIRE(ticks_at_second == 2);
+    REQUIRE(ticks.load() == 2);
 }
 
 TEST_CASE("Split restart resets writer positions without replaying old releases",

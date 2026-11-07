@@ -91,6 +91,25 @@ public:
         wake.fetch_add(1, std::memory_order_seq_cst);
         wake.notify_one();
     }
+    /// Run on the back when a thread asks for it (RequestTick): the GPU's sync operations.
+    void SetTickHook(void (*hook)(void*), void* argument) {
+        tick_hook = hook;
+        tick_argument = argument;
+    }
+    /// Any thread, after queueing a sync operation it waits for: has the back run the tick hook
+    /// after the entry it is running, or at once if it waits for work. Otherwise the operation runs
+    /// after the back's next draw, or after the front sent everything it had queued before it.
+    void RequestTick() {
+        if (!back_running.load(std::memory_order_acquire)) {
+            return;
+        }
+        // The back checks tick_requested after setting back_waiting: one of the two sees the other.
+        tick_requested.store(true, std::memory_order_seq_cst);
+        if (back_waiting.load(std::memory_order_seq_cst)) {
+            wake.fetch_add(1, std::memory_order_seq_cst);
+            wake.notify_one();
+        }
+    }
 
     /// Starts the back thread once the split is wanted (EDEN_NX2_SPLIT=1, a Switch 2 title,
     /// commands read without cache flushes). Called by the front between commands.
@@ -237,6 +256,14 @@ private:
     void BackLoop(std::stop_token stop_token);
     /// Runs the entry at `entry` (of the `words` published before the ring's end), returns its size.
     size_t Execute(const u64* entry, size_t words);
+    /// The back, between entries: runs the tick hook if a thread asked for it.
+    void MaybeTick() {
+        if (tick_requested.load(std::memory_order_relaxed) &&
+            tick_requested.exchange(false, std::memory_order_acq_rel) && tick_hook != nullptr)
+            [[unlikely]] {
+            tick_hook(tick_argument);
+        }
+    }
 
     Core::System* system{};
     bool active{};
@@ -260,7 +287,10 @@ private:
     static inline thread_local bool on_back_thread{};
     void (*idle_hook)(void*){};
     void* idle_argument{};
+    void (*tick_hook)(void*){};
+    void* tick_argument{};
     alignas(64) std::atomic<bool> hook_requested{};
+    std::atomic<bool> tick_requested{};
     std::atomic<bool> back_running{};
 
     // 128 bytes: x86 spatial prefetchers pull 64-byte lines in pairs. back_waiting and wake are

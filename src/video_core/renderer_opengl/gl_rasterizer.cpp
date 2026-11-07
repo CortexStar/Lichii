@@ -396,6 +396,11 @@ void RasterizerOpenGL::DrawTexture() {
 }
 
 void RasterizerOpenGL::DispatchCompute() {
+    // As after a draw: run the sync operations threads wait for, such as a guest read's flush,
+    // rather than only at the next draw.
+    SCOPE_EXIT {
+        gpu.TickWork();
+    };
     gpu_memory->FlushCaching();
     ComputePipeline* const pipeline{shader_cache.CurrentComputePipeline()};
     if (!pipeline) {

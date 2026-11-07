@@ -1735,6 +1735,11 @@ void RasterizerVulkan::Clear(u32 layer_count) {
 }
 
 void RasterizerVulkan::DispatchCompute() {
+    // As after a draw: run the sync operations threads wait for, such as a guest read's flush,
+    // rather than only at the next draw.
+    SCOPE_EXIT {
+        gpu.TickWork();
+    };
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Compute};
     FlushWork();
     gpu_memory->FlushCaching();
