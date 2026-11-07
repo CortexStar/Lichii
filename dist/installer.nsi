@@ -22,7 +22,7 @@ ManifestDPIAware true
 
 !define PRODUCT_NAME "Lichii"
 !define PRODUCT_PUBLISHER "Lichii contributors"
-!define PRODUCT_WEB_SITE "https://github.com/zortos293/Eglantine"
+!define PRODUCT_WEB_SITE "https://github.com/zortos293/Lichii"
 !define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\${PRODUCT_NAME}.exe"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 
