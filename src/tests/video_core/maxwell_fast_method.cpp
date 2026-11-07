@@ -1020,6 +1020,69 @@ TEST_CASE("Split remembers the semaphore writes its back has not run yet",
     REQUIRE_FALSE(split.QueuedSemaphoreWriteAt(0x2000).has_value());
 }
 
+TEST_CASE("Split waits for a semaphore write's position, not for the work sent after it",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    Fixture f;
+    f.system.Initialize();
+    VideoCommon::GpuSplit split;
+    std::array<std::atomic<bool>, 2> release{};
+    Access::Start(split, f.system);
+    SCOPE_EXIT {
+        split.Stop();
+    };
+    // Runs before Stop: a failed check must not leave the back in the entries below.
+    SCOPE_EXIT {
+        release[0] = true;
+        release[1] = true;
+    };
+    const auto blocking = [&split](std::atomic<bool>& flag) {
+        split.Defer([&flag] {
+            while (!flag.load()) {
+                std::this_thread::yield();
+            }
+        });
+    };
+    // A release the front can't value (a reduction, a counter) sent by compute work, behind an
+    // entry the back is still in, then more work behind another.
+    blocking(release[0]);
+    split.Defer([] {});
+    split.NoteSemaphoreWrite(0x1000, 0, false);
+    split.NoteWriter();
+    const u64 release_position = split.Position();
+    REQUIRE(split.LastWriterPosition() == release_position);
+    blocking(release[1]);
+    split.Publish();
+    const auto queued = split.QueuedSemaphoreWriteAt(0x1000);
+    REQUIRE(queued.has_value());
+    REQUIRE(queued->position == release_position);
+    REQUIRE_FALSE(split.Ran(release_position));
+    std::atomic<bool> done{};
+    bool waited{};
+    std::thread waiter([&] {
+        waited = split.WaitForPosition(release_position, VideoCommon::DrainSite::Acquire);
+        done = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    REQUIRE_FALSE(done.load());
+    release[0] = true;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    REQUIRE(done.load());
+    waiter.join();
+    REQUIRE(waited);
+    // The release ran; the work after it still runs.
+    REQUIRE(split.Ran(release_position));
+    REQUIRE_FALSE(split.QueuedSemaphoreWriteAt(0x1000).has_value());
+    REQUIRE_FALSE(split.Ran(split.Position()));
+    release[1] = true;
+    split.Drain(VideoCommon::DrainSite::Other);
+    REQUIRE(split.Ran(split.Position()));
+    REQUIRE_FALSE(split.WaitForPosition(release_position, VideoCommon::DrainSite::Acquire));
+}
+
 TEST_CASE("Split restart resets writer positions without replaying old releases",
           "[video_core][gpu_split_dependencies]") {
     using Access = VideoCommon::GpuSplitTestAccess;

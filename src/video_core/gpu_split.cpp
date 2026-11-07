@@ -256,7 +256,7 @@ std::optional<GpuSplit::QueuedSemaphoreWrite> GpuSplit::QueuedSemaphoreWriteAt(
         it->second.position <= consumed.load(std::memory_order_acquire)) {
         return std::nullopt;
     }
-    return QueuedSemaphoreWrite{it->second.payload, it->second.known};
+    return QueuedSemaphoreWrite{it->second.payload, it->second.known, it->second.position};
 }
 
 bool GpuSplit::WritersPending() const {
