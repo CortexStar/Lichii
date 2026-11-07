@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <cstddef>
 #include <fstream>
 #include <functional>
@@ -21,6 +23,7 @@
 #include <bit>
 #include <numeric>
 #include "common/cityhash.h"
+#include "common/scm_rev.h"
 #include "common/scope_exit.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
@@ -832,7 +835,20 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         current_pipeline = nullptr;
         return nullptr;
     }
-    graphics_key.state.Refresh(*maxwell3d, dynamic_features);
+    if (maxwell3d->GetNativeMacroEngine().native_turing) {
+        native_state.Refresh(*maxwell3d, dynamic_features);
+        graphics_key.state = native_state;
+        const VideoCommon::ShaderInfo* const vertex{shader_infos[1]};
+        u32 mask = ~0U;
+        if (maxwell3d->regs.IsMeshEnabled()) {
+            mask = 0;
+        } else if (vertex && !IsUnmaskedVertexProgram(vertex->unique_hash)) {
+            mask = vertex->generic_read_mask;
+        }
+        graphics_key.state.CanonicalizeNative(mask);
+    } else {
+        graphics_key.state.Refresh(*maxwell3d, dynamic_features);
+    }
 
     if (current_pipeline) {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
@@ -1155,13 +1171,25 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             return;
         }
 
+        // Records written before keys were canonical are found under their old hash in the
+        // used list; the pipeline itself is keyed the way draws now look it up.
+        const u64 stored_hash = key.Hash();
+        {
+            boost::container::static_vector<const Shader::Environment*, Maxwell::MaxShaderProgram>
+                env_ptrs;
+            for (const auto& env : envs) {
+                env_ptrs.push_back(&env);
+            }
+            CanonicalizeNativeKey(key, env_ptrs);
+        }
         const u64 hash = key.Hash();
         if (!disk_pipelines.insert(hash).second) {
             return;
         }
         if (!PreloadAllPipelines() &&
             (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
-                                    : !used_pipelines.contains(hash))) {
+                                    : !used_pipelines.contains(hash) &&
+                                          !used_pipelines.contains(stored_hash))) {
             ++skipped_pipelines;
             size_t capture_bytes = (envs.capacity() - envs.size()) * sizeof(FileEnvironment);
             for (const auto& env : envs) {
@@ -1290,6 +1318,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                                          std::move(records));
         });
     }
+
+    PreparePrecompiled(base_dir, stop_loading, callback);
 
     if (use_vulkan_pipeline_cache) {
         SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
@@ -1459,6 +1489,310 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
              stop_loading.stop_requested() ? "stopped" : (skipped ? "skipped" : "finished"),
              total_built, done - total_built, jobs.size() - std::min(jobs.size(), done.load()),
              std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
+}
+
+void PipelineCache::CanonicalizeNativeKey(
+    GraphicsPipelineCacheKey& key,
+    std::span<const Shader::Environment* const> envs) const noexcept {
+    if (envs.empty() || !std::ranges::all_of(envs, [](const Shader::Environment* env) {
+            return env->IsNativeProgram();
+        })) {
+        return;
+    }
+    u32 mask = ~0U;
+    for (const Shader::Environment* const env : envs) {
+        if (env->ShaderStage() == Shader::Stage::Task || env->ShaderStage() == Shader::Stage::Mesh) {
+            mask = 0;
+            break;
+        }
+        if (env->ShaderStage() == Shader::Stage::VertexB &&
+            !IsUnmaskedVertexProgram(key.unique_hashes[1])) {
+            mask = VideoCommon::GenericReadMask(env->SPH());
+        }
+    }
+    key.state.CanonicalizeNative(mask);
+}
+
+void PipelineCache::PreparePrecompiled(const std::filesystem::path& base_dir,
+                                       std::stop_token stop_loading,
+                                       const VideoCore::DiskResourceLoadCallback& callback) {
+    const char* enabled = std::getenv("EDEN_NX2_PRECOMPILED");
+    if (enabled && enabled[0] == '0') {
+        return;
+    }
+    // The prepared pipelines are kept by the driver's own cache. Without one they would go to the
+    // emulator's pipeline cache file, which is loaded whole at boot: only on request there.
+    if (!DriverCachesPipelines(device) && !(enabled && enabled[0] == '1')) {
+        LOG_INFO(Render_Vulkan, "Precompiled pipelines skipped: the driver keeps no pipeline cache "
+                                "of its own (EDEN_NX2_PRECOMPILED=1 prepares them anyway)");
+        return;
+    }
+    // Layout (tools/nx2-precompile/README.md): "NX2PREP1", u32 cache version, u32 environment
+    // count, u32 record count, u32 reserved; per environment u64 offset and u64 size of a
+    // GenericEnvironment::Serialize blob; per record u8 kind (0 graphics, 1 compute), u8
+    // environment count, u16 reserved, u32 environment indices in stage order, then the key.
+    const auto path = base_dir / fmt::format("precompiled.fork-v{}.nx2prep", CACHE_VERSION);
+    std::error_code error;
+    const auto file_size = std::filesystem::file_size(path, error);
+    if (error) {
+        // A file built for an older cache version is not read: it has to be built again.
+        for (u32 version = CACHE_VERSION; version-- > 50;) {
+            const auto older = base_dir / fmt::format("precompiled.fork-v{}.nx2prep", version);
+            if (std::filesystem::exists(older, error)) {
+                LOG_WARNING(Render_Vulkan,
+                            "Precompiled pipelines skipped: {} is for cache version {}, this "
+                            "build uses {}",
+                            older.filename().string(), version, CACHE_VERSION);
+                break;
+            }
+        }
+        return;
+    }
+    const auto modified = std::filesystem::last_write_time(path, error).time_since_epoch().count();
+    // The driver keeps what it compiled; the step runs again for another file, driver or build.
+    const auto stamp_path =
+        base_dir / fmt::format("precompiled_prepared.fork-v{}.txt", CACHE_VERSION);
+    const std::string stamp = fmt::format("{} {} {:#x} {} {}\n", file_size, modified,
+                                          device.GetDriverVersion(), Common::g_scm_rev,
+                                          device.GetModelName());
+    const char* force = std::getenv("EDEN_NX2_PRECOMPILED_FORCE");
+    if (!(force && force[0] == '1')) {
+        std::ifstream stamp_file(stamp_path, std::ios::binary);
+        const std::string previous{std::istreambuf_iterator<char>(stamp_file), {}};
+        if (previous == stamp) {
+            LOG_INFO(Render_Vulkan, "Precompiled pipelines already prepared for this driver");
+            return;
+        }
+    }
+
+    struct Record {
+        bool compute{};
+        std::vector<u32> envs;
+        GraphicsPipelineCacheKey graphics_key{};
+        ComputePipelineCacheKey compute_key{};
+    };
+    std::vector<std::pair<u64, u64>> env_index;
+    std::vector<Record> records;
+    try {
+        std::ifstream file(path, std::ios::binary);
+        file.exceptions(std::ifstream::failbit);
+        std::array<char, 8> magic{};
+        u32 version{}, env_count{}, record_count{}, reserved{};
+        file.read(magic.data(), magic.size())
+            .read(reinterpret_cast<char*>(&version), sizeof(version))
+            .read(reinterpret_cast<char*>(&env_count), sizeof(env_count))
+            .read(reinterpret_cast<char*>(&record_count), sizeof(record_count))
+            .read(reinterpret_cast<char*>(&reserved), sizeof(reserved));
+        if (std::string_view{magic.data(), magic.size()} != "NX2PREP1" || version != CACHE_VERSION) {
+            LOG_WARNING(Render_Vulkan, "Precompiled pipeline file {} has another format or version",
+                        Common::FS::PathToUTF8String(path));
+            return;
+        }
+        env_index.resize(env_count);
+        file.read(reinterpret_cast<char*>(env_index.data()), env_count * sizeof(env_index[0]));
+        records.reserve(record_count);
+        for (u32 i = 0; i < record_count; ++i) {
+            u8 kind{}, count{};
+            u16 pad{};
+            file.read(reinterpret_cast<char*>(&kind), 1)
+                .read(reinterpret_cast<char*>(&count), 1)
+                .read(reinterpret_cast<char*>(&pad), 2);
+            Record record;
+            record.compute = kind == 1;
+            record.envs.resize(count);
+            file.read(reinterpret_cast<char*>(record.envs.data()), count * sizeof(u32));
+            if (record.compute) {
+                file.read(reinterpret_cast<char*>(&record.compute_key), sizeof(record.compute_key));
+            } else {
+                file.read(reinterpret_cast<char*>(&record.graphics_key), sizeof(record.graphics_key));
+            }
+            if (count == 0 || (record.compute && count != 1) ||
+                std::ranges::any_of(record.envs, [&](u32 env) { return env >= env_count; })) {
+                LOG_ERROR(Render_Vulkan, "Precompiled pipeline file {} is damaged",
+                          Common::FS::PathToUTF8String(path));
+                return;
+            }
+            records.push_back(std::move(record));
+        }
+    } catch (const std::ios_base::failure& e) {
+        LOG_ERROR(Render_Vulkan, "Cannot read precompiled pipelines: {}", e.what());
+        return;
+    }
+
+    const size_t total = records.size();
+    // Environments are read from the file by each worker; this bounds the records in flight.
+    const size_t max_in_flight = std::max<size_t>(num_pipeline_workers * 4, 16);
+
+    // A checkpoint lets an interrupted step (closed, or a crash) continue where it stopped. A boot
+    // that starts twice from the same record without getting further skips past it.
+    const auto progress_path =
+        base_dir / fmt::format("precompiled_progress.fork-v{}.txt", CACHE_VERSION);
+    size_t start_index = 0;
+    u32 restarts = 0;
+    {
+        std::ifstream progress_file(progress_path, std::ios::binary);
+        std::string line;
+        size_t next{};
+        u32 count{};
+        if (std::getline(progress_file, line) && line + '\n' == stamp &&
+            (progress_file >> next >> count)) {
+            start_index = std::min(next, total);
+            restarts = count + 1;
+        }
+    }
+    if (restarts >= 2) {
+        const size_t jump = std::min(total - start_index, max_in_flight * 2);
+        LOG_WARNING(Render_Vulkan,
+                    "Precompiled pipelines stopped twice near record {}: skipping {} records",
+                    start_index, jump);
+        start_index += jump;
+        restarts = 0;
+    }
+    const auto write_progress = [&](size_t next, u32 count) {
+        std::ofstream progress_file(progress_path, std::ios::binary | std::ios::trunc);
+        progress_file << stamp << next << ' ' << count << '\n';
+    };
+    write_progress(start_index, restarts);
+
+    struct {
+        std::mutex mutex;
+        std::condition_variable_any cv;
+        size_t in_flight{};
+        size_t built{};
+        size_t failed{};
+        size_t skipped{};
+        size_t low_water{};      ///< first record not finished yet
+        size_t checkpoint{};
+        std::vector<u8> done;
+    } state;
+    state.done.assign(total, 0);
+    state.low_water = state.checkpoint = start_index;
+    const auto begin = std::chrono::steady_clock::now();
+    const auto complete = [&](size_t index) {
+        // Under state.mutex.
+        state.done[index] = 1;
+        while (state.low_water < total && state.done[state.low_water]) {
+            ++state.low_water;
+        }
+        if (state.low_water >= state.checkpoint + 512) {
+            state.checkpoint = state.low_water;
+            write_progress(state.low_water, 0);
+        }
+        const size_t done = start_index + state.built + state.failed + state.skipped;
+        if (done % 64 == 0 || done == total) {
+            callback(VideoCore::LoadCallbackStage::Build, done, total);
+        }
+    };
+    const auto finish = [&](size_t index, bool ok) {
+        std::scoped_lock lock{state.mutex};
+        --state.in_flight;
+        ++(ok ? state.built : state.failed);
+        complete(index);
+        state.cv.notify_all();
+    };
+    const auto skip = [&](size_t index) {
+        std::scoped_lock lock{state.mutex};
+        ++state.skipped;
+        complete(index);
+    };
+    const auto read_envs = [&path, &env_index](const std::vector<u32>& ids) {
+        std::ifstream file(path, std::ios::binary);
+        file.exceptions(std::ifstream::failbit);
+        std::vector<FileEnvironment> envs(ids.size());
+        for (size_t i = 0; i < ids.size(); ++i) {
+            file.clear();
+            const auto [offset, size] = env_index[ids[i]];
+            file.seekg(static_cast<std::streamoff>(offset));
+            envs[i].Deserialize(file, static_cast<std::streamoff>(offset + size));
+        }
+        return envs;
+    };
+    LOG_INFO(Render_Vulkan, "Preparing {} precompiled pipelines from {}, from record {}", total,
+             Common::FS::PathToUTF8String(path), start_index);
+    callback(VideoCore::LoadCallbackStage::Build, start_index, total);
+    for (size_t index = start_index; index < total; ++index) {
+        if (stop_loading.stop_requested()) {
+            break;
+        }
+        auto& record = records[index];
+        if (record.compute) {
+            if (compute_cache.find(record.compute_key) != compute_cache.end()) {
+                skip(index);
+                continue;
+            }
+        } else {
+            auto& key = record.graphics_key;
+            // The driver fields only tell cache generations apart; the pipeline does not use them.
+            // Records made before a driver update are built for this driver, as draws will key them.
+            key.state.driver_id = static_cast<u32>(device.GetDriverID());
+            key.state.driver_version = device.GetDriverVersion();
+            const bool other_device =
+                (key.state.extended_dynamic_state != 0) !=
+                    dynamic_features.has_extended_dynamic_state ||
+                (key.state.extended_dynamic_state_2 != 0) !=
+                    dynamic_features.has_extended_dynamic_state_2 ||
+                (key.state.extended_dynamic_state_2_logic_op != 0) !=
+                    dynamic_features.has_extended_dynamic_state_2_logic_op ||
+                (key.state.extended_dynamic_state_3_blend != 0) !=
+                    dynamic_features.has_extended_dynamic_state_3_blend ||
+                (key.state.extended_dynamic_state_3_enables != 0) !=
+                    dynamic_features.has_extended_dynamic_state_3_enables ||
+                (key.state.color_write_enable_dynamic != 0) !=
+                    dynamic_features.has_color_write_enable ||
+                (key.state.dynamic_vertex_input != 0) != dynamic_features.has_dynamic_vertex_input ||
+                (key.state.provoking_vertex_last != 0 &&
+                 !dynamic_features.has_provoking_vertex_last_mode);
+            // Made for a device with other dynamic state, or built at boot from the disk cache.
+            if (other_device || disk_pipelines.contains(key.Hash())) {
+                skip(index);
+                continue;
+            }
+        }
+        {
+            std::unique_lock lock{state.mutex};
+            // Stopping also stops the workers, so the slots would never free up.
+            if (!state.cv.wait(lock, stop_loading,
+                               [&] { return state.in_flight < max_in_flight; })) {
+                break;
+            }
+            ++state.in_flight;
+        }
+        workers.QueueWork([this, index, &record, &read_envs, &finish] {
+            bool ok = false;
+            try {
+                auto envs = read_envs(record.envs);
+                ShaderPools pools;
+                if (record.compute) {
+                    const auto entry{CreateComputePipeline(pools, record.compute_key, envs.front(),
+                                                           nullptr, false)};
+                    ok = entry.pipeline != nullptr;
+                } else {
+                    boost::container::static_vector<Shader::Environment*, Maxwell::MaxShaderProgram>
+                        env_ptrs;
+                    for (auto& env : envs) {
+                        env_ptrs.push_back(&env);
+                    }
+                    const auto pipeline{CreateGraphicsPipeline(pools, record.graphics_key,
+                                                               MakeSpan(env_ptrs), nullptr, false)};
+                    ok = pipeline && !pipeline->Failed();
+                }
+            } catch (const std::exception& e) {
+                LOG_DEBUG(Render_Vulkan, "Precompiled pipeline failed: {}", e.what());
+            }
+            finish(index, ok);
+        });
+    }
+    workers.WaitForRequests(stop_loading);
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+    LOG_INFO(Render_Vulkan, "Precompiled pipelines: {} prepared, {} failed, {} skipped, in {:.1f} s",
+             state.built, state.failed, state.skipped, seconds);
+    if (!stop_loading.stop_requested()) {
+        std::ofstream stamp_file(stamp_path, std::ios::binary | std::ios::trunc);
+        stamp_file << stamp;
+        stamp_file.close();
+        std::filesystem::remove(progress_path, error);
+    }
 }
 
 void PipelineCache::QueueVulkanPipelineCacheFlush() {
@@ -1690,8 +2024,12 @@ void PipelineCache::EvictUnusedPipelines() {
     // with every place a session went (title 1: 1,500 on its title screen alone). One unused for
     // this long is destroyed; rebuilding it later requires a full GPU-thread shader translation
     // (~8.5 ms each) plus a driver pipeline cache hit.
-    constexpr u64 EvictAfterFrames = 9000;
-    if (frame_count <= EvictAfterFrames) {
+    // EDEN_NX2_EVICT_AFTER_FRAMES=<frames> changes the limit; 0 keeps every pipeline.
+    static const u64 EvictAfterFrames = [] {
+        const char* value = std::getenv("EDEN_NX2_EVICT_AFTER_FRAMES");
+        return value ? std::strtoull(value, nullptr, 10) : u64{9000};
+    }();
+    if (EvictAfterFrames == 0 || frame_count <= EvictAfterFrames) {
         return;
     }
     const u64 cutoff = frame_count - EvictAfterFrames;
@@ -1895,6 +2233,32 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             auto& program_va{programs[0]};
             auto program_vb{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
             programs[index] = MergeDualVertexPrograms(program_va, program_vb, env, host_info);
+        }
+
+        // Canonical native keys keep the attribute types the header's input map lists. A program
+        // that loads another one would read it as disabled: this pipeline is dropped and the
+        // program's keys keep every attribute type from now on.
+        if (index == 1 && key.state.dynamic_vertex_input && env.IsNativeProgram() &&
+            env.ShaderStage() == Shader::Stage::VertexB) {
+            u32 loads = 0;
+            for (u32 attribute = 0; attribute < 32; ++attribute) {
+                if (programs[index].info.loads.Generic(attribute)) {
+                    loads |= 1U << attribute;
+                }
+            }
+            const u32 listed = VideoCommon::GenericReadMask(env.SPH());
+            if ((loads & ~listed) != 0 && !IsUnmaskedVertexProgram(key.unique_hashes[1])) {
+                {
+                    std::scoped_lock lock{unmasked_mutex};
+                    unmasked_vertex_programs.insert(key.unique_hashes[1]);
+                    any_unmasked_vertex_program.store(true, std::memory_order_release);
+                }
+                LOG_ERROR(Render_Vulkan,
+                          "Vertex program {:016x} loads attributes {:#010x} its header does not "
+                          "list ({:#010x}); its pipelines now keep every attribute type",
+                          key.unique_hashes[1], loads, listed);
+                return nullptr;
+            }
         }
 
         if (device.GetDriverID() != VK_DRIVER_ID_NVIDIA_PROPRIETARY && Shader::Optimization::HasBrokenPattern(programs[index])) {
@@ -2231,9 +2595,13 @@ void ReportRuntimePipeline(const char* kind, std::chrono::steady_clock::time_poi
     ++count;
     const auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
     // Slow builds are always logged with their shaders, to find the programs that are slow to
-    // translate.
+    // translate. EDEN_NX2_PIPELINE_LOG_LIMIT=<n> changes how many of the others are.
+    static const u32 limit = [] {
+        const char* value = std::getenv("EDEN_NX2_PIPELINE_LOG_LIMIT");
+        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 400U;
+    }();
     if (elapsed > std::chrono::milliseconds{100} ||
-        (elapsed > std::chrono::milliseconds{2} && logged < 400)) {
+        (elapsed > std::chrono::milliseconds{2} && logged < limit)) {
         ++logged;
         LOG_INFO(Render_Vulkan, "{} pipeline built on the GPU thread in {:.1f} ms: {}", kind,
                  ms(elapsed), shaders);
