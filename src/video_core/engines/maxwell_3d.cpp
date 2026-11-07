@@ -1060,7 +1060,9 @@ struct Maxwell3D::FrontState {
         std::vector<u32> writes;               ///< The registers its code can write
         std::bitset<Regs::NUM_REGS> write_set; ///< The same, for the back's check
         std::atomic<bool> escaped{};           ///< The back saw it write another register
+        u32 checked{};                         ///< Calls EDEN_NX2_BACK_MACRO_VERIFY checked
     };
+    std::vector<std::pair<u32, u32>> back_record; ///< A checked call's writes on the back
     /// By start in the macro code of back_generation, once called.
     std::vector<std::unique_ptr<BackMacro>> back_macros;
     u64 back_generation{~u64{0}};
@@ -1218,6 +1220,68 @@ bool BackWritable(const Maxwell3D& maxwell3d, u32 method) {
     default:
         return method < MacroRegistersStart && !maxwell3d.execution_mask[method];
     }
+}
+
+// EDEN_NX2_BACK_MACRO_VERIFY=<n> (64 without a number): the first n calls of each macro the back
+// runs (FrontRunOnBack) also run the old way, on the front once the split is drained
+// (FrontRunTheOldWay), and the front compares the writes (method, value) both make; they must
+// not differ. Every 10 s it logs the counts, with the front's reads and replays of registers
+// such macros wrote and how many of them waited for the back.
+u32 BackMacroChecks() {
+    static const u32 checks = [] {
+        const char* value = std::getenv("EDEN_NX2_BACK_MACRO_VERIFY");
+        if (value == nullptr) {
+            return 0U;
+        }
+        const unsigned long calls = std::strtoul(value, nullptr, 10);
+        return calls != 0 ? static_cast<u32>(calls) : 64U;
+    }();
+    return checks;
+}
+
+struct BackMacroStats {
+    u64 calls{};
+    u64 checked{};
+    u64 differences{};
+    u64 total_differences{};
+    u64 reads{};
+    u64 read_waits{};
+    u64 replays{};
+    u64 replay_waits{};
+    std::chrono::steady_clock::time_point last_report{};
+};
+
+BackMacroStats& BackStats() {
+    static BackMacroStats stats;
+    return stats;
+}
+
+void ReportBackMacroStats() {
+    auto& stats = BackStats();
+    const auto now = std::chrono::steady_clock::now();
+    if (stats.last_report == std::chrono::steady_clock::time_point{}) {
+        stats.last_report = now;
+        return;
+    }
+    const double seconds = std::chrono::duration<double>(now - stats.last_report).count();
+    if (seconds < 10.0) {
+        return;
+    }
+    LOG_INFO(HW_GPU,
+             "Split back macros in {:.1f} s: {} calls, {} checked against the old way, {} of "
+             "those with other writes ({} in all); {} front reads of registers they wrote ({} "
+             "waited), {} replays of their shadow RAM entries ({} waited)",
+             seconds, stats.calls, stats.checked, stats.differences, stats.total_differences,
+             stats.reads, stats.read_waits, stats.replays, stats.replay_waits);
+    stats = BackMacroStats{.total_differences = stats.total_differences, .last_report = now};
+}
+
+std::string DescribeWrites(std::span<const std::pair<u32, u32>> writes) {
+    std::string text;
+    for (size_t i = 0; i < std::min<size_t>(writes.size(), 12); ++i) {
+        text += fmt::format("{}{:#x}={:#x}", i == 0 ? "" : ",", writes[i].first, writes[i].second);
+    }
+    return writes.size() > 12 ? text + ",..." : text;
 }
 
 } // Anonymous namespace
@@ -1640,6 +1704,14 @@ bool Maxwell3D::FrontRunOnBack(Core::System& system, VideoCommon::GpuSplit& spli
         back.native_code_generation = engine.native_code_generation;
         fs.back_code_copied = true;
     }
+    const bool check = known->checked < BackMacroChecks();
+    std::vector<std::pair<u32, u32>> old_writes;
+    if (check) [[unlikely]] {
+        ++known->checked;
+        old_writes = FrontRunTheOldWay(split, fs, start);
+        fs.back_record.clear();
+        back.split_record = &fs.back_record;
+    }
     split.DeferWords(
         [this, system_ptr = &system, engine_ptr = &back, macro = known.get(),
          escapes = &fs.back_escapes](std::span<const u32> parameters) {
@@ -1665,7 +1737,101 @@ bool Maxwell3D::FrontRunOnBack(Core::System& system, VideoCommon::GpuSplit& spli
         }
         fs.back_owned[written] = true;
     }
+    if (BackMacroChecks() != 0) [[unlikely]] {
+        auto& stats = BackStats();
+        ++stats.calls;
+        if (check) {
+            split.Drain(DrainSite::FrontVerify);
+            back.split_record = nullptr;
+            ++stats.checked;
+            if (old_writes != fs.back_record) {
+                ++stats.differences;
+                if (++stats.total_differences <= 16) {
+                    LOG_WARNING(HW_GPU,
+                                "Split back macro check: macro at {:#x} wrote {} the old way, {} "
+                                "on the back",
+                                start, DescribeWrites(old_writes), DescribeWrites(fs.back_record));
+                }
+            }
+        }
+        ReportBackMacroStats();
+    }
     return true;
+}
+
+// EDEN_NX2_BACK_MACRO_VERIFY: the writes (method, value) the call FrontRunOnBack sends makes run
+// the old way: on the front, against its copies of the registers, with the split drained first
+// and its DMA reads made once the caches wrote the words out. Registers macros the back ran may
+// have written are the back's, exact once drained; the call's own writes are what the back's
+// CallMethod leaves (the shadow RAM applied). Writes nothing itself.
+std::vector<std::pair<u32, u32>> Maxwell3D::FrontRunTheOldWay(VideoCommon::GpuSplit& split,
+                                                              const FrontState& fs, u32 start) {
+    split.Drain(VideoCommon::DrainSite::FrontVerify);
+    std::vector<std::pair<u32, u32>> writes;
+    std::unordered_map<u32, u32> values;
+    std::unordered_map<u32, u32> entries;
+    const auto value_of = [&](u32 method) {
+        const auto it = values.find(method);
+        return it != values.end()          ? it->second
+               : fs.back_regs[method] != 0 ? regs.reg_array[method]
+                                           : fs.regs[method];
+    };
+    const auto entry_of = [&](u32 method) {
+        const auto it = entries.find(method);
+        return it != entries.end()           ? it->second
+               : fs.back_shadow[method] != 0 ? shadow_state.reg_array[method]
+                                             : fs.shadow[method];
+    };
+    std::vector<u32> fifo = fs.parameters;
+    const auto read = [&](u32 address) {
+        return address < Regs::NUM_REGS ? value_of(address) : 0U;
+    };
+    const auto emit = [&](u32 address, u32 value) {
+        if (address >= MacroRegistersStart) {
+            return false;
+        }
+        writes.emplace_back(address, value);
+        u32 stored = value;
+        if (fs.control == Regs::ShadowRamControl::Track ||
+            fs.control == Regs::ShadowRamControl::TrackWithFilter) {
+            entries[address] = value;
+        } else if (fs.control == Regs::ShadowRamControl::Replay) {
+            stored = entry_of(address);
+        }
+        values[address] = stored;
+        if (address == 0x158) {
+            // As MacroEngine::Execute reads on the back.
+            const GPUVAddr source = (GPUVAddr{value_of(0x154) & 0x1ffffff} << 32) | value_of(0x155);
+            const u32 words = std::min<u32>(value, 0x1000);
+            const size_t read_bytes = size_t{words} * sizeof(u32);
+            split.Run(
+                [this, source, read_bytes] {
+                    VideoCommon::QueryDma::FlushPending(memory_manager, *rasterizer, source,
+                                                        read_bytes);
+                    if (memory_manager.IsMemoryDirty(source, read_bytes,
+                                                     VideoCommon::CacheType::BufferCache)) {
+                        memory_manager.FlushRegion(source, read_bytes,
+                                                   VideoCommon::CacheType::BufferCache);
+                    }
+                },
+                VideoCommon::DrainSite::FrontVerify);
+            for (u32 i = 0; i < words; ++i) {
+                fifo.push_back(memory_manager.Read<u32>(source + u64{i} * sizeof(u32)));
+            }
+        }
+        return true;
+    };
+    auto& engine = GetNativeMacroEngine();
+#ifdef ARCHITECTURE_x86_64
+    if (!engine.native_jit) {
+        engine.native_jit = std::make_shared<TuringMacroJit>();
+    }
+    engine.native_jit->Prepare(engine.native_code, engine.native_code_generation);
+    engine.native_jit->Execute(start, fifo, std::span<u32>{native_data_ram}, read, emit);
+#else
+    engine.native_interpreter.Execute(engine.native_code, start, fifo, read, emit);
+#endif
+    return writes;
 }
 
 // A register as the back holds it once it ran what the front sent: the front's copy, or the
@@ -1674,7 +1840,12 @@ bool Maxwell3D::FrontRunOnBack(Core::System& system, VideoCommon::GpuSplit& spli
 // waited for), so the back's value stays until the front writes the register again.
 u32 Maxwell3D::FrontRegister(VideoCommon::GpuSplit& split, FrontState& fs, u32 method) {
     if (fs.back_regs[method] != 0) {
-        split.WaitUntil(fs.back_regs[method], VideoCommon::DrainSite::BackRegister);
+        const bool waited =
+            split.WaitUntil(fs.back_regs[method], VideoCommon::DrainSite::BackRegister);
+        if (BackMacroChecks() != 0) [[unlikely]] {
+            ++BackStats().reads;
+            BackStats().read_waits += waited ? 1 : 0;
+        }
         fs.regs[method] = regs.reg_array[method];
         fs.back_regs[method] = 0;
         fs.back_owned[method] = fs.back_shadow[method] != 0;
@@ -1690,7 +1861,12 @@ bool Maxwell3D::FrontTakeOver(VideoCommon::GpuSplit& split, FrontState& fs, u32 
     using Control = Regs::ShadowRamControl;
     const bool tracked = fs.control == Control::Track || fs.control == Control::TrackWithFilter;
     if (fs.back_shadow[method] != 0 && fs.control == Control::Replay) {
-        split.WaitUntil(fs.back_shadow[method], VideoCommon::DrainSite::BackRegister);
+        const bool waited =
+            split.WaitUntil(fs.back_shadow[method], VideoCommon::DrainSite::BackRegister);
+        if (BackMacroChecks() != 0) [[unlikely]] {
+            ++BackStats().replays;
+            BackStats().replay_waits += waited ? 1 : 0;
+        }
         fs.shadow[method] = shadow_state.reg_array[method];
         fs.back_shadow[method] = 0;
     }

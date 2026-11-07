@@ -3413,6 +3413,8 @@ private:
     void FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split, FrontState& state);
     bool FrontRunOnBack(Core::System& system, VideoCommon::GpuSplit& split, FrontState& state,
                         const MacroEngine& engine, u32 start);
+    std::vector<std::pair<u32, u32>> FrontRunTheOldWay(VideoCommon::GpuSplit& split,
+                                                       const FrontState& state, u32 start);
     u32 FrontRegister(VideoCommon::GpuSplit& split, FrontState& state, u32 method);
     bool FrontTakeOver(VideoCommon::GpuSplit& split, FrontState& state, u32 method);
     void FrontTrackInstanceLoop(FrontState& state, u32 method, u32 value);

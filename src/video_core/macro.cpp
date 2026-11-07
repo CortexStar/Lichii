@@ -1401,6 +1401,9 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                 if (split_writes != nullptr && !(*split_writes)[address]) [[unlikely]] {
                     ++split_unexpected_writes;
                 }
+                if (split_record != nullptr) [[unlikely]] {
+                    split_record->emplace_back(address, value);
+                }
                 if (address == 0x556) {
                     // SET_RENDER_ENABLE_OVERRIDE: 0 use the render-enable condition, 1 always,
                     // 2 never. Log a histogram every 20000 macro writes (pop-in diagnostics).
