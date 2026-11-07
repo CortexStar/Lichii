@@ -1,8 +1,26 @@
 # AGENTS
 
-See `docs/Coding.md` for technical coding guidance.
+This file is policy and routing, not a knowledge base. The knowledge lives in `docs/` — read the
+relevant doc before working in an area, and write durable findings back into docs (see
+[Docs map and maintenance](#docs-map-and-maintenance)). `docs/Coding.md` has the technical coding
+guidance.
 
 Keep comments to a reasonable level. Do not overexplain or add/remove comments from unrelated parts of the codebase.
+
+## Know the machine you are on
+
+Never assume the environment — detect it, then adapt:
+
+- OS, shell, and package manager first (`uname`, `$env`, `which`). Commands quoted in docs are
+  portable unless a section says otherwise; paths like `C:/lx/...` belong to one specific machine
+  (see [The owner's PC](#builds)) and do not exist anywhere else.
+- CPU core count sets sane build/test parallelism; free disk and RAM set whether a full configure or
+  an object-level check fits. Probe (`nproc`, `free`, `df`) instead of guessing.
+- GPU vendor, model and driver change graphics diagnosis completely. Pull them from the user's
+  report or log before reasoning about rendering, and read `docs/reference/NvidiaGpu.md` and
+  `docs/reference/DriverBugs.md` when NVIDIA or driver quirks are in play.
+- If the machine matters to the conclusion (perf numbers, render bugs), state the hardware you
+  tested or reasoned about in your findings.
 
 ## Naming
 
@@ -10,8 +28,8 @@ Lichii is the product name. Anything user-facing or host-visible takes Lichii na
 
 Deliberate keeps — do not rename these, and do not "finish" them in passing:
 
-- On-disk `eden` data directories (`LICHII_DIR` keeps the value `"eden"`), `eden_log.txt`, and the `eden_username`/`eden_token` config keys. Renaming strands every existing user's saves and tokens.
-- All `EDEN_*` environment switches. They are the debugging surface documented in the tools table below and in the owner's launch scripts.
+- On-disk `eden` data directories (`LICHII_DIR` keeps the value `"eden"`), `eden_log.txt` (the log filename, `src/common/fs/fs_paths.h` `LOG_FILE`), and the `eden_username`/`eden_token` config keys. Renaming strands every existing user's saves and tokens.
+- All `EDEN_*` environment switches. They are the debugging surface documented in `docs/nx2/debug-tools.md` and in the owner's launch scripts.
 - Eden web-service URLs and the strings that name them ("Eden Web Services", "valid Eden account").
 - SPDX headers (`Eden Emulator Project`), `eglantine.profdata` (release CI), and comments attributing upstream behaviour ("Eden's compiler…", "an Eglantine developer…").
 - The stored hotkey key `"Exit Eglantine"` (it displays as "Exit Lichii"; renaming the key orphans saved keybinds).
@@ -46,7 +64,8 @@ Users report game bugs with Lichii logs (`eden_log.txt`, `eden_log.txt.old`). Ea
 | 0400486024DEC000 | The Legend of Zelda: Ocarina of Time |
 | 0400245021D2C000 | Yoshi and the Mysterious Book |
 
-Add ids here when a report identifies a new game.
+Add ids here when a report identifies a new game. Past investigations for a game live in
+`docs/investigations/` — read them first; many symptoms were already traced.
 
 ## Before writing a fix
 
@@ -60,9 +79,32 @@ Lichii is a fork of [Eglantine](https://github.com/Djihads80/Eglantine). Do not 
 ## Repos and branches
 
 - `origin` is [zortos293/Lichii](https://github.com/zortos293/Lichii): `nx2` lives here and fixes land here through PRs.
-- `cyrix` is the owner's fork, [CyrixJD115/Lichii](https://github.com/CyrixJD115/Lichii): fix branches push here for CI. `build-check` (Linux GCC + Windows clang-cl, production build and tests) runs on PRs; dispatch `release-binaries` with `publish_release=false` on a branch for a full-matrix validation build (Linux x86_64/aarch64 ±PGO, Windows MSVC ±PGO, macOS arm64) without publishing anything.
+- `cyrix` is the owner's fork, [CyrixJD115/Lichii](https://github.com/CyrixJD115/Lichii): fix branches push here for CI.
 - `upstream` is [Djihads80/Eglantine](https://github.com/Djihads80/Eglantine), the true upstream from "Before writing a fix".
 - Work happens on feature branches (`fix/<topic>`); never push to `nx2` on either remote.
+- Which repo to push to depends on who owns the work: the owner's branches go to `cyrix`; branches
+  intended for the main repo go through PRs against `zortos293/Lichii` `nx2`. If it isn't your
+  decision, ask.
+
+## Validation
+
+A change is not done when it compiles in your head — it is done when something ran and the result
+is stated. Match validation depth to the change:
+
+- **Docs / comments / markdown**: links resolve, files parse, moved files left no dangling
+  references. Grep for references to anything you moved or renamed.
+- **Namespace / string changes**: run the rebrand sweep (grep for `eden|eglantine` minus the
+  deliberate keeps in [Naming](#naming)) and confirm nothing user-facing changed unintentionally.
+- **C++ changes**: compile at least the touched translation units, or rely on CI when no local
+  toolchain exists. Never claim a build you didn't run or watch.
+- **CI on GitHub Actions**: `build-check` runs automatically on PRs (Linux GCC + Windows clang-cl,
+  production build and tests). For a full-matrix validation build (Linux x86_64/aarch64 ±PGO,
+  Windows MSVC ±PGO, macOS arm64) dispatch `release-binaries` with `publish_release=false` — this
+  validates without publishing. On the main repo, let the owners' required checks decide; on forks,
+  dispatch yourself and read the logs — green checkmarks you did not inspect prove nothing.
+- **Gameplay behaviour**: CI proves it builds and unit tests pass; it does not prove a game renders
+  correctly. Runtime verification needs the owner (or the live debug server) — say plainly what was
+  and was not tested.
 
 ## Live debug server
 
@@ -81,6 +123,8 @@ Methods: `status`, `frame_times` (`seconds`, `refresh_hz`), `screenshot`, `log_t
 - Restore every hash you reject before you finish.
 - Never start or stop the emulator. If nothing listens, ask the owner to launch the game.
 - Keep sessions light while the owner plays: one request at a time, no capture loops, `sampled` only when you need pass inputs.
+- The paths above are the owner's PC layout. On any other machine running the game, the same script
+  works with that machine's checkout path and Python.
 
 ## RenderDoc and the live server
 
@@ -95,24 +139,13 @@ Use both for graphics investigations. The live server provides emulator state, n
 
 ## Debugging tools
 
-Use these before guessing. All are off unless the variable is set; pass them as the env argument of `build-fix.sh`. Read them from the log at `*:Info` unless noted.
+Use these before guessing. The full switch table (frame dumps, shader dumps, `EDEN_NX2_REJECT_HASH`
+bisecting, traces, minidumps) lives in `docs/nx2/debug-tools.md` — read it, pick the row that
+matches the symptom. The rules that always apply:
 
-| Symptom | Tool | Output |
-|---|---|---|
-| Wrong image (white, black, missing objects, smearing) | `EDEN_NX2_FRAME_DUMP=<dir>` with `EDEN_NX2_FRAME_DUMP_AT=<seconds>`, `<frame>f` or `file` (captures once `<dir>/capture.now` exists; default 60); add `EDEN_NX2_FRAME_DUMP_SAMPLED=1` for pass inputs | One frame's pass colour targets, dispatch storage images (3D included) and present source; with `_SAMPLED`, every texture each pass samples and each compute shader samples before its first dispatch (`kind: sampled`, with stage (5 = compute), TIC index, 3D and depth included) as `.png` and `.raw.zst`, plus `manifest.jsonl` with shader hashes, formats, addresses and per-channel stats. `python3 -I tools/nx2/frame_dump_index.py <dir>` builds `index.html`. Find the first pass whose output is wrong, then inspect its shaders. |
-| Rejected or miscompiled shaders | `EDEN_NX2_SHADER_DUMP=<dir>` | Native programs with `.header.bin` sidecars and `failed-compute-*.env` for failed compute pipelines. Replay offline with `tools/nx2/shader_sweep.py` (see `tools/nx2/shader-sweep.md`). |
-| A newly lowered program changes the image | `EDEN_NX2_REJECT_HASH=<hash>,...` (native program keys from shader dump file names, or shader hashes from the frame dump) | Those programs are rejected as if unsupported; the log shows `rejected by EDEN_NX2_REJECT_HASH` per hit. Bisect by halving the list. The key covers the captured code, so recompute it when the capture rules change. |
-| Draw and render-state questions | `EDEN_NX2_RENDER_TRACE=1`, filter `*:Info HW.GPU:Debug Render.Vulkan:Debug Shader:Debug` | Per-draw state, rejected stages and zero-format texture descriptors. |
-| Video playback | `EDEN_NX2_VDEC_TRACE=1`, `EDEN_NX2_VDEC_DUMP=<dir>` | Decoder submit, decode and composite trace; decoded frames. |
-| Performance and frame pacing | `EDEN_NX2_GPU_PROFILE=1`, `EDEN_DKB_FRAME_TRACE=1` | GPU thread time per second by zone; per-present interval, CPU and fence timing. |
-| Command corruption or pop-in | `EDEN_NX2_PB_CHECK=1`; A/B with `EDEN_NX2_PB_SNAPSHOT=0` or `EDEN_NX2_FETCH_DRAIN=1` | How many pushbuffer entries change between submit and parse. |
-| Split GPU thread races | `EDEN_NX2_SPLIT_CHECK=1` | Reports scheduler use from the wrong thread. |
-| Upscaler and DLSS contracts | `EDEN_NX2_DLSS_CONTRACT_TRACE=1` | Inputs and outputs of replaced upscaler networks. |
-| Service calls | `EDEN_NX2_IPC_TRACE=1` | IPC command trace. |
-| Unmapped device reads (`Unmapped Device ReadBlock`) | `EDEN_NX2_READBLOCK_TRACE=1` | Every read of unmapped device memory, one line per read with its first unmapped address, unmapped byte count and caller (`file:line`). Without it only the first 16 are logged. |
-| Device loss (`Device loss occurred!`) | Always on | The `Device fault` lines after it: what VK_EXT_device_fault reports (fault addresses and their type, vendor fault codes). `not supported by the driver` means the driver has no such data. |
-| Driver crash, stall or slow pipeline builds | `EDEN_NX2_PIPELINE_BUILD_TRACE=<file>` | A flushed `BEGIN`/`END` line per driver pipeline build with the pipeline and stage hashes; `END` adds the wall time (`ms=`). The last `BEGIN` without an `END` names the shaders the driver crashed or is stuck on. Times include waiting on other builds, so compare runs from the same cleared driver cache rather than single builds. |
-| Host crash (log just stops) | Windows minidump in `%LOCALAPPDATA%\CrashDumps\lichii.exe.<pid>.dmp` | Read the exception and stack with the `minidump` Python package, then symbolize with `llvm-symbolizer --obj=lichii.exe --inlines --relative-address <offset>` next to the build's `lichii.pdb`. |
+- Every switch is off unless its variable is set; pass it as the env argument of `build-fix.sh`.
+- Read the tool's output from the log at `*:Info` unless the row says otherwise.
+- Turn diagnostics off when the investigation ends; restore every hash you reject.
 
 ## How work is split
 
@@ -124,11 +157,56 @@ Use these before guessing. All are off unless the variable is set; pass them as 
 
 ## Builds
 
-- Cloud machines build with clang and Ninja for compile and unit-test checks.
-- The build the owner tests runs on the owner's Windows PC (DESKTOP-4UD89UT, Ryzen 9 5900X), built with clang using 12 jobs (`cmake --build <dir> --parallel 12`).
-- On the PC the toolchain is clang-cl (LLVM 22) with the VS 2022 SDK, Qt 6.8.3 in `C:/lx/qt`, Ninja and sccache. Source is `C:/lx/src`, the persistent build dir is `C:/lx/build`, and `C:/lx/configure.sh` holds the configure flags. Build and package a fix with one command: `bash C:/lx/build-fix.sh <branch> <build-name> "<Game> - <fix>" ["ENV=VAL ..."] ["log filter"]`.
-- Every fix gets its own debug build on that PC in `C:\Users\Zortos\.capy\work\lichii-debug\<build>\` and a desktop shortcut `Lichii Debug - <Game> - <fix>` that launches it with the owner's existing user data and keeps the log next to the build, so the owner can run it and send the log back.
+Build capacity differs per machine — detect what the machine you're on offers before planning a
+build (see [Know the machine you are on](#know-the-machine-you-are-on)):
+
+- **CI (any fork with Actions enabled)**: `build-check` on PRs, `release-binaries` full matrix via
+  workflow dispatch. This is the default validation path when no local toolchain exists — see
+  [Validation](#validation).
+- **Cloud/dev boxes**: build with clang and Ninja for compile and unit-test checks. Configure
+  out-of-tree; the repo configures clean with system Qt 6 + Vulkan headers
+  (`-DVulkanHeaders_FORCE_BUNDLED=ON` avoids partial-system-install conflicts).
+- **The owner's PC** (DESKTOP-4UD89UT, Ryzen 9 5900X): the machine that produces builds the owner
+  actually tests. clang-cl with the VS 2022 SDK, Qt 6.8.3 in `C:/lx/qt`, Ninja and sccache. Source
+  is `C:/lx/src`, the persistent build dir is `C:/lx/build`, and `C:/lx/configure.sh` holds the
+  configure flags. Build and package a fix with one command:
+  `bash C:/lx/build-fix.sh <branch> <build-name> "<Game> - <fix>" ["ENV=VAL ..."] ["log filter"]`.
+  Every fix gets its own debug build in `C:\Users\Zortos\.capy\work\lichii-debug\<build>\` and a
+  desktop shortcut `Lichii Debug - <Game> - <fix>` that launches it with the owner's existing user
+  data and keeps the log next to the build, so the owner can run it and send the log back.
 - Bundle a round's candidate fixes into one build behind env switches, so the owner tests one package and A/Bs it live through the debug server instead of one build per idea.
+
+## Docs map and maintenance
+
+Docs are the shared memory. Keep them current or the next agent re-derives everything from scratch.
+
+Layout:
+
+- `docs/` root — evergreen contributor guides: `Build.md`, `CI.md`, `Coding.md`, `Debug.md`,
+  `Deps.md`, `Options.md`, `Settings.md`, `Caveats.md`, `CrossCompile.md`, `CPMUtil.md`,
+  `Development.md`, `compatibility-report.md`.
+- `docs/reference/` — standing technical reference: subsystem design (`DesignOverview.md`,
+  `HosKernel.md`, `dynarmic/`), GPU/driver notes (`NvidiaGpu.md`, `DriverBugs.md`), video playback
+  (`VideoPlayback*.md`), documented behaviours (`native-dlss-replacement.md`, `overwolf-vulkan.md`).
+- `docs/investigations/` — dated per-game/per-session debugging records (Bananza, Kirby, Star Fox,
+  Duskbloods, shader sweeps…). Read before debugging a game; append new findings to the game's
+  existing file or start `<game>-<topic>.md`.
+- `docs/nx2/` — the nx2 effort itself: `debug-tools.md` (the authoritative env-switch table),
+  `debug-mcp.md`, and nx2 technical notes.
+- `docs/user/` — end-user handbook (do not restructure casually; it ships to users).
+- `docs/build/`, `docs/performance/`, `docs/img/` — supporting material.
+
+Maintenance rules:
+
+- New research, findings, root causes, A/B results: write them into the matching doc today — not
+  "later". Unrecorded findings rot; the next session starts from zero.
+- New env switch, renamed tool, changed procedure: update `docs/nx2/debug-tools.md`,
+  `docs/nx2/debug-mcp.md` or the guide that describes it, in the same change.
+- New game investigation: `docs/investigations/<game>-<topic>.md`, linked from the game's existing
+  chain of notes.
+- Keep `docs/README.md` (the index) accurate when you add or move docs.
+- This file (`AGENTS.md`) is for policy and pointers only. Move knowledge into docs, not here; the
+  only reason to edit AGENTS.md is a change in policy, layout, or pointers.
 
 ## Toggles and merging
 
