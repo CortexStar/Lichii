@@ -1741,7 +1741,9 @@ void Device::RemoveUnsuitableExtensions() {
                        shape.scope == VK_SCOPE_SUBGROUP_KHR;
             });
         };
-        const bool usable = extensions.cooperative_matrix &&
+        // EDEN_NX2_NO_COOP_MATRIX=1 keeps HMMA on the software path: AMD 2.0.353 advertises the
+        // extension on RDNA2 (RX 6900 XT) and crashes in amdvlk64.dll building these pipelines.
+        const bool usable = std::getenv("EDEN_NX2_NO_COOP_MATRIX") == nullptr && extensions.cooperative_matrix &&
                             features.cooperative_matrix.cooperativeMatrix &&
                             (properties.cooperative_matrix.cooperativeMatrixSupportedStages &
                              VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
