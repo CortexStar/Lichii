@@ -50,6 +50,7 @@ enum class DrainSite : u32 {
     FrontVerify,    ///< EDEN_NX2_FRONT_VERIFY
     BackRegister,   ///< A register a macro the back ran may have written (Maxwell3D)
     BackCode,       ///< The macro code changes under the macros the back has yet to run
+    ListCopies,     ///< Lists on GPU-written pages: the dispatches and copies before the last sync
     Count,
 };
 
@@ -57,7 +58,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> 
     "other",           "fetch drain",   "acquire",    "semaphore flush", "fence release",
     "list writers",    "list sync",     "list flush", "macro dma read",  "macro dma writes",
     "macro dma flush", "gp sync fence", "map",        "front start",     "front verify",
-    "back register",   "back code",
+    "back register",   "back code",     "list copy writers",
 };
 
 // Splits the GPU thread in two (NX2_GPU_THREAD_SPLIT.md). The GPU thread (the front) takes the
@@ -255,8 +256,8 @@ public:
     bool WaitForSync();
     /// Waits until the back executed the compute and copy work sent before the last NoteSync:
     /// the writers a command list fetched now is ordered after. Returns whether any of it was
-    /// still queued.
-    bool WaitForSyncedWriters();
+    /// still queued. `site`: whose wait it is, for EDEN_NX2_GPU_PROFILE.
+    bool WaitForSyncedWriters(DrainSite site = DrainSite::ListWriters);
     /// A semaphore release was just sent: once the back ran it, the word at `device_address` holds
     /// `payload`, or a value the front can't tell (`known` false: a reduction, a counter report).
     void NoteSemaphoreWrite(u64 device_address, u32 payload, bool known);

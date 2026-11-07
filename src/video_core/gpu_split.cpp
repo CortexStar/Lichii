@@ -233,9 +233,8 @@ bool GpuSplit::WaitForSync() {
     return WaitFor(std::min(last_sync_position, write_position), DrainSite::ListSync);
 }
 
-bool GpuSplit::WaitForSyncedWriters() {
-    return WaitFor(std::min({last_writer_position, last_sync_position, write_position}),
-                   DrainSite::ListWriters);
+bool GpuSplit::WaitForSyncedWriters(DrainSite site) {
+    return WaitFor(std::min({last_writer_position, last_sync_position, write_position}), site);
 }
 
 void GpuSplit::NoteSemaphoreWrite(u64 device_address, u32 payload, bool known) {
