@@ -893,3 +893,65 @@ TEST_CASE("GPU writes to guest memory land the read downloads under them first",
     REQUIRE(f.bytes[0x10104] == 0x12);
     REQUIRE(f.bytes[0x10fff] == 0x12);
 }
+
+TEST_CASE("Read downloads take again what a GPU write outside the cache's records changed",
+          "[buffer_ports]") {
+    Fixture f;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    auto& buffer = Access::Get(*f.cache, id);
+    std::ranges::fill(buffer.bytes, 0x12);
+    Access::MarkWritten(*f.cache, id, 0x20000, 0x100);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    // After the read's copy: a query result copy into the buffer (SyncValues), then a GPU write
+    // elsewhere on the page, which the next read downloads.
+    f.runtime.pending.push_back(
+        [&buffer] { std::fill_n(buffer.bytes.begin() + 0x40, 0x10, u8{0x56}); });
+    f.cache->OutdateReadDownloads(0x20040, 0x10);
+    f.runtime.pending.push_back(
+        [&buffer] { std::fill_n(buffer.bytes.begin() + 0x800, 0x10, u8{0x34}); });
+    Access::MarkWritten(*f.cache, id, 0x20800, 0x10);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    f.cache->FinishReadDownloads(0x20000, 0x1000);
+    REQUIRE(f.bytes[0x1003f] == 0x12);
+    REQUIRE(f.bytes[0x10040] == 0x56);
+    REQUIRE(f.bytes[0x1004f] == 0x56);
+    REQUIRE(f.bytes[0x10050] == 0x12);
+    REQUIRE(f.bytes[0x10800] == 0x34);
+    REQUIRE_FALSE(Access::Pending(*f.cache, 0x20000, 0x1000));
+}
+
+TEST_CASE("Switch 2 writes to guest memory land read downloads only on GPU-written pages",
+          "[buffer_ports]") {
+    Fixture f;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    std::ranges::fill(Access::Get(*f.cache, id).bytes, 0x12);
+    ReadRasterizer reads{*f.cache};
+    Tegra::MemoryManager gpu_memory{f.system, f.device, 32, 1ULL << 31, 16};
+    gpu_memory.BindRasterizer(&reads);
+    gpu_memory.Map(0x200000, 0x20000, 0x10000, Tegra::PTEKind::PITCH, true);
+    struct Nx2Title {
+        Nx2Title() {
+            Tegra::g_nx2_ampere = true;
+        }
+        ~Nx2Title() {
+            Tegra::g_nx2_ampere = false;
+            Tegra::Nx2ClearGpuWrittenPages();
+        }
+    } nx2_title;
+    Access::MarkWritten(*f.cache, id, 0x20000, 0x1000);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    // A page no GPU write reached: no download can be on its way there.
+    gpu_memory.Write<u32>(0x201000, 0xdeadbeef);
+    REQUIRE(VideoCore::g_read_downloads == 1);
+    REQUIRE(f.runtime.host_read_waits == 0);
+    gpu_memory.Write<u32>(0x200100, 0xcafef00d);
+    REQUIRE(VideoCore::g_read_downloads == 0);
+    REQUIRE(f.runtime.host_read_waits == 1);
+    u32 value{};
+    std::memcpy(&value, f.bytes + 0x10100, sizeof(value));
+    REQUIRE(value == 0xcafef00d);
+    std::memcpy(&value, f.bytes + 0x11000, sizeof(value));
+    REQUIRE(value == 0xdeadbeef);
+    REQUIRE(f.bytes[0x10000] == 0x12);
+    REQUIRE(f.bytes[0x10fff] == 0x12);
+}

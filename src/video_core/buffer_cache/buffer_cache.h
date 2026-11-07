@@ -647,6 +647,17 @@ void BufferCache<P>::FinishReadDownloads(DAddr device_addr, u64 size) {
 }
 
 template <class P>
+void BufferCache<P>::OutdateReadDownloads(DAddr device_addr, u64 size) {
+    // The bytes stay GPU-modified when the downloads land, so a later read downloads them.
+    if (!read_downloads.empty()) [[unlikely]] {
+        for (ReadDownload& download : read_downloads) {
+            download.clean_ranges.Subtract(device_addr, size);
+        }
+        read_download_ranges.Subtract(device_addr, size);
+    }
+}
+
+template <class P>
 void BufferCache<P>::WriteReadDownloads(u64 tick) {
     if constexpr (!IS_OPENGL) {
         while (!read_downloads.empty() && read_downloads.front().tick <= tick) {
@@ -2442,14 +2453,7 @@ void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u3
     for (auto& ranges : pending_download_ranges) {
         ranges.Subtract(device_addr, size);
     }
-    // A read download taken before still writes these bytes to guest memory, as a synchronous
-    // one would have, but they stay GPU-modified: a later read downloads them again.
-    if (!read_downloads.empty()) [[unlikely]] {
-        for (ReadDownload& download : read_downloads) {
-            download.clean_ranges.Subtract(device_addr, size);
-        }
-        read_download_ranges.Subtract(device_addr, size);
-    }
+    OutdateReadDownloads(device_addr, size);
     memory_tracker.MarkRegionAsGpuModified(device_addr, size);
     MarkVertexBuffersStale(device_addr, size);
     gpu_modified_ranges.Add(device_addr, size);

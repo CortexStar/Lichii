@@ -215,6 +215,9 @@ protected:
     bool SemiFlushQueryDirty(QueryLocation location);
     void RequestGuestHostSync();
     void UnregisterPending();
+    /// Before a report's bytes go to guest memory: a download for a guest read still on its way
+    /// would write the GPU's older copy over them later (as MemoryManager::Write).
+    void FinishReads(DAddr address, size_t size);
 
     ::Common::unordered_map<u64, ::Common::unordered_map<u32, QueryLocation>> cached_queries;
     std::mutex cache_mutex;

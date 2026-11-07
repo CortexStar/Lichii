@@ -330,7 +330,9 @@ template <typename T>
 void MemoryManager::Write(GPUVAddr addr, T data) {
     // A download for a guest read not yet in guest memory would land over this write later.
     if (VideoCore::g_read_downloads.load(std::memory_order_relaxed) != 0) [[unlikely]] {
-        if (const auto address = GpuToCpuAddress(addr); address && rasterizer != nullptr) {
+        if (const auto address = GpuToCpuAddress(addr);
+            address && rasterizer != nullptr &&
+            VideoCore::ReadDownloadsMayCover(*address, sizeof(T))) {
             rasterizer->FinishRead(*address, sizeof(T));
         }
     }
@@ -537,7 +539,7 @@ void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffe
     // A download for a guest read not yet in guest memory would land over this write later.
     const auto finish_reads = [this](DAddr dev_addr, std::size_t amount) {
         if (VideoCore::g_read_downloads.load(std::memory_order_relaxed) != 0) [[unlikely]] {
-            if (rasterizer != nullptr) {
+            if (rasterizer != nullptr && VideoCore::ReadDownloadsMayCover(dev_addr, amount)) {
                 rasterizer->FinishRead(dev_addr, amount);
             }
         }

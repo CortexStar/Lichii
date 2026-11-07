@@ -281,6 +281,12 @@ public:
     /// `mutex` itself (a caller holding it keeps it held while the host GPU finishes).
     void FinishReadDownloads(DAddr device_addr, u64 size);
 
+    /// A GPU write into the buffers over [device_addr, device_addr + size), after the read
+    /// downloads taken so far: they still write their older bytes to guest memory, as synchronous
+    /// ones would have, but a later read takes the range again. MarkWrittenBuffer does this for
+    /// the writes it records; the query cache's copies of its results call it themselves.
+    void OutdateReadDownloads(DAddr device_addr, u64 size);
+
     std::optional<VideoCore::RasterizerDownloadArea> GetFlushArea(DAddr device_addr, u64 size);
 
     /// Without downloads at every fence, a guest CPU read is the only way GPU-written buffer
