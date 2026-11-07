@@ -411,9 +411,8 @@ jobs:
             .sccache
           key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
 
-      # Plain tar.gz with the two programs. GitHub artifacts drop the executable bit, so a tar is
-      # what keeps it. This one is not self-contained: it needs Qt 6 and the usual libraries
-      # installed on the system.
+      # Plain tar.gz with the two programs and switch defaults. GitHub artifacts drop executable
+      # bits, so a tar preserves them. This needs Qt 6 and the usual system libraries installed.
       - name: Package Linux tar.gz
         if: startsWith(matrix.platform, 'linux')
         shell: bash
@@ -423,7 +422,7 @@ jobs:
           test -x build/release/bin/eden-cli
           strip build/release/bin/lichii build/release/bin/eden-cli
           tar -czf "lichii-${GITHUB_SHA}-${{ matrix.platform }}.tar.gz" \
-            -C build/release/bin lichii eden-cli
+            -C build/release/bin lichii eden-cli nx2_switches.txt
           ls -la "lichii-${GITHUB_SHA}-${{ matrix.platform }}.tar.gz"
 
       # A self-contained AppImage: linuxdeploy bundles every library the two programs need except
@@ -457,6 +456,8 @@ jobs:
           export LDAI_OUTPUT="lichii-${GITHUB_SHA}-${{ matrix.platform }}.AppImage"
           export OUTPUT="$LDAI_OUTPUT"
           export ARCH="$arch"
+          mkdir -p AppDir/usr/bin
+          cp build/release/bin/nx2_switches.txt AppDir/usr/bin/
           "$tools/linuxdeploy-$arch.AppImage" --appdir AppDir \
             --executable build/release/bin/lichii \
             --executable build/release/bin/eden-cli \
@@ -675,6 +676,34 @@ jobs:
           tag="build-${GITHUB_RUN_NUMBER}"
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
 
+          link() { [[ -e "dist/$2" ]] && echo "[$1](${base}/$2)" || true; }
+          appimage_tar() {
+            local appimage tar
+            appimage=$(link AppImage "$1.AppImage")
+            tar=$(link tar.gz "$1.tar.gz")
+            echo "${appimage}${appimage:+${tar:+ · }}${tar}"
+          }
+          has_pgo=$(compgen -G 'dist/*-pgo.*' || true)
+          row() {
+            [[ -z "$2$3" ]] && return 0
+            if [[ -n "$has_pgo" ]]; then echo "| $1 | $2 | $3 | $4 |"; else echo "| $1 | $2 | $4 |"; fi
+          }
+          table() {
+            local rows
+            rows=$(cat)
+            [[ -z "$rows" ]] && return 0
+            if [[ -n "$has_pgo" ]]; then
+              printf '| Build Type | Standard | PGO (Recommended) | Notes |\n| --- | --- | --- | --- |\n'
+            else
+              printf '| Build Type | Standard | Notes |\n| --- | --- | --- |\n'
+            fi
+            echo "$rows"
+          }
+          pgo_note=""
+          if [[ -n "$has_pgo" ]]; then
+            pgo_note="The PGO builds are the same programs compiled with profile-guided optimization (clang plus Eglantine's profile); prefer them when your CPU supports it."
+          fi
+
           cat > notes.md <<EOF
           Automatic build of \`${GITHUB_REF_NAME}\` at ${GITHUB_SHA}.
 
@@ -682,27 +711,25 @@ jobs:
 
           Linux packages come as an AppImage (self-contained, needs glibc 2.39 or newer: Ubuntu 24.04, Fedora 40, Debian 13, Arch) and a tar.gz (uses your system libraries, so Qt 6 and the usual libraries must be installed).
 
-          | Build Type | Standard | PGO (Recommended) | Notes |
-          | --- | --- | --- | --- |
-          | amd64 | [AppImage](${base}/lichii-linux-x86_64.AppImage) · [tar.gz](${base}/lichii-linux-x86_64.tar.gz) | [AppImage](${base}/lichii-linux-x86_64-pgo.AppImage) · [tar.gz](${base}/lichii-linux-x86_64-pgo.tar.gz) | Make the AppImage executable (\`chmod +x\`) and run it |
-          | ARM (aarch64) | [AppImage](${base}/lichii-linux-aarch64.AppImage) · [tar.gz](${base}/lichii-linux-aarch64.tar.gz) | [AppImage](${base}/lichii-linux-aarch64-pgo.AppImage) · [tar.gz](${base}/lichii-linux-aarch64-pgo.tar.gz) | |
+          $({
+            row amd64 "$(appimage_tar lichii-linux-x86_64)" "$(appimage_tar lichii-linux-x86_64-pgo)" "Make the AppImage executable (\`chmod +x\`) and run it"
+            row "ARM (aarch64)" "$(appimage_tar lichii-linux-aarch64)" "$(appimage_tar lichii-linux-aarch64-pgo)" ""
+          } | table)
 
           ## Windows
 
           Windows packages are in-place zip files: extract and run \`lichii.exe\`, or \`eden-cli.exe\` from a terminal.
 
-          | Build Type | Standard | PGO (Recommended) | Notes |
-          | --- | --- | --- | --- |
-          | amd64 / x86_64 (MSVC) | [MSVC zip](${base}/lichii-windows-x86_64.zip) | | Use if you run into graphical issues on other builds |
-          | amd64 / x86_64 (MinGW) | | [PGO zip](${base}/lichii-windows-x86_64-pgo.zip) | Built with MinGW clang; bundles its own DLLs, no Visual C++ redistributable needed |
+          $({
+            row "amd64 / x86_64 (MSVC)" "$(link "MSVC zip" lichii-windows-x86_64.zip)" "" "Use if you run into graphical issues on other builds"
+            row "amd64 / x86_64 (MinGW)" "" "$(link "PGO zip" lichii-windows-x86_64-pgo.zip)" "Built with MinGW clang; bundles its own DLLs, no Visual C++ redistributable needed"
+          } | table)
 
           ## macOS
 
-          | Build Type | Standard | PGO (Recommended) | Notes |
-          | --- | --- | --- | --- |
-          | arm64 (Apple Silicon) | [zip](${base}/lichii-macos-arm64.zip) | | macOS 15 or newer. Not notarized: right-click and choose Open the first time, or run \`xattr -dr com.apple.quarantine lichii.app\`. \`eden-cli\` is inside the app, in \`Contents/MacOS\` |
+          $(row "arm64 (Apple Silicon)" "$(link zip lichii-macos-arm64.zip)" "" "macOS 15 or newer. Not notarized: right-click and choose Open the first time, or run \`xattr -dr com.apple.quarantine lichii.app\`. \`eden-cli\` is inside the app, in \`Contents/MacOS\`" | table)
 
-          The PGO builds are the same programs compiled with profile-guided optimization (clang plus Eglantine's profile); prefer them when your CPU supports it.
+          ${pgo_note}
           EOF
 
           gh release create "${tag}" dist/* \
@@ -711,3 +738,20 @@ jobs:
             --prerelease \
             --title "Lichii ${GITHUB_REF_NAME} build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7})" \
             --notes-file notes.md
+
+      # LICHII_BUILD_TAG is baked into every binary as build-<run number>, and the update checker
+      # compares release tags against it. A release whose tag or title names another run would be
+      # skipped or offered wrongly, so fail the run instead of leaving it published.
+      - name: Verify the release tag matches the run number
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          expected="build-${GITHUB_RUN_NUMBER}"
+          published_tag=$(gh release view "$expected" --repo "${GITHUB_REPOSITORY}" --json tagName --jq '.tagName')
+          published_title=$(gh release view "$expected" --repo "${GITHUB_REPOSITORY}" --json name --jq '.name')
+          if [ "$published_tag" != "$expected" ] || [[ "$published_title" != *" build ${GITHUB_RUN_NUMBER} ("* ]]; then
+            echo "Release is tagged '$published_tag' and titled '$published_title', expected tag $expected and a title naming build ${GITHUB_RUN_NUMBER}"
+            exit 1
+          fi
