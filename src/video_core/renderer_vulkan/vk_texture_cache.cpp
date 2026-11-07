@@ -2148,7 +2148,7 @@ bool TextureCacheRuntime::TemporalUpscale(Framebuffer* dst_framebuffer, ImageVie
                                       *temporal_history.views[read_index],
                                       *temporal_history.views[write_index], dst_region, jitter,
                                       motion_scale, !use_history ? -1.0f : reset ? 1.0f : current_weight, kernel_scale,
-                                      clip_width, clip_motion, kernel_motion);
+                                      clip_width, clip_motion, kernel_motion, render_size);
     // RCAS on the output, set by the FSR sharpness slider (stops as FSR takes them, 0% = stored 200
     // turns it off). It reads the unsharpened result just stored, which stays the history.
     // EDEN_NX2_TEMPORAL_SHARPEN=<stops>|off overrides the slider.
