@@ -8,6 +8,7 @@
 
 #include <array>
 #include <type_traits>
+#include <vector>
 
 #include "common/bit_field.h"
 #include "common/common_types.h"
@@ -291,6 +292,9 @@ struct FixedPipelineState {
         return offsetof(FixedPipelineState, xfb_state);
     }
 
+    /// attribute_types as Refresh computes it with dynamic vertex input.
+    [[nodiscard]] static u64 DynamicAttributeTypes(const Maxwell& regs) noexcept;
+
     u32 DynamicAttributeType(size_t index) const noexcept {
         return (attribute_types >> (index * 2)) & 0b11;
     }
@@ -298,6 +302,43 @@ struct FixedPipelineState {
 static_assert(std::has_unique_object_representations_v<FixedPipelineState>);
 static_assert(std::is_trivially_copyable_v<FixedPipelineState>);
 static_assert(std::is_trivially_constructible_v<FixedPipelineState>);
+
+/// EDEN_NX2_PIPE_SKIP: tells when FixedPipelineState::Refresh would give the state it gave last
+/// time. Registers Refresh reads that have a free dirty table slot raise Dirty::PipelineState;
+/// those whose two slots are taken are compared by value.
+class PipelineStateWatch {
+public:
+    /// Whether Refresh would leave `state` as it is: no flag raised, the same draw topology,
+    /// engine hint and dual-source blending, the value-compared registers unchanged, and the
+    /// parts Refresh redoes under a raised VertexInput (dynamic) or ViewportSwizzles flag equal
+    /// to what it would compute. Clears ViewportSwizzles then, as Refresh would.
+    [[nodiscard]] bool StateUnchanged(Tegra::Engines::Maxwell3D& maxwell3d,
+                                      const FixedPipelineState& state) noexcept;
+
+    /// Called right after Refresh: remembers its inputs and clears Dirty::PipelineState.
+    void Store(Tegra::Engines::Maxwell3D& maxwell3d, const DynamicFeatures& features);
+
+    /// Forgets the watched engine, so the next Store patches its (possibly new) dirty tables.
+    void Reset() noexcept {
+        engine = nullptr;
+        valid = false;
+    }
+
+private:
+    void Setup(Tegra::Engines::Maxwell3D& maxwell3d, const DynamicFeatures& features);
+
+    const Tegra::Engines::Maxwell3D* engine{};
+    std::vector<u32> value_registers;
+    std::vector<u32> values;
+    Maxwell::PrimitiveTopology topology{};
+    Tegra::Engines::Maxwell3D::EngineHint engine_state{};
+    bool dual_source_blend{};
+    bool blending_gated{};
+    bool dynamic_vertex_input{};
+    bool valid{};
+};
+
+[[nodiscard]] bool PipelineSkipEnabled() noexcept;
 
 } // namespace Vulkan
 

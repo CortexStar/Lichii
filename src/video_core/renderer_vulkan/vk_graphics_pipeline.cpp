@@ -305,6 +305,7 @@ GraphicsPipeline::GraphicsPipeline(
         num_image_elements += Shader::NumDescriptors(info->texture_descriptors);
         num_image_elements += Shader::NumDescriptors(info->image_descriptors);
         num_descriptor_entries += NumDescriptorEntries(*info);
+        AppendBindingKinds(*info, false, binding_kinds);
     }
     fragment_has_color0_output = stage_infos[NUM_STAGES - 1].stores_frag_color[0];
     const auto any_written = [](const auto& descriptors) {
@@ -401,6 +402,7 @@ GraphicsPipeline::GraphicsPipeline(
 void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
     transition_keys.push_back(transition->key);
     transitions.push_back(transition);
+    transition_tags.push_back(TransitionTag(transition->key));
 }
 
 template <typename Spec>
@@ -409,8 +411,8 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     boost::container::small_vector<VideoCommon::SamplerId, 96> samplers;
     views.reserve(num_image_elements);
     samplers.reserve(num_textures);
-    // EDEN_NX2_BINDCACHE: the sampler handles are kept to look the bindings up in bind_cache.
-    const bool use_bind_cache = num_image_elements != 0 && VideoCommon::BindCacheEnabled();
+    // EDEN_NX2_BINDMEMO: the sampler handles are kept to look the bindings up in the memo.
+    const bool use_bind_memo = num_image_elements != 0 && VideoCommon::BindMemoEnabled();
     boost::container::small_vector<u32, 96> sampler_handles;
 
     namespace Profile = VideoCommon::Nx2Profile;
@@ -494,7 +496,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                 const auto handle{read_handle(desc, index)};
                 views.push_back({handle.first});
 
-                if (use_bind_cache) {
+                if (use_bind_memo) {
                     sampler_handles.push_back(handle.second);
                     continue;
                 }
@@ -528,37 +530,40 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             config_stage(4);
         }
     }
-    const ImageBindingCache::Entry* bind_hit{};
-    ImageBindingCache::Entry* bind_record{};
-    u64 bind_epoch{};
-    if (use_bind_cache) {
-        bind_hit = bind_cache.Find(texture_cache, false, via_header_index,
-                                   std::span(views.data(), views.size()),
-                                   std::span(sampler_handles.data(), sampler_handles.size()));
-        if (bind_hit) {
-            for (size_t index = 0; index < views.size(); ++index) {
-                views[index].id = bind_hit->views[index].id;
-            }
-            samplers.assign(bind_hit->samplers.begin(), bind_hit->samplers.end());
-        } else {
-            for (const u32 handle : sampler_handles) {
-                samplers.push_back(texture_cache.GetSamplerId(handle, false));
+    boost::container::small_vector<TextureCache::BindingMemo*, 160> memos;
+    bool memo_hit = false;
+    u64 memo_clock = 0;
+    if (use_bind_memo) {
+        Profile::Scope scope{Profile::Zone::FillImageViews};
+        memos.resize(views.size());
+        samplers.resize(sampler_handles.size());
+        memo_hit = FindImageBindings(texture_cache, binding_kinds,
+                                     std::span(views.data(), views.size()),
+                                     std::span(sampler_handles.data(), sampler_handles.size()),
+                                     samplers.data(), memos.data());
+        if (!memo_hit) {
+            memo_clock = texture_cache.BindingClock();
+            for (size_t index = 0; index < sampler_handles.size(); ++index) {
+                samplers[index] = texture_cache.GetSamplerId(sampler_handles[index], false);
             }
         }
     }
     ASSERT(views.size() == num_image_elements);
     ASSERT(samplers.size() == num_textures);
-    if (!bind_hit) {
+    if (!memo_hit) {
         Profile::Scope scope{Profile::Zone::FillImageViews};
         texture_cache.FillImageViews(std::span(views.data(), views.size()), false,
                                      Spec::has_images);
     }
-    if (use_bind_cache && !bind_hit) {
-        bind_epoch = texture_cache.BindingsEpoch();
-        bind_record = &bind_cache.BeginRecord(
-            via_header_index, std::span(views.data(), views.size()),
-            std::span(sampler_handles.data(), sampler_handles.size()),
-            std::span(samplers.data(), samplers.size()));
+    // A resolved draw leaves its descriptors here to be remembered.
+    boost::container::small_vector<DescriptorUpdateEntry, 32> record_descriptors;
+    boost::container::small_vector<u8, 32> record_rescaled;
+    std::optional<ImageBindingRecord> record;
+    if (use_bind_memo && !memo_hit) {
+        record_descriptors.resize(views.size());
+        record_rescaled.resize(views.size());
+        record = ImageBindingRecord{record_descriptors.data(), record_rescaled.data(),
+                                    views.data()};
     }
     if (RecordingSampledTextures()) {
         sampled_images.clear();
@@ -682,7 +687,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     RenderAreaPushConstant render_area;
     const VideoCommon::SamplerId* samplers_it{samplers.data()};
     const VideoCommon::ImageViewInOut* views_it{views.data()};
-    size_t push_index{};
+    TextureCache::BindingMemo* const* memos_it{memos.data()};
     const auto prepare_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         {
             Profile::Scope scope{Profile::Zone::BindStageBuffers};
@@ -690,13 +695,14 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         }
         {
             Profile::Scope scope{Profile::Zone::PushDescriptors};
-            if (bind_hit) {
-                ReplayImageDescriptors(*bind_hit, push_index, guest_descriptor_queue);
+            if (memo_hit) {
+                PushMemoDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
+                                    rescaling, memos_it);
             } else {
                 PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
-                                     rescaling, samplers_it, views_it, bind_record);
+                                     rescaling, samplers_it, views_it,
+                                     record ? &*record : nullptr);
             }
-            ++push_index;
         }
         const auto& info{stage_infos[stage]};
         if (info.uses_render_area) {
@@ -723,11 +729,11 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     if constexpr (Spec::enabled_stages[4]) {
         prepare_stage(4);
     }
-    if (bind_hit) {
-        ReplayImageBindingEffects(*bind_hit, texture_cache, rescaling);
-    } else if (bind_record && texture_cache.BindingsEpoch() == bind_epoch &&
-               texture_cache.CanCacheBindings(std::span(views.data(), views.size()))) {
-        bind_record->epoch = bind_epoch;
+    if (record) {
+        RecordImageBindings(texture_cache, binding_kinds, std::span(views.data(), views.size()),
+                            std::span(sampler_handles.data(), sampler_handles.size()),
+                            std::span(samplers.data(), samplers.size()),
+                            record_descriptors.data(), record_rescaled.data(), memo_clock);
     }
     if (buffer_cache.any_buffer_uploaded) {
         buffer_cache.runtime.PostCopyBarrier();

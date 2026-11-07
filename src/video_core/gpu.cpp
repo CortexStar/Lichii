@@ -69,7 +69,19 @@ struct GPU::Impl {
         , use_nvdec{use_nvdec_}
         , shader_notify()
         , is_async{is_async_}
-    {}
+    {
+        // Fence downloads must not land over guest CPU writes that are not applied yet. The
+        // query only uses the system (it outlives the fencing thread that calls it).
+        VideoCommon::Nx2Reactive::SetPendingCpuWritesQuery([&core_system = system_](u64 address,
+                                                                                    u64 size) {
+            for (auto& manager : core_system.GetGPUDirtyMemoryManager()) {
+                if (manager.MayHaveWrites() && manager.Overlaps(address, size)) {
+                    return true;
+                }
+            }
+            return false;
+        });
+    }
 
     ~Impl() {
         NotifyShutdown();
@@ -127,6 +139,21 @@ struct GPU::Impl {
 
     /// Synchronizes CPU writes with Host GPU memory.
     void InvalidateGPUCache() {
+        // Called at every fence (~11,000 a second in Ocarina), mostly with nothing collected:
+        // skip the six cores' locks then (EDEN_NX2_DIRTY_FASTPATH=0 always gathers).
+        static const bool fast_path = [] {
+            const char* value = std::getenv("EDEN_NX2_DIRTY_FASTPATH");
+            return value == nullptr || value[0] != '0';
+        }();
+        if (fast_path) {
+            bool may_have_writes = false;
+            for (auto& manager : system.GetGPUDirtyMemoryManager()) {
+                may_have_writes |= manager.MayHaveWrites();
+            }
+            if (!may_have_writes) {
+                return;
+            }
+        }
         std::function<void(PAddr, size_t)> callback_writes([this](PAddr address, size_t size) {
             renderer->ReadRasterizer()->OnCacheInvalidation(address, size);
         });
@@ -253,10 +280,58 @@ struct GPU::Impl {
         gpu_thread.FlushRegion(addr, size, is_async);
     }
 
+    /// A read of GPU-written memory whose downloads are on their way (Nx2Reactive::WaitLanding):
+    /// waits for them to land, without the GPU thread. Returns the area once they have, or the
+    /// last answer (not preemtive) when no download covers it anymore or after 16 ms (a flush
+    /// would wait for the same host GPU work); the read then flushes.
+    VideoCore::RasterizerDownloadArea WaitForLanding(DAddr addr, u64 size,
+                                                     VideoCore::RasterizerDownloadArea area) {
+        auto& landing = VideoCommon::Nx2Reactive::GetLanding();
+        VideoCore::RasterizerInterface* const rasterizer = renderer->ReadRasterizer();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{16};
+        landing.waiters.fetch_add(1, std::memory_order_acq_rel);
+        while (true) {
+            const u64 generation = landing.generation.load(std::memory_order_acquire);
+            area = rasterizer->GetFlushArea(addr, size);
+            if (area.preemtive || !area.wait_landing) {
+                break;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                break;
+            }
+            std::unique_lock lock{landing.mutex};
+            landing.cv.wait_until(lock, (std::min)(deadline, now + std::chrono::milliseconds{1}),
+                                  [&] {
+                                      return landing.generation.load(std::memory_order_acquire) !=
+                                             generation;
+                                  });
+        }
+        landing.waiters.fetch_sub(1, std::memory_order_acq_rel);
+        area.wait_landing = false;
+        return area;
+    }
+
     VideoCore::RasterizerDownloadArea OnCPURead(DAddr addr, u64 size) {
         auto raster_area = renderer->ReadRasterizer()->GetFlushArea(addr, size);
         if (raster_area.preemtive) {
             return raster_area;
+        }
+        if (raster_area.wait_landing) {
+            const auto wait_begin = VideoCommon::Nx2Reactive::g_diag
+                                        ? std::chrono::steady_clock::now()
+                                        : std::chrono::steady_clock::time_point{};
+            raster_area = WaitForLanding(addr, size, raster_area);
+            if (VideoCommon::Nx2Reactive::g_diag) [[unlikely]] {
+                VideoCommon::Nx2Reactive::NoteLandingWait(
+                    raster_area.preemtive,
+                    static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now() - wait_begin)
+                                         .count()));
+            }
+            if (raster_area.preemtive) {
+                return raster_area;
+            }
         }
         raster_area.preemtive = true;
         // A guest CPU read of GPU-written memory (reactive flushing): count them, they decide
@@ -470,6 +545,12 @@ bool GPU::HasPendingCPUWrites(DAddr addr, u64 size) {
         }
     }
     return false;
+}
+
+void GPU::CollectHandoffWrite(DAddr addr, u64 size) {
+    // The last manager is kept for the handoff (core.cpp). Its writers all hold the buffer cache's
+    // lock, so it has one producer at a time, like a core's.
+    impl->system.GetGPUDirtyMemoryManager().back().Collect(addr, size);
 }
 
 void GPU::OnCommandListEnd() {

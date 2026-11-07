@@ -348,6 +348,20 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             [&](u64 address, NativeQmdScheduler::Descriptor& descriptor) {
                 if (!memory_manager.IsFullyMappedRange(address, sizeof(descriptor))) return false;
                 memory_manager.ReadBlockUnsafe(address, descriptor.data(), sizeof(descriptor));
+                // An all-zero QMD whose words GPU work wrote (a copy) may still be only in the
+                // buffer cache: flush it and read again (EDEN_NX2_QMD_FLUSH=0: off).
+                static const bool qmd_flush = VideoCommon::Nx2Switch("EDEN_NX2_QMD_FLUSH", true);
+                if (qmd_flush && std::ranges::all_of(descriptor, [](u32 word) { return word == 0; })) {
+                    if (const auto device = memory_manager.GpuToCpuAddress(address);
+                        device && rasterizer->MustFlushRegion(*device, sizeof(descriptor),
+                                                              VideoCommon::CacheType::BufferCache)) {
+                        rasterizer->FlushRegion(*device, sizeof(descriptor),
+                                                VideoCommon::CacheType::BufferCache);
+                        memory_manager.ReadBlockUnsafe(address, descriptor.data(), sizeof(descriptor));
+                        LOG_WARNING(HW_GPU, "Native QMD {:#x} read zero from guest memory; flushed "
+                                    "the buffer cache", address);
+                    }
+                }
                 if (static u32 logged{}; (descriptor[53] & (1U << 23)) && logged < 8) {
                     ++logged;
                     LOG_INFO(HW_GPU, "Native QMD {:#x} releases: {:08x} | {:08x} | {:08x}", address,
@@ -367,6 +381,8 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             },
             [&](u64 address, u32 payload, u32 flags) {
                 if (!memory_manager.IsFullyMappedRange(address, sizeof(payload))) return false;
+                // The split's front: acquires met on this page are host-level waits.
+                VideoCommon::GpuSplit::NoteGpuSemaphore(address);
                 if (flags & (1U << 26)) {
                     rasterizer->SignalFence([this, address, payload] {
                         const u32 value = memory_manager.Read<u32>(address) + payload;
@@ -1301,7 +1317,8 @@ void KeplerCompute::FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& fs
         const GPUVAddr address =
             (GPUVAddr{fs.registers[0x6c0] & 0x1ffffff} << 32) | fs.registers[0x6c1];
         const u32 argument = fs.registers[0x6c3];
-        split.NoteWrite(&memory_manager, address, 16);
+        // Bit 28: a one-word structure, without the time stamp.
+        split.NoteWrite(&memory_manager, address, ((argument >> 28) & 1) != 0 ? 4 : 16, true);
         const u32 operation = argument & 3;
         if ((operation == 0 || operation == 2) && ((argument >> 3) & 1) == 0) {
             split.NoteRelease(&memory_manager, address, fs.registers[0x6c2]);

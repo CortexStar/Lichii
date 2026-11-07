@@ -34,6 +34,7 @@ enum class Type {
     CachedCPU,
     Untracked,
     Preflushable,
+    Hot, ///< Kept unprotected and reported apart by ForEachCpuUploadRange (BufferCache hot pages)
     Max
 };
 
@@ -210,6 +211,62 @@ struct WordManager {
         });
         if (pending) {
             release();
+        }
+        if (!ranges.empty()) {
+            ApplyCollectedRanges(ranges, 1);
+        }
+    }
+
+    /// ForEachModifiedRange(Type::CPU, true, ...), except for Hot pages: their CPU and Untracked
+    /// bits stay (no protection change) and they go to `hot_func` instead of `func`.
+    template <typename Func, typename HotFunc>
+    void ForEachCpuUploadRange(VAddr query_cpu_range, s64 size, Func&& func, HotFunc&& hot_func) {
+        std::span<u64> state_words = Span(Type::CPU);
+        std::span<u64> untracked_words = Span(Type::Untracked);
+        std::span<u64> cached_words = Span(Type::CachedCPU);
+        const std::span<const u64> hot_words = Span(Type::Hot);
+        size_t const offset = query_cpu_range - cpu_addr;
+        struct Run {
+            bool pending = false;
+            size_t begin{};
+            size_t end{};
+        };
+        Run regular{};
+        Run hot{};
+        const auto add = [&](Run& run, size_t page, size_t pages, auto& callback) {
+            if (run.pending && run.end == page) {
+                run.end += pages;
+                return;
+            }
+            if (run.pending) {
+                callback(cpu_addr + run.begin * BYTES_PER_PAGE, (run.end - run.begin) * BYTES_PER_PAGE);
+            }
+            run = Run{true, page, page + pages};
+        };
+        CollectedRanges ranges;
+        IterateWords(offset, size, [&](size_t index, u64 mask) {
+            const u64 word = state_words[index] & mask;
+            const u64 hot_word = word & hot_words[index];
+            const u64 clear_mask = mask & ~hot_words[index];
+            CollectChangedRanges(true, index, untracked_words[index], clear_mask, ranges);
+            state_words[index] &= ~clear_mask;
+            untracked_words[index] &= ~clear_mask;
+            cached_words[index] &= ~word;
+            NoteCleanWord(index);
+            const size_t base_offset = index * PAGES_PER_WORD;
+            IteratePages(word & ~hot_word, [&](size_t pages_offset, size_t pages_size) {
+                add(regular, base_offset + pages_offset, pages_size, func);
+            });
+            IteratePages(hot_word, [&](size_t pages_offset, size_t pages_size) {
+                add(hot, base_offset + pages_offset, pages_size, hot_func);
+            });
+        });
+        if (regular.pending) {
+            func(cpu_addr + regular.begin * BYTES_PER_PAGE,
+                 (regular.end - regular.begin) * BYTES_PER_PAGE);
+        }
+        if (hot.pending) {
+            hot_func(cpu_addr + hot.begin * BYTES_PER_PAGE, (hot.end - hot.begin) * BYTES_PER_PAGE);
         }
         if (!ranges.empty()) {
             ApplyCollectedRanges(ranges, 1);

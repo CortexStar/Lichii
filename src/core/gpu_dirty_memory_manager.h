@@ -34,6 +34,7 @@ public:
                 if (IsValid(tmp.address)) {
                     std::scoped_lock lk(guard);
                     back_buffer.emplace_back(tmp);
+                    has_back.store(true, std::memory_order_release);
                     current.exchange(t, std::memory_order_relaxed);
                     return;
                 }
@@ -56,9 +57,11 @@ public:
             std::scoped_lock lk(guard);
             TransformAddress t = current.exchange(default_transform, std::memory_order_relaxed);
             front_buffer.swap(back_buffer);
+            has_back.store(false, std::memory_order_relaxed);
             if (IsValid(t.address)) {
                 front_buffer.emplace_back(t);
             }
+            has_front.store(!front_buffer.empty(), std::memory_order_release);
         }
         for (auto& transform : front_buffer) {
             size_t offset = 0;
@@ -75,7 +78,19 @@ public:
                 offset += continuous_bits << align_bits;
             }
         }
-        front_buffer.clear();
+        {
+            std::scoped_lock lk(guard);
+            front_buffer.clear();
+            has_front.store(false, std::memory_order_release);
+        }
+    }
+
+    /// Whether Gather can find collected writes, without its locks (a write collected meanwhile
+    /// is gathered by the next one, as if it came right after this Gather).
+    bool MayHaveWrites() {
+        return IsValid(current.load(std::memory_order_acquire).address) ||
+               has_back.load(std::memory_order_acquire) ||
+               has_front.load(std::memory_order_acquire);
     }
 
     /// Returns true when collected writes not yet gathered overlap [address, address + size).
@@ -98,6 +113,12 @@ public:
             return true;
         }
         for (const TransformAddress& t : back_buffer) {
+            if (overlaps(t)) {
+                return true;
+            }
+        }
+        // Writes a Gather is still applying count until their callbacks have run.
+        for (const TransformAddress& t : front_buffer) {
             if (overlaps(t)) {
                 return true;
             }
@@ -145,6 +166,8 @@ private:
     }
 
     std::atomic<TransformAddress> current{};
+    std::atomic<bool> has_back{}; ///< back_buffer holds writes
+    std::atomic<bool> has_front{}; ///< front_buffer holds writes Gather is still applying
     std::mutex guard;
     std::mutex gather_guard;
     std::vector<TransformAddress> back_buffer;

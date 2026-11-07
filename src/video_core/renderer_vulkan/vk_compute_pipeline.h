@@ -106,8 +106,8 @@ private:
     bool uses_push_descriptor{false};
     bool uses_descriptor_buffer{false};
     DescriptorBufferLayout descriptor_buffer_layout;
-    // EDEN_NX2_BINDCACHE: the previous dispatch's image bindings and descriptor buffer allocation
-    ImageBindingCache bind_cache;
+    std::vector<u32> binding_kinds; ///< EDEN_NX2_BINDMEMO: per texture/image view, in read order
+    // EDEN_NX2_BINDCACHE: the previous dispatch's descriptor buffer allocation
     std::vector<DescriptorUpdateEntry> last_descriptor_payload;
     VkDeviceSize last_descriptor_buffer_offset{};
     u32 last_descriptor_buffer_chunk{};

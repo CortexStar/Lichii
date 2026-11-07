@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -27,6 +28,7 @@
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2_query_fast.h"
+#include "video_core/nx2_reactive.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace VideoCommon {
@@ -56,6 +58,7 @@ public:
     void TickFrame() {
         std::unique_lock lock(ring_guard);
         delayed_destruction_ring.Tick();
+        Nx2Reactive::g_frame.fetch_add(1, std::memory_order_relaxed);
     }
 
     // Unlike other fences, this one doesn't
@@ -82,6 +85,11 @@ public:
 
     void SignalFence(std::function<void()>&& func) {
         Nx2Profile::Scope profile_scope{Nx2Profile::Zone::Fence};
+        // A guest read waits for downloads to land (Nx2Reactive::WaitLanding): submit the
+        // deferred work now rather than at the end of the batching window.
+        if (Nx2Reactive::GetLanding().waiters.load(std::memory_order_relaxed) != 0) {
+            SubmitDeferredWork();
+        }
         const bool delay_fence = Settings::IsGPUFenceBehaviorDefault() ? Settings::IsGPULevelHigh() : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
         if constexpr (!can_async_check) {
             TryReleasePendingFences<false>();

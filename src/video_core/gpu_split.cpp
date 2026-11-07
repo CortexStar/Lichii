@@ -133,7 +133,17 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     narrow_dma_recorded = narrow && Nx2Switch("EDEN_NX2_NARROW_DMA_RECORDED", true);
     narrow_list_sync = narrow && Nx2Switch("EDEN_NX2_NARROW_LIST_SYNC", true);
     sem_predict = narrow && Nx2Switch("EDEN_NX2_SEM_PREDICT", true);
+    sem_predict_landed = sem_predict && Nx2Switch("EDEN_NX2_SEM_PREDICT_LANDED", true);
+    acquire_poll = narrow && Nx2Switch("EDEN_NX2_ACQUIRE_POLL", true);
+    list_exact = narrow && Nx2Switch("EDEN_NX2_LIST_EXACT", true);
+    sync_gpu_semaphores = narrow && Nx2Switch("EDEN_NX2_SYNC_GPU_SEMAPHORES", true);
+    publish_idle = Nx2Switch("EDEN_NX2_PUBLISH_IDLE", true);
     diag = narrow && Nx2Switch("EDEN_NX2_NARROW_DIAG", false);
+    if (narrow) {
+        page_slots = std::make_unique<PageSlot[]>(PageBuckets * 4);
+        word_slots = std::make_unique<WordSlot[]>(WordBuckets * 4);
+        queued_releases = std::make_unique<QueuedRelease[]>(ReleaseBuckets * 4);
+    }
     ++session;
     LOG_INFO(HW_GPU, "GPU thread split: engine methods run on a second thread{}{}",
              front_macros ? ", macros on the first" : "",
@@ -141,9 +151,11 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     if (narrow) {
         LOG_INFO(HW_GPU,
                  "GPU thread split narrow switches: compute {} render_enable {} dma_recorded {} "
-                 "list_sync {} sem_predict {} diag {}",
+                 "list_sync {} sem_predict {} sem_predict_landed {} acquire_poll {} list_exact {} "
+                 "sync_gpu_semaphores {} diag {}",
                  narrow_compute, narrow_render_enable, narrow_dma_recorded, narrow_list_sync,
-                 sem_predict, diag);
+                 sem_predict, sem_predict_landed, acquire_poll, list_exact, sync_gpu_semaphores,
+                 diag);
     }
 }
 
@@ -174,17 +186,38 @@ void GpuSplit::Stop() {
     front_macros = false;
     narrow = false;
     narrow_strict = false;
+    narrow_compute = false;
+    narrow_render_enable = false;
+    narrow_dma_recorded = false;
+    narrow_list_sync = false;
+    sem_predict = false;
+    sem_predict_landed = false;
+    acquire_poll = false;
+    list_exact = false;
+    sync_gpu_semaphores = false;
+    for (auto& page : gpu_semaphore_pages) {
+        page.store(0, std::memory_order_relaxed);
+    }
+    gpu_semaphore_count.store(0, std::memory_order_relaxed);
+    gpu_semaphore_saturated.store(false, std::memory_order_relaxed);
     unbounded_position = 0;
     unbounded_writer_position = 0;
     acquire_position = 0;
-    overflow_position = 0;
-    queued_releases = {};
-    next_release = 0;
-    pending_head = 0;
-    pending_tail = 0;
+    write_floor = 0;
+    queued_releases.reset();
+    page_slots.reset();
+    word_slots.reset();
+    huge_writes = {};
+    next_huge = 0;
+    spaces = {};
+    space_last = {};
+    used_spaces = 0;
+    last_record = 0;
+    last_page_slot = nullptr;
     published.store(0, std::memory_order_relaxed);
     consumed.store(0, std::memory_order_relaxed);
     back_waiting.store(false, std::memory_order_relaxed);
+    back_idle.store(false, std::memory_order_relaxed);
     front_waiting.store(false, std::memory_order_relaxed);
 }
 
@@ -228,7 +261,9 @@ void GpuSplit::Publish() {
     published_local = write_position;
     publish_every = std::min<size_t>(publish_every * 2, PublishEvery);
     published.store(write_position, std::memory_order_seq_cst);
-    if (back_waiting.load(std::memory_order_seq_cst)) {
+    // Taken back here: the publishes until the back runs again don't wake it once more each.
+    if (back_waiting.load(std::memory_order_seq_cst) &&
+        back_waiting.exchange(false, std::memory_order_seq_cst)) {
         wake.fetch_add(1, std::memory_order_seq_cst);
         wake.notify_one();
     }
@@ -295,109 +330,308 @@ void GpuSplit::ReportNarrowCheck(DrainSite site, u32 mismatches, u32 macro, GPUV
     }
 }
 
-void GpuSplit::RecordWrite(const void* space, GPUVAddr address, u64 size) {
-    const GPUVAddr end = address + size;
-    if (pending_tail != pending_head) {
-        // Runs of writes to the same memory (constant buffer words, one by one) share a record:
-        // done once the last of them is.
-        PendingWrite& last = pending_writes[(pending_tail - 1) & PendingWriteMask];
-        if (last.space == space && address <= last.end && last.begin <= end) {
-            last.begin = (std::min)(last.begin, address);
-            last.end = (std::max)(last.end, end);
-            last.position = write_position;
-            return;
-        }
-        PrunePendingWrites();
-    }
-    if (pending_tail - pending_head == MaxPendingWrites) {
-        consumed_cache = consumed.load(std::memory_order_acquire);
-        PrunePendingWrites();
-        if (pending_tail - pending_head == MaxPendingWrites) {
-            // Full: the oldest counts as unbounded from now on (no read stops short of it).
-            const PendingWrite& oldest = pending_writes[pending_head & PendingWriteMask];
-            if (oldest.position > unbounded_position) {
-                unbounded_position = oldest.position;
-                unbounded_cause = UnboundedCause::Overflow;
-            }
-            if (oldest.position > acquire_position) {
-                acquire_position = oldest.position;
-                acquire_cause = UnboundedCause::Overflow;
-            }
-            if (oldest.position > unbounded_writer_position) {
-                unbounded_writer_position = oldest.position;
-                writer_cause = UnboundedCause::Overflow;
-            }
-            overflow_position = (std::max)(overflow_position, oldest.position);
-            if (diag) [[unlikely]] {
-                ++diag_notes[static_cast<size_t>(UnboundedCause::Overflow)];
-            }
-            ++pending_head;
-        }
-    }
-    pending_writes[pending_tail & PendingWriteMask] = {space, address, end, write_position};
-    ++pending_tail;
+namespace {
+
+[[nodiscard]] size_t HashBucket(u64 key, size_t buckets) {
+    return static_cast<size_t>((key * 0x9E3779B97F4A7C15ULL) >> 32) & (buckets - 1);
 }
 
-void GpuSplit::PrunePendingWrites() {
-    while (pending_head != pending_tail &&
-           pending_writes[pending_head & PendingWriteMask].position <= consumed_cache) {
-        ++pending_head;
+} // Anonymous namespace
+
+void GpuSplit::NoteGpuSemaphore(GPUVAddr address) {
+    if (gpu_semaphore_saturated.load(std::memory_order_relaxed)) {
+        return;
+    }
+    const u64 key = (address >> PageBits) + 1;
+    size_t index = HashBucket(key, GpuSemaphoreSlots);
+    for (size_t probe = 0; probe < 16; ++probe, index = (index + 1) & (GpuSemaphoreSlots - 1)) {
+        u64 current = gpu_semaphore_pages[index].load(std::memory_order_acquire);
+        if (current == key) {
+            return;
+        }
+        if (current == 0) {
+            if (gpu_semaphore_pages[index].compare_exchange_strong(current, key,
+                                                                 std::memory_order_acq_rel)) {
+                if (gpu_semaphore_count.fetch_add(1, std::memory_order_relaxed) + 1 >=
+                    GpuSemaphoreSlots * 3 / 4) {
+                    gpu_semaphore_saturated.store(true, std::memory_order_release);
+                }
+                return;
+            }
+            if (current == key) {
+                return;
+            }
+        }
+    }
+    gpu_semaphore_saturated.store(true, std::memory_order_release);
+}
+
+bool GpuSplit::AcquireSyncs(GPUVAddr address) const {
+    if (!sync_gpu_semaphores || gpu_semaphore_saturated.load(std::memory_order_acquire)) {
+        return true;
+    }
+    const u64 key = (address >> PageBits) + 1;
+    size_t index = HashBucket(key, GpuSemaphoreSlots);
+    for (size_t probe = 0; probe < 16; ++probe, index = (index + 1) & (GpuSemaphoreSlots - 1)) {
+        const u64 current = gpu_semaphore_pages[index].load(std::memory_order_acquire);
+        if (current == key) {
+            return true;
+        }
+        if (current == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+u32 GpuSplit::SpaceId(const void* space) {
+    for (u32 i = 0; i < used_spaces; ++i) {
+        if (spaces[i] == space) {
+            return i;
+        }
+    }
+    if (used_spaces < MaxSpaces - 1) {
+        spaces[used_spaces] = space;
+        return used_spaces++;
+    }
+    // The rest share the last id: their reads wait for all of its writes.
+    return MaxSpaces - 1;
+}
+
+void GpuSplit::InsertPage(u64 key, bool coarse) {
+    PageSlot* slot = last_page_slot;
+    if (slot == nullptr || slot->key != key) {
+        PageSlot* const bucket = &page_slots[HashBucket(key, PageBuckets) * 4];
+        slot = nullptr;
+        for (size_t i = 0; i < 4; ++i) {
+            if (bucket[i].key == key) {
+                slot = &bucket[i];
+                break;
+            }
+        }
+        if (slot == nullptr) {
+            // A done slot, else the oldest (the floor waits for it).
+            PageSlot* victim = &bucket[0];
+            for (size_t i = 0; i < 4; ++i) {
+                if (bucket[i].any <= consumed_cache) {
+                    victim = &bucket[i];
+                    break;
+                }
+                if (bucket[i].any < victim->any) {
+                    victim = &bucket[i];
+                }
+            }
+            RaiseFloor(victim->any);
+            *victim = {key, 0, 0};
+            slot = victim;
+        }
+        last_page_slot = slot;
+    }
+    if (coarse) {
+        slot->coarse = write_position;
+    }
+    slot->any = write_position;
+}
+
+void GpuSplit::InsertWord(u64 key) {
+    WordSlot* const bucket = &word_slots[HashBucket(key, WordBuckets) * 4];
+    WordSlot* victim = nullptr;
+    for (size_t i = 0; i < 4; ++i) {
+        if (bucket[i].key == key) {
+            bucket[i].position = write_position;
+            return;
+        }
+        if (victim == nullptr && bucket[i].position <= consumed_cache) {
+            victim = &bucket[i];
+        }
+    }
+    if (victim == nullptr) {
+        victim = &bucket[0];
+        for (size_t i = 1; i < 4; ++i) {
+            if (bucket[i].position < victim->position) {
+                victim = &bucket[i];
+            }
+        }
+        RaiseFloor(victim->position);
+    }
+    *victim = {key, write_position};
+}
+
+const GpuSplit::PageSlot* GpuSplit::FindPage(u64 key) const {
+    const PageSlot* const bucket = &page_slots[HashBucket(key, PageBuckets) * 4];
+    for (size_t i = 0; i < 4; ++i) {
+        if (bucket[i].key == key) {
+            return &bucket[i];
+        }
+    }
+    return nullptr;
+}
+
+const GpuSplit::WordSlot* GpuSplit::FindWord(u64 key) const {
+    const WordSlot* const bucket = &word_slots[HashBucket(key, WordBuckets) * 4];
+    for (size_t i = 0; i < 4; ++i) {
+        if (bucket[i].key == key) {
+            return &bucket[i];
+        }
+    }
+    return nullptr;
+}
+
+void GpuSplit::RecordWrite(const void* space, GPUVAddr address, u64 size, bool fine) {
+    const u64 sid = SpaceId(space);
+    space_last[sid] = write_position;
+    last_record = write_position;
+    const GPUVAddr end = address + size;
+    const GPUVAddr first_page = address >> PageBits;
+    const GPUVAddr last_page = (end - 1) >> PageBits;
+    if (fine) {
+        NoteGpuSemaphore(address);
+    }
+    if (fine && size <= MaxFineBytes) {
+        for (GPUVAddr word = address >> WordBits; word <= (end - 1) >> WordBits; ++word) {
+            InsertWord((word << 2) | sid);
+        }
+        for (GPUVAddr page = first_page; page <= last_page; ++page) {
+            InsertPage((page << 2) | sid, false);
+        }
+        return;
+    }
+    if (last_page - first_page >= 64) {
+        // Round robin replaces the oldest.
+        HugeWrite& slot = huge_writes[next_huge];
+        RaiseFloor(slot.position);
+        slot = {space, address, end, write_position};
+        next_huge = (next_huge + 1) % MaxHugeWrites;
+        return;
+    }
+    for (GPUVAddr page = first_page; page <= last_page; ++page) {
+        InsertPage((page << 2) | sid, true);
     }
 }
 
 u64 GpuSplit::PendingWriteTarget(const void* space, GPUVAddr address, u64 size, u64 base) const {
+    u64 target = (std::max)(base, write_floor);
+    if (page_slots == nullptr || size == 0) {
+        return target;
+    }
     const GPUVAddr end = address + size;
-    // Newest first: positions only grow, so the first overlap is the latest one, and records
-    // at or before `base` can't move the target.
-    for (u64 index = pending_tail; index != pending_head;) {
-        const PendingWrite& pending = pending_writes[--index & PendingWriteMask];
-        if (pending.position <= base) {
+    u64 sid = MaxSpaces;
+    for (u32 i = 0; i < used_spaces; ++i) {
+        if (spaces[i] == space) {
+            sid = i;
             break;
         }
-        // Another address space may map the same memory.
-        if (pending.space != space || (pending.begin < end && address < pending.end)) {
-            return pending.position;
+    }
+    // Another address space may map the same memory.
+    for (u64 i = 0; i < MaxSpaces; ++i) {
+        if (i != sid || i == MaxSpaces - 1) {
+            target = (std::max)(target, space_last[i]);
         }
     }
-    return base;
+    for (const HugeWrite& write : huge_writes) {
+        if (write.position > target &&
+            (write.space != space || (write.begin < end && address < write.end))) {
+            target = write.position;
+        }
+    }
+    if (sid == MaxSpaces) {
+        // Nothing recorded in this space itself.
+        return target;
+    }
+    const GPUVAddr first_page = address >> PageBits;
+    const GPUVAddr last_page = (end - 1) >> PageBits;
+    if (last_page - first_page >= 64) {
+        return (std::max)(target, last_record);
+    }
+    const bool small = size <= 256;
+    for (GPUVAddr page = first_page; page <= last_page; ++page) {
+        const PageSlot* const slot = FindPage((page << 2) | sid);
+        if (slot == nullptr || slot->any <= (std::max)(target, consumed_cache)) {
+            // No pending write in the page (a pending slot that gave way raised the floor).
+            continue;
+        }
+        if (!small) {
+            target = slot->any;
+            continue;
+        }
+        target = (std::max)(target, slot->coarse);
+        const GPUVAddr page_begin = (std::max)(address, page << PageBits);
+        const GPUVAddr page_end = (std::min)(end, (page + 1) << PageBits);
+        for (GPUVAddr word = page_begin >> WordBits; word <= (page_end - 1) >> WordBits; ++word) {
+            if (const WordSlot* const word_slot = FindWord((word << 2) | sid)) {
+                target = (std::max)(target, word_slot->position);
+            }
+        }
+    }
+    return target;
+}
+
+bool GpuSplit::WrittenSince(const void* space, GPUVAddr address, u64 position) const {
+    if (page_slots == nullptr || write_floor > position) {
+        return true;
+    }
+    u64 sid = MaxSpaces;
+    for (u32 i = 0; i < used_spaces; ++i) {
+        if (spaces[i] == space) {
+            sid = i;
+            break;
+        }
+    }
+    if (sid == MaxSpaces) {
+        return true;
+    }
+    for (u64 i = 0; i < MaxSpaces; ++i) {
+        if ((i != sid || i == MaxSpaces - 1) && space_last[i] > position) {
+            return true;
+        }
+    }
+    for (const HugeWrite& write : huge_writes) {
+        if (write.position > position && write.begin <= address && address < write.end) {
+            return true;
+        }
+    }
+    // A slot replaced since no longer tells: count it as written.
+    const PageSlot* const page = FindPage(((address >> PageBits) << 2) | sid);
+    if (page == nullptr || page->coarse > position) {
+        return true;
+    }
+    const WordSlot* const word = FindWord(((address >> WordBits) << 2) | sid);
+    return word == nullptr || word->position > position;
 }
 
 bool GpuSplit::WaitForWritesTo(const void* space, GPUVAddr address, u64 size, DrainSite site,
                                NarrowBase base_kind) {
+    // Held-back writes (constant buffer runs) are sent and recorded first.
+    RunPendingFlush();
     consumed_cache = consumed.load(std::memory_order_acquire);
-    PrunePendingWrites();
     u64 base = unbounded_position;
     UnboundedCause cause = unbounded_cause;
     if (base_kind == NarrowBase::Acquire) {
         base = acquire_position;
         cause = acquire_cause;
     } else if (base_kind == NarrowBase::Recorded) {
-        base = overflow_position;
+        base = 0;
         cause = UnboundedCause::Overflow;
     }
     const u64 target = PendingWriteTarget(space, address, size, base);
     if (target != base) {
-        cause = UnboundedCause::Record;
+        cause = target == write_floor ? UnboundedCause::Overflow : UnboundedCause::Record;
     }
     return WaitForAttributed((std::min)(target, write_position), site, cause);
 }
 
 bool GpuSplit::WaitForWritersTo(const void* space, GPUVAddr address, u64 size, bool sync_only) {
+    RunPendingFlush(); // As in WaitForWritesTo
     consumed_cache = consumed.load(std::memory_order_acquire);
-    PrunePendingWrites();
     u64 base = unbounded_writer_position;
     UnboundedCause cause = writer_cause;
     if (sync_only) {
         base = last_sync_position;
         cause = UnboundedCause::Sync;
-        if (overflow_position > base) {
-            base = overflow_position;
-            cause = UnboundedCause::Overflow;
-        }
     }
     const u64 target = PendingWriteTarget(space, address, size, base);
     if (target != base) {
-        cause = UnboundedCause::Record;
+        cause = target == write_floor ? UnboundedCause::Overflow : UnboundedCause::Record;
     }
     return WaitForAttributed((std::min)(target, write_position), DrainSite::NarrowListWriters,
                              cause);
@@ -496,50 +730,96 @@ void GpuSplit::MaybeReportDiag() {
     diag_window_ticks = Nx2Profile::Ticks();
 }
 
-void GpuSplit::NoteRelease(const void* space, GPUVAddr address, u32 value) {
-    if (!sem_predict) {
-        return;
-    }
-    for (QueuedRelease& release : queued_releases) {
-        if (release.space == space && release.address == address) {
-            release.position = write_position;
-            release.value = value;
-            return;
+GpuSplit::QueuedRelease* GpuSplit::FindRelease(const void* space, GPUVAddr address) {
+    QueuedRelease* const bucket =
+        &queued_releases[HashBucket(address >> WordBits, ReleaseBuckets) * 4];
+    for (size_t i = 0; i < 4; ++i) {
+        if (bucket[i].used && bucket[i].address == address && bucket[i].space == space) {
+            return &bucket[i];
         }
     }
-    queued_releases[next_release] = {space, address, write_position, value};
-    next_release = (next_release + 1) % MaxQueuedReleases;
+    return nullptr;
+}
+
+void GpuSplit::NoteRelease(const void* space, GPUVAddr address, u32 value) {
+    if (!sem_predict || queued_releases == nullptr) {
+        return;
+    }
+    const auto* const memory = static_cast<const Tegra::MemoryManager*>(space);
+    const u32 before = memory->Read<u32>(address);
+    QueuedRelease* release = FindRelease(space, address);
+    if (release == nullptr) {
+        // A free slot, else the oldest.
+        QueuedRelease* const bucket =
+            &queued_releases[HashBucket(address >> WordBits, ReleaseBuckets) * 4];
+        release = &bucket[0];
+        for (size_t i = 0; i < 4; ++i) {
+            if (!bucket[i].used) {
+                release = &bucket[i];
+                break;
+            }
+            if (bucket[i].position < release->position) {
+                release = &bucket[i];
+            }
+        }
+        release->used = false;
+    }
+    const auto device = memory->GpuToCpuAddress(address);
+    const u32 slot = device ? static_cast<u32>(Tegra::Nx2LandedSlot(*device)) : 0;
+    const u32 landed = Tegra::g_nx2_semaphore_landed[slot].load(std::memory_order_acquire);
+    if (!release->used || release->landed_slot != slot ||
+        landed - release->landed_base >= release->sent) {
+        // The releases before it landed: count from here.
+        release->landed_base = landed;
+        release->sent = 0;
+    }
+    release->space = space;
+    release->address = address;
+    release->position = write_position;
+    release->value = value;
+    release->before = before;
+    release->landed_slot = slot;
+    release->sent += device ? 1 : 0;
+    release->used = true;
 }
 
 std::optional<u32> GpuSplit::PredictedSemaphore(const void* space, GPUVAddr address) {
-    if (!sem_predict) {
+    if (!sem_predict || queued_releases == nullptr) {
         return std::nullopt;
     }
     consumed_cache = consumed.load(std::memory_order_acquire);
-    PrunePendingWrites();
-    for (const QueuedRelease& release : queued_releases) {
-        if (release.space != space || release.address != address ||
-            release.position <= consumed_cache) {
-            continue;
-        }
-        // A recorded write sent after the release (a copy, a compute report) may change it.
-        if (PendingWriteTarget(space, address, sizeof(u32), release.position) !=
-            release.position) {
-            return std::nullopt;
-        }
-        return release.value;
+    const QueuedRelease* const release = FindRelease(space, address);
+    // A write sent after the release (a copy, a compute report) may change the word.
+    if (release == nullptr || WrittenSince(space, address, release->position)) {
+        return std::nullopt;
     }
-    return std::nullopt;
+    if (release->position > consumed_cache) {
+        return release->value;
+    }
+    if (!sem_predict_landed || release->sent == 0) {
+        return std::nullopt;
+    }
+    // The back ran it. A fence may still hold the write back (one-word releases land when the
+    // fence after them signals): while it hasn't landed and guest memory still holds the word
+    // from before it, the word is the release's.
+    const u32 landed =
+        Tegra::g_nx2_semaphore_landed[release->landed_slot].load(std::memory_order_acquire);
+    if (landed - release->landed_base >= release->sent) {
+        return std::nullopt;
+    }
+    const u32 now = static_cast<const Tegra::MemoryManager*>(space)->Read<u32>(address);
+    if (now != release->before && now != release->value) {
+        return std::nullopt;
+    }
+    return release->value;
 }
 
 void GpuSplit::ForgetRelease(const void* space, GPUVAddr address) {
-    if (!sem_predict) {
+    if (!sem_predict || queued_releases == nullptr) {
         return;
     }
-    for (QueuedRelease& release : queued_releases) {
-        if (release.space == space && release.address == address) {
-            release = {};
-        }
+    if (QueuedRelease* const release = FindRelease(space, address)) {
+        release->used = false;
     }
 }
 
@@ -734,6 +1014,27 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
             ->RunDrawBatch(*system, entry + 1, count, repeats);
         return 1 + size_t{count};
     }
+    case Kind::CbWrite: {
+        const u32 count = static_cast<u32>((head >> 8) & 7);
+        Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+        // The words after the first (at most 3, see GpuSplit::CbWrite), out of the u64 storage.
+        std::array<u32, 3> rest{};
+        if (count > 1) {
+            std::memcpy(rest.data(), entry + 1,
+                        size_t{(std::min)(count, u32{4}) - 1} * sizeof(u32));
+        }
+        static_cast<Tegra::Engines::Maxwell3D*>(back_engine)
+            ->BackCbWrite(*system, static_cast<u32>((head >> 12) & 0xffff),
+                          static_cast<u32>(head >> 32), rest.data(), count);
+        return 1 + size_t{count} / 2;
+    }
+    case Kind::CbBind: {
+        Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+        static_cast<Tegra::Engines::Maxwell3D*>(back_engine)
+            ->BackCbBind(*system, static_cast<u32>((head >> 8) & 0xff),
+                         static_cast<u32>(head >> 32));
+        return 1;
+    }
     }
     return 1;
 }
@@ -745,16 +1046,21 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     back_running.store(true, std::memory_order_release);
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
     Common::SetCurrentThreadToPerformanceCores();
+    Common::PinCurrentThread(Common::PinnedRole::GpuBack);
     system->RegisterHostThread();
 #ifdef _WIN32
     g_back_thread_id.store(GetCurrentThreadId(), std::memory_order_relaxed);
 #endif
     u64 read_position = 0;
+    const bool back_lean = Nx2Switch("EDEN_NX2_BACK_LEAN", true);
+    // Counts across batches, so a stream of short batches still checks hook requests.
+    u32 entries = 0;
     while (!stop_token.stop_requested()) {
         Nx2Profile::Report("GPU back thread");
         u64 available = published.load(std::memory_order_acquire);
         if (available == read_position) {
             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
+            back_idle.store(true, std::memory_order_relaxed);
             // The front usually sends more within microseconds: spin briefly before sleeping.
             for (u32 spins = 0; spins < 8192 && available == read_position &&
                                 !hook_requested.load(std::memory_order_relaxed);
@@ -782,13 +1088,18 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 continue;
             }
         }
+        if (back_idle.load(std::memory_order_relaxed)) {
+            back_idle.store(false, std::memory_order_relaxed);
+        }
         u64 last_store = read_position;
         while (read_position != available) {
             const size_t index = read_position & RingMask;
             const size_t size =
                 Execute(&ring[index], std::min<u64>(available - read_position, RingWords - index));
             read_position += size != 0 ? size : RingWords - index;
-            if (hook_requested.load(std::memory_order_relaxed) &&
+            // EDEN_NX2_BACK_LEAN: the hook request (another thread's cache line) every 4 entries.
+            if ((!back_lean || (++entries & 3) == 0) &&
+                hook_requested.load(std::memory_order_relaxed) &&
                 idle_hook != nullptr) [[unlikely]] {
                 hook_requested.store(false, std::memory_order_seq_cst);
                 idle_hook(idle_argument);

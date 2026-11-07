@@ -222,6 +222,10 @@ private:
     void NoteBackWrites(const BackWrites& writes);
     /// GpuSplit::WaitForWriters for a command list's pages (narrowed with the narrow drains).
     bool WaitForListWriters(GPUVAddr address, size_t size);
+    /// WaitForListWriters for a list on pages the GPU never wrote (EDEN_NX2_LIST_EXACT).
+    bool WaitForListFetch(GPUVAddr address, size_t size);
+    /// Marks the list's pages as read from; whether all of them were before.
+    bool MarkListPagesSeen(GPUVAddr address, size_t size);
     void ReportUnboundSubchannel();
     void WatchArgument(u32 method, u32 argument) const;
 

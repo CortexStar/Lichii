@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <span>
+#include "video_core/page_filter.h"
 #include "common/container/unordered_map.h"
 #include <utility>
 #include <vector>
@@ -61,6 +62,15 @@ class ShaderCache : public VideoCommon::ChannelSetupCaches<VideoCommon::ChannelI
     };
 
 public:
+    /// Device pages shaders or rejected programs were ever registered on (InnerInvalidation
+    /// skips InvalidateRegions for writes elsewhere, EDEN_NX2_PAGE_FILTER).
+    VideoCommon::PageFilter page_filter;
+
+    /// Whether shaders were marked for removal and not removed yet (InvalidateRegions removes them).
+    [[nodiscard]] bool HasPendingRemovals() const noexcept {
+        return removal_pending.load(std::memory_order_acquire);
+    }
+
     /// @brief Removes shaders inside a given region
     /// @note Checks for ranges
     /// @param addr Start address of the invalidation
@@ -174,6 +184,7 @@ private:
     ::Common::unordered_map<u64, std::vector<Entry*>> invalidation_cache;
     std::vector<std::unique_ptr<ShaderInfo>> storage;
     std::vector<Entry*> marked_for_removal;
+    std::atomic<bool> removal_pending{};
 
     /// Native programs the lowering rejected, by address, so each draw or dispatch rethrows the
     /// first error instead of lowering again; dropped when guest memory there is written.

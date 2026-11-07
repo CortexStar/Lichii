@@ -4,8 +4,11 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
+#include <functional>
 #include <mutex>
 #include <unordered_map>
 #include <utility>
@@ -26,29 +29,89 @@ inline bool EnvFlag(const char* name) {
     return value != nullptr && value[0] == '1';
 }
 
-/// EDEN_NX2_REACTIVE_PREFETCH=1: GPU writes over pages the guest CPU has read GPU data from
-/// (BufferCache::cpu_read_ranges) are also copied back at the next fence; their traps stay armed.
-/// A read after the copy reaches guest memory goes on without a stall, an earlier one flushes as
-/// before. Off by default: like every fence download it is written when its fence pops, so a
-/// guest CPU write to the same bytes between the GPU write and the next collection of CPU writes
-/// can be overwritten by the GPU's bytes.
+/// EDEN_NX2_REACTIVE_PREFETCH (on unless 0): GPU writes over pages the guest CPU has read GPU
+/// data from (BufferCache::cpu_read_ranges) are also copied back at the next fence; their traps
+/// stay armed. A read after the copy reaches guest memory goes on without a stall and sees
+/// current data; an earlier one waits for the copy (WaitLanding) or flushes. A pop skips the
+/// pages with guest CPU writes not yet collected (SetPendingCpuWritesQuery), so it cannot write
+/// the GPU's older bytes over them.
 inline bool Prefetch() {
-    static const bool enabled = EnvFlag("EDEN_NX2_REACTIVE_PREFETCH");
-    return enabled;
-}
-
-/// EDEN_NX2_REACTIVE_PREFLUSH (on unless 0): upstream yuzu's reactive flushing on Switch 2 titles
-/// too: the first read of a GPU-written page flushes it and marks it Preflushable, so later GPU
-/// writes over it are copied back at fences and its reads never stall again. A heuristic: fast
-/// GPU fences signal syncpoints before the host GPU has run the work, so a read right after a
-/// syncpoint wait can see the previous copy (one GPU round trip late). Fine for data read a frame
-/// later (Ocarina's auto-exposure), wrong for data needed back in the same frame.
-inline bool Preflush() {
     static const bool enabled = [] {
-        const char* value = std::getenv("EDEN_NX2_REACTIVE_PREFLUSH");
+        const char* value = std::getenv("EDEN_NX2_REACTIVE_PREFETCH");
         return value == nullptr || value[0] != '0';
     }();
     return enabled;
+}
+
+/// EDEN_NX2_REACTIVE_PREFLUSH=1: upstream yuzu's reactive flushing on Switch 2 titles too: the
+/// first read of a GPU-written page flushes it and marks it Preflushable, so later GPU writes over
+/// it are copied back at fences and its reads never trap again. Off by default: reads that come
+/// before the copy lands see older data with nothing to tell, which flickered Ocarina's tone
+/// mapping and left a third of Castle Town loads overexposed in other forks (Frizti fbc7b11276,
+/// Lichii #259, Eglantine #686).
+inline bool Preflush() {
+    static const bool enabled = EnvFlag("EDEN_NX2_REACTIVE_PREFLUSH");
+    return enabled;
+}
+
+/// EDEN_NX2_REACTIVE_WAIT_LANDING (on unless 0): a guest read of a GPU-written page whose GPU
+/// writes all have a download recorded (Prefetch) waits for those downloads to land instead of
+/// flushing: the GPU thread neither copies again nor waits for the host GPU (Scheduler::Finish).
+/// After 16 ms without the copy landing the read flushes as before.
+inline bool WaitLanding() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_REACTIVE_WAIT_LANDING");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+/// EDEN_NX2_REACTIVE_HOT_FRAMES (default 64, 0 never forgets): pages the guest CPU read GPU data
+/// from keep their later GPU writes copied back (Prefetch) while they are read at least once every
+/// 64 to 128 frames. A forgotten page's next read flushes as a first read does.
+inline u64 HotFrames() {
+    static const u64 frames = [] {
+        const char* value = std::getenv("EDEN_NX2_REACTIVE_HOT_FRAMES");
+        return value != nullptr ? static_cast<u64>(std::strtoull(value, nullptr, 10)) : u64{64};
+    }();
+    return frames;
+}
+
+/// Frames ended so far (FenceManager::TickFrame).
+inline std::atomic<u64> g_frame{};
+
+/// Wakes the reads waiting for downloads to land (WaitLanding) when a fence's downloads pop.
+struct Landing {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::atomic<u64> generation{};
+    std::atomic<u32> waiters{};
+};
+
+inline Landing& GetLanding() {
+    static Landing landing;
+    return landing;
+}
+
+inline void NotifyLanded() {
+    Landing& landing = GetLanding();
+    landing.generation.fetch_add(1, std::memory_order_acq_rel);
+    if (landing.waiters.load(std::memory_order_acquire) != 0) {
+        std::scoped_lock lock{landing.mutex};
+        landing.cv.notify_all();
+    }
+}
+
+/// Whether guest CPU writes to [address, address + size) were collected but not yet applied to
+/// the caches (GPU::InvalidateGPUCache). Set by the GPU; a fence's downloads must not land over
+/// them.
+inline std::function<bool(u64, u64)>& PendingCpuWritesQuery() {
+    static std::function<bool(u64, u64)> query;
+    return query;
+}
+
+inline void SetPendingCpuWritesQuery(std::function<bool(u64, u64)> query) {
+    PendingCpuWritesQuery() = std::move(query);
 }
 
 /// EDEN_NX2_REACTIVE_DIAG=1: every second, a summary of the guest CPU's reads of cached GPU
@@ -82,6 +145,9 @@ struct State {
     u64 prefetch_writes{};
     u64 prefetch_bytes{};
     u64 preflush_marks{};
+    u64 landing_waits{};
+    u64 landing_timeouts{};
+    u64 landing_ns{};
 };
 
 inline State& Get() {
@@ -111,11 +177,14 @@ inline void MaybeReportLocked(State& state) {
     state.last = now;
     LOG_INFO(HW_GPU,
              "Reactive diag {:.2f} s: {} lookups ({} buffer, {} image, {} clean), {} stalls "
-             "({:.2f} ms waited), {} regions; prefetch {} writes {} KiB; preflush marks {}",
+             "({:.2f} ms waited), {} regions; prefetch {} writes {} KiB; preflush marks {}; "
+             "landing waits {} ({} timed out, {:.2f} ms)",
              seconds, state.lookups, state.buffer_lookups, state.image_lookups,
              state.lookups - state.buffer_lookups - state.image_lookups, state.stalls,
              static_cast<double>(state.stall_ns) / 1e6, state.regions.size(),
-             state.prefetch_writes, state.prefetch_bytes / 1024, state.preflush_marks);
+             state.prefetch_writes, state.prefetch_bytes / 1024, state.preflush_marks,
+             state.landing_waits, state.landing_timeouts,
+             static_cast<double>(state.landing_ns) / 1e6);
     std::vector<std::pair<u64, Region>> sorted(state.regions.begin(), state.regions.end());
     std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
         if (a.second.stalls != b.second.stalls) {
@@ -138,6 +207,9 @@ inline void MaybeReportLocked(State& state) {
     state.prefetch_writes = 0;
     state.prefetch_bytes = 0;
     state.preflush_marks = 0;
+    state.landing_waits = 0;
+    state.landing_timeouts = 0;
+    state.landing_ns = 0;
 }
 
 /// The caches answered a read of [start, end) with an area of `kind` (whether it stalls is
@@ -179,6 +251,16 @@ inline void NotePrefetch(u64 bytes) {
     std::scoped_lock lock{state.mutex};
     ++state.prefetch_writes;
     state.prefetch_bytes += bytes;
+}
+
+/// A read waited `ns` for downloads to land (WaitLanding); `landed` false when it gave up.
+inline void NoteLandingWait(bool landed, u64 ns) {
+    auto& state = Get();
+    std::scoped_lock lock{state.mutex};
+    ++state.landing_waits;
+    state.landing_timeouts += landed ? 0 : 1;
+    state.landing_ns += ns;
+    MaybeReportLocked(state);
 }
 
 /// A read marked a page range Preflushable (EDEN_NX2_REACTIVE_PREFLUSH).

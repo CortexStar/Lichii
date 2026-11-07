@@ -102,8 +102,9 @@ public:
         cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *trace_work_pool, query + 1);
     }
 
-    /// Sends currently recorded work to the worker thread.
-    void DispatchWork();
+    /// Sends currently recorded work to the worker thread. `lazy` (EDEN_NX2_LAZY_WAKE): a sleeping
+    /// worker is woken only once two chunks wait; submissions and WaitWorker always wake it.
+    void DispatchWork(bool lazy = false);
 
     /// Requests to begin a renderpass.
     void RequestRenderpass(const Framebuffer* framebuffer,
@@ -143,6 +144,9 @@ public:
     bool IsRenderPassActive() const {
         return state.renderpass != VK_NULL_HANDLE;
     }
+
+    /// Whether the active render pass is the one RequestRenderpass(framebuffer) would keep.
+    bool RenderPassMatches(const Framebuffer* framebuffer) const;
 
     /// Update the pipeline to the current execution context.
     bool UpdateGraphicsPipeline(GraphicsPipeline* pipeline);
@@ -185,7 +189,7 @@ public:
         if (chunk->Record(command)) {
             return;
         }
-        DispatchWork();
+        DispatchWork(true);
         (void)chunk->Record(command);
     }
 
@@ -513,6 +517,7 @@ private:
     std::mutex queue_mutex;
     std::condition_variable_any event_cv;
     bool worker_waiting{}; ///< The worker is waiting for work (guarded by queue_mutex)
+    bool lazy_queued{};    ///< A lazily queued chunk may wait for a sleeping worker (recording thread)
     std::jthread worker_thread;
 
     std::chrono::steady_clock::duration frame_interval{};

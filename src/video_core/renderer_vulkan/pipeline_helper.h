@@ -360,110 +360,148 @@ public:
     std::array<f32, 4> words{};
 };
 
-/// The texture and image bindings of a pipeline's latest draws or dispatches. One with the same
-/// handles reuses the resolved view and sampler ids and image descriptors while the descriptor
-/// pool entries behind the handles and the texture cache's BindingsEpoch() stay the same
-/// (EDEN_NX2_BINDCACHE).
-class ImageBindingCache {
-public:
-    struct Entry {
-        u64 epoch{}; ///< TextureCache::BindingsEpoch() of the configuration; 0: unusable
-        bool via_header_index{};
-        std::vector<VideoCommon::ImageViewInOut> views;
-        std::vector<u32> sampler_handles;
-        std::vector<VideoCommon::SamplerId> samplers;
-        std::vector<DescriptorUpdateEntry> descriptors; ///< what PushImageDescriptors added
-        std::vector<u32> push_ends; ///< end of each PushImageDescriptors call in descriptors
-        std::vector<u8> texture_rescaled; ///< PushTexture argument of each texture descriptor
-        std::vector<u8> image_rescaled;   ///< PushImage argument of each image descriptor
-        std::vector<VideoCommon::ImageId> written_images;
-    };
+/// EDEN_NX2_BINDMEMO: what the descriptor made for a texture or image binding depends on besides
+/// its view and sampler, as TextureCache::FindBinding keys it.
+namespace BindingKind {
+constexpr u32 TextureBuffer = 1;
+constexpr u32 ImageBuffer = 2;
+constexpr u32 Texture = 3;
+constexpr u32 Image = 4;
+constexpr u32 ClassMask = 7;
+} // namespace BindingKind
 
-    /// The entry for these handles when resolving them again would give the same bindings.
-    [[nodiscard]] const Entry* Find(const TextureCache& texture_cache, bool compute,
-                                    bool via_header_index,
-                                    std::span<const VideoCommon::ImageViewInOut> views,
-                                    std::span<const u32> sampler_handles) const {
-        const u64 epoch = texture_cache.BindingsEpoch();
-        for (const Entry& entry : entries) {
-            if (entry.epoch != epoch || entry.via_header_index != via_header_index ||
-                entry.views.size() != views.size() ||
-                entry.sampler_handles.size() != sampler_handles.size() ||
-                !std::equal(sampler_handles.begin(), sampler_handles.end(),
-                            entry.sampler_handles.begin())) {
-                continue;
-            }
-            bool same_handles = true;
-            for (size_t index = 0; index < views.size(); ++index) {
-                if (entry.views[index].index != views[index].index) {
-                    same_handles = false;
-                    break;
-                }
-            }
-            if (!same_handles) {
-                continue;
-            }
-            for (const VideoCommon::ImageViewInOut& view : entry.views) {
-                if (!texture_cache.ImageBindingUnchanged(view.index, compute, view.id)) {
-                    return nullptr;
-                }
-            }
-            for (size_t index = 0; index < entry.samplers.size(); ++index) {
-                if (!texture_cache.SamplerBindingUnchanged(entry.sampler_handles[index], compute,
-                                                           entry.samplers[index])) {
-                    return nullptr;
-                }
-            }
-            return &entry;
-        }
-        return nullptr;
+/// Appends the kind of each texture/image binding of a stage, in the order its views are read.
+inline void AppendBindingKinds(const Shader::Info& info, bool compute, std::vector<u32>& kinds) {
+    const u32 base = compute ? TextureCache::BINDING_KIND_COMPUTE : 0U;
+    for (const auto& desc : info.texture_buffer_descriptors) {
+        kinds.insert(kinds.end(), desc.count, base | BindingKind::TextureBuffer);
     }
-
-    /// Starts recording a configuration resolved from scratch. Usable once its epoch is set.
-    [[nodiscard]] Entry& BeginRecord(bool via_header_index,
-                                     std::span<const VideoCommon::ImageViewInOut> views,
-                                     std::span<const u32> sampler_handles,
-                                     std::span<const VideoCommon::SamplerId> samplers) {
-        Entry& entry = entries[next];
-        next = (next + 1) % static_cast<u32>(entries.size());
-        entry.epoch = 0;
-        entry.via_header_index = via_header_index;
-        entry.views.assign(views.begin(), views.end());
-        entry.sampler_handles.assign(sampler_handles.begin(), sampler_handles.end());
-        entry.samplers.assign(samplers.begin(), samplers.end());
-        entry.descriptors.clear();
-        entry.push_ends.clear();
-        entry.texture_rescaled.clear();
-        entry.image_rescaled.clear();
-        entry.written_images.clear();
-        return entry;
+    for (const auto& desc : info.image_buffer_descriptors) {
+        kinds.insert(kinds.end(), desc.count, base | BindingKind::ImageBuffer);
     }
-
-private:
-    std::array<Entry, 4> entries;
-    u32 next{};
-};
-
-/// Adds the descriptors that call `push_index` of PushImageDescriptors added for the entry.
-inline void ReplayImageDescriptors(const ImageBindingCache::Entry& entry, size_t push_index,
-                                   GuestDescriptorQueue& guest_descriptor_queue) {
-    const u32 begin = push_index == 0 ? 0 : entry.push_ends[push_index - 1];
-    const u32 end = entry.push_ends[push_index];
-    guest_descriptor_queue.AddEntries(entry.descriptors.data() + begin, end - begin);
+    for (const auto& desc : info.texture_descriptors) {
+        const u32 kind = base | BindingKind::Texture | (static_cast<u32>(desc.type) << 3) |
+                         (desc.is_depth ? 1U << 7 : 0U);
+        kinds.insert(kinds.end(), desc.count, kind);
+    }
+    for (const auto& desc : info.image_descriptors) {
+        const u32 kind = base | BindingKind::Image | (static_cast<u32>(desc.type) << 3) |
+                         (static_cast<u32>(desc.format) << 8) |
+                         (desc.is_byte_addressed ? 1U << 12 : 0U) |
+                         (desc.is_written ? 1U << 13 : 0U);
+        kinds.insert(kinds.end(), desc.count, kind);
+    }
 }
 
-/// What PushImageDescriptors did besides adding descriptors: rescaling bits, written images.
-inline void ReplayImageBindingEffects(const ImageBindingCache::Entry& entry,
-                                      TextureCache& texture_cache,
-                                      RescalingPushConstant& rescaling) {
-    for (const u8 is_rescaled : entry.texture_rescaled) {
-        rescaling.PushTexture(is_rescaled != 0);
+/// Looks every binding up in the texture cache's memo. When all are there, fills the views' ids,
+/// `samplers` (one per texture) and `memos` (one per view) and returns true.
+inline bool FindImageBindings(TextureCache& texture_cache, std::span<const u32> kinds,
+                              std::span<VideoCommon::ImageViewInOut> views,
+                              std::span<const u32> sampler_handles,
+                              VideoCommon::SamplerId* samplers,
+                              TextureCache::BindingMemo** memos) {
+    if (kinds.size() != views.size()) {
+        return false;
     }
-    for (const u8 is_rescaled : entry.image_rescaled) {
-        rescaling.PushImage(is_rescaled != 0);
+    size_t sampler_index = 0;
+    for (size_t index = 0; index < views.size(); ++index) {
+        const u32 kind = kinds[index];
+        const bool is_texture = (kind & BindingKind::ClassMask) == BindingKind::Texture;
+        if (is_texture && sampler_index >= sampler_handles.size()) {
+            return false;
+        }
+        const u32 tsc_index = is_texture ? sampler_handles[sampler_index++] : ~0U;
+        TextureCache::BindingMemo* const memo =
+            texture_cache.FindBinding(views[index].index, tsc_index, kind);
+        if (!memo) {
+            return false;
+        }
+        memos[index] = memo;
     }
-    for (const VideoCommon::ImageId image_id : entry.written_images) {
-        texture_cache.MarkModification(image_id);
+    sampler_index = 0;
+    for (size_t index = 0; index < views.size(); ++index) {
+        views[index].id = memos[index]->view;
+        if (views[index].blacklist) {
+            texture_cache.NoteBlacklistedBinding(memos[index]->image);
+        }
+        if ((kinds[index] & BindingKind::ClassMask) == BindingKind::Texture) {
+            samplers[sampler_index++] = memos[index]->sampler;
+        }
+    }
+    return true;
+}
+
+/// Where PushImageDescriptors leaves each binding's descriptor and rescaling bit, by view index,
+/// for RecordImageBindings.
+struct ImageBindingRecord {
+    DescriptorUpdateEntry* descriptors;
+    u8* rescaled;
+    const VideoCommon::ImageViewInOut* views_begin;
+};
+
+static_assert(sizeof(DescriptorUpdateEntry) <= sizeof(TextureCache::BindingMemo::payload));
+
+/// Remembers the bindings a draw or dispatch resolved, when nothing happened in the texture
+/// cache since BindingClock() was `clock`.
+inline void RecordImageBindings(TextureCache& texture_cache, std::span<const u32> kinds,
+                                std::span<const VideoCommon::ImageViewInOut> views,
+                                std::span<const u32> sampler_handles,
+                                std::span<const VideoCommon::SamplerId> samplers,
+                                const DescriptorUpdateEntry* descriptors, const u8* rescaled,
+                                u64 clock) {
+    if (kinds.size() != views.size() || texture_cache.BindingClock() != clock) {
+        return;
+    }
+    size_t sampler_index = 0;
+    for (size_t index = 0; index < views.size(); ++index) {
+        const u32 kind = kinds[index];
+        const u32 kind_class = kind & BindingKind::ClassMask;
+        const bool is_texture = kind_class == BindingKind::Texture;
+        const bool has_descriptor = is_texture || kind_class == BindingKind::Image;
+        u32 tsc_index = ~0U;
+        VideoCommon::SamplerId sampler{};
+        if (is_texture) {
+            if (sampler_index >= sampler_handles.size() || sampler_index >= samplers.size()) {
+                return;
+            }
+            tsc_index = sampler_handles[sampler_index];
+            sampler = samplers[sampler_index];
+            ++sampler_index;
+        }
+        texture_cache.RecordBinding(views[index].index, tsc_index, kind, views[index].id, sampler,
+                                    has_descriptor ? &descriptors[index] : nullptr,
+                                    has_descriptor ? sizeof(DescriptorUpdateEntry) : 0,
+                                    rescaled[index] != 0, clock);
+    }
+}
+
+/// PushImageDescriptors from the memos FindImageBindings found.
+inline void PushMemoDescriptors(TextureCache& texture_cache,
+                                GuestDescriptorQueue& guest_descriptor_queue,
+                                const Shader::Info& info, RescalingPushConstant& rescaling,
+                                TextureCache::BindingMemo* const*& memos) {
+    memos += Shader::NumDescriptors(info.texture_buffer_descriptors);
+    memos += Shader::NumDescriptors(info.image_buffer_descriptors);
+    for (const auto& desc : info.texture_descriptors) {
+        bool is_rescaled{};
+        for (u32 index = 0; index < desc.count; ++index) {
+            const TextureCache::BindingMemo& memo{**(memos++)};
+            guest_descriptor_queue.AddPayload(memo.payload.data());
+            is_rescaled |= memo.rescaled != 0;
+        }
+        rescaling.PushTexture(is_rescaled);
+    }
+    for (const auto& desc : info.image_descriptors) {
+        bool is_rescaled{};
+        for (u32 index = 0; index < desc.count; ++index) {
+            const TextureCache::BindingMemo& memo{**(memos++)};
+            if (desc.is_written) {
+                texture_cache.MarkModification(memo.image);
+            }
+            guest_descriptor_queue.AddPayload(memo.payload.data());
+            is_rescaled |= memo.rescaled != 0;
+        }
+        rescaling.PushImage(is_rescaled);
     }
 }
 
@@ -472,8 +510,7 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
                                  const Shader::Info& info, RescalingPushConstant& rescaling,
                                  const VideoCommon::SamplerId*& samplers,
                                  const VideoCommon::ImageViewInOut*& views,
-                                 ImageBindingCache::Entry* record = nullptr) {
-    const size_t first_descriptor = guest_descriptor_queue.UpdateCount();
+                                 const ImageBindingRecord* record = nullptr) {
     const u32 num_texture_buffers = Shader::NumDescriptors(info.texture_buffer_descriptors);
     const u32 num_image_buffers = Shader::NumDescriptors(info.image_buffer_descriptors);
     views += num_texture_buffers;
@@ -481,7 +518,8 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
     for (const auto& desc : info.texture_descriptors) {
         bool is_rescaled{};
         for (u32 index = 0; index < desc.count; ++index) {
-            const VideoCommon::ImageViewId image_view_id{(views++)->id};
+            const VideoCommon::ImageViewInOut* const view{views++};
+            const VideoCommon::ImageViewId image_view_id{view->id};
             const VideoCommon::SamplerId sampler_id{*(samplers++)};
             ImageView& image_view{texture_cache.GetImageView(image_view_id)};
             VkImageView vk_image_view{image_view.Handle(desc.type)};
@@ -494,38 +532,34 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
                                                    sampler.HandleFor(image_view, desc.is_depth));
             const bool element_rescaled{texture_cache.IsRescaling(image_view)};
             is_rescaled |= element_rescaled;
+            if (record) {
+                const size_t view_index = static_cast<size_t>(view - record->views_begin);
+                record->descriptors[view_index] = guest_descriptor_queue.Last();
+                record->rescaled[view_index] = element_rescaled ? 1 : 0;
+            }
         }
         rescaling.PushTexture(is_rescaled);
-        if (record) {
-            record->texture_rescaled.push_back(is_rescaled ? 1 : 0);
-        }
     }
     for (const auto& desc : info.image_descriptors) {
         bool is_rescaled{};
         for (u32 index = 0; index < desc.count; ++index) {
-            ImageView& image_view{texture_cache.GetImageView((views++)->id)};
+            const VideoCommon::ImageViewInOut* const view{views++};
+            ImageView& image_view{texture_cache.GetImageView(view->id)};
             const VkImageView vk_image_view{
                 image_view.StorageView(desc.type, desc.format, desc.is_byte_addressed)};
             if (desc.is_written) {
                 texture_cache.MarkModification(image_view.image_id);
-                if (record) {
-                    record->written_images.push_back(image_view.image_id);
-                }
             }
             guest_descriptor_queue.AddImage(vk_image_view);
             const bool element_rescaled{texture_cache.IsRescaling(image_view)};
             is_rescaled |= element_rescaled;
+            if (record) {
+                const size_t view_index = static_cast<size_t>(view - record->views_begin);
+                record->descriptors[view_index] = guest_descriptor_queue.Last();
+                record->rescaled[view_index] = element_rescaled ? 1 : 0;
+            }
         }
         rescaling.PushImage(is_rescaled);
-        if (record) {
-            record->image_rescaled.push_back(is_rescaled ? 1 : 0);
-        }
-    }
-    if (record) {
-        const DescriptorUpdateEntry* const data = guest_descriptor_queue.UpdateData();
-        record->descriptors.insert(record->descriptors.end(), data + first_descriptor,
-                                   data + guest_descriptor_queue.UpdateCount());
-        record->push_ends.push_back(static_cast<u32>(record->descriptors.size()));
     }
 }
 

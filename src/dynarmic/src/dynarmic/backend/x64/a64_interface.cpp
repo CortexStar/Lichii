@@ -6,6 +6,8 @@
  * SPDX-License-Identifier: 0BSD
  */
 
+#include <array>
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -21,6 +23,7 @@
 #include "dynarmic/backend/x64/block_of_code.h"
 #include "dynarmic/backend/x64/devirtualize.h"
 #include "dynarmic/backend/x64/jitstate_info.h"
+#include "dynarmic/backend/x64/perf_map.h"
 #include "dynarmic/common/atomic.h"
 #include "dynarmic/frontend/A64/translate/a64_translate.h"
 #include "dynarmic/interface/A64/a64.h"
@@ -51,6 +54,15 @@ static std::function<void(BlockOfCode&)> GenRCP(const A64::UserConfig& conf) {
     };
 }
 
+// Largest power of two <= conf.rsb_size, between 8 and A64JitState::RSB_SIZE, minus one.
+static size_t RsbPtrMask(const A64::UserConfig& conf) {
+    size_t size = A64JitState::RSB_SIZE;
+    while (size > 8 && size > conf.rsb_size) {
+        size >>= 1;
+    }
+    return size - 1;
+}
+
 static Optimization::PolyfillOptions GenPolyfillOptions(const BlockOfCode& code) {
     return Optimization::PolyfillOptions{
         .sha256 = !code.HasHostFeature(HostFeature::SHA),
@@ -62,7 +74,7 @@ struct Jit::Impl final {
 public:
     Impl(Jit* jit, UserConfig conf)
         : conf(conf)
-        , block_of_code(GenRunCodeCallbacks(conf.callbacks, &GetCurrentBlockThunk, this, conf), JitStateInfo{jit_state}, conf.code_cache_size, GenRCP(conf))
+        , block_of_code(GenRunCodeCallbacks(conf.callbacks, &GetCurrentBlockThunk, this, conf), JitStateInfo{jit_state, RsbPtrMask(conf)}, conf.code_cache_size, GenRCP(conf))
         , emitter(block_of_code, conf, jit)
         , polyfill_options(GenPolyfillOptions(block_of_code))
     {
@@ -78,7 +90,7 @@ public:
         // TODO: Check code alignment
         const CodePtr current_code_ptr = [this] {
             // RSB optimization
-            const u32 new_rsb_ptr = (jit_state.rsb_ptr - 1) & A64JitState::RSB_PTR_MASK;
+            const u32 new_rsb_ptr = (jit_state.rsb_ptr - 1) & u32(RsbPtrMask(conf));
             if (jit_state.GetUniqueHash() == jit_state.rsb_location_descriptors[new_rsb_ptr]) {
                 jit_state.rsb_ptr = new_rsb_ptr;
                 return CodePtr(jit_state.rsb_codeptrs[new_rsb_ptr]);
@@ -88,7 +100,24 @@ public:
         const HaltReason hr = block_of_code.RunCode(&jit_state, current_code_ptr);
         PerformRequestedCacheInvalidation(hr);
         is_executing = false;
+        if (conf.jit_counters && (++counter_runs & 1023) == 0) {
+            DumpCounters();
+        }
         return hr;
+    }
+
+    void DumpCounters() {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - counter_last_dump < std::chrono::seconds(1)) {
+            return;
+        }
+        counter_last_dump = now;
+        std::array<u64, 5> values{};
+        for (size_t i = 0; i < jit_state.nx2_counters.size(); ++i) {
+            values[i] = jit_state.nx2_counters[i];
+        }
+        values[4] = counter_runs;
+        JitMapCounters(this, values.data(), values.size());
     }
 
     HaltReason Step() {
@@ -258,7 +287,7 @@ private:
         // LocationDescriptor ctor() does important ops (like tflags) do not skip
         auto const arch_descriptor = A64::LocationDescriptor{descriptor};
         ir_block.Reset(arch_descriptor);
-        A64::Translate(ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
+        A64::Translate(ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct, true, conf.elide_ld_st_barriers, conf.native_lse_atomics});
         Optimization::Optimize(ir_block, conf, polyfill_options);
         return emitter.Emit(ir_block).entrypoint;
     }
@@ -293,6 +322,8 @@ private:
     Optimization::PolyfillOptions polyfill_options;
     bool is_executing = false;
     bool invalidate_entire_cache = false;
+    u64 counter_runs = 0;
+    std::chrono::steady_clock::time_point counter_last_dump{};
     boost::icl::interval_set<u64> invalid_cache_ranges;
     std::mutex invalidation_mutex;
 };

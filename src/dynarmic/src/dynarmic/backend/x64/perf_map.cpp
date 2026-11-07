@@ -80,3 +80,62 @@ void PerfMapClear() {
 }  // namespace Dynarmic::Backend::X64
 
 #endif
+
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+
+namespace Dynarmic::Backend::X64 {
+
+namespace {
+std::FILE* OpenJitMap() {
+    static std::FILE* const map_file = [] () -> std::FILE* {
+        const char* path = std::getenv("EDEN_NX2_JIT_MAP");
+        if (path == nullptr || path[0] == '\0' || (path[0] == '0' && path[1] == '\0')) {
+            return nullptr;
+        }
+        std::FILE* f = std::fopen(path, "a");
+        if (f) {
+            std::setvbuf(f, nullptr, _IONBF, 0);
+        }
+        return f;
+    }();
+    return map_file;
+}
+std::mutex jit_map_mutex;
+}  // anonymous namespace
+
+void JitMapRegister(const void* start, std::size_t size, std::uint64_t guest_pc) {
+    std::FILE* const f = OpenJitMap();
+    if (!f) {
+        return;
+    }
+    std::lock_guard guard{jit_map_mutex};
+    std::fprintf(f, "%llx %llx %llx\n", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(start)),
+                 static_cast<unsigned long long>(size), static_cast<unsigned long long>(guest_pc));
+}
+
+void JitMapCounters(const void* jit, const std::uint64_t* counters, std::size_t count) {
+    std::FILE* const f = OpenJitMap();
+    if (!f) {
+        return;
+    }
+    std::lock_guard guard{jit_map_mutex};
+    std::fprintf(f, "counters %llx", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(jit)));
+    for (std::size_t i = 0; i < count; ++i) {
+        std::fprintf(f, " %llu", static_cast<unsigned long long>(counters[i]));
+    }
+    std::fprintf(f, "\n");
+}
+
+void JitMapClear(const void* begin, const void* end) {
+    std::FILE* const f = OpenJitMap();
+    if (!f) {
+        return;
+    }
+    std::lock_guard guard{jit_map_mutex};
+    std::fprintf(f, "clear %llx %llx\n", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(begin)),
+                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(end)));
+}
+
+}  // namespace Dynarmic::Backend::X64

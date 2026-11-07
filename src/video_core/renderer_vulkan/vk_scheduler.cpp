@@ -201,7 +201,8 @@ bool Scheduler::DeferFlush() {
     // Imprisonment fights, each a queue submission (~22,000 a second with the others), which
     // kept the Vulkan worker busy submitting. Batched within 500 us: ~10-15% more fps there.
     // Command list copies after dispatches were ~9,000 more a second, of which the front waited
-    // for about 5%.
+    // for about 5%. A guest read waiting for downloads (Nx2Reactive::WaitLanding) has the
+    // fence manager submit at once instead (FenceManager::SignalFence).
     static const s64 interval_us = [] {
         const char* value = std::getenv("EDEN_NX2_FENCE_FLUSH_US");
         if (value != nullptr) {
@@ -313,24 +314,48 @@ void Scheduler::MarkFrameEnd(u64 frame) {
     }
 }
 
-void Scheduler::DispatchWork() {
+void Scheduler::DispatchWork(bool lazy) {
     if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
         VideoCommon::GpuSplit::CheckOwner("Scheduler::DispatchWork");
     }
-    if (chunk && !chunk->Empty()) {
-        // Waking the worker is a system call (~2% of the GPU thread at one dispatch per 8
-        // draws): skip it while the worker is still busy, it pops the queue before waiting.
-        bool wake;
-        {
-            std::scoped_lock ql{queue_mutex};
+    // EDEN_NX2_LAZY_WAKE=0: every chunk handed over wakes a sleeping worker. Otherwise the chunks
+    // handed over between submissions (every 32 draws, or full) wake it only in pairs: each wake
+    // is a system call on this thread (~1% of it in Ocarina), and nothing waits for those chunks
+    // before the next submission, which always wakes it.
+    static const bool lazy_wake = [] {
+        const char* value = std::getenv("EDEN_NX2_LAZY_WAKE");
+        return value == nullptr || value[0] != '0';
+    }();
+    const bool has_work = chunk && !chunk->Empty();
+    if (!has_work && !(lazy_queued && !lazy)) {
+        return;
+    }
+    lazy = lazy && lazy_wake;
+    // Waking the worker is a system call (~2% of the GPU thread at one dispatch per 8
+    // draws): skip it while the worker is still busy, it pops the queue before waiting.
+    bool wake;
+    {
+        std::scoped_lock ql{queue_mutex};
+        if (has_work) {
             work_queue.push(std::move(chunk));
-            wake = worker_waiting;
         }
-        if (wake) {
-            event_cv.notify_all();
-        }
+        wake = worker_waiting && !work_queue.empty() && (!lazy || work_queue.size() >= 2);
+        lazy_queued = worker_waiting && !wake && !work_queue.empty();
+    }
+    if (wake) {
+        event_cv.notify_all();
+    }
+    if (has_work) {
         AcquireNewChunk();
     }
+}
+
+bool Scheduler::RenderPassMatches(const Framebuffer* framebuffer) const {
+    const VkExtent2D render_area = framebuffer->RenderArea();
+    return state.renderpass != VK_NULL_HANDLE && framebuffer->RenderPass() == state.renderpass &&
+           framebuffer->Handle() == state.framebuffer &&
+           render_area.width == state.render_area.width &&
+           render_area.height == state.render_area.height;
 }
 
 void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass renderpass,
@@ -523,6 +548,7 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
     const Common::DkbCpuTrace::Registration trace_thread{Common::DkbCpuTrace::Role::VulkanWorker};
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
     Common::SetCurrentThreadToPerformanceCores();
+    Common::PinCurrentThread(Common::PinnedRole::VulkanWorker);
 
     const auto TryPopQueue{[this](auto& work) -> bool {
         if (work_queue.empty()) {

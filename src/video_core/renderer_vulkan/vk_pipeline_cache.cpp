@@ -30,6 +30,7 @@
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/ir_opt/passes.h"
 #include "shader_recompiler/program_header.h"
+#include "video_core/dirty_flags.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
@@ -773,18 +774,36 @@ void PipelineCache::SaveUsedPipelines() {
 }
 
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
-
+    const bool shaders_dirty = maxwell3d->dirty.flags[VideoCommon::Dirty::Shaders];
     if (!RefreshStages(graphics_key.unique_hashes)) {
         current_pipeline = nullptr;
+        key_pipeline = nullptr;
         return nullptr;
     }
-    graphics_key.state.Refresh(*maxwell3d, dynamic_features);
+    // EDEN_NX2_PIPE_SKIP: when nothing Refresh reads changed, the state part of the key stands;
+    // with the same shaders too, so does the pipeline the last lookup found for it.
+    const bool skip = PipelineSkipEnabled();
+    const bool state_same = skip && graphics_key.state.xfb_enabled == 0 &&
+                            state_watch.StateUnchanged(*maxwell3d, graphics_key.state);
+    if (state_same && !shaders_dirty && key_pipeline != nullptr &&
+        key_pipeline == current_pipeline) {
+        current_pipeline->MarkUsed(frame_count);
+        return BuiltPipeline(current_pipeline);
+    }
+    if (!state_same) {
+        graphics_key.state.Refresh(*maxwell3d, dynamic_features);
+        if (skip) {
+            state_watch.Store(*maxwell3d, dynamic_features);
+        }
+    }
+    key_pipeline = nullptr;
 
     if (current_pipeline) {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
         if (next) {
             current_pipeline = next;
             current_pipeline->MarkUsed(frame_count);
+            key_pipeline = current_pipeline;
             return BuiltPipeline(current_pipeline);
         }
     }
@@ -1139,6 +1158,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     }
     current_pipeline = pipeline.get();
     current_pipeline->MarkUsed(frame_count);
+    key_pipeline = current_pipeline;
     return BuiltPipeline(current_pipeline);
 }
 

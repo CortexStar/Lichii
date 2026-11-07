@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include "video_core/page_filter.h"
 #include "common/container/unordered_map.h"
 #include <utility>
 
@@ -50,6 +51,10 @@ public:
             return {static_cast<size_t>(stream_id.Value()), static_cast<size_t>(query_id.Value())};
         }
     };
+
+    /// Device pages queries were ever cached on (InnerInvalidation skips the rest,
+    /// EDEN_NX2_PAGE_FILTER).
+    VideoCommon::PageFilter page_filter;
 
     explicit QueryCacheBase(Tegra::GPU& gpu, VideoCore::RasterizerInterface& rasterizer_,
                             Tegra::MaxwellDeviceMemoryManager& device_memory_,

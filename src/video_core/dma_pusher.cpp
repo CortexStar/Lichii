@@ -202,7 +202,7 @@ bool DmaPusher::Step() {
         const bool use_safe = !VideoCommon::GpuSplit::Get().Active() &&
                               (Settings::IsDMALevelDefault() ? Settings::IsGPULevelHigh() : Settings::IsDMALevelSafe());
         if (!gpu_written && VideoCommon::GpuSplit::Get().Active() &&
-            WaitForListWriters(dma_state.dma_get, size_t{header.size} * sizeof(u32))) {
+            WaitForListFetch(dma_state.dma_get, size_t{header.size} * sizeof(u32))) {
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
         }
@@ -474,6 +474,16 @@ void DmaPusher::CallMethod(u32 argument) {
             return;
         }
         const auto engine_type = subchannel_type[dma_state.subchannel];
+        if (engine_type == Engines::EngineTypes::Maxwell3D && split.FrontMacros()) {
+            // The common case first: with its macros on the front the 3D engine is no writer
+            // and notes its own writes (as below, without the checks).
+            auto* const maxwell3d = static_cast<Engines::Maxwell3D*>(subchannel);
+            if (maxwell3d->GetNativeMacroEngine().native_turing) {
+                maxwell3d->FrontCallMethod(system, split, dma_state.method, argument,
+                                           dma_state.is_last_call);
+                return;
+            }
+        }
         const bool writer = split.Active() &&
                             IsMemoryWriter(*subchannel, engine_type, dma_state.method);
         const BackWrites back_writes =
@@ -537,6 +547,14 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
             return;
         }
         const auto engine_type = subchannel_type[dma_state.subchannel];
+        if (engine_type == Engines::EngineTypes::Maxwell3D && split.FrontMacros()) {
+            auto* const maxwell3d = static_cast<Engines::Maxwell3D*>(subchannel);
+            if (maxwell3d->GetNativeMacroEngine().native_turing) {
+                maxwell3d->FrontCallMultiMethod(system, split, dma_state.method, base_start,
+                                                num_methods, dma_state.method_count);
+                return;
+            }
+        }
         const bool writer = split.Active() &&
                             IsMemoryWriter(*subchannel, engine_type, dma_state.method);
         const BackWrites back_writes =
@@ -671,6 +689,63 @@ bool DmaPusher::WaitForListWriters(GPUVAddr address, size_t size) {
         return waited || waited_all;
     }
     return waited;
+}
+
+namespace {
+
+// Device pages the front has read command lists from (one bit per 4 KiB of the 36-bit device
+// address space) in the split's session g_seen_list_session. GPU thread only.
+std::vector<u64> g_seen_list_pages;
+u64 g_seen_list_session = ~u64{0};
+
+} // Anonymous namespace
+
+bool DmaPusher::MarkListPagesSeen(GPUVAddr address, size_t size) {
+    const u64 session = VideoCommon::GpuSplit::Get().Session();
+    if (g_seen_list_session != session) {
+        g_seen_list_session = session;
+        g_seen_list_pages.assign((u64{1} << (36 - 12)) / 64, 0);
+    }
+    bool seen = true;
+    for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < address + size; page += 0x1000) {
+        const auto device = memory_manager.GpuToCpuAddress(page);
+        if (!device) {
+            seen = false;
+            continue;
+        }
+        const u64 index = *device >> 12;
+        if (index / 64 >= g_seen_list_pages.size()) {
+            seen = false;
+            continue;
+        }
+        u64& word = g_seen_list_pages[index / 64];
+        const u64 bit = u64{1} << (index % 64);
+        if ((word & bit) == 0) {
+            word |= bit;
+            seen = false;
+        }
+    }
+    return seen;
+}
+
+bool DmaPusher::WaitForListFetch(GPUVAddr address, size_t size) {
+    auto& split = VideoCommon::GpuSplit::Get();
+    // EDEN_NX2_LIST_EXACT: a list on pages the GPU never wrote (IsGpuWrittenCommands) only waits
+    // for the recorded writes over its pages: the dispatches and copies that wrote command lists
+    // so far wrote GPU-written pages, which take ReadGpuWrittenCommands. A page read for the
+    // first time waits for all of them, so that one writing it for the first time runs (and
+    // marks it) before the list is read.
+    if (!split.NarrowDrains() || !split.ListExact() || VideoCommon::GpuSplit::NarrowVerify()) {
+        return WaitForListWriters(address, size);
+    }
+    const GPUVAddr first = address & ~GPUVAddr{0xfff};
+    const GPUVAddr last = (address + size + 0xfff) & ~GPUVAddr{0xfff};
+    if (!MarkListPagesSeen(address, size)) {
+        return split.WaitForWritersTo(&memory_manager, first, last - first, false);
+    }
+    return split.WaitForWritesTo(&memory_manager, first, last - first,
+                                 VideoCommon::DrainSite::NarrowListWriters,
+                                 VideoCommon::NarrowBase::Recorded);
 }
 
 void DmaPusher::RefreshSnapshot(CommandList& list, u64 now) {

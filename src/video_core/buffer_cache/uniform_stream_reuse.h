@@ -32,29 +32,32 @@ concept StreamUniformReusable = requires(R& runtime, u32 size) {
 };
 
 /// EDEN_NX2_UBOREUSE=0 turns the reuse off (every small uniform buffer is copied, as before).
+/// Read once at static init: asked for every streamed uniform buffer.
+inline const bool g_uniform_stream_reuse = [] {
+    const char* const value = std::getenv("EDEN_NX2_UBOREUSE");
+    return value == nullptr || value[0] != '0';
+}();
+
 [[nodiscard]] inline bool UniformStreamReuseEnabled() noexcept {
-    static const bool enabled = [] {
-        const char* const value = std::getenv("EDEN_NX2_UBOREUSE");
-        return value == nullptr || value[0] != '0';
-    }();
-    return enabled;
+    return g_uniform_stream_reuse;
 }
 
 /// EDEN_NX2_OPT_UBO_INPLACE=0: copy the guest bytes to a scratch buffer and compare that copy
 /// (as before), instead of comparing the guest memory where it is when it is contiguous.
+inline const bool g_uniform_stream_in_place = [] {
+    const char* const value = std::getenv("EDEN_NX2_OPT_UBO_INPLACE");
+    return value == nullptr || value[0] != '0';
+}();
+
 [[nodiscard]] inline bool UniformStreamInPlaceEnabled() noexcept {
-    static const bool enabled = [] {
-        const char* const value = std::getenv("EDEN_NX2_OPT_UBO_INPLACE");
-        return value == nullptr || value[0] != '0';
-    }();
-    return enabled;
+    return g_uniform_stream_in_place;
 }
 
 template <class Ref>
 class UniformStreamReuse {
 public:
     static constexpr u32 MaxBytes = 4096; // BufferCache's DEFAULT_SKIP_CACHE_SIZE
-    static constexpr size_t NumStages = 5;
+    static constexpr size_t NumStages = 6; // the five graphics stages and compute
     static constexpr size_t NumSlots = 18; // Maxwell constant buffers per stage
 
     struct Slot {

@@ -184,6 +184,44 @@ public:
                                           static_cast<s64>(end - begin), func);
         });
     }
+    /// ForEachUploadRange / ForEachDirtyUploadRange keeping Hot pages unprotected and dirty:
+    /// they go to `hot_func` instead (WordManager::ForEachCpuUploadRange).
+    template <typename Func, typename HotFunc>
+    void ForEachUploadRange(VAddr query_cpu_range, u64 query_size, bool skip_clean, Func&& func,
+                            HotFunc&& hot_func) {
+        IteratePages<true>(query_cpu_range, query_size,
+                           [&func, &hot_func, skip_clean](Manager* manager, u64 offset, size_t size) {
+            u64 begin = offset;
+            u64 end = offset + size;
+            if (skip_clean) {
+                const u64 dirty = manager->DirtyWords(offset / BYTES_PER_WORD,
+                                                      (offset + size - 1) / BYTES_PER_WORD);
+                if (dirty == 0) {
+                    return;
+                }
+                begin = (std::max<u64>)(offset, std::countr_zero(dirty) * BYTES_PER_WORD);
+                end = (std::min<u64>)(offset + size, (64 - std::countl_zero(dirty)) * BYTES_PER_WORD);
+            }
+            manager->ForEachCpuUploadRange(manager->cpu_addr + begin, static_cast<s64>(end - begin),
+                                           func, hot_func);
+        });
+    }
+
+    /// Marks or unmarks Hot pages (BufferCache hot pages).
+    void MarkRegionHot(VAddr cpu_address, u64 size, bool hot) {
+        IteratePages<true>(cpu_address, size, [hot](Manager* manager, u64 offset, size_t length) {
+            manager->ChangeRegionState(Type::Hot, hot, manager->cpu_addr + offset, length);
+        });
+    }
+
+    /// Calls `func` for each range of Hot pages in the region.
+    template <typename Func>
+    void ForEachHotRange(VAddr cpu_address, u64 size, Func&& func) {
+        IteratePages<false>(cpu_address, size, [&func](Manager* manager, u64 offset, size_t length) {
+            manager->ForEachModifiedRange(Type::Hot, false, manager->cpu_addr + offset, length, func);
+        });
+    }
+
     /// Verify mode: true when the clean words of the managers over a range match a recount.
     [[nodiscard]] bool CleanWordsHold(VAddr query_cpu_addr, u64 query_size) const noexcept {
         const size_t first = query_cpu_addr >> HIGHER_PAGE_BITS;

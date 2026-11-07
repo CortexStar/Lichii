@@ -94,7 +94,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(UnboundedCause::Cou
 enum class NarrowBase : u8 {
     Read,     ///< Every unbounded write (macro DMA reads)
     Acquire,  ///< Every unbounded write and dispatch (semaphore acquires)
-    Recorded, ///< Only the recorded writes (and overflowed records): EDEN_NX2_NARROW_DMA_RECORDED
+    Recorded, ///< Only the recorded writes (and the write floor): EDEN_NX2_NARROW_DMA_RECORDED
 };
 
 /// An EDEN_NX2_* on/off switch: '0' off, anything else on, unset `default_on`.
@@ -203,6 +203,31 @@ public:
                    (u64{repeats} << 32);
         std::memcpy(entry + 1, methods, size_t{count} * sizeof(u64));
         Commit(1 + size_t{count});
+    }
+    // EDEN_NX2_FRONT_CB_ENCODE (Maxwell3D::FrontCbWord): constant buffer commands.
+    /// `count` (1-4) words written to the constant buffer data registers, register i being
+    /// const_buffer.buffer + nibble i of `nibbles` (Maxwell3D::BackCbWrite). Never more words
+    /// than the single method entries it stands for.
+    void CbWrite(Tegra::Engines::EngineInterface* engine, u32 nibbles, const u32* words,
+                 u32 count) {
+        SelectEngine(engine);
+        const size_t size = 1 + size_t{count} / 2;
+        u64* const entry = Reserve(size);
+        entry[0] = static_cast<u64>(Kind::CbWrite) | (u64{count & 7} << 8) |
+                   (u64{nibbles & 0xffff} << 12) | (u64{words[0]} << 32);
+        if (count > 1) {
+            entry[size - 1] = 0;
+            std::memcpy(entry + 1, words + 1, size_t{count - 1} * sizeof(u32));
+        }
+        Commit(size);
+    }
+    /// A write of `argument` to bind group `stage`'s raw_config (Maxwell3D::BackCbBind).
+    void CbBind(Tegra::Engines::EngineInterface* engine, u32 stage, u32 argument) {
+        SelectEngine(engine);
+        u64* const entry = Reserve(1);
+        entry[0] = static_cast<u64>(Kind::CbBind) | (u64{stage & 0xff} << 8) |
+                   (u64{argument} << 32);
+        Commit(1);
     }
     /// Work the front holds back (a register delta, a draw batch): `hook(argument)` sends it
     /// before anything else is sent and before a Drain. Another holder's work is sent first.
@@ -317,10 +342,11 @@ public:
         return session;
     }
     /// The work just sent writes [address, address + size) of the GPU address space `space` (its
-    /// MemoryManager) when the back runs it.
-    void NoteWrite(const void* space, GPUVAddr address, u64 size) {
+    /// MemoryManager) when the back runs it. `fine`: a release or report (tracked by the word, so
+    /// reads of the words next to it don't wait for it); other writes are tracked by the page.
+    void NoteWrite(const void* space, GPUVAddr address, u64 size, bool fine = false) {
         if (narrow && size != 0) {
-            RecordWrite(space, address, size);
+            RecordWrite(space, address, size, fine);
         }
     }
     /// The work just sent may write guest memory the front can't bound. `writer`: it is compute
@@ -380,6 +406,24 @@ public:
     [[nodiscard]] bool NarrowDiag() const {
         return diag;
     }
+    /// EDEN_NX2_ACQUIRE_POLL: semaphore acquires read guest memory once the recorded writes over
+    /// the word ran, without waiting for dispatches or other unbounded work; an acquire not met
+    /// suspends the channel and is polled from guest memory (no drain).
+    [[nodiscard]] bool AcquirePoll() const {
+        return acquire_poll;
+    }
+    /// EDEN_NX2_LIST_EXACT: command lists on pages the GPU never wrote (and that held lists
+    /// before) wait only for the recorded writes over their pages.
+    [[nodiscard]] bool ListExact() const {
+        return list_exact;
+    }
+    /// Any thread: GPU work releases or reports to the page of `address` (sticky until Stop):
+    /// semaphore releases, reports and QMD releases.
+    static void NoteGpuSemaphore(GPUVAddr address);
+    /// Whether a semaphore acquire met at `address` is a host-level wait (NoteSync): the GPU
+    /// releases semaphores on its page (EDEN_NX2_SYNC_GPU_SEMAPHORES; always without it). An
+    /// acquire on a word only the CPU writes says nothing about the GPU work before it.
+    [[nodiscard]] bool AcquireSyncs(GPUVAddr address) const;
 
     // Semaphore prediction (EDEN_NX2_SEM_PREDICT): the values of the releases the front queued.
     // While a release is still queued, an acquire it meets is met: the back runs the work after
@@ -387,9 +431,12 @@ public:
     [[nodiscard]] bool SemaphorePredict() const {
         return sem_predict;
     }
-    /// A release of `value` at `address` of `space` was just sent.
+    /// A release of `value` at `address` of `space` (a Tegra::MemoryManager) was just sent.
     void NoteRelease(const void* space, GPUVAddr address, u32 value);
     /// The value of the latest still-queued release at `address` of `space`, if any.
+    /// EDEN_NX2_SEM_PREDICT_LANDED: also once the back ran it while guest memory still holds the
+    /// word from before it (a fence still holds the write back) or its value, and nothing the
+    /// front sent since wrote the word.
     [[nodiscard]] std::optional<u32> PredictedSemaphore(const void* space, GPUVAddr address);
     /// Work that writes `address` of `space` with a value the front doesn't know was just sent.
     void ForgetRelease(const void* space, GPUVAddr address);
@@ -437,6 +484,8 @@ private:
         Call,   ///< Bits 8-31 payload size in words; word 1 thunk, then the payload
         StateDelta, ///< Bits 32-63 count; then count words (method | value << 32), Maxwell3D
         DrawBatch,  ///< Bits 8-15 count, 32-63 repeats; then count words (method | arg << 32)
+        CbWrite,    ///< Bits 8-10 count (1-4), 12-27 register nibbles, 32-63 word 0; then words
+        CbBind,     ///< Bits 8-15 stage, 32-63 argument (Maxwell3D bind group raw_config)
     };
     static constexpr u64 IsLast = 1 << 4;
     static constexpr u64 HasSegment = 1 << 5;
@@ -466,7 +515,9 @@ private:
     u64* ReserveSlow(size_t words);
     void Commit(size_t words) {
         write_position += words;
-        if (write_position - published_local >= publish_every) {
+        // EDEN_NX2_PUBLISH_IDLE: a back that ran out of work gets each entry at once.
+        if (write_position - published_local >= publish_every ||
+            (publish_idle && back_idle.load(std::memory_order_relaxed))) {
             Publish();
         }
     }
@@ -496,23 +547,59 @@ private:
     /// Runs the entry at `entry` (of the `words` published before the ring's end), returns its size.
     size_t Execute(const u64* entry, size_t words);
 
-    /// Narrow drains: a queued write with a known destination, done once `consumed` reaches
-    /// `position` (the end of the work that makes it).
-    struct PendingWrite {
+    // Narrow drains: the queued writes with a known destination, indexed by where they write.
+    // Each slot holds the position of the end of the latest work writing its page (4 KiB) or word
+    // (4 bytes, releases and reports); it is done once `consumed` reaches it. Slots are found by
+    // a hash in buckets of four; a slot still pending that has to make room raises write_floor,
+    // which every read waits for. Writes over more than 64 pages go to a short list.
+    struct PageSlot {
+        u64 key;
+        u64 coarse; ///< Page-granular writes
+        u64 any;    ///< Any write (word writes too)
+    };
+    struct WordSlot {
+        u64 key;
+        u64 position;
+    };
+    struct HugeWrite {
         const void* space;
         GPUVAddr begin;
         GPUVAddr end;
         u64 position;
     };
-    static constexpr size_t MaxPendingWrites = 512;
-    static constexpr size_t PendingWriteMask = MaxPendingWrites - 1;
-    void RecordWrite(const void* space, GPUVAddr address, u64 size);
-    /// Forgets the recorded writes the back executed (by consumed_cache).
-    void PrunePendingWrites();
+    static constexpr size_t PageBuckets = 2048;  ///< 4 slots each
+    static constexpr size_t WordBuckets = 2048;  ///< 4 slots each
+    static constexpr size_t MaxHugeWrites = 16;
+    static constexpr size_t MaxFineBytes = 64;   ///< Larger releases go by the page
+    static constexpr size_t MaxSpaces = 4;       ///< Address spaces told apart (the last: the rest)
+    static constexpr GPUVAddr PageBits = 12;
+    static constexpr GPUVAddr WordBits = 2;
+    void RecordWrite(const void* space, GPUVAddr address, u64 size, bool fine);
+    [[nodiscard]] u32 SpaceId(const void* space);
+    void InsertPage(u64 key, bool coarse);
+    void InsertWord(u64 key);
+    /// A pending slot gives way: reads wait for it from now on.
+    void RaiseFloor(u64 position) {
+        if (position <= consumed_cache || position <= write_floor) {
+            return;
+        }
+        consumed_cache = consumed.load(std::memory_order_acquire);
+        if (position > consumed_cache) {
+            write_floor = position;
+            if (diag) [[unlikely]] {
+                ++diag_notes[static_cast<size_t>(UnboundedCause::Overflow)];
+            }
+        }
+    }
+    [[nodiscard]] const PageSlot* FindPage(u64 key) const;
+    [[nodiscard]] const WordSlot* FindWord(u64 key) const;
     /// The position to wait for before reading [address, address + size) of `space`: at least
     /// `base`, and past the latest recorded write that may overlap it.
     [[nodiscard]] u64 PendingWriteTarget(const void* space, GPUVAddr address, u64 size,
                                          u64 base) const;
+    /// Whether the front sent work after `position` that may write the word at `address`
+    /// (true where the index no longer tells).
+    [[nodiscard]] bool WrittenSince(const void* space, GPUVAddr address, u64 position) const;
 
     Core::System* system{};
     bool active{};
@@ -524,7 +611,17 @@ private:
     bool narrow_dma_recorded{};
     bool narrow_list_sync{};
     bool sem_predict{};
+    bool sem_predict_landed{};
+    bool acquire_poll{};
+    bool list_exact{};
+    bool sync_gpu_semaphores{};
+    bool publish_idle{};
     bool diag{};
+    /// NoteGpuSemaphore's pages (page + 1, open addressing); saturated: every page counts.
+    static constexpr size_t GpuSemaphoreSlots = 1024;
+    static inline std::array<std::atomic<u64>, GpuSemaphoreSlots> gpu_semaphore_pages{};
+    static inline std::atomic<u32> gpu_semaphore_count{};
+    static inline std::atomic<bool> gpu_semaphore_saturated{};
     u64 session{};
     std::unique_ptr<u64[]> ring;
 
@@ -545,21 +642,29 @@ private:
     u64 unbounded_writer_position{};
     /// Unbounded writes and dispatches (semaphore acquires wait for those).
     u64 acquire_position{};
-    /// The latest overflowed record (NarrowBase::Recorded reads wait for it).
-    u64 overflow_position{};
+    /// The latest pending write slot that gave way (every narrowed read waits for it).
+    u64 write_floor{};
     UnboundedCause unbounded_cause{};
     UnboundedCause acquire_cause{};
     UnboundedCause writer_cause{};
-    /// Releases the front queued (EDEN_NX2_SEM_PREDICT), round robin.
+    /// The latest release the front queued per semaphore word (EDEN_NX2_SEM_PREDICT), found by a
+    /// hash in buckets of four; `before`: the word in guest memory when it was sent.
     struct QueuedRelease {
         const void* space;
         GPUVAddr address;
         u64 position;
         u32 value;
+        u32 before;
+        /// Tegra::g_nx2_semaphore_landed slot of the word, its count when the entry started, and
+        /// the releases sent since: the latest landed once the count grew by `sent`.
+        u32 landed_slot;
+        u32 landed_base;
+        u32 sent;
+        bool used;
     };
-    static constexpr size_t MaxQueuedReleases = 32;
-    std::array<QueuedRelease, MaxQueuedReleases> queued_releases{};
-    size_t next_release{};
+    static constexpr size_t ReleaseBuckets = 256; ///< 4 slots each
+    [[nodiscard]] QueuedRelease* FindRelease(const void* space, GPUVAddr address);
+    std::unique_ptr<QueuedRelease[]> queued_releases;
     // EDEN_NX2_NARROW_DIAG (front only): notes per cause; real waits and their ticks per site
     // and cause; acquire checks (predicted, waited).
     std::array<u64, static_cast<size_t>(UnboundedCause::Count)> diag_notes{};
@@ -574,10 +679,19 @@ private:
     std::array<std::array<u64, 3>, 0x100> diag_macro_dma{};
     u64 diag_window_start{};
     u64 diag_window_ticks{};
-    /// Recorded writes not yet known done, oldest first: [pending_head, pending_tail).
-    std::array<PendingWrite, MaxPendingWrites> pending_writes{};
-    u64 pending_head{};
-    u64 pending_tail{};
+    /// The pending write index (RecordWrite).
+    std::unique_ptr<PageSlot[]> page_slots;
+    std::unique_ptr<WordSlot[]> word_slots;
+    std::array<HugeWrite, MaxHugeWrites> huge_writes{};
+    size_t next_huge{};
+    std::array<const void*, MaxSpaces> spaces{};
+    /// Per address space id: the latest recorded write (reads in another space wait for it).
+    std::array<u64, MaxSpaces> space_last{};
+    u32 used_spaces{};
+    /// The latest recorded write anywhere.
+    u64 last_record{};
+    /// The page slot the last page write went to (runs of writes to one page).
+    PageSlot* last_page_slot{};
 
     // Back side.
     Tegra::Engines::EngineInterface* back_engine{};
@@ -595,6 +709,8 @@ private:
     alignas(128) std::atomic<u64> consumed{};
     /// A position the front waits for (WaitFor): the back stores `consumed` once past it.
     alignas(128) std::atomic<u64> wait_target{~u64{0}};
+    /// The back found the ring empty (it spins, then sleeps): Commit publishes at once.
+    alignas(128) std::atomic<bool> back_idle{};
     alignas(128) std::atomic<bool> back_waiting{};
     std::atomic<u32> wake{};
     /// The front sleeps in Backoff (#161: instead of yielding).

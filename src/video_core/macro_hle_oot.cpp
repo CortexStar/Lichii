@@ -19,20 +19,33 @@ namespace {
 
 constexpr u32 MaxInstructions = 1024;
 
-// TODO(OoT macros): no replacement is registered yet. Ocarina's macro code is uploaded by the
-// game's NVN2 driver at run time and no dump of it existed when this was written, so none of
-// the hot macros (methods 0xe02, 0xe1c, 0xe3a, 0xe36, 0xe2c) could be reproduced exactly.
-// To add one:
-//   1. Run Ocarina with EDEN_NX2_OOT_MACROS_DUMP=1 (split GPU thread with front macros, the
-//      default) and filter the log for "OoT macro". Each macro's code is logged once per hash
-//      ("OoT macro code"), and the first calls of the hot macros with their parameters and
-//      the writes they emitted ("OoT macro call").
-//   2. Decode the code with TuringMacroInterpreter::Decode (macro_turing.h; Mesa's
-//      mme_tu104 disassembler reads the same format) and write the handler from it: the same
-//      writes in the same order, FIFO consumption, data RAM effects and DMA reads (0x157/0x158
-//      through Context::Emit). Registers it reads come from Context::Read.
-//   3. Check it against the logged calls, then add {hash, name, handler} below.
-constexpr std::array<Macro, 0> macros{};
+// The replacements in macro_hle_oot.h, by the code hash of the macro they were written from
+// (EDEN_NX2_OOT_MACROS_DUMP=1 logs each macro's code and hash).
+constexpr std::array macros{
+    Macro{0x2ee8ad56465747bfULL, "0xe02 bind constant buffer", Id::E02},
+    Macro{0x46c054102001e459ULL, "0xe04 indexed draw", Id::E04},
+    Macro{0x999c63d624da37a4ULL, "0xe08 stage program", Id::E08},
+    Macro{0xe25bdd1f82c86e49ULL, "0xe10", Id::E10},
+    Macro{0xbe42b5cb86694207ULL, "0xe1c select constant buffer", Id::E1C},
+    Macro{0xd3f63d16fa69462dULL, "0xe1e", Id::E1E},
+    Macro{0x4bdbe220379623d9ULL, "0xe20", Id::E20},
+    Macro{0xa5fc8a3a55ec5a41ULL, "0xe28", Id::E28},
+    Macro{0xd44bd7403b220b38ULL, "0xe2a render enable", Id::E2A},
+    Macro{0x3b26ab7eb3fc9863ULL, "0xe2c conditional render", Id::E2C},
+    Macro{0xcecda2c386f441e1ULL, "0xe36 select constant buffer offset", Id::E36},
+    Macro{0x7653928eec3315a8ULL, "0xe3a stage disable", Id::E3A},
+    Macro{0x053e08f952ce26eeULL, "0xe3e", Id::E3E},
+    Macro{0xd7011b3ed6907773ULL, "0xe52 instanced draw", Id::E52},
+    Macro{0x4f3ca32a4d22aaf0ULL, "0xe5c", Id::E5C},
+    Macro{0xdaba5f7044390cd4ULL, "0xe68 data RAM write", Id::E68},
+    Macro{0x0fc20101c0d79a0aULL, "0xe8c", Id::E8C},
+    Macro{0x57f1ff45827c7b87ULL, "0xe92", Id::E92},
+    Macro{0x9d3c85c8f0bea13aULL, "0xe96 vertex attributes", Id::E96},
+    Macro{0x0d3ef03cb86ff29bULL, "0xe9a vertex streams", Id::E9A},
+    Macro{0x38b7414725298d00ULL, "0xea0 instanced draw (base in constant buffer)", Id::EA0},
+    Macro{0xa53fe0ab08bad81fULL, "0xece", Id::ECE},
+    Macro{0x2e38eccae827f4f1ULL, "0xed6", Id::ED6},
+};
 
 [[nodiscard]] bool IsHot(u32 method) {
     switch (method) {

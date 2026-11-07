@@ -32,7 +32,7 @@ struct A64JitState {
     // Exclusive state stuff
     static constexpr u64 RESERVATION_GRANULE_MASK = 0xFFFF'FFFF'FFFF'FFF0ull;
     // Return stack buffer
-    static constexpr size_t RSB_SIZE = 8;  // MUST be a power of 2.
+    static constexpr size_t RSB_SIZE = 32;  // MUST be a power of 2. UserConfig::rsb_size picks how many are used.
     static constexpr size_t RSB_PTR_MASK = RSB_SIZE - 1;
 
     std::array<u64, 31> reg{};
@@ -55,6 +55,10 @@ struct A64JitState {
     u32 rsb_ptr = 0;
     std::array<u64, RSB_SIZE> rsb_location_descriptors;
     std::array<u64, RSB_SIZE> rsb_codeptrs;
+
+    // Diagnostic counters (UserConfig::jit_counters): RSB hits, fast dispatch lookups, fast
+    // dispatch misses, native atomics.
+    std::array<u64, 4> nx2_counters{};
 
     u32 GetPstate() const {
         return NZCV::FromX64(cpsr_nzcv);
