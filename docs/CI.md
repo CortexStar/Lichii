@@ -105,7 +105,7 @@ To retrain:
 | Kind              | Tag                    | Release title                            | GitHub Release flag                |
 | ----------------- | ---------------------- | ---------------------------------------- | ---------------------------------- |
 | Stable            | `vX.Y.Z`               | `Lichii vX.Y.Z`                       | Not a pre-release; marked latest   |
-| Release candidate | `vX.Y.Z-rcN`           | `Eglantine vX.Y.Z-rcN`                   | Pre-release                        |
+| Release candidate | `vX.Y.Z-rcN`           | `Lichii vX.Y.Z-rcN`                   | Pre-release                        |
 | Daily             | `daily-YYYYMMDD`       | `Lichii Build DD/MM/YYYY`             | Pre-release; replaces same-day tag |
 | Branch / PR       | `branch-<slug>-<hash>` | `Lichii Branch: <PR title or branch>` | Pre-release; rolling               |
 
