@@ -1834,8 +1834,11 @@ bool KeplerCompute::FrontQmdSignal(VideoCommon::GpuSplit& split, GPUVAddr qmd_ad
     // QMDs the front only reads after waiting for the back (written by queued copies or
     // uploads other than inline QMDs) or on GPU-written pages (each a drain) would make
     // launches wait: the old way is cheaper then.
+    // EDEN_NX2_QMD_AUTO_OFF=0 keeps predicting however many reads wait (drains still count).
+    static const bool auto_off = VideoCommon::Nx2Switch("EDEN_NX2_QMD_AUTO_OFF", true);
     if (mirror.window_reads >= 256 || mirror.window_resyncs > 8) {
-        if (mirror.window_waits * 8 > mirror.window_reads || mirror.window_resyncs > 8) {
+        if ((auto_off && mirror.window_waits * 8 > mirror.window_reads) ||
+            mirror.window_resyncs > 8) {
             LOG_WARNING(HW_GPU,
                         "QMD release prediction: {} of {} QMD reads waited for queued writes, "
                         "{} drains; predictions off (EDEN_NX2_QMD_PREDICT)",
