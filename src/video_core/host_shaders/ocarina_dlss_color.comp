@@ -10,5 +10,6 @@ void main() {
     if (any(greaterThanEqual(pixel, imageSize(dlss_color)))) {
         return;
     }
+    // The guest has already tonemapped this square-root-encoded color for LDR.
     imageStore(dlss_color, pixel, vec4(texelFetch(guest_color, pixel, 0).rgb, 1.0));
 }

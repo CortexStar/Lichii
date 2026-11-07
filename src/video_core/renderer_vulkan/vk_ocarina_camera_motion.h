@@ -35,11 +35,15 @@ public:
     ~OcarinaLiveDlss();
 
     [[nodiscard]] bool EvaluationFailed() const;
+    /// Save the 1440p DLSS copy before the game adds its HUD.
     void SaveSceneReference(VkImageView color);
+    /// Composite the HUD from the guest image over the matching 4K scene.
     void Composite4k(VkImageView native_composite, u64 frame);
     VkImage CompositedImage() const;
     VkImageView CompositedView() const;
 
+    /// Queue motion, DLSS evaluation and guest writeback for one frame. A false return leaves
+    /// the guest dispatch in charge. The scheduler checks EvaluationFailed before skipping it.
     bool Record(VkImageView color, VkImageView depth, VkImageView target, VkExtent2D extent,
                 VkExtent2D output_extent, VkExtent2D target_extent, const std::array<f32, 16>& current,
                 const std::array<f32, 16>& previous, const OcarinaActorMesh& mesh,

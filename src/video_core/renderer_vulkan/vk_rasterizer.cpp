@@ -2049,6 +2049,7 @@ bool RasterizerVulkan::OcarinaDlssEnabled() const {
            Settings::values.nvidia_dlss.GetValue() && Streamline::IsDlssAvailable();
 }
 
+/// Capture the two camera matrices from a draw targeting the scene color and depth.
 void RasterizerVulkan::TrackOcarinaCamera(std::span<const u64> shader_hashes) {
     constexpr u64 scene_vertex_shader = 0x46cc6aaba42f700fULL;
     if (!OcarinaDlssEnabled() || oot_camera_sample_frame == render_trace_frame ||
@@ -2091,6 +2092,7 @@ void RasterizerVulkan::TrackOcarinaCamera(std::span<const u64> shader_hashes) {
     });
 }
 
+/// Capture the skinning pose of the recognized Link draw for frame-to-frame motion.
 void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool is_indirect) {
     if (shader_hash != 0x28c6e527634f814aULL || !is_indexed || is_indirect ||
         !OcarinaDlssEnabled() || oot_actor.frame == render_trace_frame) {
@@ -2143,6 +2145,7 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
     }
 }
 
+/// Read the shared mesh only when both poses refer to the same vertex and index buffers.
 bool RasterizerVulkan::ReadOcarinaActor(OcarinaActorMesh& mesh) {
     const auto& now = oot_actor;
     const auto& before = oot_previous_actor;
@@ -2188,6 +2191,7 @@ bool RasterizerVulkan::ReadOcarinaActor(OcarinaActorMesh& mesh) {
     return true;
 }
 
+/// Track the scene depth on its reader dispatch, or try to replace a recognized upscale dispatch.
 bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool replace) {
     constexpr u64 depth_reader = 0x1fc7a0423116281fULL;
     const bool upscale_4k = replace && pipeline.ShaderHash() == ComputePipeline::Ocarina1440pShader;

@@ -29,6 +29,7 @@ namespace {
 
 using Matrix = std::array<f32, 16>;
 
+/// Reproject depth from the current clip space directly into the previous camera's clip space.
 std::optional<Matrix> ClipToPreviousClip(const Matrix& current, const Matrix& previous) {
     std::array<std::array<f64, 8>, 4> rows{};
     for (size_t i = 0; i < 4; ++i) {
@@ -205,6 +206,7 @@ public:
         pipeline = MakePipeline(logical);
     }
 
+    /// Reuse the mesh and update the two poses only while the vertex and index data still match.
     bool Update(const Device& device, const OcarinaActorMesh& mesh,
                 const ActorTransforms& transforms, VkImageView depth_view, VkSampler sampler) {
         const auto vertex_data = std::as_bytes(std::span{mesh.vertices});
@@ -334,6 +336,7 @@ public:
         : ComputePass(device_, scheduler, pool, BINDINGS, TEMPLATES, BANK, PUSH_CONSTANTS,
                       OCARINA_CAMERA_MOTION_COMP_SPV) {}
 
+    /// Fill camera motion from depth, then overwrite visible actor pixels with skinned motion.
     void Record(Scheduler& scheduler, const void* descriptors, const Matrix& transform,
                 VkImage motion, VkExtent2D size,
                 const ActorOverlay& overlay) {
@@ -743,6 +746,7 @@ bool OcarinaLiveDlss::Record(VkImageView color, VkImageView depth, VkImageView t
             .motion_vector_scale = {1.0f, 1.0f},
             .reset = reset,
             .depth_inverted = false,
+            .hdr = false,
         })) {
         state.scheduler.InvalidateState();
         return false;
@@ -751,8 +755,9 @@ bool OcarinaLiveDlss::Record(VkImageView color, VkImageView depth, VkImageView t
     resources.tick = state.scheduler.CurrentTick();
     if (target) {
         state.queue.Acquire(state.scheduler, 2);
-        const auto output_sampler = output_extent.width == target_extent.width ? sampler :
-                                                                              state.LinearSampler();
+        const bool same_size = output_extent.width == target_extent.width &&
+                               output_extent.height == target_extent.height;
+        const auto output_sampler = same_size ? sampler : state.LinearSampler();
         state.queue.AddSampledImage(state.upscaler.OutputView(), output_sampler);
         state.queue.AddImage(target);
         state.output_pass.RecordOutput(state.scheduler, state.queue.UpdateData(), state.upscaler,
