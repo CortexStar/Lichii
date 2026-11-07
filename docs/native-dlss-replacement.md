@@ -51,6 +51,10 @@ enabled and the runtime is available; otherwise an enabled temporal selection us
   the HUD is taken from the difference between that frame and a 1440p copy of the temporal scene,
   and composited over the 4K scene. The 4K image skips the presentation's post-processing and
   upscale filters.
+- Max Resolution add-on on, handheld: the scene renders at 1920x1080 and the same output pass
+  runs at 1:1 (`c033c3ddc9f0897b`, 1920x1080 to 1920x1080); the game's final pass then scales to
+  its 2560x1440 output. FSR replaces it as native anti-aliasing (no upscale). DLSS leaves the
+  game's pass there (DLAA through it is untested).
 - The game has no motion vectors or jitter. Motion comes from the scene depth reprojected
   through this and the previous frame's camera (vertex constant buffer 3). Link's recognized
   skinned draw is replayed with both poses where his depth matches. Without his pose the frame
