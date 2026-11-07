@@ -132,6 +132,15 @@ struct Runtime {
         pending.clear();
         return submitted_tick;
     }
+    u64 QueueForHostRead() {
+        ++queued_host_reads;
+        submitted.emplace_back(++submitted_tick, std::move(pending));
+        pending.clear();
+        return submitted_tick;
+    }
+    bool IsFreeNow(u64 tick) const {
+        return IsFree(tick);
+    }
     void WaitForHostRead(u64 tick) {
         if (before_completion) {
             before_completion();
@@ -170,7 +179,7 @@ struct Runtime {
 
     u32 alignment{256};
     u32 allocations{}, downloads{}, uploads{}, finishes{}, waits{};
-    u32 host_read_barriers{}, host_read_waits{};
+    u32 host_read_barriers{}, host_read_waits{}, queued_host_reads{};
     u64 upload_bytes{}, waited_tick{};
     u64 submitted_tick{}, completed_tick{};
     std::vector<std::unique_ptr<Buffer>> stagings;
@@ -1022,4 +1031,261 @@ TEST_CASE("Read download check finds an earlier read's bytes the GPU changed unr
     REQUIRE(Access::ReadChecks(*f.cache).checked == 2);
     REQUIRE(Access::ReadChecks(*f.cache).mismatched == 0x10);
     REQUIRE(Access::ReadChecks(*f.cache).rewritten == 0);
+}
+
+namespace {
+struct Nx2TitleScope {
+    Nx2TitleScope() {
+        Tegra::g_nx2_ampere = true;
+    }
+    ~Nx2TitleScope() {
+        Tegra::g_nx2_ampere = false;
+        Tegra::Nx2ClearGpuWrittenPages();
+    }
+};
+
+/// A dispatch that writes `value` over [address, address + size) of the buffer at 0x20000.
+void WriteByDispatch(Fixture& f, VideoCommon::BufferId id, DAddr address, u32 size, u8 value) {
+    auto& buffer = Access::Get(*f.cache, id);
+    f.runtime.pending.push_back([&buffer, address, size, value] {
+        std::fill_n(buffer.bytes.begin() + static_cast<std::ptrdiff_t>(address - 0x20000), size,
+                    value);
+    });
+    Access::MarkWritten(*f.cache, id, address, size);
+    f.cache->NoteWorkRecorded(true);
+}
+
+/// A guest read of a word at `address`, as GPU::OnCPURead serves it.
+VideoCore::RasterizerDownloadArea ReadWord(Fixture& f, DAddr address) {
+    const auto area = f.cache->GetFlushArea(address, 4);
+    REQUIRE(area);
+    const u64 size = area->end_address - area->start_address;
+    if (!area->preemtive && !area->in_flight) {
+        f.cache->DownloadMemoryForRead(area->start_address, size);
+    }
+    if (!area->preemtive) {
+        f.cache->FinishReadDownloads(area->start_address, size);
+    }
+    return *area;
+}
+} // namespace
+
+TEST_CASE("Pages read after each GPU write get their downloads right behind the writes",
+          "[buffer_ports]") {
+    Fixture f;
+    const Nx2TitleScope nx2_title;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    // Learned from two writes the guest read; those reads still flush.
+    for (u8 frame = 1; frame <= 2; ++frame) {
+        WriteByDispatch(f, id, 0x20000, 0x100, frame);
+        REQUIRE(f.runtime.queued_host_reads == 0);
+        const auto area = ReadWord(f, 0x20010);
+        REQUIRE_FALSE(area.preemtive);
+        REQUIRE_FALSE(area.in_flight);
+        REQUIRE(f.bytes[0x10010] == frame);
+    }
+    REQUIRE(f.runtime.host_read_waits == 2);
+    // The next write's download goes right behind it, before any read.
+    WriteByDispatch(f, id, 0x20000, 0x100, 3);
+    REQUIRE(f.runtime.queued_host_reads == 1);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 1);
+    REQUIRE(f.bytes[0x10010] == 2);
+    // A read before the host GPU ran it waits for that copy alone.
+    const auto waiting = f.cache->GetFlushArea(0x20010, 4);
+    REQUIRE(waiting->in_flight);
+    f.cache->FinishReadDownloads(waiting->start_address,
+                                 waiting->end_address - waiting->start_address);
+    REQUIRE(f.runtime.host_read_waits == 3);
+    REQUIRE(f.runtime.host_read_barriers == 2);
+    REQUIRE(f.bytes[0x10010] == 3);
+    REQUIRE(f.bytes[0x100ff] == 3);
+    // Once the host GPU ran it, the read finds the bytes in guest memory and waits for nothing.
+    WriteByDispatch(f, id, 0x20000, 0x100, 4);
+    REQUIRE(f.runtime.queued_host_reads == 2);
+    f.runtime.Complete(f.runtime.submitted_tick);
+    REQUIRE(ReadWord(f, 0x20010).preemtive);
+    REQUIRE(f.runtime.host_read_waits == 3);
+    REQUIRE(f.bytes[0x10010] == 4);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 0);
+    REQUIRE(VideoCore::g_read_downloads == 0);
+    REQUIRE_FALSE(Access::Pending(*f.cache, 0x20000, 0x1000));
+}
+
+TEST_CASE("Early downloads leave what a newer GPU write changed to a download of its own",
+          "[buffer_ports]") {
+    Fixture f;
+    const Nx2TitleScope nx2_title;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    for (u8 frame = 1; frame <= 2; ++frame) {
+        WriteByDispatch(f, id, 0x20000, 0x100, frame);
+        ReadWord(f, 0x20010);
+    }
+    // Another dispatch writes part of it again before the read: it gets an early download too.
+    WriteByDispatch(f, id, 0x20000, 0x100, 3);
+    WriteByDispatch(f, id, 0x20080, 0x40, 4);
+    REQUIRE(f.runtime.queued_host_reads == 2);
+    f.runtime.Complete(f.runtime.submitted_tick);
+    REQUIRE(ReadWord(f, 0x20010).preemtive);
+    REQUIRE(f.bytes[0x1007f] == 3);
+    REQUIRE(f.bytes[0x10080] == 4);
+    REQUIRE(f.bytes[0x100bf] == 4);
+    REQUIRE(f.bytes[0x100c0] == 3);
+    // A draw writes part of it again: the read downloads that part after the early download.
+    WriteByDispatch(f, id, 0x20000, 0x100, 5);
+    auto& buffer = Access::Get(*f.cache, id);
+    f.runtime.pending.push_back(
+        [&buffer] { std::fill_n(buffer.bytes.begin() + 0x40, 0x10, u8{6}); });
+    Access::MarkWritten(*f.cache, id, 0x20040, 0x10);
+    const auto area = ReadWord(f, 0x20010);
+    REQUIRE_FALSE(area.preemtive);
+    REQUIRE_FALSE(area.in_flight);
+    REQUIRE(f.bytes[0x1003f] == 5);
+    REQUIRE(f.bytes[0x10040] == 6);
+    REQUIRE(f.bytes[0x1004f] == 6);
+    REQUIRE(f.bytes[0x10050] == 5);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 0);
+    REQUIRE_FALSE(Access::Pending(*f.cache, 0x20000, 0x1000));
+}
+
+TEST_CASE("Early downloads keep CPU writes, and stop for pages no longer read", "[buffer_ports]") {
+    Fixture f;
+    const Nx2TitleScope nx2_title;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    for (u8 frame = 1; frame <= 2; ++frame) {
+        WriteByDispatch(f, id, 0x20000, 0x100, frame);
+        ReadWord(f, 0x20010);
+    }
+    // The guest writes part of the page before the early download lands: its values stay.
+    WriteByDispatch(f, id, 0x20000, 0x100, 3);
+    std::memset(f.bytes + 0x10020, 0xee, 0x10);
+    const std::array<std::pair<DAddr, u64>, 1> applied{{{0x20020, 0x10}}};
+    f.cache->ClaimCpuWrites(applied);
+    f.runtime.Complete(f.runtime.submitted_tick);
+    REQUIRE(ReadWord(f, 0x20010).preemtive);
+    REQUIRE(f.bytes[0x1001f] == 3);
+    REQUIRE(f.bytes[0x10020] == 0xee);
+    REQUIRE(f.bytes[0x1002f] == 0xee);
+    REQUIRE(f.bytes[0x10030] == 3);
+    // Not read any more: a few more writes get early downloads, then none.
+    const u32 queued = f.runtime.queued_host_reads;
+    for (u8 frame = 4; frame < 12; ++frame) {
+        WriteByDispatch(f, id, 0x20000, 0x100, frame);
+        f.runtime.Complete(f.runtime.submitted_tick);
+    }
+    REQUIRE(f.runtime.queued_host_reads - queued == 4);
+    const auto area = ReadWord(f, 0x20010);
+    REQUIRE_FALSE(area.preemtive);
+    REQUIRE(f.bytes[0x10010] == 11);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 0);
+    REQUIRE_FALSE(Access::Pending(*f.cache, 0x20000, 0x1000));
+}
+
+TEST_CASE("GPU writes to guest memory land the early downloads under them first",
+          "[buffer_ports]") {
+    Fixture f;
+    const Nx2TitleScope nx2_title;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    ReadRasterizer reads{*f.cache};
+    Tegra::MemoryManager gpu_memory{f.system, f.device, 32, 1ULL << 31, 16};
+    gpu_memory.BindRasterizer(&reads);
+    gpu_memory.Map(0x200000, 0x20000, 0x10000, Tegra::PTEKind::PITCH, true);
+    for (u8 frame = 1; frame <= 2; ++frame) {
+        WriteByDispatch(f, id, 0x20000, 0x100, frame);
+        ReadWord(f, 0x20010);
+    }
+    WriteByDispatch(f, id, 0x20000, 0x100, 3);
+    REQUIRE(VideoCore::g_read_downloads == 1);
+    // A semaphore release into the copied bytes before the host GPU ran the copy.
+    gpu_memory.Write<u32>(0x200040, 0xcafef00d);
+    REQUIRE(VideoCore::g_read_downloads == 0);
+    u32 value{};
+    std::memcpy(&value, f.bytes + 0x10040, sizeof(value));
+    REQUIRE(value == 0xcafef00d);
+    REQUIRE(f.bytes[0x1003f] == 3);
+    REQUIRE(f.bytes[0x10044] == 3);
+    REQUIRE(ReadWord(f, 0x20040).preemtive);
+}
+
+TEST_CASE("Finished early downloads land a few draws later, or at the next dispatch",
+          "[buffer_ports]") {
+    Fixture f;
+    const Nx2TitleScope nx2_title;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    for (u8 frame = 1; frame <= 2; ++frame) {
+        WriteByDispatch(f, id, 0x20000, 0x100, frame);
+        ReadWord(f, 0x20010);
+    }
+    WriteByDispatch(f, id, 0x20000, 0x100, 3);
+    f.runtime.Complete(f.runtime.submitted_tick);
+    for (u32 draw = 1; draw < 32; ++draw) {
+        f.cache->NoteWorkRecorded(false);
+    }
+    REQUIRE(Access::ReadDownloads(*f.cache) == 1);
+    f.cache->NoteWorkRecorded(false);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 0);
+    REQUIRE(f.bytes[0x10010] == 3);
+    // A draw writes it: the early download goes behind the next dispatch.
+    auto& buffer = Access::Get(*f.cache, id);
+    f.runtime.pending.push_back([&buffer] { std::fill_n(buffer.bytes.begin(), 0x100, u8{4}); });
+    Access::MarkWritten(*f.cache, id, 0x20000, 0x100);
+    f.cache->NoteWorkRecorded(false);
+    REQUIRE(f.runtime.queued_host_reads == 1);
+    f.cache->NoteWorkRecorded(true);
+    REQUIRE(f.runtime.queued_host_reads == 2);
+    f.runtime.Complete(f.runtime.submitted_tick);
+    f.cache->NoteWorkRecorded(true);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 0);
+    REQUIRE(f.bytes[0x10010] == 4);
+    REQUIRE(ReadWord(f, 0x20010).preemtive);
+}
+
+TEST_CASE("Early downloads stop at 32 on their way", "[buffer_ports]") {
+    Fixture f;
+    const Nx2TitleScope nx2_title;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x30000);
+    // 33 pages, each read after two writes.
+    for (u8 frame = 1; frame <= 2; ++frame) {
+        for (DAddr page = 0x20000; page < 0x41000; page += 0x1000) {
+            WriteByDispatch(f, id, page, 0x100, frame);
+            ReadWord(f, page);
+        }
+    }
+    // Their next writes before the host GPU ran any copy: the 33rd page's read flushes.
+    for (DAddr page = 0x20000; page < 0x41000; page += 0x1000) {
+        WriteByDispatch(f, id, page, 0x100, 3);
+    }
+    REQUIRE(f.runtime.queued_host_reads == 32);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 32);
+    const auto last = ReadWord(f, 0x40010);
+    REQUIRE_FALSE(last.preemtive);
+    REQUIRE_FALSE(last.in_flight);
+    REQUIRE(f.bytes[0x30010] == 3);
+    REQUIRE(f.bytes[0x10010] == 3);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 0);
+    REQUIRE_FALSE(Access::Pending(*f.cache, 0x20000, 0x21000));
+}
+
+TEST_CASE("Early downloads stop at 1 MiB a frame", "[buffer_ports]") {
+    Fixture f;
+    const Nx2TitleScope nx2_title;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    for (u8 frame = 1; frame <= 2; ++frame) {
+        WriteByDispatch(f, id, 0x20000, 0x1000, frame);
+        ReadWord(f, 0x20010);
+    }
+    // A whole page each, read once the host GPU ran it: 256 make 1 MiB.
+    for (u32 write = 0; write < 256; ++write) {
+        WriteByDispatch(f, id, 0x20000, 0x1000, static_cast<u8>(write));
+        f.runtime.Complete(f.runtime.submitted_tick);
+        REQUIRE(ReadWord(f, 0x20010).preemtive);
+    }
+    REQUIRE(f.runtime.queued_host_reads == 256);
+    // The frame's later writes leave their reads to flush.
+    WriteByDispatch(f, id, 0x20000, 0x1000, 0xab);
+    REQUIRE(f.runtime.queued_host_reads == 256);
+    const auto area = ReadWord(f, 0x20010);
+    REQUIRE_FALSE(area.preemtive);
+    REQUIRE_FALSE(area.in_flight);
+    REQUIRE(f.bytes[0x10010] == 0xab);
+    REQUIRE(f.bytes[0x10fff] == 0xab);
 }

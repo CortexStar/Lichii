@@ -287,6 +287,11 @@ public:
     /// the writes it records; the query cache's copies of its results call it themselves.
     void OutdateReadDownloads(DAddr device_addr, u64 size);
 
+    /// The GPU thread recorded a draw or dispatch (`mutex` held). After a dispatch, the downloads
+    /// of the pages written since that the guest reads after each write go right behind it
+    /// (RecordEarlyDownloads). Those the host GPU has run land in guest memory.
+    void NoteWorkRecorded(bool dispatch);
+
     std::optional<VideoCore::RasterizerDownloadArea> GetFlushArea(DAddr device_addr, u64 size);
 
     /// Without downloads at every fence, a guest CPU read is the only way GPU-written buffer
@@ -633,6 +638,28 @@ private:
     /// WriteReadDownloads for those the host GPU has completed: nothing waits.
     void WriteCompletedReadDownloads();
 
+    /// WriteReadDownloads up to the newest read download over the range, if the host GPU ran it.
+    /// Returns whether it did.
+    bool WriteFinishedReadDownloads(DAddr device_addr, u64 size);
+
+    /// Records a read download of the GPU-modified bytes over `ranges` that no read download
+    /// brings yet. `own`: the bytes the read itself asked for (EDEN_NX2_READ_CHECK compares them).
+    /// A read's download is submitted at once; an early one goes with the GPU thread's next
+    /// submission.
+    void RecordReadDownload(std::span<const std::pair<DAddr, u64>> ranges,
+                            std::span<const std::pair<DAddr, u64>> own, bool early);
+
+    /// A guest read of the pages [begin, end): learns which pages the guest reads after the GPU
+    /// writes them. `gpu_modified`: the read found GPU writes not yet in guest memory.
+    void NoteReadBack(DAddr begin, DAddr end, bool gpu_modified);
+
+    /// A GPU write: the pages under it that the guest reads after each write get an early
+    /// download once the writing work is recorded.
+    void NoteReadBackWrite(DAddr device_addr, u64 size);
+
+    /// Records the early downloads of the pages written since their last one (`mutex` held).
+    void RecordEarlyDownloads();
+
     void DeleteBuffer(BufferId buffer_id, bool do_not_mark = false);
 
     [[nodiscard]] Binding StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index, bool is_written,
@@ -844,12 +871,51 @@ private:
         /// guest memory takes its bytes out.
         Common::RangeSet<DAddr> clean_ranges;
         std::unique_ptr<ReadCheck> check; ///< TEST: EDEN_NX2_READ_CHECK
+        /// Recorded right after a GPU write, before any read (RecordEarlyDownloads)
+        bool early{};
     };
     /// Oldest first, and written to guest memory in that order: none lands over newer bytes.
     std::deque<ReadDownload> read_downloads;
     /// All the read downloads' clean_ranges (they don't overlap): GPU-modified bytes already on
     /// their way, which later reads wait for rather than download again.
     Common::RangeSet<DAddr> read_download_ranges;
+
+    /// A page the guest CPU read GPU writes from. Switch 2 titles read compute results back every
+    /// frame, milliseconds after the dispatch that wrote them: a download recorded at the read
+    /// waits for all the GPU work recorded in between. Pages read after each of their writes get
+    /// their download recorded right behind the write instead (RecordEarlyDownloads), which the
+    /// read finds landed or on its way (GetFlushArea: in_flight).
+    struct ReadBackPage {
+        DAddr page{};
+        u64 last_read{};     ///< read_back_reads at its last read of a write (eviction)
+        u16 reads{};         ///< Writes in a row the guest read, up to EarlyAfterReads
+        u16 unread_writes{}; ///< GPU writes since its last read
+        bool written{};      ///< A GPU write since its last read
+    };
+    /// Reads of a page's writes in a row before its writes get early downloads.
+    static constexpr u16 EarlyAfterReads = 2;
+    /// Writes in a row without a read that stop them.
+    static constexpr u16 MaxUnreadWrites = 4;
+    static constexpr size_t MaxReadBackPages = 64;
+    /// Early download bytes a frame, and early downloads not yet in guest memory: past them, reads
+    /// flush on demand.
+    static constexpr u64 EarlyBytesPerFrame = 1_MiB;
+    static constexpr u32 MaxPendingEarlyDownloads = 32;
+    /// EDEN_NX2_EARLY_READ_DOWNLOADS=0: none (for comparisons).
+    static bool EarlyDownloadsEnabled() {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_EARLY_READ_DOWNLOADS");
+            return value == nullptr || value[0] != '0';
+        }();
+        return enabled;
+    }
+    std::vector<ReadBackPage> read_back_pages; ///< Sorted by page
+    /// Pages to download once the work writing them is recorded.
+    boost::container::small_vector<DAddr, 8> early_pages;
+    u64 read_back_reads{};
+    u64 early_bytes_this_frame{};
+    u32 pending_early_downloads{};
+    u32 early_landing_checks{};
 
     std::deque<Async_Buffer> async_buffers_death_ring;
 

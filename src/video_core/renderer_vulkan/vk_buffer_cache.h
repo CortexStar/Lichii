@@ -137,8 +137,16 @@ public:
     /// FinishForHostRead without the wait: submits, and returns the tick to wait for.
     u64 SubmitForHostRead();
 
-    /// Waits for a SubmitForHostRead tick, on any thread.
+    /// SubmitForHostRead without the submission: the copies go with the GPU thread's next one, as
+    /// a fence's do (Scheduler::DeferFlush). Returns the tick they go in.
+    u64 QueueForHostRead();
+
+    /// Waits for a SubmitForHostRead or QueueForHostRead tick, on any thread.
     void WaitForHostRead(u64 tick);
+
+    /// Whether the host GPU completed `tick`, asking it when the tick is submitted but not known
+    /// to be done.
+    [[nodiscard]] bool IsFreeNow(u64 tick);
 
     u64 GetDeviceLocalMemory() const;
 
