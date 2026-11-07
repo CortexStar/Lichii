@@ -37,10 +37,12 @@ u16 IntegerToHalf(s32 value) {
     return static_cast<u16>((value < 0 ? 0x8000U : 0U) | ((exponent + 15) << 10) | mantissa);
 }
 
+/// Two small integers as one register of halves, `low` in bits 0-15.
 u32 PackHalves(s32 low, s32 high) {
     return IntegerToHalf(low) | (static_cast<u32>(IntegerToHalf(high)) << 16);
 }
 
+/// D = A * B + C for one 16x8x16 tile, as integers.
 struct Matrices {
     std::array<std::array<s32, 16>, 16> a{};
     std::array<std::array<s32, 8>, 16> b{};
@@ -48,6 +50,7 @@ struct Matrices {
     std::array<std::array<s32, 8>, 16> d{};
 };
 
+/// A, B and C filled with integers in [-3, 3] from a fixed sequence, and their expected D.
 Matrices MakeMatrices() {
     // Every element differs from most others, so that any misplaced element changes the results.
     u32 state = 0x2545f491;
@@ -101,12 +104,14 @@ void WriteLane(const Matrices& m, u32 lane, std::span<u32> words) {
     words[9] = 0;
 }
 
+/// Whether the half `got` encodes `expected`.
 bool SameHalf(u32 got, s32 expected) {
     const u32 want = IntegerToHalf(expected);
     // A sum that cancels to zero may have either sign.
     return got == want || (expected == 0 && (got & 0x7fff) == 0);
 }
 
+/// How many lanes' D registers (words 8 and 9 of each lane) differ from the expected D.
 u32 CountWrongLanes(const Matrices& m, std::span<const u32> words) {
     u32 wrong = 0;
     for (u32 lane = 0; lane < LANES; ++lane) {
@@ -123,6 +128,8 @@ u32 CountWrongLanes(const Matrices& m, std::span<const u32> words) {
     return wrong;
 }
 
+/// Runs the test shader on one subgroup with its own command pool and fence, and compares every
+/// lane's result. Throws on Vulkan errors.
 bool RunTest(const Device& device) {
     const auto& logical = device.GetLogical();
     const std::vector<u32> code =

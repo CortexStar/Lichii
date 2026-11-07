@@ -15,9 +15,9 @@ namespace {
 
 constexpr u32 GUEST_WARP_LANES = 32;
 
-// Sirit lacks the two cooperative matrix instructions. They are emitted as an OpTypeStruct and an
-// OpSelect, which have the same word layout, and PatchCooperativeHmma replaces the opcodes after
-// assembly. The operands are constants that no real structure has as members.
+/// Sirit lacks the two cooperative matrix instructions. They are emitted as an OpTypeStruct and an
+/// OpSelect, which have the same word layout, and PatchCooperativeHmma replaces the opcodes after
+/// assembly. The operands are constants that no real structure has as members.
 CooperativeHmmaTypes DefineCooperativeHmmaTypes(Sirit::Module& module, Id u32_type) {
     module.AddExtension("SPV_KHR_cooperative_matrix");
     module.AddCapability(spv::Capability::CooperativeMatrixKHR);
@@ -38,10 +38,10 @@ CooperativeHmmaTypes DefineCooperativeHmmaTypes(Sirit::Module& module, Id u32_ty
     };
 }
 
-// HMMA.16816.F16 on a cooperative matrix. Each lane already holds its share of the matrices in
-// registers, so no data moves between lanes or through memory: the lane's halves become the
-// matrix's local elements. Vulkan leaves their order to the driver; NVIDIA's is the guest's except
-// that A's middle registers swap (see the self-test in vk_cooperative_hmma_test.cpp).
+/// HMMA.16816.F16 on a cooperative matrix. Each lane already holds its share of the matrices in
+/// registers, so no data moves between lanes or through memory: the lane's halves become the
+/// matrix's local elements. Vulkan leaves their order to the driver; NVIDIA's is the guest's except
+/// that A's middle registers swap (see the self-test in vk_cooperative_hmma_test.cpp).
 Id EmitCooperativeHmma(Sirit::Module& module, const CooperativeHmmaTypes& types, Id u32_type,
                        Id u32x2_type, Id a, Id b, Id c) {
     const auto insert_word{[&](Id matrix_type, Id matrix, Id vector, u32 word, u32 slot) {
@@ -231,6 +231,8 @@ Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a, Id b, Id c) {
     return ctx.OpFunctionCall(ctx.U32[2], ctx.software_matrix_functions[depth == 16], a, b, c);
 }
 
+/// Rewrites the placeholder OpTypeStruct and OpSelect instructions of DefineCooperativeHmmaTypes
+/// and EmitCooperativeHmma into the cooperative matrix opcodes, in assembled SPIR-V words.
 void PatchCooperativeHmma(std::vector<u32>& code, const CooperativeHmmaTypes& types) {
     for (size_t offset = 5; offset < code.size();) {
         const u32 word_count{code[offset] >> 16};
@@ -255,6 +257,7 @@ void PatchCooperativeHmma(std::vector<u32>& code, const CooperativeHmmaTypes& ty
     }
 }
 
+/// See emit_spirv.h: one warp runs the cooperative lowering on the registers in its buffer.
 std::vector<u32> EmitCooperativeHmmaTest(u32 spirv_version) {
     Sirit::Module module{spirv_version};
     module.AddCapability(spv::Capability::Shader);
