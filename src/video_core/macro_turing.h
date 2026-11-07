@@ -25,6 +25,10 @@ public:
         std::string_view error;
     };
 
+    /// A call whose entry point is past the uploaded macro memory. Nothing of it ran, so the
+    /// call can be replayed: the JIT uses this to fall back to the interpreter below.
+    static constexpr std::string_view OutsideCodeError{"instruction outside uploaded RAM"};
+
     // One instruction's fields, decoded once and reused while its words stay the same (macro
     // code runs thousands of times a frame; decoding it every time was most of the interpreter).
     struct Decoded {
@@ -93,7 +97,7 @@ public:
         data_ram_writes.clear();
         for (Word steps = 0; steps < 1000000; ++steps) {
             if (static_cast<std::size_t>(pc) * 3 + 2 >= code.size()) {
-                fail("instruction outside uploaded RAM");
+                fail(OutsideCodeError);
                 break;
             }
             const std::array<Word, 3> bits{code[pc * 3 + 2], code[pc * 3 + 1], code[pc * 3]};

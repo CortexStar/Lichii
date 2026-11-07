@@ -84,7 +84,7 @@ public:
             "data RAM write out of bounds",
             "invalid output selector",
             "unsupported emitted method",
-            "instruction outside uploaded RAM",
+            TuringMacroInterpreter::OutsideCodeError,
             "instruction limit exceeded",
         };
         return error < texts.size() ? texts[error] : "unknown";
