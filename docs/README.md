@@ -18,6 +18,7 @@ This contains documentation created by developers, build instructions, guideline
 - **[The NVIDIA SM86 (Maxwell) GPU](./NvidiaGpu.md)**
 - **[Driver Bugs](./DriverBugs.md)**
 - **[Building Older Commits](./build/OlderCommits.md)**
+- **[Switch 2 Graphics Pipeline Retention](./nx2/pipeline-retention.md)**
 - **[Build 95 Pipeline Retention Benchmark](./nx2/benchmarks/build95-pipeline-retention/README.md)**
 - Subsystems:
   - **[Design Overview](./DesignOverview.md)**
