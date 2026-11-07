@@ -72,7 +72,7 @@ Lobby::Lobby(QWidget* parent, QStandardItemModel* list,
         } else if (!GetProfileUsername().empty()) {
             ui->nickname->setText(QString::fromStdString(GetProfileUsername()));
         } else {
-            ui->nickname->setText(QStringLiteral("Eden"));
+            ui->nickname->setText(QStringLiteral("Lichii"));
         }
     }
 

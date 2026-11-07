@@ -558,10 +558,10 @@ jobs:
           # macdeployqt invalidates the signatures. The programs get the entitlements when the
           # tree has them (the Hypervisor CPU backend needs com.apple.security.hypervisor).
           codesign --force --deep --sign - "$app"
-          if [ -f dist/eglantine.entitlements ]; then
-            codesign --force --sign - --entitlements dist/eglantine.entitlements \
+          if [ -f dist/lichii.entitlements ]; then
+            codesign --force --sign - --entitlements dist/lichii.entitlements \
               "$app/Contents/MacOS/lichii-cli"
-            codesign --force --sign - --entitlements dist/eglantine.entitlements "$app"
+            codesign --force --sign - --entitlements dist/lichii.entitlements "$app"
           fi
           codesign --verify --deep --strict "$app"
           ditto -c -k --keepParent "$app" "lichii-${GITHUB_SHA}-${{ matrix.platform }}.zip"

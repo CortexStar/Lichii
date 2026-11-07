@@ -72,7 +72,7 @@ static void PrintHelp(const char* argv0) {
 }
 
 static void PrintVersion() {
-    LOG_INFO(Network, "Eden dedicated room {} {} Libnetwork: {}", Common::g_scm_branch,
+    LOG_INFO(Network, "Lichii dedicated room {} {} Libnetwork: {}", Common::g_scm_branch,
              Common::g_scm_desc, Network::network_version);
 }
 
