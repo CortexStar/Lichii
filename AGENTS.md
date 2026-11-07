@@ -4,6 +4,23 @@ See `docs/Coding.md` for technical coding guidance.
 
 Keep comments to a reasonable level. Do not overexplain or add/remove comments from unrelated parts of the codebase.
 
+## Naming
+
+Lichii is the product name. Anything user-facing or host-visible takes Lichii naming: UI strings, dialogs, window titles, log lines, cubeb/SDL application names, default profile/nickname/device values, docs, dist metadata. Executables are `lichii`, `lichii-cli` and `lichii-room`; the CMake targets behind them keep their historical `yuzu*` names.
+
+Deliberate keeps — do not rename these, and do not "finish" them in passing:
+
+- On-disk `eden` data directories (`LICHII_DIR` keeps the value `"eden"`), `eden_log.txt`, and the `eden_username`/`eden_token` config keys. Renaming strands every existing user's saves and tokens.
+- All `EDEN_*` environment switches. They are the debugging surface documented in the tools table below and in the owner's launch scripts.
+- Eden web-service URLs and the strings that name them ("Eden Web Services", "valid Eden account").
+- SPDX headers (`Eden Emulator Project`), `eglantine.profdata` (release CI), and comments attributing upstream behaviour ("Eden's compiler…", "an Eglantine developer…").
+- The stored hotkey key `"Exit Eglantine"` (it displays as "Exit Lichii"; renaming the key orphans saved keybinds).
+- The Android app (`org.yuzu.yuzu_emu`) and factual upstream references (PR inventories, session notes).
+
+When merging from `origin/nx2`: nx2 does not carry the rebrand, so keep it through conflicts — take upstream's functional changes, keep the Lichii strings, then sweep the merged files for reintroduced branding. SPDX headers and attribution comments are expected; new user-facing Eden/Eglantine strings are not.
+
+Icons are generated from `dist/lichii.svg` by `tools/update-icons.sh` (needs `magick` and `optipng`). Translation catalogs (`dist/languages/*.ts`) still carry pre-rename source strings; Transifex ownership for Lichii is undecided, so don't hand-edit the catalogs and don't `tx pull -t -f` — it would overwrite local changes with the shared Eden resource.
+
 ## Game bug reports
 
 Users report game bugs with Lichii logs (`eden_log.txt`, `eden_log.txt.old`). Each `Booting game: <program id>` line starts a session; the build is on the first line (`Lichii Version: ... | nx2-<sha>`). Known program ids:
@@ -39,6 +56,13 @@ Lichii is a fork of [Eglantine](https://github.com/Djihads80/Eglantine). Do not 
 2. Check `upstream/nx2`, open and closed PRs, unmerged branches, and issues for the game and symptom (`gh pr list -R Djihads80/Eglantine --state all`, `gh issue list -R Djihads80/Eglantine --state all`, `gh pr diff <n>`). Read the diffs, not only the titles.
 3. If nx2 is behind `upstream/nx2`, merge upstream first. Port an existing upstream fix before writing a new one, and cite its PR or commit.
 4. Write a new fix only when nothing upstream addresses the root cause the log shows.
+
+## Repos and branches
+
+- `origin` is [zortos293/Lichii](https://github.com/zortos293/Lichii): `nx2` lives here and fixes land here through PRs.
+- `cyrix` is the owner's fork, [CyrixJD115/Lichii](https://github.com/CyrixJD115/Lichii): fix branches push here for CI. `build-check` (Linux GCC + Windows clang-cl, production build and tests) runs on PRs; dispatch `release-binaries` with `publish_release=false` on a branch for a full-matrix validation build (Linux x86_64/aarch64 ±PGO, Windows MSVC ±PGO, macOS arm64) without publishing anything.
+- `upstream` is [Djihads80/Eglantine](https://github.com/Djihads80/Eglantine), the true upstream from "Before writing a fix".
+- Work happens on feature branches (`fix/<topic>`); never push to `nx2` on either remote.
 
 ## Live debug server
 
