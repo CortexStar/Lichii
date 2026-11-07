@@ -206,17 +206,12 @@ private:
     static constexpr size_t MXCSR_ALREADY_EXITED = 1 << 0;
     static constexpr size_t FORCE_RETURN = 1 << 1;
 
-    ConstantPool constant_pool;
-    JitStateInfo jsi;
-    std::array<const void*, 4> return_from_run_code;
-    RunCodeFuncType run_code = nullptr;
-    RunCodeFuncType step_code = nullptr;
-    RunCodeCallbacks cb;
-    CodePtr code_begin = nullptr;
+    // The commit and far-code state is declared before constant_pool on purpose: the ConstantPool
+    // constructor already calls EnsureMemoryCommitted, which reads these, so they have to be
+    // initialised first (members are initialised in declaration order).
 #ifdef _WIN32
     size_t committed_size = 0;
 #endif
-    bool prelude_complete = false;
     const u8* far_code_begin = nullptr;
     const u8* far_code_ptr = nullptr;
     const u8* near_code_ptr = nullptr;
@@ -224,6 +219,14 @@ private:
 #ifdef _WIN32
     size_t far_committed_end = 0;
 #endif
+    ConstantPool constant_pool;
+    JitStateInfo jsi;
+    std::array<const void*, 4> return_from_run_code;
+    RunCodeFuncType run_code = nullptr;
+    RunCodeFuncType step_code = nullptr;
+    RunCodeCallbacks cb;
+    CodePtr code_begin = nullptr;
+    bool prelude_complete = false;
 
     void GenRunCode(std::function<void(BlockOfCode&)> rcp);
 };
