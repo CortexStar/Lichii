@@ -229,7 +229,11 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     publish_waits = publish_waits_switch;
     static const bool acquire_skip_barriers_switch =
         Nx2Switch("EDEN_NX2_ACQUIRE_SKIP_BARRIERS", true);
-    static const bool front_defer_switch = Nx2Switch("EDEN_NX2_FRONT_DEFER", true);
+    // Default off (integ4, wave 5): in OoT most parks find no other channel's work (2.6k of
+    // ~4.1k parks/s end in "waits with only parked channels", 445 ms/s), and back starvation
+    // rose from 3.3 to 5.1 ms/frame: 43.1 FPS with it on vs 45.7 off (RESULTS_W5.md).
+    // EDEN_NX2_FRONT_DEFER=1 turns it back on.
+    static const bool front_defer_switch = Nx2Switch("EDEN_NX2_FRONT_DEFER", false);
     acquire_skip_barriers = acquire_poll && acquire_skip_barriers_switch;
     front_defer = narrow && front_defer_switch;
     defer_round_target = ~u64{0};
