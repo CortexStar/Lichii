@@ -12,10 +12,13 @@
 #include <cstddef>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <unordered_map>
 #include <unordered_set>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <string>
 #include <type_traits>
 #include "common/container/unordered_map.h"
@@ -36,6 +39,7 @@
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache_prebuild.h"
+#include "video_core/renderer_vulkan/vk_shader_reuse.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/shader_cache.h"
 
@@ -155,6 +159,29 @@ private:
         bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools = nullptr,
         std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr);
 
+    /// Translated shaders of a graphics pipeline.
+    struct GraphicsShaders {
+        /// Stage infos and, unless emit_stages builds them, modules; what shader_reuse gets.
+        std::shared_ptr<ReusableShaders> shaders;
+        /// Into shaders->infos, null for stages without a program.
+        std::array<const Shader::Info*, Maxwell::MaxShaderStage> infos{};
+        std::function<std::shared_ptr<const GraphicsShaderModules>()> emit_stages;
+        std::optional<MeshEmulationSetup> mesh_emulation;
+    };
+
+    /// Shaders of an earlier graphics pipeline that fit `envs` (vk_shader_reuse.h), or null.
+    [[nodiscard]] std::shared_ptr<const ReusableShaders> FindReusableShaders(
+        const ShaderTranslationKey& key, std::span<Shader::Environment* const> envs,
+        u64 pipeline_hash) const;
+
+    /// With `verify_against`, logs the stages whose SPIR-V differs from those shaders'.
+    [[nodiscard]] std::optional<GraphicsShaders> BuildGraphicsShaders(
+        ShaderPools& pools, const GraphicsPipelineCacheKey& key,
+        const ShaderTranslationKey& translation_key, std::span<Shader::Environment* const> envs,
+        const ReusableShaders* verify_against, bool build_in_parallel,
+        std::shared_ptr<ShaderPools> emit_pools,
+        std::unique_ptr<EmissionBudget::Reservation> reservation);
+
     [[nodiscard]] bool StaleNullPointerSlot(const ComputePipelineCacheEntry& entry) const;
 
     /// Translates the current compute program, binding the pointers in keep_pointers whatever
@@ -188,6 +215,7 @@ private:
     VideoCore::ShaderNotify& shader_notify;
     bool use_asynchronous_shaders{};
     bool use_vulkan_pipeline_cache{};
+    const bool use_shader_reuse;
     const size_t num_pipeline_workers;
     EmissionBudget emission_budget;
 
@@ -213,6 +241,7 @@ private:
     ShaderPools main_pools;
     std::mutex spare_pools_mutex;
     std::vector<std::shared_ptr<ShaderPools>> spare_pools;
+    ShaderReuseCache shader_reuse;
 
     Shader::Profile profile;
     Shader::HostTranslateInfo host_info;
