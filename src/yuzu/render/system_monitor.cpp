@@ -299,6 +299,7 @@ SystemMonitor::Snapshot SystemMonitor::Get() const {
 
 void SystemMonitor::Run(std::stop_token token) {
     Common::SetCurrentThreadName("SystemMonitor");
+    Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
 
     // Counter setup (PDH, DXGI) is slow enough that it stays off the UI thread
     Sampler sampler;
