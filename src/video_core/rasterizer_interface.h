@@ -143,6 +143,14 @@ public:
         return false;
     }
 
+    /// Any thread: whether the query cache holds reports that can still land in the range, as
+    /// FlushQueryResults writes them out or once their host results come in. Without a query
+    /// cache that can tell, assume so.
+    [[nodiscard]] virtual bool HoldsQueries([[maybe_unused]] DAddr addr,
+                                            [[maybe_unused]] u64 size) {
+        return true;
+    }
+
     /// Notify rasterizer that any caches of the specified region should be invalidated
     virtual void InvalidateRegion(DAddr addr, u64 size,
                                   VideoCommon::CacheType which = VideoCommon::CacheType::All) = 0;
