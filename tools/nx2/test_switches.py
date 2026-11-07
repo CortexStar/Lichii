@@ -70,7 +70,7 @@ int main(int argc, char** argv) {
                      "LICHII_NATIVE_DRAW_DIAGNOSTICS", "LICHII_NATIVE_FRAME_CAPTURE",
                      "LICHII_NATIVE_SHADER_OVERRIDE_DIR", "LICHII_PUNCH_HOLE",
                      "LICHII_STARFOX_WINDOW_TRACE", "LICHII_VI2_MAX_RESOLUTION_MODE",
-                     "EGLANTINE_EXPERIMENTAL_STATIC_VERTEX_REPACK", "EGLANTINE_TEST_VERTEX_REPACK")
+                     "LICHII_EXPERIMENTAL_STATIC_VERTEX_REPACK", "LICHII_TEST_VERTEX_REPACK")
         (self.bin / "nx2_switches.txt").write_text("".join(f"{name}=1\n" for name in supported))
         for name in supported:
             with self.subTest(name=name):
