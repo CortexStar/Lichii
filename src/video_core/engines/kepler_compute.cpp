@@ -872,8 +872,10 @@ bool KeplerCompute::EmulatesNativeTensorPrograms() const {
     // Donkey Kong Bananza's programs must run: rejected, they write nothing and the screen is
     // purple from its mode select on.
     constexpr u64 DonkeyKongBananzaProgramId = 0x040074A01BF12000ULL;
+    const auto mode = Settings::values.tensor_programs.GetValue();
     return Settings::GetCurrentProgramID() == DonkeyKongBananzaProgramId ||
-           rasterizer->EmulatesNativeTensorPrograms();
+           mode == Settings::TensorPrograms::Native ||
+           (mode == Settings::TensorPrograms::Auto && rasterizer->EmulatesNativeTensorPrograms());
 }
 
 // Title 4's upscaler reads the tonemapped frame through the texture handle at cbuf0+0x90 and

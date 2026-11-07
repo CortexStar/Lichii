@@ -425,6 +425,15 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
     VideoCommon::GpuSplit::Get().SetIdleHook(
         [](void* argument) { static_cast<Scheduler*>(argument)->FlushDeferred(); },
         &scheduler);
+    const auto mode = Settings::values.tensor_programs.GetValue();
+    LOG_INFO(Render_Vulkan, "Tensor programs: {} (cooperative matrices {}, setting {}; Donkey Kong "
+                            "Bananza always emulates)",
+             (mode == Settings::TensorPrograms::Native ||
+              (mode == Settings::TensorPrograms::Auto && EmulatesNativeTensorPrograms()))
+                 ? "native"
+                 : "upscale stand-in",
+             pipeline_cache.SupportsCooperativeHmma() ? "usable" : "unavailable",
+             Settings::CanonicalizeEnum(mode));
 }
 
 RasterizerVulkan::~RasterizerVulkan() {
@@ -2870,9 +2879,10 @@ bool RasterizerVulkan::UsesNvidiaDlss() const {
 }
 
 bool RasterizerVulkan::EmulatesNativeTensorPrograms() const {
-    // Mesa's Intel driver takes minutes to compile an emulated network (Ocarina of Time's has 768
-    // matrix multiplies) and then runs it at about 8 FPS. The upscale stand-in draws instead.
-    return device.GetDriverID() != VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA;
+    // Emulated in software, a network (Ocarina of Time's has 768 matrix multiplies) takes minutes
+    // to compile and runs at a few FPS (MoltenVK, Mesa's Intel driver, old GPUs). Only cooperative
+    // matrices run it well; elsewhere the upscale stand-in draws instead.
+    return pipeline_cache.SupportsCooperativeHmma();
 }
 
 bool RasterizerVulkan::SupportsGameDlssNetwork() const {

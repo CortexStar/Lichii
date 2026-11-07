@@ -298,6 +298,13 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Enables GPU vendor-specific pipeline cache.\nThis option can improve shader loading "
               "time significantly in cases where the Vulkan driver does not store pipeline cache "
               "files internally."));
+    INSERT(Settings, tensor_programs, tr("Switch 2 tensor programs:"),
+           tr("Switch 2 games run neural networks (Ocarina of Time's upscaler and movie "
+              "enhancement) on tensor cores. Native emulates them in software or on Vulkan "
+              "cooperative matrices; Stand-in skips the network and draws a plain upscale of "
+              "its input. Auto emulates them only where the GPU has cooperative matrices (and "
+              "always for Donkey Kong Bananza), which makes them far faster on Macs and on GPUs "
+              "without that extension. Takes effect on the next game boot."));
     INSERT(Settings, native_async_draws, tr("Switch 2 draws with unbuilt pipelines:"),
            tr("Only applies when asynchronous shader building is on. Decides what a Switch 2 draw "
               "does when its graphics pipeline is still building.\n"
@@ -697,6 +704,12 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                           {
                               PAIR(ConsoleMode, Docked, tr("Docked")),
                               PAIR(ConsoleMode, Handheld, tr("Handheld")),
+                          }});
+    translations->insert({Settings::EnumMetadata<Settings::TensorPrograms>::Index(),
+                          {
+                              PAIR(TensorPrograms, Auto, tr("Auto")),
+                              PAIR(TensorPrograms, Native, tr("Native")),
+                              PAIR(TensorPrograms, Standin, tr("Stand-in")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::NativeAsyncDraws>::Index(),
                           {
