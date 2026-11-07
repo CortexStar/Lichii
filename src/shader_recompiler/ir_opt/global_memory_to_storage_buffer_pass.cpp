@@ -2060,9 +2060,11 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
         collect();
     }
     program.info.native_global_bounds |= info.native_runtime_bounds;
-    // Store extents, before the accesses are rebased (the analysis reads the guest addresses)
+    // Store extents, before the accesses are rebased (the analysis reads the guest addresses).
+    // None while a store stays global: the backend routes it to the descriptor whose pointer is the
+    // closest one at or below the address, which need not be one of the store's candidates.
     std::map<StorageBufferAddr, StorageWriteExtent> extents;
-    if (!info.untracked_writes) {
+    if (!info.untracked_writes && info.unbounded_writes.empty()) {
         std::map<StorageBufferAddr, StoreExtentAnalysis> analyses;
         for (const StorageInst& storage_inst : info.to_replace) {
             if (!IsGlobalMemoryWrite(*storage_inst.inst) ||
