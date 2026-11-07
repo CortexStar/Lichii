@@ -56,12 +56,13 @@ TEST_CASE("Lichii ignores dev builds and malformed release tags", "[updater]") {
 TEST_CASE("Lichii selects only the matching platform and PGO variant", "[updater]") {
     const std::string platform =
         GENERATE("windows-x86_64", "windows-x86_64-pgo", "linux-x86_64", "linux-x86_64-pgo",
-                 "linux-aarch64", "linux-aarch64-pgo", "macos-arm64");
+                 "linux-aarch64", "linux-aarch64-pgo", "macos-arm64", "macos-x86_64");
     auto release = MakeRelease("build-71", "unrelated.zip");
     for (const auto name :
          {"windows-x86_64.zip", "windows-x86_64-pgo.zip", "linux-x86_64.tar.gz",
           "linux-x86_64-pgo.tar.gz", "linux-aarch64.tar.gz", "linux-aarch64-pgo.tar.gz",
-          "macos-arm64.zip", "linux-x86_64.AppImage", "linux-x86_64-pgo.AppImage",
+          "macos-arm64.zip", "macos-x86_64.zip", "linux-x86_64.AppImage",
+          "linux-x86_64-pgo.AppImage",
           "linux-aarch64.AppImage", "linux-aarch64-pgo.AppImage"}) {
         release.assets.push_back(
             "https://github.com/zortos293/Lichii/releases/download/build-71/lichii-" +
@@ -118,6 +119,7 @@ TEST_CASE("PGO builds fall back to the standard asset, standard builds never get
     CHECK_FALSE(UpdateChecker::SelectUpdate(std::array{pgo_only}, "build-70", "windows-x86_64"));
     CHECK(UpdateChecker::SelectUpdate(std::array{pgo_only}, "build-70", "windows-x86_64-pgo"));
     CHECK(release.GetPlatformAssets("macos-arm64-pgo").empty());
+    CHECK(release.GetPlatformAssets("macos-x86_64-pgo").empty());
 }
 
 TEST_CASE("Linux installs only get the package they were installed from", "[updater]") {

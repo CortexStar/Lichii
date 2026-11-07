@@ -260,9 +260,16 @@ else()
     # `--disable-vdpau` is needed to avoid linking issues
     set(FFmpeg_CC ${CMAKE_C_COMPILER_LAUNCHER}  ${CMAKE_C_COMPILER})
     set(FFmpeg_CXX ${CMAKE_CXX_COMPILER_LAUNCHER}  ${CMAKE_CXX_COMPILER})
+    # FFmpeg links through the compiler driver; Apple's raw ld rejects the -Wl, flags it gets.
+    if (APPLE)
+        set(FFmpeg_LD ${CMAKE_C_COMPILER})
+    else()
+        set(FFmpeg_LD ${CMAKE_LINKER})
+    endif()
     add_custom_command(
         OUTPUT
             ${FFmpeg_MAKEFILE}
+            ${FFmpeg_BUILD_DIR}/config.h
         COMMAND
             ${BASH_PROGRAM} ${FFmpeg_PREFIX}/configure
                 --disable-avdevice
@@ -271,6 +278,7 @@ else()
                 --disable-everything
                 --disable-ffmpeg
                 --disable-ffprobe
+                --disable-iconv
                 --disable-network
                 --disable-swresample
                 --enable-decoder=h264
@@ -280,7 +288,7 @@ else()
                 --enable-pic
                 --cc=${FFmpeg_CC}
                 --cxx=${FFmpeg_CXX}
-                --ld=${CMAKE_LINKER}
+                --ld=${FFmpeg_LD}
                 --extra-cflags=${CMAKE_C_FLAGS}
                 --extra-cxxflags=${CMAKE_CXX_FLAGS}
                 --extra-ldflags=${CMAKE_C_LINK_FLAGS}
@@ -291,16 +299,13 @@ else()
     )
     unset(FFmpeg_CC)
     unset(FFmpeg_CXX)
+    unset(FFmpeg_LD)
     unset(FFmpeg_HWACCEL_FLAGS)
     unset(FFmpeg_CROSS_COMPILE_FLAGS)
 
     # Workaround for Ubuntu 18.04's older version of make not being able to call make as a child
     # with context of the jobserver. Also helps ninja users.
-    execute_process(
-        COMMAND
-            nproc
-        OUTPUT_VARIABLE
-            SYSTEM_THREADS)
+    cmake_host_system_information(RESULT SYSTEM_THREADS QUERY NUMBER_OF_LOGICAL_CORES)
 
     set(FFmpeg_BUILD_LIBRARIES ${FFmpeg_LIBRARIES})
 
@@ -311,11 +316,16 @@ else()
         set(FFmpeg_MAKE_ARGS "")
     endif()
 
+    # FFmpeg needs GNU make: gmake on the BSDs, plain make elsewhere (macOS ships GNU make 3.81).
+    find_program(FFmpeg_MAKE NAMES gmake make REQUIRED)
     add_custom_command(
         OUTPUT
             ${FFmpeg_BUILD_LIBRARIES}
         COMMAND
-            gmake ${FFmpeg_MAKE_ARGS}
+            ${FFmpeg_MAKE} ${FFmpeg_MAKE_ARGS}
+        # configure leaves the Makefile alone on a rerun but rewrites config.h.
+        DEPENDS
+            ${FFmpeg_BUILD_DIR}/config.h
         WORKING_DIRECTORY
             ${FFmpeg_BUILD_DIR}
     )
