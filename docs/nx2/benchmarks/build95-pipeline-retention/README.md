@@ -108,7 +108,9 @@ change the camera endpoint, so validate it rather than assume equivalent views.
 `return-intervals.csv` contains all 3600 primary intervals as integer nanoseconds,
 with run, mode, interval index and present ID. Absolute monotonic timestamps and
 local paths are omitted. `results.json` contains recorded summaries, seed hashes,
-source/binary identity, memory samples and build validation. Run:
+source/binary identity, memory samples and build validation. From this benchmark
+directory in the archive checkout (not the separate historical source checkout),
+run:
 
 ```sh
 python3 analyze.py
@@ -117,8 +119,8 @@ python3 analyze.py
 The dependency-free analyzer checks indices, present continuity, positive
 intervals and recomputes all recorded primary statistics and paired reductions.
 The instrumented base passed 18 debug-server cases (178 assertions), 16 pipeline
-cases (107 assertions), and 17 Python tests. This documentation PR does not change
-runtime code or claim those tests validate a production retention fix.
+cases (107 assertions), and 17 Python tests. This historical artifact does not claim those tests validate the production
+retention policy; see the separate current-base comparison for that implementation.
 
 ## Limits and next measurements
 
