@@ -223,8 +223,8 @@ static void CollectStoragePointerSlots(const ::Common::unordered_map<u64, u8>& t
         const u32 offset = static_cast<u32>(key);
         const auto low = values.find(MakeCbufKey(index, offset));
         const auto high = values.find(MakeCbufKey(index, offset + 4));
-        if (low != values.end() && high != values.end() && low->second == 0 &&
-            high->second == 0) {
+        // Null or not yet mapped: either can hold a buffer later.
+        if (low != values.end() && high != values.end()) {
             null_slots.push_back(key);
         }
     }

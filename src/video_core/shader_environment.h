@@ -99,7 +99,8 @@ public:
     void Serialize(std::ofstream& file) const;
 
     /// Native programs: the constant buffer slots (index << 32 | offset) storage tracking took as
-    /// pointers, and the ones it left out because they held null when the program was translated.
+    /// pointers, and the ones it left out because they held null or an unmapped address when the
+    /// program was translated.
     void StoragePointerSlots(std::vector<u64>& pointers, std::vector<u64>& null_slots) const;
 
     /// Takes these slots as pointers without reading them: a rebuild keeps its earlier buffers.
