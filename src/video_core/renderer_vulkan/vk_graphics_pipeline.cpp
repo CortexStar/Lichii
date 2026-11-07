@@ -34,6 +34,7 @@
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "common/settings.h"
 #include "shader_recompiler/exception.h"
+#include "video_core/nx2_bindcache.h"
 #include "video_core/nx2_profile.h"
 
 #if defined(__clang__) && defined(NDEBUG)
@@ -408,6 +409,9 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     boost::container::small_vector<VideoCommon::SamplerId, 96> samplers;
     views.reserve(num_image_elements);
     samplers.reserve(num_textures);
+    // EDEN_NX2_BINDCACHE: the sampler handles are kept to look the bindings up in bind_cache.
+    const bool use_bind_cache = num_image_elements != 0 && VideoCommon::BindCacheEnabled();
+    boost::container::small_vector<u32, 96> sampler_handles;
 
     namespace Profile = VideoCommon::Nx2Profile;
     {
@@ -490,6 +494,10 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                 const auto handle{read_handle(desc, index)};
                 views.push_back({handle.first});
 
+                if (use_bind_cache) {
+                    sampler_handles.push_back(handle.second);
+                    continue;
+                }
                 VideoCommon::SamplerId sampler{texture_cache.GetSamplerId(handle.second, false)};
                 samplers.push_back(sampler);
             }
@@ -520,12 +528,37 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             config_stage(4);
         }
     }
+    const ImageBindingCache::Entry* bind_hit{};
+    ImageBindingCache::Entry* bind_record{};
+    u64 bind_epoch{};
+    if (use_bind_cache) {
+        bind_hit = bind_cache.Find(texture_cache, false, via_header_index,
+                                   std::span(views.data(), views.size()),
+                                   std::span(sampler_handles.data(), sampler_handles.size()));
+        if (bind_hit) {
+            for (size_t index = 0; index < views.size(); ++index) {
+                views[index].id = bind_hit->views[index].id;
+            }
+            samplers.assign(bind_hit->samplers.begin(), bind_hit->samplers.end());
+        } else {
+            for (const u32 handle : sampler_handles) {
+                samplers.push_back(texture_cache.GetSamplerId(handle, false));
+            }
+        }
+    }
     ASSERT(views.size() == num_image_elements);
     ASSERT(samplers.size() == num_textures);
-    {
+    if (!bind_hit) {
         Profile::Scope scope{Profile::Zone::FillImageViews};
         texture_cache.FillImageViews(std::span(views.data(), views.size()), false,
                                      Spec::has_images);
+    }
+    if (use_bind_cache && !bind_hit) {
+        bind_epoch = texture_cache.BindingsEpoch();
+        bind_record = &bind_cache.BeginRecord(
+            via_header_index, std::span(views.data(), views.size()),
+            std::span(sampler_handles.data(), sampler_handles.size()),
+            std::span(samplers.data(), samplers.size()));
     }
     if (RecordingSampledTextures()) {
         sampled_images.clear();
@@ -649,6 +682,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     RenderAreaPushConstant render_area;
     const VideoCommon::SamplerId* samplers_it{samplers.data()};
     const VideoCommon::ImageViewInOut* views_it{views.data()};
+    size_t push_index{};
     const auto prepare_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         {
             Profile::Scope scope{Profile::Zone::BindStageBuffers};
@@ -656,8 +690,13 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         }
         {
             Profile::Scope scope{Profile::Zone::PushDescriptors};
-            PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
-                                 rescaling, samplers_it, views_it);
+            if (bind_hit) {
+                ReplayImageDescriptors(*bind_hit, push_index, guest_descriptor_queue);
+            } else {
+                PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
+                                     rescaling, samplers_it, views_it, bind_record);
+            }
+            ++push_index;
         }
         const auto& info{stage_infos[stage]};
         if (info.uses_render_area) {
@@ -683,6 +722,12 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     }
     if constexpr (Spec::enabled_stages[4]) {
         prepare_stage(4);
+    }
+    if (bind_hit) {
+        ReplayImageBindingEffects(*bind_hit, texture_cache, rescaling);
+    } else if (bind_record && texture_cache.BindingsEpoch() == bind_epoch &&
+               texture_cache.CanCacheBindings(std::span(views.data(), views.size()))) {
+        bind_record->epoch = bind_epoch;
     }
     if (buffer_cache.any_buffer_uploaded) {
         buffer_cache.runtime.PostCopyBarrier();

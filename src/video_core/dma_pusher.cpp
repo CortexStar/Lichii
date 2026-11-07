@@ -137,7 +137,8 @@ bool DmaPusher::Step() {
     if (header.size > 0) {
         if (header.sync && g_nx2_ampere.load(std::memory_order_relaxed)) {
             VideoCommon::GpuSplit::Get().NoteSync();
-            VideoCommon::GpuSplit::Get().NoteUnboundedWrite();
+            VideoCommon::GpuSplit::Get().NoteUnboundedWrite(false,
+                                                            VideoCommon::UnboundedCause::GpSync);
         }
         // EDEN_NX2_FETCH_DRAIN=1: wait for the back before every entry, as before the split
         // overlapped the two halves again.
@@ -591,12 +592,21 @@ DmaPusher::BackWrites DmaPusher::FrontBackWrites(Engines::EngineInterface& engin
         // With its macros on the front it notes its own (Maxwell3D::FrontNoteWrites).
         writes.unbounded =
             !static_cast<Engines::Maxwell3D&>(engine).GetNativeMacroEngine().native_turing;
+        writes.cause = VideoCommon::UnboundedCause::Maxwell3DBack;
         break;
-    case Engines::EngineTypes::KeplerCompute:
+    case Engines::EngineTypes::KeplerCompute: {
+        auto& compute = static_cast<Engines::KeplerCompute&>(engine);
+        if (VideoCommon::GpuSplit::Get().NarrowCompute() && compute.FrontRunsMacros()) {
+            // It notes its own, per launch and write (KeplerCompute::FrontNoteWrites).
+            break;
+        }
         // Dispatches write wherever their shaders store.
-        writes.unbounded = static_cast<Engines::KeplerCompute&>(engine).MayWriteMemory(method);
+        writes.unbounded = compute.MayWriteMemory(method);
         writes.writer = writes.unbounded;
+        writes.cause = method >= MacroRegistersStart ? VideoCommon::UnboundedCause::ComputeMacro
+                                                     : VideoCommon::UnboundedCause::ComputeOther;
         break;
+    }
     case Engines::EngineTypes::MaxwellDMA: {
         auto& dma = static_cast<Engines::MaxwellDMA&>(engine);
         const u64 session = VideoCommon::GpuSplit::Get().Session();
@@ -607,6 +617,7 @@ DmaPusher::BackWrites DmaPusher::FrontBackWrites(Engines::EngineInterface& engin
             }
             writes.writer = true;
             writes.unbounded |= !launch.bounded;
+            writes.cause = VideoCommon::UnboundedCause::BlockLinearDma;
             for (u32 range = 0; range < launch.count; ++range) {
                 if (writes.count == writes.ranges.size()) {
                     writes.unbounded = true;
@@ -620,6 +631,7 @@ DmaPusher::BackWrites DmaPusher::FrontBackWrites(Engines::EngineInterface& engin
     default:
         // Fermi2D blits, KeplerMemory inline uploads.
         writes.unbounded = method >= engine.execution_mask.size() || engine.execution_mask[method];
+        writes.cause = VideoCommon::UnboundedCause::OtherEngine;
         break;
     }
     return writes;
@@ -632,7 +644,7 @@ void DmaPusher::NoteBackWrites(const BackWrites& writes) {
         split.NoteWrite(&memory_manager, begin, end - begin);
     }
     if (writes.unbounded) {
-        split.NoteUnboundedWrite(writes.writer);
+        split.NoteUnboundedWrite(writes.writer, writes.cause);
     }
 }
 
@@ -644,7 +656,11 @@ bool DmaPusher::WaitForListWriters(GPUVAddr address, size_t size) {
     // By page: the pages are what IsGpuWrittenCommands and the buffer cache's list copies go by.
     const GPUVAddr first = address & ~GPUVAddr{0xfff};
     const GPUVAddr last = (address + size + 0xfff) & ~GPUVAddr{0xfff};
-    const bool waited = split.WaitForWritersTo(&memory_manager, first, last - first);
+    // EDEN_NX2_NARROW_LIST_SYNC: the pushbuffer fetch sees what a dispatch or copy wrote only
+    // after a host-level wait (GP entry sync bit, syncpoint or semaphore acquire), so the work
+    // before the last one and the recorded writes over the list are enough.
+    const bool waited =
+        split.WaitForWritersTo(&memory_manager, first, last - first, split.NarrowListSync());
     if (VideoCommon::GpuSplit::NarrowVerify()) {
         // EDEN_NX2_NARROW_VERIFY: the pages GPU-written now and after all the writers.
         const bool written = IsGpuWrittenCommands(address, size);

@@ -230,6 +230,7 @@ private:
     VkDeviceSize last_descriptor_buffer_offset{};
     u32 last_descriptor_buffer_chunk{};
     u64 last_descriptor_buffer_generation{};
+    ImageBindingCache bind_cache; ///< EDEN_NX2_BINDCACHE
 
     const bool worker_only_build;
     bool uses_push_descriptor{false};

@@ -40,6 +40,7 @@
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/nx2_reactive.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
@@ -172,6 +173,7 @@ struct GPU::Impl {
         if (TickWorkFastEnabled() && !has_sync_requests.load(std::memory_order_acquire)) {
             return;
         }
+        VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::TickWork};
         std::unique_lock lck{sync_request_mutex};
         while (!sync_requests.empty()) {
             auto request = std::move(sync_requests.front());

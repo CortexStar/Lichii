@@ -1110,6 +1110,10 @@ struct KeplerCompute::FrontState {
     bool compute_uploaded{};
     u32 bind_pointer{};
     MacroEngine* macro{}; ///< Without a native context: the one macro engine
+    /// The inline upload's exec was seen by this front (its destination is known).
+    bool upload_known{};
+    bool upload_linear{};
+    u32 upload_copy_size{};
 };
 
 KeplerCompute::FrontState& KeplerCompute::Front(VideoCommon::GpuSplit& split) {
@@ -1181,6 +1185,9 @@ void KeplerCompute::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit&
     auto& fs = Front(split);
     if (method >= fs.registers.size()) {
         split.Method(this, method, argument, is_last_call, segment);
+        if (split.NarrowCompute()) {
+            split.NoteUnboundedWrite(true, VideoCommon::UnboundedCause::ComputeOther);
+        }
         return;
     }
     if (method >= 0xe00) {
@@ -1199,6 +1206,7 @@ void KeplerCompute::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit&
     }
     FrontApply(fs, method, argument);
     split.Method(this, method, argument, is_last_call, segment);
+    FrontNoteWrites(split, fs, method);
 }
 
 void KeplerCompute::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit& split,
@@ -1217,6 +1225,11 @@ void KeplerCompute::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuS
         }
     }
     split.MultiMethod(this, method, base_start, amount, methods_pending, segment);
+    if (method < fs.registers.size()) {
+        FrontNoteWrites(split, fs, method);
+    } else if (split.NarrowCompute()) {
+        split.NoteUnboundedWrite(true, VideoCommon::UnboundedCause::ComputeOther);
+    }
 }
 
 void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split,
@@ -1238,6 +1251,7 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
         }
         FrontApply(fs, address, value);
         split.MacroWrite(this, address, value);
+        FrontNoteWrites(split, fs, address);
         return true;
     };
 #ifdef ARCHITECTURE_x86_64
@@ -1257,6 +1271,68 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
                   start, result.consumed, result.error);
     }
     fs.parameters.clear();
+}
+
+void KeplerCompute::FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& fs, u32 method) {
+    // EDEN_NX2_NARROW_COMPUTE: instead of every compute macro word and memory-writing method
+    // counting as unbounded (DmaPusher::FrontBackWrites), what ProcessNativeMethod writes.
+    if (!split.NarrowCompute()) {
+        return;
+    }
+    using VideoCommon::UnboundedCause;
+    constexpr u32 exec_upload_method = KEPLER_COMPUTE_REG_INDEX(exec_upload);
+    constexpr u32 data_upload_method = KEPLER_COMPUTE_REG_INDEX(data_upload);
+    switch (method) {
+    case 0xae:
+    case 0xaf:
+    case 0xb0:
+        split.NoteDispatch(UnboundedCause::ComputeLaunch);
+        break;
+    case 0x107: {
+        // The inline QMD goes to memory, then may launch.
+        const GPUVAddr address =
+            ((GPUVAddr{fs.registers[0xc6]} << 32) | fs.registers[0xc7]) << 8;
+        split.NoteWrite(&memory_manager, address, 256);
+        split.NoteDispatch(UnboundedCause::ComputeLaunch);
+        break;
+    }
+    case 0x6c3: {
+        // ProcessNativeReportSemaphore.
+        const GPUVAddr address =
+            (GPUVAddr{fs.registers[0x6c0] & 0x1ffffff} << 32) | fs.registers[0x6c1];
+        const u32 argument = fs.registers[0x6c3];
+        split.NoteWrite(&memory_manager, address, 16);
+        const u32 operation = argument & 3;
+        if ((operation == 0 || operation == 2) && ((argument >> 3) & 1) == 0) {
+            split.NoteRelease(&memory_manager, address, fs.registers[0x6c2]);
+        } else {
+            split.ForgetRelease(&memory_manager, address);
+        }
+        break;
+    }
+    case exec_upload_method:
+        // As Upload::State::ProcessExec (bit 0: pitch layout).
+        fs.upload_known = true;
+        fs.upload_linear = (fs.registers[exec_upload_method] & 1) != 0;
+        fs.upload_copy_size = fs.registers[KEPLER_COMPUTE_REG_INDEX(upload.line_length_in)] *
+                              fs.registers[KEPLER_COMPUTE_REG_INDEX(upload.line_count)];
+        break;
+    case data_upload_method: {
+        if (!fs.upload_known) {
+            split.NoteUnboundedWrite(true, UnboundedCause::ComputeUpload);
+            break;
+        }
+        Upload::Registers upload{};
+        std::memcpy(&upload, fs.registers.data() + KEPLER_COMPUTE_REG_INDEX(upload),
+                    sizeof(upload));
+        const auto [begin, end] = Upload::WriteRange(upload, fs.upload_linear, fs.upload_copy_size);
+        split.NoteWrite(&memory_manager, begin, end - begin);
+        break;
+    }
+    default:
+        // Register stores, macro uploads and bindings.
+        break;
+    }
 }
 
 } // namespace Tegra::Engines

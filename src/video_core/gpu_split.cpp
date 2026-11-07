@@ -168,6 +168,8 @@ void GpuSplit::Stop() {
     consumed_cache = 0;
     publish_every = PublishEvery;
     front_engine = nullptr;
+    pending_flush = nullptr;
+    pending_flush_argument = nullptr;
     back_engine = nullptr;
     front_macros = false;
     narrow = false;
@@ -233,6 +235,7 @@ void GpuSplit::Publish() {
 }
 
 void GpuSplit::Drain(DrainSite site) {
+    RunPendingFlush();
     consumed_cache = consumed.load(std::memory_order_acquire);
     if (consumed_cache == write_position) {
         return;
@@ -459,6 +462,32 @@ void GpuSplit::MaybeReportDiag() {
              static_cast<double>(diag_acquires[1]) / seconds,
              static_cast<double>(diag_acquires[2] + diag_acquires[3]) / seconds,
              static_cast<double>(diag_acquires[3]) / seconds);
+    std::string dma;
+    for (u32 pass = 0; pass < 12; ++pass) {
+        size_t best = diag_macro_dma.size();
+        u64 best_count = 0;
+        for (size_t i = 0; i < diag_macro_dma.size(); ++i) {
+            const u64 count = diag_macro_dma[i][0] + diag_macro_dma[i][1];
+            if (count > best_count) {
+                best = i;
+                best_count = count;
+            }
+        }
+        if (best == diag_macro_dma.size()) {
+            break;
+        }
+        const auto& entry = diag_macro_dma[best];
+        dma += fmt::format(" {:#x} {:.0f}/s ram {:.0f} fifo {:.0f} words/read {:.1f},",
+                           0xe00 + best * 2, static_cast<double>(best_count) / seconds,
+                           static_cast<double>(entry[0]) / seconds,
+                           static_cast<double>(entry[1]) / seconds,
+                           static_cast<double>(entry[2]) / static_cast<double>(best_count));
+        diag_macro_dma[best] = {};
+    }
+    if (!dma.empty()) {
+        LOG_INFO(HW_GPU, "Narrow diag: MME DMA reads by macro:{}", dma);
+    }
+    diag_macro_dma = {};
     diag_notes = {};
     diag_waits = {};
     diag_wait_ticks = {};
@@ -487,13 +516,31 @@ std::optional<u32> GpuSplit::PredictedSemaphore(const void* space, GPUVAddr addr
         return std::nullopt;
     }
     consumed_cache = consumed.load(std::memory_order_acquire);
+    PrunePendingWrites();
     for (const QueuedRelease& release : queued_releases) {
-        if (release.space == space && release.address == address &&
-            release.position > consumed_cache) {
-            return release.value;
+        if (release.space != space || release.address != address ||
+            release.position <= consumed_cache) {
+            continue;
         }
+        // A recorded write sent after the release (a copy, a compute report) may change it.
+        if (PendingWriteTarget(space, address, sizeof(u32), release.position) !=
+            release.position) {
+            return std::nullopt;
+        }
+        return release.value;
     }
     return std::nullopt;
+}
+
+void GpuSplit::ForgetRelease(const void* space, GPUVAddr address) {
+    if (!sem_predict) {
+        return;
+    }
+    for (QueuedRelease& release : queued_releases) {
+        if (release.space == space && release.address == address) {
+            release = {};
+        }
+    }
 }
 
 bool GpuSplit::WaitFor(u64 target, DrainSite site) {
@@ -536,6 +583,8 @@ void GpuSplit::Backoff(u32 spins, u64 target) {
 }
 
 void GpuSplit::SwitchEngine(Tegra::Engines::EngineInterface* engine) {
+    // Before front_engine changes: the held-back work selects its own engine.
+    RunPendingFlush();
     front_engine = engine;
     u64* const entry = Reserve(2);
     entry[0] = static_cast<u64>(Kind::Engine);
@@ -670,6 +719,20 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
         const size_t payload = static_cast<size_t>((head >> 8) & 0xffffff);
         reinterpret_cast<void (*)(const u64*)>(entry[1])(entry + 2);
         return 2 + payload;
+    }
+    case Kind::StateDelta: {
+        // Only Maxwell3D sends these (FrontState).
+        const u32 count = static_cast<u32>(head >> 32);
+        static_cast<Tegra::Engines::Maxwell3D*>(back_engine)
+            ->ApplyFrontDelta(*system, entry + 1, count);
+        return 1 + size_t{count};
+    }
+    case Kind::DrawBatch: {
+        const u32 count = static_cast<u32>((head >> 8) & 0xff);
+        const u32 repeats = static_cast<u32>(head >> 32);
+        static_cast<Tegra::Engines::Maxwell3D*>(back_engine)
+            ->RunDrawBatch(*system, entry + 1, count, repeats);
+        return 1 + size_t{count};
     }
     }
     return 1;

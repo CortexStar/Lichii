@@ -181,6 +181,63 @@ public:
         Commit(1);
     }
 
+    // Front-owned register state (EDEN_NX2_FRONT_STATE, Maxwell3D::FrontState): state register
+    // writes stay on the front until something else is sent, then go as one StateDelta entry
+    // (Maxwell3D::ApplyFrontDelta); runs of identical instance-loop draws go as one DrawBatch.
+    /// `count` (method | value << 32) words written by `fill(u64*)`, applied in order.
+    template <typename Fill>
+    void StateDelta(Tegra::Engines::EngineInterface* engine, u32 count, const Fill& fill) {
+        SelectEngine(engine);
+        u64* const entry = Reserve(1 + size_t{count});
+        entry[0] = static_cast<u64>(Kind::StateDelta) | (u64{count} << 32);
+        fill(entry + 1);
+        Commit(1 + size_t{count});
+    }
+    /// `count` (method | argument << 32) instance-loop writes, run once, then `repeats - 1` more
+    /// instances counted (Maxwell3D::RunDrawBatch).
+    void DrawBatch(Tegra::Engines::EngineInterface* engine, const u64* methods, u32 count,
+                   u32 repeats) {
+        SelectEngine(engine);
+        u64* const entry = Reserve(1 + size_t{count});
+        entry[0] = static_cast<u64>(Kind::DrawBatch) | (u64{count & 0xff} << 8) |
+                   (u64{repeats} << 32);
+        std::memcpy(entry + 1, methods, size_t{count} * sizeof(u64));
+        Commit(1 + size_t{count});
+    }
+    /// Work the front holds back (a register delta, a draw batch): `hook(argument)` sends it
+    /// before anything else is sent and before a Drain. Another holder's work is sent first.
+    using PendingFlush = void (*)(void*);
+    void SetPendingFlush(PendingFlush hook, void* argument) {
+        if (pending_flush != hook || pending_flush_argument != argument) {
+            RunPendingFlush();
+            pending_flush = hook;
+            pending_flush_argument = argument;
+        }
+    }
+    /// Sends the held-back work now.
+    void RunPendingFlush() {
+        if (pending_flush != nullptr) [[unlikely]] {
+            const PendingFlush hook = pending_flush;
+            pending_flush = nullptr;
+            hook(pending_flush_argument);
+        }
+    }
+    /// The holder sends its work itself (it calls SetPendingFlush again for what it keeps).
+    void ClearPendingFlush() {
+        pending_flush = nullptr;
+    }
+    /// `argument` goes away: forget its held-back work.
+    void DropPendingFlush(void* argument) {
+        if (pending_flush_argument == argument) {
+            pending_flush = nullptr;
+            pending_flush_argument = nullptr;
+        }
+    }
+    /// EDEN_NX2_NARROW_DRAIN=2.
+    [[nodiscard]] bool NarrowStrict() const {
+        return narrow_strict;
+    }
+
     /// Runs `func` on the back after everything sent before it. Must be trivially copyable.
     /// Work that writes guest memory notes it after (NoteWrite, NoteUnboundedWrite).
     template <typename Func>
@@ -334,6 +391,16 @@ public:
     void NoteRelease(const void* space, GPUVAddr address, u32 value);
     /// The value of the latest still-queued release at `address` of `space`, if any.
     [[nodiscard]] std::optional<u32> PredictedSemaphore(const void* space, GPUVAddr address);
+    /// Work that writes `address` of `space` with a value the front doesn't know was just sent.
+    void ForgetRelease(const void* space, GPUVAddr address);
+    /// EDEN_NX2_NARROW_DIAG: a macro's MME DMA read (`fifo`: MME_DMA_READ_FIFOED) of `words`.
+    void NoteMacroDmaDiag(u32 macro, bool fifo, u32 words) {
+        if (diag && macro >= 0xe00 && macro < 0x1000) [[unlikely]] {
+            auto& entry = diag_macro_dma[(macro - 0xe00) / 2];
+            ++entry[fifo ? 1 : 0];
+            entry[2] += words;
+        }
+    }
     /// EDEN_NX2_NARROW_DIAG: an acquire check (`predicted`: met by a queued release; `waited`:
     /// it still waited for the back).
     void NoteAcquireDiag(bool predicted, bool waited) {
@@ -368,6 +435,8 @@ private:
         Method, ///< Bits 8-23 method, 32-63 argument; flags IsLast, HasSegment (word 1)
         Multi,  ///< Bits 8-23 method, 32-63 amount; word 1 methods pending, [segment], words
         Call,   ///< Bits 8-31 payload size in words; word 1 thunk, then the payload
+        StateDelta, ///< Bits 32-63 count; then count words (method | value << 32), Maxwell3D
+        DrawBatch,  ///< Bits 8-15 count, 32-63 repeats; then count words (method | arg << 32)
     };
     static constexpr u64 IsLast = 1 << 4;
     static constexpr u64 HasSegment = 1 << 5;
@@ -385,6 +454,8 @@ private:
 
     /// Room for an entry of `words` at the write position (never across the ring's end).
     u64* Reserve(size_t words) {
+        // Held-back front state goes before any other entry (SetPendingFlush).
+        RunPendingFlush();
         const size_t index = write_position & RingMask;
         if (index + words <= RingWords && write_position + words - consumed_cache <= RingWords)
             [[likely]] {
@@ -466,6 +537,9 @@ private:
     /// Words between publishes: small right after a drain, while the back has nothing to do.
     size_t publish_every{PublishEvery};
     Tegra::Engines::EngineInterface* front_engine{};
+    /// Held-back front work (SetPendingFlush).
+    PendingFlush pending_flush{};
+    void* pending_flush_argument{};
     /// Narrow drains: the end of the latest work with unbounded writes (of compute or copy work).
     u64 unbounded_position{};
     u64 unbounded_writer_position{};
@@ -496,6 +570,8 @@ private:
                static_cast<size_t>(DrainSite::Count)>
         diag_wait_ticks{};
     std::array<u64, 4> diag_acquires{};
+    /// Per macro (by start method): DMA reads into data RAM, FIFOed, words.
+    std::array<std::array<u64, 3>, 0x100> diag_macro_dma{};
     u64 diag_window_start{};
     u64 diag_window_ticks{};
     /// Recorded writes not yet known done, oldest first: [pending_head, pending_tail).

@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <deque>
@@ -56,7 +57,10 @@ public:
     size_t WriteCounter(VAddr address, bool has_timestamp, u32 value,
                         std::optional<u32> subreport = std::nullopt) override {
         auto new_id = BuildQuery(has_timestamp, address, static_cast<u64>(value));
-        pending_sync.push_back(new_id);
+        // The value is kept here too: fence releases free their slot at once, and the slot can
+        // hold another release before the sync (EDEN_NX2_FENCE_TRIM batches them).
+        pending_sync.push_back(PendingSync{new_id, address, static_cast<u64>(value),
+                                           has_timestamp});
         return new_id;
     }
 
@@ -70,17 +74,28 @@ public:
         }
         std::vector<SyncValuesStruct> sync_values;
         sync_values.reserve(pending_sync.size());
-        for (size_t pending_id : pending_sync) {
-            auto& query = slot_queries[pending_id];
-            if (True(query.flags & QueryFlagBits::IsRewritten) ||
-                True(query.flags & QueryFlagBits::IsInvalidated)) {
+        std::vector<VAddr> seen;
+        seen.reserve(pending_sync.size());
+        // Newest first: only the last write of an address counts (one copy command must not
+        // write a range twice).
+        for (auto it = pending_sync.rbegin(); it != pending_sync.rend(); ++it) {
+            if (std::find(seen.begin(), seen.end(), it->address) != seen.end()) {
                 continue;
             }
-            query.flags |= QueryFlagBits::IsHostSynced;
+            seen.push_back(it->address);
+            auto& query = slot_queries[it->id];
+            const bool same = query.guest_address == it->address && query.value == it->value;
+            if (same && (True(query.flags & QueryFlagBits::IsRewritten) ||
+                         True(query.flags & QueryFlagBits::IsInvalidated))) {
+                continue;
+            }
+            if (same) {
+                query.flags |= QueryFlagBits::IsHostSynced;
+            }
             sync_values.emplace_back(SyncValuesStruct{
-                .address = query.guest_address,
-                .value = query.value,
-                .size = static_cast<u64>(True(query.flags & QueryFlagBits::HasTimestamp) ? 8 : 4)});
+                .address = it->address,
+                .value = it->value,
+                .size = static_cast<u64>(it->has_timestamp ? 8 : 4)});
         }
         pending_sync.clear();
         if (sync_values.size() > 0) {
@@ -89,8 +104,15 @@ public:
     }
 
 private:
+    struct PendingSync {
+        size_t id;
+        VAddr address;
+        u64 value;
+        bool has_timestamp;
+    };
+
     RuntimeType& runtime;
-    std::deque<size_t> pending_sync;
+    std::deque<PendingSync> pending_sync;
 };
 
 template <typename Traits>
@@ -562,10 +584,12 @@ bool QueryCacheBase<Traits>::HasUncommittedFlushes() const {
 }
 
 template <typename Traits>
-bool QueryCacheBase<Traits>::HasPendingFenceWork() const {
+bool QueryCacheBase<Traits>::HasPendingFenceWork(bool ignore_payload_sync) const {
     bool result = false;
-    impl->ForEachStreamer([&result](StreamerInterface* streamer) {
-        result |= streamer->HasUnsyncedQueries() || streamer->HasPendingSync();
+    StreamerInterface* const payload = impl->streamers[static_cast<size_t>(QueryType::Payload)];
+    impl->ForEachStreamer([&](StreamerInterface* streamer) {
+        result |= streamer->HasUnsyncedQueries() ||
+                  ((!ignore_payload_sync || streamer != payload) && streamer->HasPendingSync());
         return result;
     });
     return result;

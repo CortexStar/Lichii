@@ -3214,6 +3214,12 @@ public:
                          u32 argument, bool is_last_call);
     void FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
                               const u32* base_start, u32 amount, u32 methods_pending);
+    /// GpuSplit's back (Kind::StateDelta, EDEN_NX2_FRONT_STATE): state register writes the
+    /// front coalesced, `count` words of method | value << 32 (shadow RAM already applied).
+    void ApplyFrontDelta(Core::System& system, const u64* entries, u32 count);
+    /// GpuSplit's back (Kind::DrawBatch): an instance loop's begin..end writes, then
+    /// `repeats - 1` more identical instances.
+    void RunDrawBatch(Core::System& system, const u64* methods, u32 count, u32 repeats);
 
     bool ShouldExecute() const {
         return execute_on;
@@ -3407,6 +3413,17 @@ private:
     void FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 words);
     void FrontVerify(VideoCommon::GpuSplit& split, FrontState& state);
     void FinishFrontMacro(Core::System& system);
+    // EDEN_NX2_FRONT_STATE: state writes held back as a delta, instance loops as a draw batch.
+    void FrontMarkDelta(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 value);
+    /// Sends an executable write, or holds it back in a draw batch.
+    void FrontSend(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 argument,
+                   u32 value, bool is_last_call, bool from_macro);
+    void FrontEmitBatch(VideoCommon::GpuSplit& split, FrontState& state);
+    void FrontEmitCapture(VideoCommon::GpuSplit& split, FrontState& state);
+    /// GpuSplit::PendingFlush: sends the batch, the partial capture and the delta.
+    static void FrontFlushPending(void* maxwell3d);
+    void FrontRunOotMacro(VideoCommon::GpuSplit& split, FrontState& state, u32 method,
+                          const void* macro);
     std::unique_ptr<FrontState> front;
     bool front_macros{};
     // EDEN_NX2_SPLIT_VERIFY: the last SET_SHADOW_RAM_CONTROL writes each side saw (argument,

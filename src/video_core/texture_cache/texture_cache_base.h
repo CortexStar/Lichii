@@ -258,6 +258,24 @@ public:
     /// Refresh the state for graphics/compute image view and sampler descriptors
     void SynchronizeDescriptors(bool compute);
 
+    /// Changes whenever a pipeline's cached texture bindings (view and sampler ids, descriptor
+    /// handles, rescaling bits) could be stale: images or views created, deleted, rescaled or
+    /// CPU modified, descriptor pools moved, and every frame (EDEN_NX2_BINDCACHE).
+    [[nodiscard]] u64 BindingsEpoch() const noexcept {
+        return bindings_epoch;
+    }
+
+    /// True when handle `index` resolves to `id` with nothing to do: its TIC entry was read and
+    /// guest memory still holds it. Reads the entry, changes nothing.
+    [[nodiscard]] bool ImageBindingUnchanged(u32 index, bool compute, ImageViewId id) const;
+
+    /// True when sampler handle `index` resolves to `id` with nothing to do (as above).
+    [[nodiscard]] bool SamplerBindingUnchanged(u32 index, bool compute, SamplerId id) const;
+
+    /// True when FillImageViews would only touch these views' images: none has aliases to
+    /// synchronize or CPU writes to upload. A cached binding skips that preparation.
+    [[nodiscard]] bool CanCacheBindings(std::span<const ImageViewInOut> views) const;
+
     /// Updates the Render Targets if they can be rescaled
     /// @retval True if the Render Targets have been rescaled.
     bool RescaleRenderTargets();
@@ -537,6 +555,7 @@ private:
     std::array<ImageId, 8> rt_image_id{};
     ImageId rt_depth_image_id{};
     u64 texture_bindings_serial = 0;
+    u64 bindings_epoch = 1; ///< See BindingsEpoch(); 0 never matches a cached binding
     u64 last_feedback_loop_serial = 0;
     u64 last_feedback_texture_serial = 0;
     bool last_feedback_loop_result = false;

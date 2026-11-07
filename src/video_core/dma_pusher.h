@@ -22,6 +22,7 @@
 #include "common/scratch_buffer.h"
 #include "video_core/engines/engine_interface.h"
 #include "video_core/engines/puller.h"
+#include "video_core/gpu_split.h"
 
 namespace Core {
 class System;
@@ -214,6 +215,7 @@ private:
         u32 count{};
         bool unbounded{};
         bool writer{}; ///< Compute or copy work (GpuSplit::NoteUnboundedWrite)
+        VideoCommon::UnboundedCause cause{}; ///< EDEN_NX2_NARROW_DIAG
     };
     BackWrites FrontBackWrites(Engines::EngineInterface& engine, Engines::EngineTypes type,
                                u32 method, const u32* arguments, u32 count);

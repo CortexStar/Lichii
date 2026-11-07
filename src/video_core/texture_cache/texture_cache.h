@@ -469,6 +469,8 @@ void TextureCache<P>::TickFrame() {
 
     runtime.TickFrame();
     ++frame_tick;
+    // Cached bindings skip the LRU touch of their images: keep them to one frame.
+    ++bindings_epoch;
 
     if constexpr (IMPLEMENTS_ASYNC_DOWNLOADS) {
         for (auto& buffer : async_buffers_death_ring) {
@@ -650,6 +652,46 @@ SamplerId TextureCache<P>::GetSamplerId(u32 index, bool compute) {
 }
 
 template <class P>
+bool TextureCache<P>::ImageBindingUnchanged(u32 index, bool compute, ImageViewId id) const {
+    const auto& table =
+        compute ? channel_state->compute_image_table : channel_state->graphics_image_table;
+    index = Tegra::Texture::TextureHeaderIndex(index, table.current_limit,
+                                               gpu_memory->UsesNativeTiling());
+    if (index > table.current_limit) {
+        return id == NULL_IMAGE_VIEW_ID;
+    }
+    return table.Unchanged(*gpu_memory, index) && table.bound_ids[index] == id;
+}
+
+template <class P>
+bool TextureCache<P>::SamplerBindingUnchanged(u32 index, bool compute, SamplerId id) const {
+    const auto& table =
+        compute ? channel_state->compute_sampler_table : channel_state->graphics_sampler_table;
+    if (index > table.current_limit) {
+        return id == NULL_SAMPLER_ID;
+    }
+    return table.Unchanged(*gpu_memory, index) && table.bound_ids[index] == id;
+}
+
+template <class P>
+bool TextureCache<P>::CanCacheBindings(std::span<const ImageViewInOut> views) const {
+    for (const ImageViewInOut& view : views) {
+        if (!view.id) {
+            continue;
+        }
+        const ImageViewBase& image_view = slot_image_views[view.id];
+        if (image_view.IsBuffer() || image_view.image_id == NULL_IMAGE_ID) {
+            continue;
+        }
+        const ImageBase& image = slot_images[image_view.image_id];
+        if (!image.aliased_images.empty() || True(image.flags & ImageFlagBits::CpuModified)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <class P>
 const typename P::Sampler& TextureCache<P>::GetSampler(SamplerId id) const noexcept {
     return slot_samplers[id];
 }
@@ -672,6 +714,7 @@ void TextureCache<P>::SynchronizeDescriptors(bool compute) {
             bindings_changed = true;
         if (bindings_changed) {
             ++texture_bindings_serial;
+            ++bindings_epoch;
         }
     } else {
         const bool linked_tsc = maxwell3d->regs.sampler_binding == Tegra::Engines::Maxwell3D::Regs::SamplerBinding::ViaHeaderBinding;
@@ -684,6 +727,7 @@ void TextureCache<P>::SynchronizeDescriptors(bool compute) {
             bindings_changed = true;
         if (bindings_changed) {
             ++texture_bindings_serial;
+            ++bindings_epoch;
         }
     }
 }
@@ -922,6 +966,7 @@ FramebufferId TextureCache<P>::GetFramebufferId(const RenderTargets& key) {
 template <class P>
 void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
     ForEachImageInRegion(cpu_addr, size, [this, cpu_addr, size](ImageId image_id, Image& image) {
+        ++bindings_epoch;
         if (True(image.flags & ImageFlagBits::UnwrittenSparse)) {
             // Written at last: a backed image replaces it where it is used next.
             image.flags |= ImageFlagBits::CpuModified | ImageFlagBits::Remapped;
@@ -1063,6 +1108,7 @@ void TextureCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t siz
                             [&](ImageId id, Image&) { deleted_images.push_back(id); });
     for (const ImageId id : deleted_images) {
         Image& image = slot_images[id];
+        ++bindings_epoch;
         if (False(image.flags & ImageFlagBits::CpuModified)) {
             image.flags |= ImageFlagBits::CpuModified;
             if (True(image.flags & ImageFlagBits::Tracked)) {
@@ -2130,6 +2176,7 @@ ImageViewId TextureCache<P>::CreateImageView(const TICEntry& raw_config) {
     }
     const TICEntry config = TextureViewHeader(raw_config, native);
     const ImageInfo info(config);
+    ++bindings_epoch;
     if (info.type == ImageType::Buffer) {
         const ImageViewInfo view_info(config, 0);
         return slot_image_views.insert(runtime, info, view_info, config.Address());
@@ -2239,6 +2286,7 @@ bool TextureCache<P>::ImageCanRescale(ImageBase& image) {
 
 template <class P>
 void TextureCache<P>::InvalidateScale(Image& image) {
+    ++bindings_epoch;
     if (image.scale_tick <= frame_tick) {
         image.scale_tick = frame_tick + 1;
     }
@@ -2669,6 +2717,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     }
     const ImageId new_image_id = slot_images.insert(runtime, new_info, gpu_addr, cpu_addr);
     Image& new_image = slot_images[new_image_id];
+    ++bindings_epoch;
 
     new_image.allocation_tick = frame_tick;
     {
@@ -3283,6 +3332,7 @@ ImageViewId TextureCache<P>::FindOrEmplaceImageView(ImageId image_id, const Imag
     }
     const ImageViewId image_view_id = slot_image_views.insert(runtime, info, image_id, image, slot_images);
     image.InsertView(info, image_view_id);
+    ++bindings_epoch;
     return image_view_id;
 }
 
@@ -3456,6 +3506,7 @@ template <class P>
 void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     ImageBase& image = slot_images[image_id];
     ++images_deleted;
+    ++bindings_epoch;
     // Drop every decode still queued for it, whatever IsDecoding says: an image re-decoded while
     // a decode was in flight has two, and the first to finish clears the flag. A decode left
     // behind was uploaded into the next image to take this slot (another texture's data: garbage
@@ -3568,6 +3619,7 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
 
 template <class P>
 void TextureCache<P>::RemoveImageViewReferences(std::span<const ImageViewId> removed_views) {
+    ++bindings_epoch;
     for (const ImageViewId removed : removed_views) {
         const auto refs = image_view_descriptors.find(removed);
         if (refs == image_view_descriptors.end()) {
@@ -3715,6 +3767,7 @@ void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool 
                         image.gpu_addr);
             Tegra::Nx2SparseMarkWritten(image.gpu_addr, image.guest_size_bytes);
             image.flags |= ImageFlagBits::CpuModified | ImageFlagBits::Remapped;
+            ++bindings_epoch;
         }
         MarkModification(image);
     }

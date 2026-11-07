@@ -37,14 +37,17 @@ inline bool Prefetch() {
     return enabled;
 }
 
-/// EDEN_NX2_REACTIVE_PREFLUSH=1: upstream yuzu's reactive flushing on Switch 2 titles too: the
-/// first read of a GPU-written page flushes it and marks it Preflushable, so later GPU writes
-/// over it are copied back at fences and its reads never stall again. A heuristic, off by
-/// default: fast GPU fences signal syncpoints before the host GPU has run the work, so a read
-/// right after a syncpoint wait can see the previous copy (one GPU round trip late). Fine for
-/// data read a frame later (auto-exposure), wrong for data needed back in the same frame.
+/// EDEN_NX2_REACTIVE_PREFLUSH (on unless 0): upstream yuzu's reactive flushing on Switch 2 titles
+/// too: the first read of a GPU-written page flushes it and marks it Preflushable, so later GPU
+/// writes over it are copied back at fences and its reads never stall again. A heuristic: fast
+/// GPU fences signal syncpoints before the host GPU has run the work, so a read right after a
+/// syncpoint wait can see the previous copy (one GPU round trip late). Fine for data read a frame
+/// later (Ocarina's auto-exposure), wrong for data needed back in the same frame.
 inline bool Preflush() {
-    static const bool enabled = EnvFlag("EDEN_NX2_REACTIVE_PREFLUSH");
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_REACTIVE_PREFLUSH");
+        return value == nullptr || value[0] != '0';
+    }();
     return enabled;
 }
 

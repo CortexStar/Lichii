@@ -65,6 +65,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_query_fast.h"
 
 namespace Vulkan {
 
@@ -1527,9 +1528,14 @@ void Vulkan::RasterizerVulkan::DisableGraphicsUniformBuffer(size_t stage, u32 in
 void RasterizerVulkan::FlushAll() {}
 
 void RasterizerVulkan::SubmitNx2ListCopies() {
-    // Submitted at once: ReadGpuWrittenCommands waits on these copies, so they can't sit out
-    // the longer DeferFlush interval (#161).
+    // ReadGpuWrittenCommands waits on these copies, so they can't sit out the longer DeferFlush
+    // interval (#161). The front reads few of the lists (Ocarina: ~150 dispatches a frame, a
+    // submission each): EDEN_NX2_DISPATCH_BATCH submits them when it waits for one
+    // (BufferCacheRuntime::WaitSubmittedTick asks the back), or with the next submission.
     if (buffer_cache.Nx2CopyListPages(scheduler.CurrentTick())) {
+        if (VideoCommon::Nx2QueryFast::DispatchBatch() && scheduler.DeferFlushUntilWanted()) {
+            return;
+        }
         scheduler.Flush();
     }
 }
@@ -2084,7 +2090,16 @@ void RasterizerVulkan::TickFrame() {
 }
 
 bool RasterizerVulkan::AccelerateConditionalRendering() {
-    gpu_memory->FlushCaching();
+    // Only the modes that read query results need the cached writes in memory (render_enable
+    // comes with most draws in Ocarina, mostly true or false).
+    const auto& regs = maxwell3d->regs;
+    const bool reads_memory =
+        regs.render_enable_override == Maxwell::RenderEnable::Override::UseRenderEnable &&
+        regs.render_enable.mode != Maxwell::RenderEnable::Mode::False &&
+        regs.render_enable.mode != Maxwell::RenderEnable::Mode::True;
+    if (reads_memory || !VideoCommon::Nx2QueryFast::Enabled()) {
+        gpu_memory->FlushCaching();
+    }
     return query_cache.AccelerateHostConditionalRendering();
 }
 
@@ -2129,6 +2144,7 @@ Tegra::Engines::AccelerateDMAInterface& RasterizerVulkan::AccessAccelerateDMA() 
 
 void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
                                                 std::span<const u8> memory) {
+    VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::InlineToMemory};
     auto cpu_addr = gpu_memory->GpuToCpuAddress(address);
     if (gpu_memory->UsesNativeTiling()) {
         u32 first_word{};

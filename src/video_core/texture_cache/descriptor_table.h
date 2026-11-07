@@ -73,6 +73,27 @@ public:
         return result;
     }
 
+    /// True when entry `index` was read since the last refresh or invalidation and guest memory
+    /// still holds what was read then, so Read would report it unchanged. Changes nothing.
+    template <class MemoryManager>
+    [[nodiscard]] bool Unchanged(const MemoryManager& gpu_memory, u32 index) const noexcept {
+        if (invalidated || index > current_limit || index / 64 >= read_descriptors.size() ||
+            index >= descriptors.size() ||
+            (read_descriptors[index / 64] & (1ULL << (index % 64))) == 0) {
+            return false;
+        }
+        const GPUVAddr gpu_addr = current_gpu_addr + index * sizeof(T);
+        T current;
+        const bool one_page =
+            (gpu_addr & Core::Memory::YUZU_PAGEMASK) + sizeof(T) <= Core::Memory::YUZU_PAGESIZE;
+        if (const u8* const host = one_page ? gpu_memory.GetPointer(gpu_addr) : nullptr) {
+            std::memcpy(std::addressof(current), host, sizeof(T));
+        } else {
+            gpu_memory.ReadBlockUnsafe(gpu_addr, std::addressof(current), sizeof(T));
+        }
+        return current == descriptors[index];
+    }
+
     void Refresh(GPUVAddr gpu_addr, u32 limit) noexcept {
         current_gpu_addr = gpu_addr;
         current_limit = limit;

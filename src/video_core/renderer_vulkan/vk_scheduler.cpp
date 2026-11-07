@@ -44,6 +44,8 @@ std::atomic<u64> g_profile_finishes{};
 std::atomic<u64> g_profile_finish_ns{};
 std::atomic<u64> g_profile_window_start{};
 std::mutex g_profile_end_mutex;
+/// Finish() per call site: calls and nanoseconds waited.
+std::map<std::string, std::pair<u64, u64>> g_profile_finish_sites;
 std::map<std::string, u64> g_profile_ends;
 
 void CountRenderPassEnd(const char* file, u32 line) {
@@ -89,6 +91,21 @@ void ReportSubmitCounts() {
     for (size_t i = 0; i < ends.size() && i < 16; ++i) {
         LOG_INFO(Render_Vulkan, "Render pass ends {:.0f}/s at {}",
                  static_cast<double>(ends[i].first) / seconds, ends[i].second);
+    }
+    std::vector<std::pair<u64, std::string>> finishes;
+    {
+        std::scoped_lock lock{g_profile_end_mutex};
+        for (const auto& [site, entry] : g_profile_finish_sites) {
+            const double calls = static_cast<double>(entry.first) / seconds;
+            const double ms = static_cast<double>(entry.second) / 1e6 / seconds;
+            finishes.emplace_back(entry.second,
+                                  fmt::format("{:.0f}/s waiting {:.1f} ms at {}", calls, ms, site));
+        }
+        g_profile_finish_sites.clear();
+    }
+    std::sort(finishes.rbegin(), finishes.rend());
+    for (size_t i = 0; i < finishes.size() && i < 8; ++i) {
+        LOG_INFO(Render_Vulkan, "Finishes {}", finishes[i].second);
     }
 }
 }
@@ -206,6 +223,14 @@ void Scheduler::FlushDeferred() {
     }
 }
 
+bool Scheduler::DeferFlushUntilWanted() {
+    if (!VideoCommon::GpuSplit::OnBackThread()) {
+        return false;
+    }
+    flush_pending = true;
+    return true;
+}
+
 bool Scheduler::WaitSubmitted(u64 tick) {
     if (IsSubmitted(tick)) {
         return true;
@@ -255,8 +280,17 @@ void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
     flush_pending = false;
     if (profile) {
         g_profile_finishes.fetch_add(1, std::memory_order_relaxed);
-        g_profile_finish_ns.fetch_add(VideoCommon::Nx2Profile::Now() - start,
-                                      std::memory_order_relaxed);
+        const u64 waited = VideoCommon::Nx2Profile::Now() - start;
+        g_profile_finish_ns.fetch_add(waited, std::memory_order_relaxed);
+        std::string_view name{location.file_name()};
+        if (const auto slash = name.find_last_of("/\\"); slash != std::string_view::npos) {
+            name.remove_prefix(slash + 1);
+        }
+        std::scoped_lock lock{g_profile_end_mutex};
+        auto& site = g_profile_finish_sites[fmt::format("{}:{} {}", name, location.line(),
+                                                        location.function_name())];
+        ++site.first;
+        site.second += waited;
     }
 }
 

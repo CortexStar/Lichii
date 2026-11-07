@@ -26,6 +26,7 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_query_fast.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace VideoCommon {
@@ -369,8 +370,12 @@ private:
     /// cost the GPU thread ~5% and woke the fencing thread for each. One in 64 is still made, so
     /// the operations fences carry along (query slot cleanup) keep running.
     bool SkipEmptyFence() {
-        if constexpr (requires { query_cache.HasPendingFenceWork(); }) {
-            if (skipped_fences >= 64 || query_cache.HasPendingFenceWork()) {
+        if constexpr (requires { query_cache.HasPendingFenceWork(true); }) {
+            // EDEN_NX2_FENCE_TRIM: payload releases (QMD releases, ~4,300 a second in Ocarina)
+            // write guest memory at once anyway; their host buffer syncs (a render pass end and
+            // two barriers each) go together with the next fence made or host wait.
+            if (skipped_fences >= 64 ||
+                query_cache.HasPendingFenceWork(Nx2QueryFast::FenceTrim())) {
                 return false;
             }
             {

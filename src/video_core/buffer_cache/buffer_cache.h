@@ -24,6 +24,7 @@
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_bindcache.h"
 #include "video_core/nx2_cmdpage_diag.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
@@ -1793,6 +1794,7 @@ void BufferCache<P>::UpdateIndexBuffer() {
             inline_buffer_id = CreateBuffer(0, buffer_size, false);
         }
         if (slot_buffers[inline_buffer_id].SizeBytes() < buffer_size) [[unlikely]] {
+            ++binding_epoch;
             slot_buffers.erase(inline_buffer_id);
             inline_buffer_id = CreateBuffer(0, buffer_size, false);
         }
@@ -1916,14 +1918,95 @@ void BufferCache<P>::UpdateStorageBuffers(size_t stage) {
     if (channel_state->enabled_storage_buffers[stage] == 0) [[likely]] {
         return;
     }
-    ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
+    const u32 enabled = channel_state->enabled_storage_buffers[stage];
+    const u32 written = channel_state->written_storage_buffers[stage];
+    StorageResolveCache& cache = graphics_storage_resolve[stage];
+    if (ReuseStorageResolve(cache, channel_state->storage_buffers[stage], enabled, written,
+                            graphics_segments)) {
+        return;
+    }
+    const u64 start_epoch = binding_epoch;
+    ForEachEnabledBit(enabled, [&](u32 index) {
         // Resolve buffer
         Binding& binding = channel_state->storage_buffers[stage][index];
         const BufferId buffer_id = FindBuffer(binding.device_addr, binding.size, false);
         binding.buffer_id = buffer_id;
-        const bool is_written = ((channel_state->written_storage_buffers[stage] >> index) & 1) != 0;
+        const bool is_written = ((written >> index) & 1) != 0;
         ResolveMultiRangeStorage(binding, is_written, graphics_segments);
     });
+    StoreStorageResolve(cache, channel_state->storage_buffers[stage], enabled, written,
+                        graphics_segments, start_epoch);
+}
+
+template <class P>
+bool BufferCache<P>::ReuseStorageResolve(StorageResolveCache& cache, std::span<Binding> bindings,
+                                         u32 enabled, u32 written,
+                                         std::vector<MultiRangeSegment>& pool) {
+    // FindBuffer waits for the buffer's writes with accurate GPU fences: keep that.
+    if (!BindCacheEnabled() || cache.epoch != binding_epoch || cache.enabled != enabled ||
+        cache.written != written || cache.channel != static_cast<const void*>(channel_state) ||
+        cache.as_id != gpu_memory->GetID() || cache.map_serial != gpu_memory->MapSerial() ||
+        Settings::IsGPUFenceBehaviorAccurate()) {
+        return false;
+    }
+    bool same = true;
+    ForEachEnabledBit(enabled, [&](u32 index) {
+        const Binding& now = bindings[index];
+        const Binding& was = cache.bindings[index];
+        same &= now.device_addr == was.device_addr && now.gpu_addr == was.gpu_addr &&
+                now.size == was.size;
+    });
+    if (!same) {
+        return false;
+    }
+    const u32 base = static_cast<u32>(pool.size());
+    pool.insert(pool.end(), cache.segments.begin(), cache.segments.end());
+    ForEachEnabledBit(enabled, [&](u32 index) {
+        Binding& binding = bindings[index];
+        const Binding& was = cache.bindings[index];
+        binding.buffer_id = was.buffer_id;
+        binding.segment_first = was.segment_count != 0 ? base + was.segment_first : 0;
+        binding.segment_count = was.segment_count;
+    });
+    return true;
+}
+
+template <class P>
+void BufferCache<P>::StoreStorageResolve(StorageResolveCache& cache,
+                                         std::span<const Binding> bindings, u32 enabled,
+                                         u32 written, const std::vector<MultiRangeSegment>& pool,
+                                         u64 start_epoch) {
+    cache.epoch = 0;
+    // A buffer created or deleted while resolving may have dropped one of these bindings' buffer
+    // (DeleteBuffer clears it and the caller resolves again): keep nothing then.
+    if (!BindCacheEnabled() || binding_epoch != start_epoch) {
+        return;
+    }
+    cache.segments.clear();
+    bool valid = true;
+    ForEachEnabledBit(enabled, [&](u32 index) {
+        Binding binding = bindings[index];
+        if (binding.segment_count != 0) {
+            if (binding.segment_first > pool.size() ||
+                binding.segment_count > pool.size() - binding.segment_first) {
+                valid = false;
+                return;
+            }
+            const auto first = pool.begin() + binding.segment_first;
+            binding.segment_first = static_cast<u32>(cache.segments.size());
+            cache.segments.insert(cache.segments.end(), first, first + binding.segment_count);
+        }
+        cache.bindings[index] = binding;
+    });
+    if (!valid) {
+        return;
+    }
+    cache.enabled = enabled;
+    cache.written = written;
+    cache.channel = channel_state;
+    cache.as_id = gpu_memory->GetID();
+    cache.map_serial = gpu_memory->MapSerial();
+    cache.epoch = binding_epoch;
 }
 
 template <class P>
@@ -1985,14 +2068,25 @@ void BufferCache<P>::UpdateComputeUniformBuffers() {
 
 template <class P>
 void BufferCache<P>::UpdateComputeStorageBuffers() {
-    ForEachEnabledBit(channel_state->enabled_compute_storage_buffers, [&](u32 index) {
+    const u32 enabled = channel_state->enabled_compute_storage_buffers;
+    const u32 written = channel_state->written_compute_storage_buffers;
+    if (enabled == 0) {
+        return;
+    }
+    if (ReuseStorageResolve(compute_storage_resolve, channel_state->compute_storage_buffers,
+                            enabled, written, compute_segments)) {
+        return;
+    }
+    const u64 start_epoch = binding_epoch;
+    ForEachEnabledBit(enabled, [&](u32 index) {
         // Resolve buffer
         Binding& binding = channel_state->compute_storage_buffers[index];
         binding.buffer_id = FindBuffer(binding.device_addr, binding.size, false);
-        const bool is_written =
-            ((channel_state->written_compute_storage_buffers >> index) & 1) != 0;
+        const bool is_written = ((written >> index) & 1) != 0;
         ResolveMultiRangeStorage(binding, is_written, compute_segments);
     });
+    StoreStorageResolve(compute_storage_resolve, channel_state->compute_storage_buffers, enabled,
+                        written, compute_segments, start_epoch);
 }
 
 template <class P>
@@ -2410,6 +2504,7 @@ BufferId BufferCache<P>::CreateBuffer(DAddr device_addr, u32 wanted_size,
     const u32 size = static_cast<u32>(overlap.end - overlap.begin);
     const BufferId new_buffer_id =
         slot_buffers.insert(runtime, overlap.begin, size, sparse_compatible);
+    ++binding_epoch;
     auto& new_buffer = slot_buffers[new_buffer_id];
     const size_t size_bytes = new_buffer.SizeBytes();
     runtime.ClearBuffer(new_buffer, 0, size_bytes, 0);
@@ -2778,6 +2873,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
 
 template <class P>
 void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
+    ++binding_epoch;
     if constexpr (requires { runtime.OnBufferDeleted(slot_buffers[buffer_id]); }) {
         runtime.OnBufferDeleted(slot_buffers[buffer_id]);
     }

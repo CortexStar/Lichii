@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -27,6 +28,7 @@
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
+#include "video_core/nx2_bindcache.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "shader_recompiler/exception.h"
@@ -357,6 +359,12 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
 
     boost::container::small_vector<VideoCommon::ImageViewInOut, 64> views;
     boost::container::small_vector<VideoCommon::SamplerId, 64> samplers;
+    // EDEN_NX2_BINDCACHE: the sampler handles are kept to look the bindings up in bind_cache.
+    const bool use_bind_cache =
+        VideoCommon::BindCacheEnabled() &&
+        (!info.texture_buffer_descriptors.empty() || !info.image_buffer_descriptors.empty() ||
+         !info.texture_descriptors.empty() || !info.image_descriptors.empty());
+    boost::container::small_vector<u32, 64> sampler_handles;
 
     const auto& qmd{kepler_compute.launch_description};
     const auto& cbufs{qmd.const_buffer_config};
@@ -414,6 +422,10 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
             const auto handle{read_handle(desc, index)};
             views.push_back({handle.first});
 
+            if (use_bind_cache) {
+                sampler_handles.push_back(handle.second);
+                continue;
+            }
             VideoCommon::SamplerId sampler = texture_cache.GetSamplerId(handle.second, true);
             samplers.push_back(sampler);
         }
@@ -421,7 +433,34 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     for (const auto& desc : info.image_descriptors) {
         add_image(desc, desc.is_written);
     }
-    texture_cache.FillImageViews(std::span(views.data(), views.size()), true);
+    const ImageBindingCache::Entry* bind_hit{};
+    ImageBindingCache::Entry* bind_record{};
+    u64 bind_epoch{};
+    if (use_bind_cache) {
+        bind_hit = bind_cache.Find(texture_cache, true, via_header_index,
+                                   std::span(views.data(), views.size()),
+                                   std::span(sampler_handles.data(), sampler_handles.size()));
+        if (bind_hit) {
+            for (size_t index = 0; index < views.size(); ++index) {
+                views[index].id = bind_hit->views[index].id;
+            }
+            samplers.assign(bind_hit->samplers.begin(), bind_hit->samplers.end());
+        } else {
+            for (const u32 handle : sampler_handles) {
+                samplers.push_back(texture_cache.GetSamplerId(handle, true));
+            }
+        }
+    }
+    if (!bind_hit) {
+        texture_cache.FillImageViews(std::span(views.data(), views.size()), true);
+    }
+    if (use_bind_cache && !bind_hit) {
+        bind_epoch = texture_cache.BindingsEpoch();
+        bind_record = &bind_cache.BeginRecord(
+            via_header_index, std::span(views.data(), views.size()),
+            std::span(sampler_handles.data(), sampler_handles.size()),
+            std::span(samplers.data(), samplers.size()));
+    }
     if (auto& trace{GetUpscalerTrace()}; trace.enabled && kepler_compute.IsNativeMode()) {
         const u64 frame{trace.frame.load(std::memory_order_relaxed)};
         if (!trace.armed && frame >= trace.first_frame && info.uses_subgroup_shuffles) {
@@ -553,9 +592,16 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     RescalingPushConstant rescaling;
     const VideoCommon::SamplerId* samplers_it{samplers.data()};
     const VideoCommon::ImageViewInOut* views_it{views.data()};
-    if (!shadow) {
+    if (!shadow && bind_hit) {
+        ReplayImageDescriptors(*bind_hit, 0, guest_descriptor_queue);
+        ReplayImageBindingEffects(*bind_hit, texture_cache, rescaling);
+    } else if (!shadow) {
         PushImageDescriptors(texture_cache, guest_descriptor_queue, info, rescaling, samplers_it,
-                             views_it);
+                             views_it, bind_record);
+        if (bind_record && texture_cache.BindingsEpoch() == bind_epoch &&
+            texture_cache.CanCacheBindings(std::span(views.data(), views.size()))) {
+            bind_record->epoch = bind_epoch;
+        }
     } else {
         auto sampled_info{info};
         sampled_info.image_descriptors.clear();
@@ -599,7 +645,19 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     const DescriptorUpdateEntry* const descriptor_data{guest_descriptor_queue.UpdateData()};
     VkDeviceSize descriptor_buffer_offset{};
     u32 descriptor_buffer_chunk{};
-    if (uses_descriptor_buffer) {
+    // EDEN_NX2_BINDCACHE: the same descriptors as the previous dispatch, in the same generation of
+    // the ring, use that allocation again (as graphics pipelines do).
+    const bool reuse_allocation =
+        uses_descriptor_buffer && has_last_descriptor_buffer && VideoCommon::BindCacheEnabled() &&
+        last_descriptor_buffer_generation == descriptor_buffer_ring.CurrentGeneration() &&
+        last_descriptor_payload.size() == num_descriptor_entries &&
+        std::memcmp(last_descriptor_payload.data(), descriptor_data,
+                    num_descriptor_entries * sizeof(DescriptorUpdateEntry)) == 0;
+    if (reuse_allocation) {
+        descriptor_buffer_offset = last_descriptor_buffer_offset;
+        descriptor_buffer_chunk = last_descriptor_buffer_chunk;
+        descriptor_buffer_ring.TouchFrame(scheduler);
+    } else if (uses_descriptor_buffer) {
         const DescriptorBufferRing::Allocation alloc{
             descriptor_buffer_ring.Allocate(scheduler, descriptor_buffer_layout.size)};
         if (!alloc.host) {
@@ -609,6 +667,14 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         WriteDescriptorBuffer(device, descriptor_buffer_layout, descriptor_data, alloc.host);
         descriptor_buffer_offset = alloc.offset;
         descriptor_buffer_chunk = alloc.chunk;
+        if (VideoCommon::BindCacheEnabled()) {
+            has_last_descriptor_buffer = true;
+            last_descriptor_buffer_offset = alloc.offset;
+            last_descriptor_buffer_chunk = alloc.chunk;
+            last_descriptor_buffer_generation = alloc.generation;
+            last_descriptor_payload.assign(descriptor_data,
+                                           descriptor_data + num_descriptor_entries);
+        }
     }
 
     const bool bind_descriptor_buffer{

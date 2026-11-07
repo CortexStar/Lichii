@@ -96,6 +96,8 @@ add_library(video_core STATIC
     host1x/vic.h
     macro.cpp
     macro.h
+    macro_hle_oot.cpp
+    macro_hle_oot.h
     macro_memo.h
     macro_turing.h
     fence_manager.h
@@ -113,12 +115,14 @@ add_library(video_core STATIC
     native_qmd.h
     native_query_trace.h
     nx2.h
+    nx2_bindcache.h
     nx2_cmdpage_diag.h
     nx2_debug_control.cpp
     nx2_debug_control.h
     nx2_profile.h
     nx2_perf.h
     nx2_download_trace.h
+    nx2_query_fast.h
     nx2_reactive.h
     pending_maps.h
     present.h

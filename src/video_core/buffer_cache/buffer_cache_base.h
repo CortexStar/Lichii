@@ -535,6 +535,28 @@ private:
 
     void UpdateComputeTextureBuffers();
 
+    /// The buffers and multi-range segments a stage's storage bindings resolved to, kept while the
+    /// bindings, the GPU mappings and the set of buffers (binding_epoch) stay the same.
+    struct StorageResolveCache {
+        u64 epoch{}; ///< binding_epoch when stored; 0 never matches
+        u64 map_serial{};
+        size_t as_id{};
+        const void* channel{};
+        u32 enabled{};
+        u32 written{};
+        std::array<Binding, NUM_STORAGE_BUFFERS> bindings{};
+        std::vector<MultiRangeSegment> segments;
+    };
+
+    /// Restores the stage's resolved storage bindings from the cache when nothing they depend on
+    /// changed (EDEN_NX2_BINDCACHE). False: resolve them, then StoreStorageResolve.
+    bool ReuseStorageResolve(StorageResolveCache& cache, std::span<Binding> bindings, u32 enabled,
+                             u32 written, std::vector<MultiRangeSegment>& pool);
+
+    void StoreStorageResolve(StorageResolveCache& cache, std::span<const Binding> bindings,
+                             u32 enabled, u32 written,
+                             const std::vector<MultiRangeSegment>& pool, u64 start_epoch);
+
     void MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync = false);
 
     /// Counts a GPU write to the command list pages in the range (invalidating their copies) and,
@@ -765,6 +787,10 @@ private:
     VirtualRangeCache virtual_ranges;
     std::vector<MultiRangeSegment> graphics_segments;
     std::vector<MultiRangeSegment> compute_segments;
+    /// Bumped whenever a buffer is created, deleted or joined: resolved bindings may be stale.
+    u64 binding_epoch = 1;
+    std::array<StorageResolveCache, NUM_STAGES> graphics_storage_resolve{};
+    StorageResolveCache compute_storage_resolve{};
     u64 frame_tick = 0;
     /// EDEN_NX2_TABLE_POINTER_TRACE: last table entry and size bound per table pointer slot.
     std::unordered_map<u64, std::pair<GPUVAddr, u32>> traced_table_pointers;
