@@ -49,7 +49,8 @@ std::vector<Asset> Release::GetPlatformAssets(std::string_view platform,
         if (package != LinuxPackage::AppImage) {
             extensions.push_back(".tar.gz");
         }
-    } else if (platform == "windows-x86_64" || (platform == "macos-arm64" && !pgo)) {
+    } else if (platform == "windows-x86_64" ||
+               ((platform == "macos-arm64" || platform == "macos-x86_64") && !pgo)) {
         extensions = {".zip"};
     } else {
         return {};

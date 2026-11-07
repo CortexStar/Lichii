@@ -28,6 +28,8 @@ If you're having issues with building, always consult that ebuild.
 
 macOS is largely untested. Expect crashes, significant Vulkan issues, and other fun stuff.
 
+Intel (x86_64) Macs run guest code through the dynarmic JIT, so expect lower performance than on Apple Silicon. Homebrew no longer ships Intel bottles, so build with Qt's official binaries (for example through `aqtinstall`) and `-DCPMUTIL_FORCE_BUNDLED=ON -DYUZU_USE_EXTERNAL_FFMPEG=ON`, which builds the other libraries from source; the `macos-x86_64` job in `.github/workflows/release-binaries.yml` does exactly this. Only `autoconf automake libtool nasm glslang ninja pkg-config` are needed from Homebrew, with `$(brew --prefix libtool)/libexec/gnubin` on `PATH`.
+
 ## OpenIndiana
 
 Always consult [the OpenIndiana package list](https://pkg.openindiana.org/hipster/en/index.shtml) to cross-verify availability.
