@@ -1355,13 +1355,14 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
         engine.native_jit->Prepare(engine.native_code, engine.native_code_generation);
         auto result = engine.native_jit->Execute(
             start, fs.parameters, std::span<u32>{native_data_ram}, read, emit);
-        if (!result.success && result.consumed == 0 &&
+        if (!result.success && !result.side_effects &&
             result.error == TuringMacroInterpreter::OutsideCodeError) {
             // The compiled program disagrees with the uploaded words about where this entry
-            // point is, so it rejected the call before running any of it (seen with the GPU
-            // thread split on Ocarina of Time, where every macro failed and nothing drew). Run
-            // it on the interpreter instead: it decodes the words as they are, and a macro that
-            // really is outside the uploaded RAM fails there too and is reported as before.
+            // point is and rejected the call (seen with the GPU thread split on Ocarina of Time,
+            // where every macro failed and nothing drew). Run it on the interpreter instead: it
+            // decodes the words as they are, and a macro that really is outside the uploaded RAM
+            // fails there too and is reported as before. Only calls that wrote nothing outside
+            // their registers are replayed; the FIFO is replayed from a copy below.
             std::vector<u32> replay_parameters{fs.parameters};
             const auto replayed = engine.native_interpreter.Execute(
                 engine.native_code, start, replay_parameters, read, emit);

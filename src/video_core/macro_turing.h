@@ -23,6 +23,9 @@ public:
         Word pc;
         std::size_t consumed;
         std::string_view error;
+        /// The call wrote something outside its own registers (an emitted method, a DMA read or
+        /// a data RAM word), so replaying it from the start would repeat that write.
+        bool side_effects{};
     };
 
     /// A call whose entry point is past the uploaded macro memory. Nothing of it ran, so the

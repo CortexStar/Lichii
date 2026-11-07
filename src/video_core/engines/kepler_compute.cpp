@@ -1262,9 +1262,10 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
     macro.native_jit->Prepare(macro.native_code, macro.native_code_generation);
     auto result = macro.native_jit->Execute(
         start, fs.parameters, std::span<u32>{*macro.native_interpreter.active_dram}, read, emit);
-    if (!result.success && result.consumed == 0 &&
+    if (!result.success && !result.side_effects &&
         result.error == TuringMacroInterpreter::OutsideCodeError) {
-        // As in Maxwell3D::FrontRunMacro: replay on the interpreter rather than drop the call.
+        // As in Maxwell3D::FrontRunMacro: replay a call that wrote nothing on the interpreter
+        // rather than drop it.
         std::vector<u32> replay_parameters{fs.parameters};
         const auto replayed = macro.native_interpreter.Execute(
             macro.native_code, start, replay_parameters, read, emit);
