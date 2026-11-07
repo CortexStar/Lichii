@@ -314,6 +314,7 @@ public:
     u32 rescaling_textures_member_index{};
     u32 rescaling_images_member_index{};
     u32 rescaling_downfactor_member_index{};
+    u32 storage_validity_member_index{};
     u32 texture_rescaling_index{};
     u32 image_rescaling_index{};
 
@@ -446,7 +447,7 @@ private:
     void DefineWriteStorageCasLoopFunction(const Info& info);
     void DefineGlobalMemoryFunctions(const IR::Program& program);
     void DefineRescalingInput(const Info& info);
-    void DefineRescalingInputPushConstant();
+    void DefineRescalingInputPushConstant(bool static_buffer_bounds);
     void DefineRescalingInputUniformConstant();
     void DefineRenderArea(const Info& info);
 

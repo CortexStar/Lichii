@@ -796,6 +796,7 @@ void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index,
                   ssbo_index);
         return;
     }
+    channel_state->compute_storage_buffers[ssbo_index] = NULL_BINDING;
     const bool already_enabled =
         ((channel_state->enabled_compute_storage_buffers >> ssbo_index) & 1U) != 0;
     if constexpr (requires { runtime.ShouldLimitDynamicStorageBuffers(); }) {
@@ -818,18 +819,28 @@ void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index,
     }
 
     const auto& launch_desc = kepler_compute->launch_description;
-    if (((launch_desc.const_buffer_enable_mask >> cbuf_index) & 1) == 0) {
+    const auto& cbufs = launch_desc.const_buffer_config;
+    if (cbuf_index >= cbufs.size() || cbuf_index >= 32 ||
+        ((launch_desc.const_buffer_enable_mask >> cbuf_index) & 1) == 0) {
         LOG_WARNING(HW_GPU, "Skipped binding SSBO: cbuf index {} is not enabled", cbuf_index);
         return;
     }
     ASSERT(((launch_desc.const_buffer_enable_mask >> cbuf_index) & 1) != 0);
 
-    const auto& cbufs = launch_desc.const_buffer_config;
+    if (cbuf_offset > cbufs[cbuf_index].size ||
+        sizeof(u64) > cbufs[cbuf_index].size - cbuf_offset) {
+        return;
+    }
     GPUVAddr ssbo_addr = cbufs[cbuf_index].Address() + cbuf_offset;
+    if (ssbo_addr < cbufs[cbuf_index].Address() ||
+        !gpu_memory->IsFullyMappedRange(ssbo_addr, sizeof(u64))) {
+        return;
+    }
     GPUVAddr holder{};
     if (indirect_offset != ~0U) {
         holder = gpu_memory->Read<u64>(ssbo_addr);
-        if (holder == 0) {
+        if (holder == 0 || holder + indirect_offset < holder ||
+            !gpu_memory->IsFullyMappedRange(holder + indirect_offset, sizeof(u64))) {
             channel_state->compute_storage_buffers[ssbo_index] = NULL_BINDING;
             return;
         }
@@ -841,6 +852,19 @@ void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index,
         TraceTablePointer(true, 0, ssbo_index, cbuf_index, cbuf_offset, indirect_offset, holder,
                           channel_state->compute_storage_buffers[ssbo_index]);
     }
+}
+
+template <class P>
+u64 BufferCache<P>::ComputeStorageBufferValidityMask() const {
+    u64 mask = 0;
+    for (size_t index = 0; index < channel_state->compute_storage_buffers.size() && index < 64; ++index) {
+        const auto& binding = channel_state->compute_storage_buffers[index];
+        if ((channel_state->enabled_compute_storage_buffers & (u64{1} << index)) != 0 &&
+            binding.buffer_id != NULL_BUFFER_ID && binding.size != 0 && binding.gpu_addr != 0) {
+            mask |= u64{1} << index;
+        }
+    }
+    return mask;
 }
 
 template <class P>
@@ -2940,7 +2964,8 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
                                              bool native_pointer, bool table_pointer) const {
     const GPUVAddr gpu_addr = gpu_memory->Read<u64>(ssbo_addr);
 
-    if (gpu_addr == 0) {
+    if (gpu_addr == 0 || !gpu_memory->IsWithinGPUAddressRange(gpu_addr) ||
+        !gpu_memory->IsFullyMappedRange(gpu_addr, 1)) {
         return NULL_BINDING;
     }
 

@@ -1,0 +1,3 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#pragma once
+#define LICHII_SHADER_COMPILER_FINGERPRINT "@compiler_digest@"

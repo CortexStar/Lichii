@@ -1,0 +1,28 @@
+diff --git a/include/sirit/sirit.h b/include/sirit/sirit.h
+--- a/include/sirit/sirit.h
++++ b/include/sirit/sirit.h
+@@ -360,6 +360,9 @@
+         return OpLoad(result_type, pointer, std::span<const MemoryAccessLiteral>({memory_access...}));
+     }
+
++    /// Number of elements in the runtime array member of a storage buffer.
++    Id OpArrayLength(Id result_type, Id structure, std::uint32_t member);
++
+     /// Store through a pointer.
+     Id OpStore(Id pointer, Id object,
+                std::span<const MemoryAccessLiteral> memory_access = {});
+diff --git a/src/instructions/memory.cpp b/src/instructions/memory.cpp
+--- a/src/instructions/memory.cpp
++++ b/src/instructions/memory.cpp
+@@ -21,6 +21,11 @@
+ Id Module::OpLoad(Id result_type, Id pointer, std::span<const MemoryAccessLiteral> memory_access) {
+     code->Reserve(4 + memory_access.size());
+     return *code << OpId{spv::Op::OpLoad, result_type} << pointer << memory_access << EndOp{};
++}
++
++Id Module::OpArrayLength(Id result_type, Id structure, std::uint32_t member) {
++    code->Reserve(5);
++    return *code << OpId{spv::Op::OpArrayLength, result_type} << structure << Literal{member} << EndOp{};
+ }
+
+ Id Module::OpStore(Id pointer, Id object, std::span<const MemoryAccessLiteral> memory_access) {

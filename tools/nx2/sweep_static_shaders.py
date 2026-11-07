@@ -14,6 +14,7 @@ import subprocess
 import sys
 
 from shader_sweep import invoke, parse_cache, unpack_native_code, summarize
+from shader_archive import declared_compute_workgroup
 
 
 def digest(data):
@@ -174,10 +175,25 @@ def main():
                                               ("source", "entry", "index", "offset", "version")}
             base["cache_version"] = environment["version"]
         elif base["stage"] == "compute":
-            return {**base, "status": "partial", "phase": "context", "lowered": True,
-                    "error": {"message": "compute launch and resource context not established"}}
+            try:
+                dimensions = declared_compute_workgroup(
+                    Path(base["source"]).read_bytes(), Path(base["control"]).read_bytes())
+            except ValueError as error:
+                return {**base, "status": "error", "phase": "context", "lowered": True,
+                        "error": {"message": str(error)}}
+            if dimensions is None:
+                return {**base, "status": "partial", "phase": "context", "lowered": True,
+                        "error": {"message": "compute launch and resource context not established"}}
+            command += ["--control", base["control"]]
+            command[1] = base["source"]
+            base["context_source"] = "static-compute-control"
+            base["declared_workgroup"] = dimensions
         else:
             base["context_source"] = "static-header-with-synthetic-pipeline-defaults"
+            control = Path(base["control"]).read_bytes()
+            if len(control) >= 0x48 and control[:8] == bytes.fromhex("34127698c9000000"):
+                command += ["--control", base["control"]]
+                base["context_source"] = "static-header-control-with-synthetic-pipeline-defaults"
         output = records / f"{identity}.spv"
         result = invoke(command + ["--output", str(output)], args.timeout)
         if result["status"] == "ok":
@@ -188,6 +204,8 @@ def main():
                     result.update(status="error", phase="validate", error={"message": validated.stderr.strip()})
                 elif matches:
                     result.update(status="partial", phase="validated-compatible-cache")
+                elif base.get("context_source") == "static-compute-control":
+                    result.update(status="partial", phase="validated-static-control")
                 else:
                     result.update(status="partial", phase="validated-synthetic")
             except subprocess.TimeoutExpired:

@@ -160,6 +160,9 @@ public:
                                   std::span<const u8> memory) override;
     void LoadDiskResources(u64 title_id, std::stop_token stop_loading,
                            const VideoCore::DiskResourceLoadCallback& callback) override;
+    void PrepareNupShaders(const FileSys::VirtualFile& file, const std::filesystem::path& path,
+                           std::stop_token stop,
+                           const VideoCore::DiskResourceLoadCallback& callback) override;
 
     void InitializeChannel(Tegra::Control::ChannelState& channel) override;
 

@@ -14,6 +14,8 @@ if(LIBVA_FOUND)
 endif()
 
 add_library(video_core STATIC
+    nup_shader_cache.cpp
+    nup_shader_cache.h
     buffer_cache/buffer_base.h
     buffer_cache/buffer_cache_base.h
     buffer_cache/buffer_cache.cpp
@@ -207,6 +209,7 @@ add_library(video_core STATIC
     renderer_vulkan/vk_frame_dump.cpp
     renderer_vulkan/vk_frame_dump.h
     renderer_vulkan/vk_graphics_pipeline.cpp
+    renderer_vulkan/graphics_pipeline_library.h
     renderer_vulkan/vk_graphics_pipeline.h
     renderer_vulkan/vk_multi_range_buffer.cpp
     renderer_vulkan/vk_multi_range_buffer.h
@@ -214,6 +217,9 @@ add_library(video_core STATIC
     renderer_vulkan/vk_master_semaphore.h
     renderer_vulkan/vk_pipeline_cache.cpp
     renderer_vulkan/vk_pipeline_cache.h
+    renderer_vulkan/pipeline_cache_policy.h
+    renderer_vulkan/pipeline_cache_certificate.cpp
+    renderer_vulkan/pipeline_cache_certificate.h
     renderer_vulkan/vk_present_manager.cpp
     renderer_vulkan/vk_present_manager.h
     renderer_vulkan/vk_query_cache.cpp
@@ -267,6 +273,7 @@ add_library(video_core STATIC
 
     shader_cache.cpp
     shader_cache.h
+    shader_cache_io.h
     shader_environment.cpp
     shader_environment.h
     shader_handle_program.h
@@ -461,6 +468,7 @@ if(WIN32)
     target_link_libraries(video_core PRIVATE advapi32)
 endif()
 target_link_libraries(video_core PUBLIC shader_recompiler stb bc_decoder gpu_logging)
+target_link_libraries(video_core PRIVATE zstd::zstd OpenSSL::Crypto)
 if (ENABLE_OPENGL)
     target_link_libraries(video_core PUBLIC glad)
 endif()

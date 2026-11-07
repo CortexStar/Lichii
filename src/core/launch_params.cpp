@@ -41,6 +41,7 @@ LaunchParams ParseLaunchParams(Core::System& system, int argc, char *argv[], wch
         {"filter", no_argument, 0, 'x'},
         {"pack-nup", required_argument, 0, 'N'},
         {"unpack-nup", required_argument, 0, 'U'},
+        {"precompile-nup", required_argument, 0, 0x108},
         {"edit-nup", required_argument, 0, 'E'},
         {"nup-name", required_argument, 0, 0x100},
         {"nup-icon", required_argument, 0, 0x101},
@@ -78,6 +79,9 @@ LaunchParams ParseLaunchParams(Core::System& system, int argc, char *argv[], wch
                 break;
             case 'U':
                 p.unpack_nup_source = std::string(optarg);
+                break;
+            case 0x108:
+                p.precompile_nup_source = std::string(optarg);
                 break;
             case 'E':
                 p.edit_nup_source = std::string(optarg);
@@ -245,6 +249,8 @@ void ApplyLaunchParams(LaunchParams const& lp) noexcept {
             " Pack a loose dump with all its updates and DLC into a NUP file and exit\n"
             "--unpack-nup <file.nup> [<out_dir>]"
             " Extract a NUP back into a loose dump and exit\n"
+            "--precompile-nup <file.nup>"
+            " Prepare NUP shader code in a sibling .shaders.bin without booting and exit\n"
             "--edit-nup <file.nup> [--nup-name NAME --nup-icon PATH --nup-version VER"
             " --nup-publisher NAME --clear-nup-name --clear-nup-icon --clear-nup-version"
             " --clear-nup-publisher]"

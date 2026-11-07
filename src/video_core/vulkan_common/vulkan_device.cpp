@@ -1221,6 +1221,10 @@ bool Device::GetSuitability(bool requires_swapchain) {
     FOR_EACH_VK_FEATURE_EXT(FEATURE_EXTENSION);
     FOR_EACH_VK_EXTENSION(EXTENSION);
 
+    extensions.graphics_pipeline_library &= extensions.pipeline_library;
+    RemoveExtensionIfUnsuitable(extensions.graphics_pipeline_library,
+                                VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+
     extensions.depth_stencil_resolve =
         extensions.depth_stencil_resolve &&
         (instance_version >= VK_API_VERSION_1_2 || extensions.create_renderpass2);
@@ -1436,6 +1440,11 @@ bool Device::GetSuitability(bool requires_swapchain) {
         properties.custom_border_color.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_PROPERTIES_EXT;
         SetNext(next, properties.custom_border_color);
+    }
+    if (extensions.graphics_pipeline_library) {
+        properties.graphics_pipeline_library.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT;
+        SetNext(next, properties.graphics_pipeline_library);
     }
     if (extensions.cooperative_matrix) {
         properties.cooperative_matrix.sType =

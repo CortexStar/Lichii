@@ -2669,6 +2669,12 @@ void RasterizerVulkan::LoadDiskResources(u64 title_id, std::stop_token stop_load
     pipeline_cache.LoadDiskResources(title_id, stop_loading, callback);
 }
 
+void RasterizerVulkan::PrepareNupShaders(const FileSys::VirtualFile& file,
+                                        const std::filesystem::path& path, std::stop_token stop,
+                                        const VideoCore::DiskResourceLoadCallback& callback) {
+    pipeline_cache.PrepareNupShaders(file, path, stop, callback);
+}
+
 void RasterizerVulkan::FlushWork() {
 #ifdef __ANDROID__
     static constexpr bool android = true;

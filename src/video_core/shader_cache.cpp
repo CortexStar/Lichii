@@ -99,6 +99,14 @@ void ShaderCache::RefreshDebugRejections(bool unrejected) {
 ShaderCache::ShaderCache(Tegra::MaxwellDeviceMemoryManager& device_memory_)
     : device_memory{device_memory_} {}
 
+void ShaderCache::PrepareNupShaders(const FileSys::VirtualFile& file,
+                                    const std::filesystem::path& path, std::stop_token stop,
+                                    const VideoCore::DiskResourceLoadCallback& callback) {
+    nup_shader_cache.Prepare(file, path, stop, [&](size_t value, size_t total) {
+        callback(VideoCore::LoadCallbackStage::PrecompileNup, value, total);
+    });
+}
+
 // Task and mesh programs are translated with the mesh registers and the header of the pass-through
 // geometry program (per-primitive outputs), so pipelines are keyed by them too.
 u64 ShaderCache::MeshStateHash() const {
@@ -165,7 +173,9 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
                 // Native programs are lowered while the environment is built (once: the
                 // ShaderInfo keeps the result for the pipeline's environments).
                 RethrowIfRejected(*cpu_shader_addr);
-                GraphicsEnvironment env{*maxwell3d, *gpu_memory, program, native ? shader_addr : base_addr, start_address};
+                GraphicsEnvironment env{*maxwell3d, *gpu_memory, program,
+                                        native ? shader_addr : base_addr, start_address, {},
+                                        &nup_shader_cache};
                 shader_info = MakeShaderInfo(env, *cpu_shader_addr);
             } catch (const Shader::Exception&) {
                 RememberRejection(*cpu_shader_addr);
@@ -278,7 +288,8 @@ const ShaderInfo* ShaderCache::ComputeShader() {
     } else {
         try {
             RethrowIfRejected(*cpu_shader_addr);
-            ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start};
+            ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start,
+                                   {}, &nup_shader_cache};
             shader = MakeShaderInfo(env, *cpu_shader_addr);
         } catch (const Shader::Ampere::TrapGuardError&) {
             // Constants can become valid on the next dispatch; do not cache this rejection.

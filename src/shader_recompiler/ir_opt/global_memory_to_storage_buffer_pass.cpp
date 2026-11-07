@@ -1127,6 +1127,67 @@ small_vector<StorageBufferAddr, 4> NativePointerCandidates(const IR::U32& low_ad
                                                            Environment& env, bool& dynamic,
                                                            StorageInfo& info) {
     small_vector<StorageBufferAddr, 4> candidates;
+    if (env.UsesStaticResourceLayout()) {
+        std::unordered_map<const IR::Inst*, std::optional<bool>> proven;
+        const auto visit = [&](auto&& self, const IR::Value& value, size_t depth) -> bool {
+            if (value.IsImmediate()) return false;
+            if (depth > 256) throw NotImplementedException("Static pointer expression is too deep");
+            const auto* inst = value.InstRecursive();
+            if (const auto found = proven.find(inst); found != proven.end()) {
+                if (!found->second) throw NotImplementedException("Static pointer expression is cyclic");
+                return *found->second;
+            }
+            proven.emplace(inst, std::nullopt);
+            bool pointer = false;
+            switch (inst->GetOpcode()) {
+            case IR::Opcode::GetCbufU32:
+            case IR::Opcode::GetCbufU32x2: {
+                if (!inst->Arg(0).IsImmediate() || !inst->Arg(1).IsImmediate()) {
+                    throw NotImplementedException("Static pointer requires fixed constant buffer fields");
+                }
+                const StorageBufferAddr field{inst->Arg(0).U32(), inst->Arg(1).U32()};
+                pointer = Common::IsAligned(field.offset, 8) &&
+                          env.IsCbufStorageBufferPointer(field.index, field.offset);
+                if (pointer && std::ranges::find(candidates, field) == candidates.end()) {
+                    candidates.push_back(field);
+                }
+                break;
+            }
+            case IR::Opcode::IAdd32:
+                for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+                    pointer = self(self, inst->Arg(arg), depth + 1) || pointer;
+                }
+                break;
+            case IR::Opcode::Phi:
+            case IR::Opcode::SelectU32:
+                pointer = true;
+                for (size_t arg = inst->GetOpcode() == IR::Opcode::SelectU32 ? 1 : 0;
+                     arg < inst->NumArgs(); ++arg) {
+                    if (!self(self, inst->Arg(arg), depth + 1)) {
+                        throw NotImplementedException("Static pointer has an unclassified branch");
+                    }
+                }
+                break;
+            case IR::Opcode::ShuffleIndex:
+                pointer = self(self, inst->Arg(0), depth + 1);
+                break;
+            case IR::Opcode::CompositeExtractU32x2:
+                if (!inst->Arg(1).IsImmediate() || inst->Arg(1).U32() != 0) {
+                    throw NotImplementedException("Static pointer has an unknown component");
+                }
+                pointer = self(self, inst->Arg(0), depth + 1);
+                break;
+            default:
+                throw NotImplementedException("Static pointer has an unresolved origin");
+            }
+            proven.at(inst) = pointer;
+            return pointer;
+        };
+        if (!visit(visit, low_addr, 0)) {
+            throw NotImplementedException("Static address has no declared pointer origin");
+        }
+        return candidates;
+    }
     small_vector<const IR::Inst*, 16> pending{low_addr.InstRecursive()};
     std::unordered_set<const IR::Inst*> visited{pending.front()};
     const auto enqueue = [&](const IR::Value& value) {
@@ -1332,11 +1393,17 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
     // Track the low address of the instruction
     const std::optional<LowAddrInfo> low_addr_info{TrackLowAddress(&inst)};
     if (!low_addr_info) {
+        if (env.UsesStaticResourceLayout()) {
+            throw NotImplementedException("Static resource layout cannot identify the global address");
+        }
         // Failed to track the low address, use NVN fallbacks
         return;
     }
     // First try to find storage buffers in the NVN address
     const IR::U32 low_addr{low_addr_info->value};
+    if (env.UsesStaticResourceLayout() && low_addr.IsImmediate()) {
+        throw NotImplementedException("Static resource layout requires a declared pointer origin");
+    }
     const std::optional<StorageBufferAddr> paired_pointer{
         TrackPointerAddend(*low_addr_info, info.iterator_words, conditions)};
     std::optional<StorageBufferAddr> storage_buffer{paired_pointer};
@@ -1363,6 +1430,22 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
             }
         }
         const auto& candidates{it->second};
+        if (env.UsesStaticResourceLayout()) {
+            if (!IsRuntimeRoutable(inst) || candidates.empty()) {
+                throw NotImplementedException("Static resource layout cannot route this global operation");
+            }
+            for (const auto& candidate : candidates) {
+                if (candidate.indirect != ~0U) {
+                    throw NotImplementedException("Static resource layout requires direct pointers");
+                }
+                info.set.insert(candidate);
+                if (IsGlobalMemoryWrite(inst)) {
+                    info.writes.insert(candidate);
+                }
+            }
+            info.native_runtime_bounds = true;
+            return;
+        }
         const bool has_loaded_pointer{std::ranges::any_of(
             candidates, [](const StorageBufferAddr& c) { return c.indirect != ~0U; })};
         if (paired_found &&
@@ -1611,6 +1694,10 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
         return;
     }
     const size_t max_ssbos{StorageBufferLimit(host_info)};
+    if (env.UsesStaticResourceLayout() &&
+        (program.stage != Stage::Compute || !env.IsNativeProgram() || !host_info.support_int64)) {
+        throw NotImplementedException("Static resource layout requires native compute with int64 support");
+    }
     TrackingConditions conditions{program};
     StorageInfo info;
     // Without 64-bit integers the backend cannot route global accesses among bound buffers.
@@ -1629,6 +1716,12 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
         }
     };
     collect();
+    if (env.UsesStaticResourceLayout()) {
+        if (info.set.size() > max_ssbos) {
+            throw NotImplementedException("Static resource layout exceeds the storage binding limit");
+        }
+        program.info.uses_static_buffer_bounds = true;
+    }
     if (info.competing_loaded_bound && info.set.size() > max_ssbos) {
         // Not enough bindings for the loaded pointers that compete with paired ones: keep the
         // pairs, as if no loaded pointer competed.

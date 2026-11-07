@@ -86,11 +86,17 @@ LoadingScreen::LoadingScreen(QWidget* parent)
         {VideoCore::LoadCallbackStage::Prepare, tr("Loading...")},
         {VideoCore::LoadCallbackStage::Build, tr("Loading Shaders %1 / %2")},
         {VideoCore::LoadCallbackStage::Complete, tr("Launching...")},
+        {VideoCore::LoadCallbackStage::PrecompileNup, tr("Preparing game shaders: archive %1 / %2")},
+        {VideoCore::LoadCallbackStage::PrewarmNupGraphics, tr("Preparing graphics pipelines %1 / %2")},
+        {VideoCore::LoadCallbackStage::ReadNupModels, tr("Reading game models %1 / %2")},
     };
     progressbar_style = {
         {VideoCore::LoadCallbackStage::Prepare, PROGRESSBAR_STYLE_PREPARE},
         {VideoCore::LoadCallbackStage::Build, PROGRESSBAR_STYLE_BUILD},
         {VideoCore::LoadCallbackStage::Complete, PROGRESSBAR_STYLE_COMPLETE},
+        {VideoCore::LoadCallbackStage::PrecompileNup, PROGRESSBAR_STYLE_BUILD},
+        {VideoCore::LoadCallbackStage::PrewarmNupGraphics, PROGRESSBAR_STYLE_BUILD},
+        {VideoCore::LoadCallbackStage::ReadNupModels, PROGRESSBAR_STYLE_BUILD},
     };
 }
 
@@ -165,7 +171,7 @@ void LoadingScreen::OnLoadProgress(VideoCore::LoadCallbackStage stage, std::size
         }
         // only calculate an estimate time after a second has passed since stage change
         const auto diff = duration_cast<milliseconds>(now - slow_shader_start);
-        if (diff > seconds{1}) {
+        if (diff > seconds{1} && value > slow_shader_first_value) {
             const auto eta_mseconds =
                 static_cast<long>(static_cast<double>(total - slow_shader_first_value) /
                                   (value - slow_shader_first_value) * diff.count());
@@ -178,7 +184,10 @@ void LoadingScreen::OnLoadProgress(VideoCore::LoadCallbackStage stage, std::size
     }
 
     // update labels and progress bar
-    if (stage == VideoCore::LoadCallbackStage::Build) {
+    if (stage == VideoCore::LoadCallbackStage::Build ||
+        stage == VideoCore::LoadCallbackStage::PrecompileNup ||
+        stage == VideoCore::LoadCallbackStage::PrewarmNupGraphics ||
+        stage == VideoCore::LoadCallbackStage::ReadNupModels) {
         ui->stage->setText(stage_translations[stage].arg(value).arg(total));
     } else {
         ui->stage->setText(stage_translations[stage]);

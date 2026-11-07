@@ -500,8 +500,8 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineImages(program.info, image_binding, bindings.image_scaling_index);
     DefineAttributeMemAccess(program.info);
     DefineWriteStorageCasLoopFunction(program.info);
-    DefineGlobalMemoryFunctions(program);
     DefineRescalingInput(program.info);
+    DefineGlobalMemoryFunctions(program);
     DefineRenderArea(program.info);
 }
 
@@ -968,12 +968,19 @@ void EmitContext::DefineWriteStorageCasLoopFunction(const Info& info) {
 /// holding the address at run time.
 void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
     const Info& info{program.info};
+    if (info.uses_static_buffer_bounds && !profile.support_int64) {
+        throw NotImplementedException("Static buffer bounds require int64");
+    }
+    if (info.uses_static_buffer_bounds &&
+        (!info.native_global_bounds || info.storage_buffers_descriptors.size() > Info::MAX_SSBOS)) {
+        throw NotImplementedException("Invalid static buffer routing layout");
+    }
     if (!info.uses_global_memory || !profile.support_int64) {
         return;
     }
     using DefPtr = Id StorageDefinitions::*;
     const Id zero{u32_zero_value};
-    const auto define_body{[&](DefPtr ssbo_member, Id addr, Id element_pointer, u32 shift,
+    const auto define_body{[&](DefPtr ssbo_member, Id addr, Id element_pointer, u32 shift, u32 access_bytes,
                                auto&& callback) {
         AddLabel();
         const size_t num_buffers{info.storage_buffers_descriptors.size()};
@@ -1032,7 +1039,22 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
             for (size_t index = 0; index < num_buffers; ++index) {
                 bases[index] = base_address(index);
                 const Id distance{OpISub(U64, addr, bases[index])};
-                const Id better{OpLogicalAnd(U1, OpUGreaterThanEqual(U1, addr, bases[index]),
+                Id candidate{OpUGreaterThanEqual(U1, addr, bases[index])};
+                if (info.uses_static_buffer_bounds) {
+                    const Id validity_pointer{OpAccessChain(
+                        TypePointer(spv::StorageClass::PushConstant, U64),
+                        rescaling_push_constants, Const(storage_validity_member_index))};
+                    const Id validity{OpLoad(U64, validity_pointer)};
+                    const Id valid{OpINotEqual(U1,
+                        OpBitwiseAnd(U64, validity, Constant(U64, u64{1} << index)), Constant(U64, u64{0}))};
+                    const Id length{OpIMul(U64, OpUConvert(U64,
+                        OpArrayLength(U32[1], ssbos[index].U32, 0U)), Constant(U64, u64{4}))};
+                    const Id width{Constant(U64, u64{access_bytes})};
+                    const Id fits{OpLogicalAnd(U1, OpUGreaterThanEqual(U1, length, width),
+                        OpULessThanEqual(U1, distance, OpISub(U64, length, width)))};
+                    candidate = OpLogicalAnd(U1, candidate, OpLogicalAnd(U1, valid, fits));
+                }
+                const Id better{OpLogicalAnd(U1, candidate,
                                              OpULessThan(U1, distance, best_distance))};
                 best_distance = OpSelect(U64, better, distance, best_distance);
                 best_index = OpSelect(U32[1], better, Const(static_cast<u32>(index)), best_index);
@@ -1062,7 +1084,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
         const Id function_type{TypeFunction(type, U64)};
         const Id func_id{OpFunction(type, spv::FunctionControlMask::MaskNone, function_type)};
         const Id addr{OpFunctionParameter(U64)};
-        if (!profile.support_descriptor_aliasing && shift > 2) {
+        if (!profile.support_descriptor_aliasing && shift > 2 && !info.uses_static_buffer_bounds) {
             AddLabel();
             std::array<Id, 4> words;
             const u32 count = 1U << (shift - 2);
@@ -1078,9 +1100,9 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
         // aligned 8 or 16 byte guest access can start at any word of the binding and the vector
         // view (offset >> shift) would read the vector before it. Those accesses read the words
         // of the buffer found for the address.
-        if (shift > 2 && profile.min_ssbo_alignment < (1U << shift)) {
+        if (shift > 2 && (profile.min_ssbo_alignment < (1U << shift) || !profile.support_descriptor_aliasing)) {
             const u32 count = 1U << (shift - 2);
-            define_body(&StorageDefinitions::U32, addr, storage_types.U32.element, 2,
+            define_body(&StorageDefinitions::U32, addr, storage_types.U32.element, 2, 1U << shift,
                         [&](Id, Id ssbo_id, Id word_index) {
                             std::array<Id, 4> words;
                             for (u32 i = 0; i < count; ++i) {
@@ -1096,7 +1118,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
             OpFunctionEnd();
             return func_id;
         }
-        define_body(ssbo_member, addr, element_pointer, shift,
+        define_body(ssbo_member, addr, element_pointer, shift, 1U << shift,
                     [&](Id ssbo_pointer, Id, Id) { OpReturnValue(OpLoad(type, ssbo_pointer)); });
         OpReturnValue(ConstantNull(type));
         OpFunctionEnd();
@@ -1107,7 +1129,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
         const Id func_id{OpFunction(void_id, spv::FunctionControlMask::MaskNone, function_type)};
         const Id addr{OpFunctionParameter(U64)};
         const Id data{OpFunctionParameter(type)};
-        if (!profile.support_descriptor_aliasing && shift > 2) {
+        if (!profile.support_descriptor_aliasing && shift > 2 && !info.uses_static_buffer_bounds) {
             AddLabel();
             const u32 count = 1U << (shift - 2);
             for (u32 i = 0; i < count; ++i) {
@@ -1119,9 +1141,9 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
             OpFunctionEnd();
             return func_id;
         }
-        if (shift > 2 && profile.min_ssbo_alignment < (1U << shift)) {
+        if (shift > 2 && (profile.min_ssbo_alignment < (1U << shift) || !profile.support_descriptor_aliasing)) {
             const u32 count = 1U << (shift - 2);
-            define_body(&StorageDefinitions::U32, addr, storage_types.U32.element, 2,
+            define_body(&StorageDefinitions::U32, addr, storage_types.U32.element, 2, 1U << shift,
                         [&](Id, Id ssbo_id, Id word_index) {
                             for (u32 i = 0; i < count; ++i) {
                                 const Id index{i == 0 ? word_index
@@ -1136,7 +1158,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
             OpFunctionEnd();
             return func_id;
         }
-        define_body(ssbo_member, addr, element_pointer, shift, [&](Id ssbo_pointer, Id, Id) {
+        define_body(ssbo_member, addr, element_pointer, shift, 1U << shift, [&](Id ssbo_pointer, Id, Id) {
             OpStore(ssbo_pointer, data);
             OpReturn();
         });
@@ -1203,7 +1225,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
                                     TypeFunction(type, U64, type))};
         const Id addr{OpFunctionParameter(U64)};
         const Id value{OpFunctionParameter(type)};
-        define_body(&StorageDefinitions::U32, addr, storage_types.U32.element, 2,
+        define_body(&StorageDefinitions::U32, addr, storage_types.U32.element, 2, 4,
                     [&](Id pointer, Id ssbo, Id word) {
                         const auto atomic = [&](Id (Sirit::Module::*op)(Id, Id, Id, Id, Id)) {
                             return (this->*op)(U32[1], pointer, scope, zero, value);
@@ -1245,7 +1267,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
         const Id address{OpFunctionParameter(U64)};
         const Id comparator{OpFunctionParameter(U32[1])};
         const Id value{OpFunctionParameter(U32[1])};
-        define_body(&StorageDefinitions::U32, address, storage_types.U32.element, 2,
+        define_body(&StorageDefinitions::U32, address, storage_types.U32.element, 2, 4,
                     [&](Id pointer, Id, Id) {
                         OpReturnValue(OpAtomicCompareExchange(U32[1], pointer, scope,
                                                               u32_zero_value, u32_zero_value,
@@ -1258,17 +1280,20 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
 }
 
 void EmitContext::DefineRescalingInput(const Info& info) {
-    if (!info.uses_rescaling_uniform) {
+    if (!info.uses_rescaling_uniform && !info.uses_static_buffer_bounds) {
         return;
     }
+    if (info.uses_static_buffer_bounds && (!profile.unified_descriptor_binding || stage != Stage::Compute)) {
+        throw NotImplementedException("Static buffer bounds require Vulkan compute push constants");
+    }
     if (profile.unified_descriptor_binding) {
-        DefineRescalingInputPushConstant();
+        DefineRescalingInputPushConstant(info.uses_static_buffer_bounds);
     } else {
         DefineRescalingInputUniformConstant();
     }
 }
 
-void EmitContext::DefineRescalingInputPushConstant() {
+void EmitContext::DefineRescalingInputPushConstant(bool static_buffer_bounds) {
     boost::container::static_vector<Id, 3> members{};
     u32 member_index{0};
 
@@ -1285,6 +1310,9 @@ void EmitContext::DefineRescalingInputPushConstant() {
     if (stage != Stage::Compute) {
         members.push_back(F32[1]);
         rescaling_downfactor_member_index = member_index++;
+    } else if (static_buffer_bounds) {
+        members.push_back(U64);
+        storage_validity_member_index = member_index++;
     }
     const Id push_constant_struct{TypeStruct(std::span(members.data(), members.size()))};
     Decorate(push_constant_struct, spv::Decoration::Block);
@@ -1303,6 +1331,10 @@ void EmitContext::DefineRescalingInputPushConstant() {
                        spv::Decoration::Offset,
                        static_cast<u32>(offsetof(RescalingLayout, down_factor)));
         MemberName(push_constant_struct, rescaling_downfactor_member_index, "down_factor");
+    } else if (static_buffer_bounds) {
+        MemberDecorate(push_constant_struct, storage_validity_member_index,
+                       spv::Decoration::Offset, COMPUTE_STORAGE_VALIDITY_OFFSET);
+        MemberName(push_constant_struct, storage_validity_member_index, "storage_validity");
     }
     const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};
     rescaling_push_constants = AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant);
@@ -1885,11 +1917,13 @@ void EmitContext::DefineMesh(const IR::Program& program) {
     mesh_info = program.mesh;
     mesh_threads = program.workgroup_size[0];
     // The task's output region, which its mesh workgroups read as their input region.
-    const Id payload_type{TypeArray(U32[1], Const(mesh_info.payload_words))};
-    mesh_payload = DefineVariable(*this, payload_type, std::nullopt,
-                                  spv::StorageClass::TaskPayloadWorkgroupEXT);
-    Name(mesh_payload, "task_payload");
-    mesh_payload_u32 = TypePointer(spv::StorageClass::TaskPayloadWorkgroupEXT, U32[1]);
+    if (stage == Stage::Task || runtime_info.mesh_has_task) {
+        const Id payload_type{TypeArray(U32[1], Const(mesh_info.payload_words))};
+        mesh_payload = DefineVariable(*this, payload_type, std::nullopt,
+                                      spv::StorageClass::TaskPayloadWorkgroupEXT);
+        Name(mesh_payload, "task_payload");
+        mesh_payload_u32 = TypePointer(spv::StorageClass::TaskPayloadWorkgroupEXT, U32[1]);
+    }
     if (stage == Stage::Task) {
         return;
     }

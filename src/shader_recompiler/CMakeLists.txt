@@ -5,6 +5,10 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 add_library(shader_recompiler STATIC
+    frontend/ampere/archive_vertex_layout.cpp
+    frontend/ampere/archive_vertex_layout.h
+    frontend/ampere/shader_archive.cpp
+    frontend/ampere/shader_archive.h
     backend/bindings.h
     backend/spirv/emit_spirv.cpp
     backend/spirv/emit_spirv.h
@@ -32,6 +36,9 @@ add_library(shader_recompiler STATIC
     backend/spirv/spirv_emit_context.cpp
     backend/spirv/spirv_emit_context.h
     environment.h
+    offline_environment.h
+    offline_graphics.h
+    nvn.h
     exception.h
     frontend/ir/abstract_syntax_list.h
     frontend/ir/attribute.h
@@ -255,6 +262,29 @@ if (ENABLE_OPENGL)
 endif()
 
 target_link_libraries(shader_recompiler PUBLIC common fmt::fmt sirit::sirit)
+
+# Sidecar caches must also be invalidated by uncommitted compiler changes.
+file(GLOB_RECURSE compiler_inputs CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
+                                                     "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
+list(APPEND compiler_inputs "${CMAKE_CURRENT_SOURCE_DIR}/../video_core/nup_shader_cache.cpp"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/../video_core/nup_shader_cache.h")
+foreach(backend_input IN ITEMS renderer_vulkan/vk_pipeline_cache.cpp
+        renderer_vulkan/vk_graphics_pipeline.cpp renderer_vulkan/pipeline_helper.h
+        renderer_vulkan/vk_graphics_pipeline.h renderer_vulkan/pipeline_cache_policy.h
+        renderer_vulkan/pipeline_cache_certificate.cpp renderer_vulkan/pipeline_cache_certificate.h
+        renderer_vulkan/fixed_pipeline_state.cpp renderer_vulkan/fixed_pipeline_state.h
+        vulkan_common/vulkan_device.cpp vulkan_common/vulkan_device.h)
+    list(APPEND compiler_inputs "${CMAKE_CURRENT_SOURCE_DIR}/../video_core/${backend_input}")
+endforeach()
+set(compiler_digest "")
+foreach(input IN LISTS compiler_inputs)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${input}")
+    file(SHA256 "${input}" digest)
+    string(APPEND compiler_digest "${digest}")
+endforeach()
+string(SHA256 compiler_digest "${compiler_digest}")
+configure_file(native_shader_fingerprint.h.in generated/native_shader_fingerprint.h @ONLY)
+target_include_directories(shader_recompiler INTERFACE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 if (MSVC)
     target_compile_options(shader_recompiler PRIVATE

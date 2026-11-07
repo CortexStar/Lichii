@@ -12,14 +12,20 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <map>
 #include <optional>
 #include <span>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 #include <bit>
 #include <numeric>
+#include <set>
+#include <openssl/sha.h>
 #include "common/cityhash.h"
 #include "common/scope_exit.h"
+#include "shader_recompiler/offline_environment.h"
+#include "shader_recompiler/offline_graphics.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/thread_worker.h"
@@ -41,16 +47,20 @@
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/pipeline_shader_emission.h"
+#include "video_core/renderer_vulkan/static_compute_match.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
 #include "video_core/renderer_vulkan/vertex_repack.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_cooperative_hmma_test.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/renderer_vulkan/pipeline_cache_policy.h"
+#include "video_core/renderer_vulkan/pipeline_cache_certificate.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/shader_cache.h"
+#include "video_core/shader_cache_io.h"
 #include "video_core/shader_environment.h"
 #include "video_core/shader_notify.h"
 #include "video_core/surface.h"
@@ -171,6 +181,7 @@ Shader::RuntimeInfo MakeRuntimeInfo(std::span<const Shader::IR::Program> program
                                     const Shader::IR::Program* previous_program,
                                     const Vulkan::Device& device) {
     Shader::RuntimeInfo info;
+    info.mesh_has_task = previous_program && previous_program->stage == Shader::Stage::Task;
     if (previous_program) {
         info.previous_stage_stores = previous_program->info.stores;
         info.previous_stage_legacy_stores_mapping = previous_program->info.legacy_stores_mapping;
@@ -429,10 +440,8 @@ bool GraphicsPipelineCacheKey::operator==(const GraphicsPipelineCacheKey& rhs) c
 }
 
 namespace {
-// NVIDIA's and AMD's drivers keep a disk cache of built pipelines of their own. Eden's copy on top
-// only kept every pipeline the title ever built in host memory (title 1: a 245 MB file, ~0.35 GB
-// of RAM for the session) and copied it whole at each save, which stalled frames; pipelines built
-// no slower without it.
+// Some Switch 1 workloads avoid a redundant application cache on these drivers.
+// Switch 2 needs it to reuse costly mesh pipeline compilation; save outside gameplay.
 bool DriverCachesPipelines(const Device& device) {
     switch (device.GetDriverID()) {
     case VK_DRIVER_ID_NVIDIA_PROPRIETARY:
@@ -440,6 +449,169 @@ bool DriverCachesPipelines(const Device& device) {
         return true;
     default:
         return false;
+    }
+}
+
+FixedPipelineState NupPrewarmState(const Device& device, const DynamicFeatures& features, bool blend) {
+    FixedPipelineState state{};
+    state.extended_dynamic_state.Assign(features.has_extended_dynamic_state);
+    state.extended_dynamic_state_2.Assign(features.has_extended_dynamic_state_2);
+    state.extended_dynamic_state_2_logic_op.Assign(features.has_extended_dynamic_state_2_logic_op);
+    state.extended_dynamic_state_3_blend.Assign(features.has_extended_dynamic_state_3_blend);
+    state.extended_dynamic_state_3_enables.Assign(features.has_extended_dynamic_state_3_enables);
+    state.color_write_enable_dynamic.Assign(features.has_color_write_enable);
+    state.dynamic_vertex_input.Assign(features.has_dynamic_vertex_input);
+    state.driver_id = device.GetDriverID();
+    state.driver_version = device.GetDriverVersion();
+    state.topology.Assign(Maxwell::PrimitiveTopology::Triangles);
+    state.polygon_mode.Assign(FixedPipelineState::PackPolygonMode(Maxwell::PolygonMode::Fill));
+    state.alpha_test_func.Assign(FixedPipelineState::PackComparisonOp(Maxwell::ComparisonOp::Always_GL));
+    state.msaa_mode.Assign(Tegra::Texture::MsaaMode::Msaa1x1);
+    state.color_formats[0] = static_cast<u8>(Tegra::RenderTargetFormat::A8B8G8R8_UNORM);
+    state.depth_enabled.Assign(1);
+    state.depth_format.Assign(static_cast<u32>(Tegra::DepthFormat::Z32_FLOAT));
+    state.point_size = std::bit_cast<u32>(1.0f);
+    state.viewport_swizzles.fill(0x6420);
+    state.dynamic_state.rasterize_enable.Assign(1);
+    state.dynamic_state.depth_clamp_disabled.Assign(1);
+    state.dynamic_state.depth_test_enable.Assign(blend);
+    state.dynamic_state.depth_write_enable.Assign(blend);
+    state.dynamic_state.depth_test_func.Assign(
+        FixedPipelineState::PackComparisonOp(Maxwell::ComparisonOp::LessEqual_GL));
+    state.dynamic_state.front_face.Assign(FixedPipelineState::PackFrontFace(Maxwell::FrontFace::CounterClockWise));
+    state.depth_bounds_max = 1;
+    for (auto& attachment : state.attachments) {
+        attachment.mask_r.Assign(1); attachment.mask_g.Assign(1);
+        attachment.mask_b.Assign(1); attachment.mask_a.Assign(1);
+        attachment.enable.Assign(blend);
+        attachment.factor_source_rgb.Assign(FixedPipelineState::PackBlendFactor(Maxwell::Blend::Factor::SourceAlpha_GL));
+        attachment.factor_dest_rgb.Assign(FixedPipelineState::PackBlendFactor(Maxwell::Blend::Factor::OneMinusSourceAlpha_GL));
+        attachment.factor_source_a.Assign(FixedPipelineState::PackBlendFactor(Maxwell::Blend::Factor::One_GL));
+        attachment.factor_dest_a.Assign(FixedPipelineState::PackBlendFactor(Maxwell::Blend::Factor::Zero_GL));
+    }
+    const size_t attributes = std::min<size_t>(state.attributes.size(), device.GetMaxVertexInputAttributes());
+    for (size_t index = 0; index < attributes; ++index) {
+        state.attributes[index].enabled.Assign(1);
+        state.attributes[index].offset.Assign(static_cast<u32>(index * 16));
+        state.attributes[index].type.Assign(static_cast<u32>(Maxwell::VertexAttribute::Type::Float));
+        state.attributes[index].size.Assign(static_cast<u32>(Maxwell::VertexAttribute::Size::Size_R32_G32_B32_A32));
+    }
+    state.vertex_strides[0] = 512;
+    if (features.has_dynamic_vertex_input) state.attribute_types = 0x5555555555555555ULL;
+    return state;
+}
+
+std::array<u8, 32> DriverSnapshotDigest(u32 version, std::span<const char> data) {
+    SHA256_CTX context;
+    SHA256_Init(&context);
+    SHA256_Update(&context, VULKAN_CACHE_MAGIC_NUMBER.data(), VULKAN_CACHE_MAGIC_NUMBER.size());
+    SHA256_Update(&context, &version, sizeof(version));
+    SHA256_Update(&context, data.data(), data.size());
+    std::array<u8, 32> result;
+    SHA256_Final(result.data(), &context);
+    return result;
+}
+
+std::array<u8, 32> NupPrewarmProfile(const std::array<u8, 32>& source,
+    const Device& device, const DynamicFeatures& features) {
+    const auto properties = device.GetPhysical().GetProperties();
+    const auto& resolution = Settings::values.resolution_info;
+#ifdef __ANDROID__
+    const u64 qcom_patch = Settings::values.patch_old_qcom_drivers.GetValue();
+#else
+    const u64 qcom_patch = 0;
+#endif
+    const std::array<u64, 25> values{3, device.CanUseGraphicsPipelineLibraries(), CACHE_VERSION, properties.vendorID, properties.deviceID,
+        properties.driverVersion, NupPrewarmState(device, features, false).Hash(),
+        NupPrewarmState(device, features, true).Hash(), resolution.active, resolution.up_scale,
+        resolution.down_shift, std::bit_cast<u32>(resolution.up_factor),
+        std::bit_cast<u32>(resolution.down_factor), Settings::values.disable_shader_loop_safety_checks.GetValue(),
+        Settings::values.fix_bloom_effects.GetValue(), Settings::values.sample_shading.GetValue(),
+        Settings::values.renderer_debug.GetValue(), Settings::values.enable_compute_pipelines.GetValue(),
+        static_cast<u64>(Settings::values.dyna_state.GetValue()), Settings::values.vertex_input_dynamic_state.GetValue(),
+        Settings::values.renderer_shader_feedback.GetValue(), Settings::values.enable_nsight_aftermath.GetValue(),
+        qcom_patch, Settings::values.emulate_bgr565.GetValue(),
+        static_cast<u64>(Settings::values.vram_usage_mode.GetValue())};
+    SHA256_CTX context;
+    SHA256_Init(&context);
+    SHA256_Update(&context, source.data(), source.size());
+    SHA256_Update(&context, properties.pipelineCacheUUID, VK_UUID_SIZE);
+    SHA256_Update(&context, values.data(), sizeof(values));
+    std::array<u8, 32> result;
+    SHA256_Final(result.data(), &context);
+    return result;
+}
+
+void ValidatePrewarmMeshShader(const Shader::IR::Program& program, const Device& device, bool has_task) {
+    const bool task = program.stage == Shader::Stage::Task;
+    if (!task && program.stage != Shader::Stage::Mesh) return;
+    VkPhysicalDeviceMeshShaderPropertiesEXT limits{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT};
+    VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &limits};
+    device.GetPhysical().GetProperties2(properties);
+    const auto* dimension_limit = task ? limits.maxTaskWorkGroupSize : limits.maxMeshWorkGroupSize;
+    u64 invocations = 1;
+    for (size_t index = 0; index < 3; ++index) {
+        const u32 dimension = program.workgroup_size[index];
+        if (!dimension || dimension > dimension_limit[index]) {
+            throw Shader::MissingOfflineContext("NUP mesh workgroup exceeds device dimensions");
+        }
+        invocations *= dimension;
+    }
+    if (invocations > (task ? limits.maxTaskWorkGroupInvocations : limits.maxMeshWorkGroupInvocations) ||
+        program.shared_memory_size) {
+        throw Shader::MissingOfflineContext("NUP mesh workgroup or private shared memory is unsupported");
+    }
+    const auto& mesh = program.mesh;
+    const u64 payload = task || has_task ? u64{mesh.payload_words} * 4 : 0;
+    if (task) {
+        if (payload > limits.maxTaskPayloadSize || payload > limits.maxTaskPayloadAndSharedMemorySize) {
+            throw Shader::MissingOfflineContext("NUP task payload exceeds device limits");
+        }
+        return;
+    }
+    const u64 vertex_words = ((u64{mesh.max_vertices} + 31) / 32) * mesh.vertex_lines.size() * 32;
+    const u64 primitive_words = ((u64{mesh.max_primitives} + 31) / 32) * mesh.primitive_lines.size() * 32;
+    const u64 shared = 4 * (std::max<u64>(vertex_words + primitive_words, 1) +
+                            4 + u64{mesh.PrimitiveVertices()} * mesh.max_primitives + 1);
+    if (shared > limits.maxMeshSharedMemorySize || payload + shared > limits.maxMeshPayloadAndSharedMemorySize) {
+        throw Shader::MissingOfflineContext("NUP mesh shared storage exceeds device limits");
+    }
+    const auto components = [&](const auto& lines, bool primitive) {
+        std::bitset<32> generics;
+        std::bitset<8> builtins;
+        if (!primitive && mesh.PrimitiveVertices() == 1) builtins.set(0);
+        for (u32 line : lines) {
+            const auto attribute = static_cast<Shader::IR::Attribute>(line);
+            if (Shader::IR::IsGeneric(attribute)) {
+                const u32 index = Shader::IR::GenericAttributeIndex(attribute);
+                if (u64{index + 1} * 4 > limits.maxMeshOutputComponents) {
+                    throw Shader::MissingOfflineContext("NUP mesh output location exceeds device limits");
+                }
+                generics.set(index);
+            } else if (!primitive && attribute >= Shader::IR::Attribute::PositionX &&
+                       attribute <= Shader::IR::Attribute::PositionW) {
+                builtins.set(1);
+            } else if (!primitive && attribute == Shader::IR::Attribute::PointSize) {
+                builtins.set(0);
+            } else if (primitive && attribute >= Shader::IR::Attribute::PrimitiveId &&
+                       attribute <= Shader::IR::Attribute::ViewportIndex) {
+                builtins.set(2 + line - static_cast<u32>(Shader::IR::Attribute::PrimitiveId));
+            }
+        }
+        return u64{4} * (generics.count() + builtins.count());
+    };
+    const u64 vertex_components = components(mesh.vertex_lines, false);
+    const u64 primitive_components = components(mesh.primitive_lines, true);
+    const auto align = [](u64 value, u64 granularity) { return ((value + granularity - 1) / granularity) * granularity; };
+    if (!limits.meshOutputPerVertexGranularity || !limits.meshOutputPerPrimitiveGranularity) {
+        throw Shader::MissingOfflineContext("NUP mesh output granularity is unavailable");
+    }
+    const u64 output = 4 * (vertex_components * align(mesh.max_vertices, limits.meshOutputPerVertexGranularity) +
+                            primitive_components * align(mesh.max_primitives, limits.meshOutputPerPrimitiveGranularity));
+    if (vertex_components + primitive_components > limits.maxMeshOutputComponents ||
+        output > limits.maxMeshOutputMemorySize || payload + output > limits.maxMeshPayloadAndOutputMemorySize) {
+        throw Shader::MissingOfflineContext("NUP mesh output storage exceeds device limits");
     }
 }
 } // Anonymous namespace
@@ -456,8 +628,9 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
       descriptor_buffer_ring{descriptor_buffer_ring_}, render_pass_cache{render_pass_cache_},
       buffer_cache{buffer_cache_}, texture_cache{texture_cache_}, shader_notify{shader_notify_},
       use_asynchronous_shaders{Settings::values.use_asynchronous_shaders.GetValue()},
-      use_vulkan_pipeline_cache{Settings::values.use_vulkan_driver_pipeline_cache.GetValue() &&
-                                !DriverCachesPipelines(device_)},
+      use_vulkan_pipeline_cache{UseApplicationPipelineCache(
+          Settings::values.use_vulkan_driver_pipeline_cache.GetValue(),
+          Settings::CurrentProgramIsSwitch2(), DriverCachesPipelines(device_))},
       num_pipeline_workers{device.HasBrokenParallelShaderCompiling() ? 1ULL
                                                                      : GetTotalPipelineWorkers()},
       emission_budget{num_pipeline_workers},
@@ -883,6 +1056,420 @@ bool PipelineCache::StaleNullPointerSlot(const ComputePipelineCacheEntry& entry)
     return false;
 }
 
+void PipelineCache::PreloadNupCompute(std::stop_token stop,
+                                     const VideoCore::DiskResourceLoadCallback& callback) {
+    nup_compute_cache.clear();
+    ambiguous_nup_shaders.clear();
+    nup_compute_hits = 0;
+    nup_compute_guard_misses = 0;
+    std::unordered_map<ComputePipelineCacheKey, std::pair<u32, u32>> layouts;
+    std::set<std::array<u8, 64>> seen;
+    struct {
+        std::mutex mutex;
+        size_t total{};
+        size_t complete{};
+        size_t built{};
+        size_t rejected{};
+        bool loaded{};
+        std::unordered_set<u64> failed_hashes;
+    } state;
+    SCOPE_EXIT { workers.WaitForRequests(stop); };
+    NupCache().ForEachComputeVariant(stop, [&](std::span<const u8> source,
+                                              std::span<const u8> control,
+                                              const Shader::Ampere::LoweredProgram* lowered) {
+        if (stop.stop_requested() || !lowered) return;
+        std::array<u8, 64> identity{};
+        SHA256(source.data(), source.size(), identity.data());
+        SHA256(control.data(), control.size(), identity.data() + 32);
+        if (!seen.insert(identity).second) return;
+
+        Shader::OfflineEnvironment code_only;
+        code_only.SetStage(Shader::Stage::Compute);
+        code_only.SetCode(*lowered);
+        const u64 hash = VideoCommon::NativeShaderHash(code_only.code);
+        std::optional<std::array<u32, 3>> groups;
+        std::optional<Shader::Ampere::ArchiveComputeBindings> layout;
+        try {
+            groups = Shader::Ampere::ReadDeclaredComputeWorkgroup(source, control);
+            layout = Shader::Ampere::ReadDeclaredComputeBindings(control);
+        } catch (const std::exception&) {
+            ambiguous_nup_shaders.insert(hash);
+            return;
+        }
+        if (!groups || !layout) {
+            ambiguous_nup_shaders.insert(hash);
+            return;
+        }
+        const ComputePipelineCacheKey key{hash, 0, *groups};
+        const std::pair shape{layout->first_pointer, layout->pointer_count};
+        const auto [position, inserted] = layouts.emplace(key, shape);
+        if (!inserted && position->second != shape) {
+            ambiguous_nup_shaders.insert(hash);
+            return;
+        }
+        std::shared_ptr<Shader::OfflineEnvironment> env;
+        try {
+            env = std::make_shared<Shader::OfflineEnvironment>(source, control, *lowered);
+        } catch (const std::exception&) {
+            std::scoped_lock lock{state.mutex};
+            ++state.rejected;
+            state.failed_hashes.insert(hash);
+            return;
+        }
+        {
+            std::scoped_lock lock{state.mutex};
+            ++state.total;
+        }
+        const auto build = [this, key, env, &state, &callback, stop] {
+            std::unique_ptr<ComputePipeline> pipeline;
+            try {
+                if (!stop.stop_requested()) {
+                    ShaderPools pools;
+                    pipeline = CreateComputePipeline(pools, key, *env, nullptr, false).pipeline;
+                }
+            } catch (const std::exception& error) {
+                LOG_DEBUG(Render_Vulkan, "NUP compute prebuild {:016x}: {}", key.unique_hash, error.what());
+            }
+            std::scoped_lock lock{state.mutex};
+            if (pipeline && pipeline->IsBound()) {
+                auto& variants = nup_compute_cache[key];
+                const bool duplicate = std::ranges::any_of(variants, [&](const auto& variant) {
+                    return variant.code == env->code && variant.constants == env->RequiredConstants();
+                });
+                if (!duplicate) {
+                    variants.push_back(
+                        {std::move(env->code), env->RequiredConstants(), std::move(pipeline)});
+                    ++state.built;
+                }
+            } else {
+                ++state.rejected;
+                state.failed_hashes.insert(key.unique_hash);
+            }
+            ++state.complete;
+            if (state.loaded) {
+                callback(VideoCore::LoadCallbackStage::Build, state.complete, state.total);
+            }
+        };
+        if (!workers.TryQueueWork(decltype(build){build})) build();
+    });
+    {
+        std::scoped_lock lock{state.mutex};
+        state.loaded = true;
+        if (state.total) callback(VideoCore::LoadCallbackStage::Build, state.complete, state.total);
+    }
+    workers.WaitForRequests(stop);
+    if (stop.stop_requested()) {
+        nup_compute_cache.clear();
+        return;
+    }
+    ambiguous_nup_shaders.insert(state.failed_hashes.begin(), state.failed_hashes.end());
+    for (auto it = nup_compute_cache.begin(); it != nup_compute_cache.end();) {
+        if (ambiguous_nup_shaders.contains(it->first.unique_hash)) it = nup_compute_cache.erase(it);
+        else ++it;
+    }
+    size_t ready = 0;
+    for (const auto& [key, candidates] : nup_compute_cache) ready += candidates.size();
+    LOG_INFO(Render_Vulkan, "NUP compute prebuild: {} ready ({} built), {} rejected, {} ambiguous code groups",
+             ready, state.built, state.rejected, ambiguous_nup_shaders.size());
+}
+
+bool PipelineCache::PrewarmNupGraphics(std::stop_token stop,
+                                      const VideoCore::DiskResourceLoadCallback& callback) {
+    if (!use_vulkan_pipeline_cache || !NupCache().Identity())
+        return false;
+    if (!NupCache().PrepareVertexLayouts(stop, [&](size_t done, size_t total) {
+            callback(VideoCore::LoadCallbackStage::ReadNupModels, done, total);
+        }))
+        return false;
+    const std::array states{NupPrewarmState(device, dynamic_features, false),
+                            NupPrewarmState(device, dynamic_features, true)};
+    VkPhysicalDeviceMeshShaderPropertiesEXT mesh_limits{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT};
+    if (device.IsExtMeshShaderSupported()) {
+        VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                                               &mesh_limits};
+        device.GetPhysical().GetProperties2(properties);
+    }
+    struct Job {
+        std::array<std::unique_ptr<Shader::OfflineEnvironment>, 6> environments;
+        std::array<u64, 6> hashes{};
+        struct State {
+            FixedPipelineState fixed;
+            std::optional<std::array<u8, 32>> vertex_types;
+        };
+        std::vector<State> states;
+        std::vector<VideoCommon::NupShaderCache::VertexInputTypes> inputs;
+    };
+    struct {
+        std::mutex mutex;
+        size_t material_variants{};
+        size_t queued{};
+        size_t total{};
+        size_t complete{};
+        size_t warmed{};
+        size_t rejected{};
+        bool transient_failure{};
+    } state;
+    const auto identity_of =
+        [](std::span<const Shader::Ampere::ArchiveProgram> group,
+           std::span<const VideoCommon::NupShaderCache::VertexInputTypes> inputs) {
+            std::array<u8, 9 * 64> stage_digests{};
+            for (const auto& program : group) {
+                const size_t index = static_cast<size_t>(program.stage);
+                if (index >= 9)
+                    throw Shader::MissingOfflineContext("Invalid NUP stage");
+                SHA256(program.code.data(), program.code.size(), stage_digests.data() + index * 64);
+                SHA256(program.control.data(), program.control.size(),
+                       stage_digests.data() + index * 64 + 32);
+            }
+            std::array<u8, 32> identity;
+            SHA256_CTX context;
+            SHA256_Init(&context);
+            SHA256_Update(&context, stage_digests.data(), stage_digests.size());
+            SHA256_Update(&context, inputs.data(), inputs.size_bytes());
+            SHA256_Final(identity.data(), &context);
+            return identity;
+        };
+    std::set<std::array<u8, 32>> pending;
+    callback(VideoCore::LoadCallbackStage::PrewarmNupGraphics, 0, 0);
+    try {
+        if (!NupCache().ForEachGraphicsGroupWithVertexLayouts(stop, [&](auto group, auto inputs) {
+                pending.insert(identity_of(group, inputs));
+            })) {
+            return false;
+        }
+    } catch (const std::exception& error) {
+        LOG_WARNING(Render_Vulkan, "NUP graphics enumeration failed: {}", error.what());
+        return false;
+    }
+    state.total = pending.size();
+    callback(VideoCore::LoadCallbackStage::PrewarmNupGraphics, 0, state.total);
+    SCOPE_EXIT {
+        workers.WaitForRequests(stop);
+    };
+    bool enumerated = false;
+    try {
+        enumerated = NupCache().ForEachGraphicsGroupWithVertexLayouts(
+            stop, [&](std::span<const Shader::Ampere::ArchiveProgram> group,
+                      std::span<const VideoCommon::NupShaderCache::VertexInputTypes> inputs) {
+                if (stop.stop_requested())
+                    return;
+                {
+                    std::scoped_lock lock{state.mutex};
+                    if (state.transient_failure)
+                        return;
+                }
+                try {
+                    if (!pending.erase(identity_of(group, inputs)))
+                        return;
+                    const auto layout = Shader::GetOfflineGraphicsLayout(group);
+                    if (layout.mesh) {
+                        const auto& mesh = *layout.mesh;
+                        if (!device.IsExtMeshShaderSupported() ||
+                            mesh.max_vertices > mesh_limits.maxMeshOutputVertices ||
+                            mesh.max_primitives > mesh_limits.maxMeshOutputPrimitives ||
+                            mesh.threads > mesh_limits.maxMeshWorkGroupInvocations ||
+                            (mesh.has_task &&
+                             mesh.payload_bytes > mesh_limits.maxTaskPayloadSize)) {
+                            throw Shader::MissingOfflineContext("NUP mesh exceeds device limits");
+                        }
+                    }
+                    auto job = std::make_shared<Job>();
+                    for (const auto& fixed : states)
+                        job->states.push_back({fixed, std::nullopt});
+                    if (!layout.mesh)
+                        job->inputs.assign(inputs.begin(), inputs.end());
+                    for (size_t index = 0; index < layout.count; ++index) {
+                        const auto& program = *layout.programs[index];
+                        const auto native = Shader::CaptureOfflineGraphics(program);
+                        const auto lowered = NupCache().Find(native, program.stage, false);
+                        if (!lowered) {
+                            if (NupCache().HasProgram(native, program.stage)) {
+                                throw std::runtime_error("NUP cached program could not be read");
+                            }
+                            throw Shader::MissingOfflineContext(
+                                "NUP program has no cached lowering");
+                        }
+                        const size_t slot =
+                            program.stage == Shader::Stage::Fragment                        ? 5
+                            : program.stage == Shader::Stage::Mesh && layout.mesh->has_task ? 3
+                                                                                            : 1;
+                        auto env = std::make_unique<Shader::OfflineEnvironment>(
+                            Shader::MakeOfflineGraphicsEnvironment(program, layout, *lowered,
+                                                                   true));
+                        job->hashes[slot] = VideoCommon::NativeShaderHash(env->code);
+                        job->environments[slot] = std::move(env);
+                    }
+                    {
+                        std::scoped_lock lock{state.mutex};
+                        ++state.queued;
+                    }
+                    const auto build = [this, job, &state, &callback, &states, stop] {
+                        size_t warmed = 0;
+                        bool failed = false;
+                        try {
+                            if (!stop.stop_requested() && !job->inputs.empty() &&
+                                job->environments[1]) {
+                                try {
+                                    ShaderPools pools;
+                                    auto& env = *job->environments[1];
+                                    Shader::Maxwell::Flow::CFG cfg(
+                                        env, pools.flow_block,
+                                        static_cast<u32>(env.StartAddress() +
+                                                         sizeof(Shader::ProgramHeader)),
+                                        false);
+                                    const auto program = TranslateProgram(pools.inst, pools.block,
+                                                                          env, cfg, host_info);
+                                    std::set<u64> distinct;
+                                    for (const auto& input : job->inputs) {
+                                        const auto required = Shader::RequiredOfflineVertexTypes(
+                                            program.info.loads, input);
+                                        if (!required || !distinct.insert(*required).second)
+                                            continue;
+                                        for (auto fixed : states) {
+                                            for (size_t slot = 0; slot < input.size(); ++slot) {
+                                                const u32 type =
+                                                    static_cast<u32>((*required >> (slot * 2)) & 3);
+                                                if (!type)
+                                                    continue;
+                                                fixed.attribute_types = (fixed.attribute_types &
+                                                                         ~(u64{3} << (slot * 2))) |
+                                                                        (u64{type} << (slot * 2));
+                                                const auto format =
+                                                    type == 2 ? Maxwell::VertexAttribute::Type::SInt
+                                                    : type == 3
+                                                        ? Maxwell::VertexAttribute::Type::UInt
+                                                        : Maxwell::VertexAttribute::Type::Float;
+                                                fixed.attributes[slot].type.Assign(
+                                                    static_cast<u32>(format));
+                                            }
+                                            const bool duplicate = std::ranges::any_of(
+                                                job->states, [&](const auto& candidate) {
+                                                    return candidate.fixed == fixed;
+                                                });
+                                            if (!duplicate)
+                                                job->states.push_back({fixed, input});
+                                        }
+                                    }
+                                } catch (const Shader::Exception& error) {
+                                    LOG_DEBUG(Render_Vulkan,
+                                              "NUP material vertex planning deferred: {}",
+                                              error.what());
+                                }
+                            }
+                            std::vector<Shader::Environment*> envs;
+                            for (const auto& env : job->environments)
+                                if (env)
+                                    envs.push_back(env.get());
+                            for (size_t index = 0; index < job->states.size(); ++index) {
+                                const auto& candidate = job->states[index];
+                                const auto& fixed = candidate.fixed;
+                                if (index && !candidate.vertex_types &&
+                                    fixed == job->states.front().fixed)
+                                    continue;
+                                if (stop.stop_requested())
+                                    break;
+                                ShaderPools pools;
+                                GraphicsPipelineCacheKey key{job->hashes, fixed};
+                                // These pipelines only populate the driver cache; no draw can
+                                // select them.
+                                auto pipeline = CreateGraphicsPipeline(
+                                    pools, key, envs, nullptr, false, nullptr, nullptr, true,
+                                    candidate.vertex_types);
+                                if (!pipeline) {
+                                    if (candidate.vertex_types)
+                                        continue;
+                                    break;
+                                }
+                                if (pipeline->Failed()) {
+                                    failed = true;
+                                    break;
+                                }
+                                ++warmed;
+                            }
+                        } catch (const std::exception& error) {
+                            failed = true;
+                            LOG_DEBUG(Render_Vulkan, "NUP graphics prewarm: {}", error.what());
+                        }
+                        std::scoped_lock lock{state.mutex};
+                        state.warmed += warmed;
+                        state.material_variants += job->states.size() - states.size();
+                        state.transient_failure |= failed;
+                        state.rejected += warmed == 0;
+                        ++state.complete;
+                        callback(VideoCore::LoadCallbackStage::PrewarmNupGraphics, state.complete,
+                                 state.total);
+                    };
+                    if (!workers.TryQueueWork(decltype(build){build}))
+                        build();
+                } catch (const Shader::MissingOfflineContext& error) {
+                    std::scoped_lock lock{state.mutex};
+                    ++state.rejected;
+                    ++state.complete;
+                    callback(VideoCore::LoadCallbackStage::PrewarmNupGraphics, state.complete,
+                             state.total);
+                    LOG_DEBUG(Render_Vulkan, "NUP graphics prewarm: {}", error.what());
+                } catch (const std::exception& error) {
+                    std::scoped_lock lock{state.mutex};
+                    ++state.rejected;
+                    state.transient_failure = true;
+                    LOG_WARNING(Render_Vulkan, "NUP graphics prewarm interrupted: {}",
+                                error.what());
+                }
+            });
+    } catch (const std::exception& error) {
+        LOG_WARNING(Render_Vulkan, "NUP graphics prewarm aborted: {}", error.what());
+    }
+    {
+        std::scoped_lock lock{state.mutex};
+        if (state.total)
+            callback(VideoCore::LoadCallbackStage::PrewarmNupGraphics, state.complete, state.total);
+    }
+    workers.WaitForRequests(stop);
+    if (state.queued || state.rejected) {
+        LOG_INFO(Render_Vulkan,
+                 "NUP graphics prewarm: {} driver pipelines warmed, {} material-layout variants, "
+                 "{} groups deferred{}",
+                 state.warmed, state.material_variants, state.rejected,
+                 stop.stop_requested() ? " (cancelled)" : "");
+    }
+    return enumerated && state.complete == state.total && !stop.stop_requested() &&
+           !state.transient_failure;
+}
+
+ComputePipeline* PipelineCache::FindNupCompute(const ComputePipelineCacheKey& key,
+                                               const ShaderInfo& shader) {
+    if (!kepler_compute->IsNativeMode() || !shader.lowered_native || key.shared_memory_size != 0 ||
+        ambiguous_nup_shaders.contains(key.unique_hash))
+        return nullptr;
+    const auto found = nup_compute_cache.find(key);
+    if (found == nup_compute_cache.end())
+        return nullptr;
+    const auto& qmd = kepler_compute->launch_description;
+    if (qmd.local_pos_alloc || qmd.local_crs_alloc) {
+        ++nup_compute_guard_misses;
+        return nullptr;
+    }
+    ComputePipeline* match = nullptr;
+    for (const auto& candidate : found->second) {
+        if (!MatchesStaticCompute(candidate.code, shader.lowered_native->code, candidate.constants,
+                                  [&](u32 bank, u32 offset) {
+                                      return VideoCommon::ReadNativeGuardConstant(
+                                          *kepler_compute, *gpu_memory, bank, offset);
+                                  }))
+            continue;
+        // Different archive variants can have indistinguishable live guards.
+        if (match) {
+            ++nup_compute_guard_misses;
+            return nullptr;
+        }
+        match = candidate.pipeline.get();
+    }
+    if (match) ++nup_compute_hits;
+    else ++nup_compute_guard_misses;
+    return match;
+}
+
 ComputePipeline* PipelineCache::CurrentComputePipeline() {
 
     const ShaderInfo* const shader{ComputeShader()};
@@ -895,6 +1482,9 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
         .shared_memory_size = qmd.shared_alloc,
         .workgroup_size{qmd.block_dim_x, qmd.block_dim_y, qmd.block_dim_z},
     };
+    if (auto* pipeline = FindNupCompute(key, *shader)) {
+        return pipeline;
+    }
     const auto [pair, is_new]{compute_cache.try_emplace(key)};
     auto& entry{pair->second};
     if (is_new) {
@@ -938,8 +1528,25 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                                          CACHE_VERSION);
         }
     }
+    loaded_driver_cache_digest.reset();
+    nup_prewarm_profile.reset();
+    nup_prewarm_source.reset();
+    nup_prewarm_complete = false;
 
     const auto shader_dir{Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir)};
+    use_vulkan_pipeline_cache = UseApplicationPipelineCache(
+        Settings::values.use_vulkan_driver_pipeline_cache.GetValue(),
+        Settings::CurrentProgramIsSwitch2(), DriverCachesPipelines(device));
+    LOG_INFO(Render_Vulkan, "Vulkan application pipeline cache: {}",
+             use_vulkan_pipeline_cache ? "enabled" : "disabled");
+    LOG_INFO(Render_Vulkan, "Graphics pipeline libraries: {}",
+             use_vulkan_pipeline_cache && Settings::CurrentProgramIsSwitch2() &&
+                     device.CanUseGraphicsPipelineLibraries() ? "enabled" : "disabled");
+    if (!use_vulkan_pipeline_cache) {
+        vulkan_pipeline_cache = {};
+        vulkan_pipeline_cache_filename.clear();
+        last_cache_size.store(0, std::memory_order_relaxed);
+    }
     const auto base_dir{shader_dir / fmt::format("{:016x}", title_id)};
     if (!Common::FS::CreateDir(shader_dir) || !Common::FS::CreateDir(base_dir)) {
         LOG_ERROR(Common_Filesystem, "Failed to create pipeline cache directories");
@@ -966,11 +1573,31 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     if (use_vulkan_pipeline_cache) {
         vulkan_pipeline_cache_filename =
             VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_pipelines", CACHE_VERSION);
-        VideoCommon::CopyCompatiblePipelineCache(
-            VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_pipelines", 52),
-            vulkan_pipeline_cache_filename, VULKAN_CACHE_MAGIC_NUMBER, 52, CACHE_VERSION);
-        vulkan_pipeline_cache =
-            LoadVulkanPipelineCache(vulkan_pipeline_cache_filename, CACHE_VERSION);
+        if (const auto source = NupCache().Identity()) {
+            nup_prewarm_source = source;
+            nup_prewarm_profile = NupPrewarmProfile(*source, device, dynamic_features);
+            if (const auto embedded = NupCache().ReadDriverCache(*nup_prewarm_profile)) {
+                try {
+                    vulkan_pipeline_cache = CreateVulkanPipelineCache(*embedded);
+                    nup_prewarm_complete = true;
+                    LOG_INFO(Render_Vulkan, "Loaded completed driver prewarm from the NUP shader binary");
+                } catch (const std::exception& error) {
+                    LOG_WARNING(Render_Vulkan, "Embedded driver cache is incompatible: {}", error.what());
+                }
+            }
+        }
+        if (!nup_prewarm_complete) {
+            vulkan_pipeline_cache = LoadVulkanPipelineCache(vulkan_pipeline_cache_filename, CACHE_VERSION);
+            if (nup_prewarm_profile && loaded_driver_cache_digest) {
+                auto certificate = vulkan_pipeline_cache_filename;
+                certificate += ".nupwarm";
+                nup_prewarm_complete = ReadPipelineCacheCertificate(
+                    certificate, *nup_prewarm_profile, *loaded_driver_cache_digest);
+            }
+        }
+        if (nup_prewarm_complete) {
+            LOG_INFO(Render_Vulkan, "NUP graphics prewarm: reusing a completed driver-cache snapshot");
+        }
     }
 
     struct {
@@ -1061,7 +1688,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         if (!disk_pipelines.insert(hash).second) {
             return;
         }
-        if (!PreloadAllPipelines() &&
+        // Switch 2 titles must finish their known pipelines before guest execution.
+        if (!PreloadAllPipelines() && !Settings::CurrentProgramIsSwitch2() &&
             (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
                                     : !used_pipelines.contains(hash))) {
             ++skipped_pipelines;
@@ -1113,6 +1741,18 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     }};
     VideoCommon::LoadPipelines(stop_loading, pipeline_cache_filename, CACHE_VERSION, load_compute,
                                load_graphics);
+
+    // Version 54 changed SPIR-V emission, not serialized environments. Recompile
+    // the captured v53 inputs with this build; never import v53 driver binaries.
+    if (CACHE_VERSION == 54 && !stop_loading.stop_requested()) {
+        const size_t before = state.total;
+        VideoCommon::LoadPipelines(
+            stop_loading, VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan", 53), 53,
+            load_compute, load_graphics);
+        LOG_INFO(Render_Vulkan, "Preloading {} additional captured v53 pipelines with the current compiler",
+                 state.total - before);
+    }
+
     for (auto& [key, candidates] : compute_envs) {
         OrderComputeTranslations(candidates);
         queue_compute(key, std::move(candidates));
@@ -1133,6 +1773,13 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     lock.unlock();
 
     workers.WaitForRequests(stop_loading);
+
+    if (!stop_loading.stop_requested()) {
+        PreloadNupCompute(stop_loading, callback);
+    }
+    if (!stop_loading.stop_requested() && nup_prewarm_profile && !nup_prewarm_complete) {
+        nup_prewarm_complete = PrewarmNupGraphics(stop_loading, callback);
+    }
 
     if (use_vulkan_pipeline_cache) {
         SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
@@ -1155,6 +1802,10 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
 
 void PipelineCache::QueueVulkanPipelineCacheFlush() {
     if (!use_vulkan_pipeline_cache || vulkan_pipeline_cache_filename.empty()) {
+        return;
+    }
+    if (!FlushPipelineCacheDuringGameplay(Settings::CurrentProgramIsSwitch2(),
+                                          DriverCachesPipelines(device))) {
         return;
     }
     if (++pipelines_since_flush < VULKAN_CACHE_FLUSH_PIPELINES) {
@@ -1278,6 +1929,12 @@ void PipelineCache::TickFrame() {
     constexpr u64 EvictCheckFrames = 600;
     if (frame_count % EvictCheckFrames == 0) {
         EvictUnusedPipelines();
+        if (nup_compute_hits || nup_compute_guard_misses) {
+            LOG_INFO(Render_Vulkan, "NUP compute lookups: {} hits, {} rejected by runtime guards",
+                     nup_compute_hits, nup_compute_guard_misses);
+            nup_compute_hits = 0;
+            nup_compute_guard_misses = 0;
+        }
     }
 }
 
@@ -1291,7 +1948,7 @@ void PipelineCache::EvictUnusedPipelines() {
     // with every place a session went (title 1: 1,500 on its title screen alone). One unused for
     // this long is destroyed; it takes 2-3 ms to build again from the driver's pipeline cache.
     constexpr u64 EvictAfterFrames = 9000;
-    if (frame_count <= EvictAfterFrames) {
+    if (frame_count <= EvictAfterFrames || Settings::CurrentProgramIsSwitch2()) {
         return;
     }
     const u64 cutoff = frame_count - EvictAfterFrames;
@@ -1432,7 +2089,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     ShaderPools& pools, const GraphicsPipelineCacheKey& key,
     std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
     bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools,
-    std::unique_ptr<EmissionBudget::Reservation> reservation) try {
+    std::unique_ptr<EmissionBudget::Reservation> reservation, bool prewarm,
+    std::optional<std::array<u8, 32>> vertex_types) try {
     auto hash = key.Hash();
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
     size_t env_index{0};
@@ -1493,6 +2151,14 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             auto& program_va{programs[0]};
             auto program_vb{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
             programs[index] = MergeDualVertexPrograms(program_va, program_vb, env, host_info);
+        }
+        if (prewarm && !programs[index].info.handle_programs.empty()) {
+            throw Shader::MissingOfflineContext("NUP graphics prewarm requires dynamic texture handles");
+        }
+        if (prewarm) {
+            ValidatePrewarmMeshShader(programs[index], device, std::ranges::any_of(envs, [](const auto* input) {
+                return input->ShaderStage() == Shader::Stage::Task;
+            }));
         }
 
         if (device.GetDriverID() != VK_DRIVER_ID_NVIDIA_PROPRIETARY && Shader::Optimization::HasBrokenPattern(programs[index])) {
@@ -1582,6 +2248,11 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 
         const auto runtime_info{MakeRuntimeInfo(programs, key, program, previous_stage, device)};
         ConvertLegacyToGeneric(program, runtime_info);
+        if (vertex_types && program.stage == Shader::Stage::VertexB &&
+            !Shader::MatchesOfflineVertexTypes(program.info.loads, *vertex_types,
+                                               runtime_info.generic_input_types)) {
+            throw Shader::MissingOfflineContext("Material does not declare every consumed vertex input");
+        }
         if (emit_pools) {
             deferred_runtime_infos[stage_index] = runtime_info;
             if (VideoCommon::Nx2Perf::Verify()) {
@@ -1642,6 +2313,10 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         render_pass_cache, key, std::move(modules), infos, std::move(emit_stages));
 
 } catch (const Shader::Exception& exception) {
+    if (prewarm) {
+        LOG_DEBUG(Render_Vulkan, "NUP graphics prewarm deferred: {}", exception.what());
+        return nullptr;
+    }
     auto hash = key.Hash();
     size_t env_index{0};
     for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
@@ -1821,6 +2496,13 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     }
 
     auto program{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
+    if (env.UsesStaticResourceLayout() &&
+        (device.GetDriverID() == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
+         device.GetDriverID() == VK_DRIVER_ID_ARM_PROPRIETARY) &&
+        program.info.storage_buffers_descriptors.size() >
+            device.GetMaxDescriptorSetStorageBuffersDynamic()) {
+        throw Shader::NotImplementedException("Static compute exceeds the dynamic storage buffer limit");
+    }
     const VkDriverIdKHR driver_id = device.GetDriverID();
     const bool needs_shared_mem_clamp =
         driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
@@ -1869,14 +2551,36 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
                 env.IsNativeProgram() ? env.MappedStoragePointerKeys() : std::vector<u64>{}};
 
 } catch (const Shader::Exception& exception) {
-    LOG_ERROR(Render_Vulkan, "Compute pipeline compilation failed shader={:#016x} pipeline={:#016x}: {}",
-              key.unique_hash, key.Hash(), exception.what());
+    if (env.UsesStaticResourceLayout()) {
+        LOG_DEBUG(Render_Vulkan, "NUP compute remains runtime-only shader={:#016x}: {}",
+                  key.unique_hash, exception.what());
+    } else {
+        LOG_ERROR(Render_Vulkan, "Compute pipeline compilation failed shader={:#016x} pipeline={:#016x}: {}",
+                  key.unique_hash, key.Hash(), exception.what());
+    }
     return {.failure = exception.what()};
 }
 
 void PipelineCache::SerializeVulkanPipelineCache(const std::filesystem::path& filename,
                                                  const vk::PipelineCache& pipeline_cache,
                                                  u32 cache_version) try {
+    if (!pipeline_cache) return;
+    VideoCommon::ShaderCacheCriticalScope save_scope;
+    LOG_INFO(Render_Vulkan, "Saving Vulkan pipeline cache snapshot");
+    const auto data = ReadPipelineCacheSnapshot([&](size_t* size, void* bytes) {
+        const VkResult result = pipeline_cache.Read(size, bytes);
+        if (result == VK_SUCCESS) return CacheReadResult::Complete;
+        return result == VK_INCOMPLETE ? CacheReadResult::Retry : CacheReadResult::Failed;
+    });
+    if (!data || data->empty()) {
+        LOG_ERROR(Render_Vulkan, "Cannot obtain a complete Vulkan pipeline cache; keeping the previous file");
+        return;
+    }
+    VideoCommon::ShaderCacheWriteProgress();
+    if (nup_prewarm_complete && nup_prewarm_profile && nup_prewarm_source == NupCache().Identity()) {
+        NupCache().WriteDriverCache(*nup_prewarm_profile,
+            {reinterpret_cast<const u8*>(data->data()), data->size()});
+    }
     // Written beside the cache and renamed over it: the emulator stopped mid-write left the cache
     // empty, and every later boot failed to read it.
     auto temporary = filename;
@@ -1891,14 +2595,13 @@ void PipelineCache::SerializeVulkanPipelineCache(const std::filesystem::path& fi
     file.write(VULKAN_CACHE_MAGIC_NUMBER.data(), VULKAN_CACHE_MAGIC_NUMBER.size())
         .write(reinterpret_cast<const char*>(&cache_version), sizeof(cache_version));
 
-    size_t cache_size = 0;
-    std::vector<char> cache_data;
-    if (pipeline_cache) {
-        pipeline_cache.Read(&cache_size, nullptr);
-        cache_data.resize(cache_size);
-        pipeline_cache.Read(&cache_size, cache_data.data());
+    constexpr size_t chunk_size = 4 * 1024 * 1024;
+    for (size_t offset = 0; offset < data->size();) {
+        const size_t count = std::min(chunk_size, data->size() - offset);
+        file.write(data->data() + offset, static_cast<std::streamsize>(count));
+        offset += count;
+        VideoCommon::ShaderCacheWriteProgress();
     }
-    file.write(cache_data.data(), cache_size);
     file.close();
     std::error_code error;
     std::filesystem::rename(temporary, filename, error);
@@ -1911,25 +2614,46 @@ void PipelineCache::SerializeVulkanPipelineCache(const std::filesystem::path& fi
 
     LOG_INFO(Render_Vulkan, "Vulkan driver pipelines cached at: {}",
              Common::FS::PathToUTF8String(filename));
-
-} catch (const std::ios_base::failure& e) {
-    LOG_ERROR(Common_Filesystem, "{}", e.what());
-    if (!Common::FS::RemoveFile(filename)) {
-        LOG_ERROR(Common_Filesystem, "Failed to delete Vulkan driver pipeline cache file {}",
-                  Common::FS::PathToUTF8String(filename));
+    if (nup_prewarm_complete && nup_prewarm_profile) {
+        auto certificate = filename;
+        certificate += ".nupwarm";
+        if (!WritePipelineCacheCertificate(certificate, *nup_prewarm_profile,
+                                            DriverSnapshotDigest(cache_version, *data))) {
+            LOG_WARNING(Render_Vulkan, "Could not certify the completed NUP graphics prewarm");
+        }
     }
+
+} catch (const std::exception& e) {
+    LOG_ERROR(Common_Filesystem, "{}", e.what());
+    auto temporary = filename;
+    temporary += ".tmp";
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
+}
+
+vk::PipelineCache PipelineCache::CreateVulkanPipelineCache(std::span<const u8> data) {
+    if (!data.empty()) {
+        VkPipelineCacheHeaderVersionOne header{};
+        if (data.size() < sizeof(header)) throw std::runtime_error("Truncated Vulkan cache header");
+        std::memcpy(&header, data.data(), sizeof(header));
+        const auto properties = device.GetPhysical().GetProperties();
+        if (header.headerSize < sizeof(header) || header.headerSize > data.size() ||
+            header.headerVersion != VK_PIPELINE_CACHE_HEADER_VERSION_ONE ||
+            header.vendorID != properties.vendorID || header.deviceID != properties.deviceID ||
+            std::memcmp(header.pipelineCacheUUID, properties.pipelineCacheUUID, VK_UUID_SIZE)) {
+            throw std::runtime_error("Vulkan cache does not match the current device/driver");
+        }
+    }
+    const VkPipelineCacheCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+        nullptr, 0, data.size(), data.data()};
+    return device.GetLogical().CreatePipelineCache(info);
 }
 
 vk::PipelineCache PipelineCache::LoadVulkanPipelineCache(const std::filesystem::path& filename,
                                                          u32 expected_cache_version) {
-    const auto create_pipeline_cache = [this](size_t data_size, const void* data) {
-        VkPipelineCacheCreateInfo pipeline_cache_ci = {
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = 0,
-            .initialDataSize = data_size,
-            .pInitialData = data};
-        return device.GetLogical().CreatePipelineCache(pipeline_cache_ci);
+    loaded_driver_cache_digest.reset();
+    const auto create_pipeline_cache = [this](size_t size, const void* data) {
+        return CreateVulkanPipelineCache({static_cast<const u8*>(data), size});
     };
     try {
         std::ifstream file(filename, std::ios::binary | std::ios::ate);
@@ -1974,18 +2698,16 @@ vk::PipelineCache PipelineCache::LoadVulkanPipelineCache(const std::filesystem::
         std::vector<char> cache_data(cache_size);
         file.read(cache_data.data(), cache_size);
 
+
         LOG_INFO(Render_Vulkan,
-                 "Loaded Vulkan driver pipeline cache: ", Common::FS::PathToUTF8String(filename));
+                 "Loaded Vulkan driver pipeline cache: {}", Common::FS::PathToUTF8String(filename));
 
-        return create_pipeline_cache(cache_size, cache_data.data());
+        auto cache = create_pipeline_cache(cache_size, cache_data.data());
+        loaded_driver_cache_digest = DriverSnapshotDigest(cache_version, cache_data);
+        return cache;
 
-    } catch (const std::ios_base::failure& e) {
+    } catch (const std::exception& e) {
         LOG_ERROR(Common_Filesystem, "{}", e.what());
-        if (!Common::FS::RemoveFile(filename)) {
-            LOG_ERROR(Common_Filesystem, "Failed to delete Vulkan driver pipeline cache file {}",
-                      Common::FS::PathToUTF8String(filename));
-        }
-
         return create_pipeline_cache(0, nullptr);
     }
 }

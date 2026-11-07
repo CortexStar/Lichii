@@ -23,6 +23,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/shader_environment.h"
+#include "video_core/nup_shader_cache.h"
 
 namespace Tegra {
 class MemoryManager;
@@ -65,6 +66,8 @@ public:
     /// Device pages this cache ever registered objects on (InnerInvalidation skips the rest).
     VideoCommon::PageFilter page_filter;
 
+    void PrepareNupShaders(const FileSys::VirtualFile& file, const std::filesystem::path& path,
+                           std::stop_token stop, const VideoCore::DiskResourceLoadCallback& callback);
     /// @brief Removes shaders inside a given region
     /// @note Checks for ranges
     /// @param addr Start address of the invalidation
@@ -87,6 +90,9 @@ public:
     void RefreshDebugRejections(bool unrejected);
 
 protected:
+    NupShaderCache& NupCache() { return nup_shader_cache; }
+    const NupShaderCache& NupCache() const { return nup_shader_cache; }
+
     struct GraphicsEnvironments {
         std::array<GraphicsEnvironment, NUM_PROGRAMS> envs;
         std::array<Shader::Environment*, NUM_PROGRAMS> env_ptrs{};
@@ -170,6 +176,7 @@ private:
     u64 MeshStateHash() const;
 
     Tegra::MaxwellDeviceMemoryManager& device_memory;
+    NupShaderCache nup_shader_cache;
 
     mutable std::mutex lookup_mutex;
     std::mutex invalidation_mutex;

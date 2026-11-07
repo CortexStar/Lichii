@@ -1,7 +1,8 @@
 import struct
 import unittest
 
-from shader_archive import ArchiveError, find_bnsh, parse_bnsh, parse_sarc
+from shader_archive import (ArchiveError, declared_compute_workgroup, find_bnsh,
+                            inspect_bfsha_models, inspect_bnsh_reflection, parse_bnsh, parse_sarc)
 from extract_static_shaders import walk_container
 
 
@@ -39,6 +40,57 @@ def sarc():
 
 
 class ShaderArchiveTests(unittest.TestCase):
+    def test_bfsha_defaults_are_not_invented_for_unbound_blocks(self):
+        data = bytearray(0x600)
+        data[:4] = b"FSHA"
+        struct.pack_into("<HH", data, 10, 9, 0xfeff)
+        struct.pack_into("<I", data, 28, len(data))
+        struct.pack_into("<Q", data, 0x48, 0x80)
+        struct.pack_into("<H", data, 0x78, 1)
+        struct.pack_into("<Q", data, 0x80 + 88, 0x200)
+        data[0x80 + 239] = 2
+        struct.pack_into("<Q", data, 0x210, 0x400)
+        struct.pack_into("<BBH", data, 0x218, 0, 1, 4)
+        struct.pack_into("<BBH", data, 0x238, 1, 0, 4)
+        model, = inspect_bfsha_models(data)
+        self.assertEqual(model["uniform_blocks"][0]["default_data"], "00000000")
+        self.assertIsNone(model["uniform_blocks"][1]["default_data"])
+        struct.pack_into("<Q", data, 0x210, len(data) - 2)
+        with self.assertRaises(ArchiveError):
+            inspect_bfsha_models(data)
+
+    def test_reflection_resources_preserve_names_and_reject_bad_extents(self):
+        data = bytearray(0x500)
+        struct.pack_into("<Q", data, 0x100 + 0x78, 0x300)
+        struct.pack_into("<Q", data, 0x300 + 5 * 8, 0x340)
+        struct.pack_into("<Q", data, 0x340 + 4 * 8, 0x400)
+        struct.pack_into("<4sI", data, 0x400, b"_DIC", 1)
+        struct.pack_into("<Q", data, 0x420, 0x440)
+        data[0x440:0x446] = b"\x03\x00buf\x00"
+        result = inspect_bnsh_reflection(data, 0x100, 5)
+        self.assertTrue(result["present"])
+        self.assertEqual(result["resources"]["storage_buffers"], ["buf"])
+        self.assertEqual(result["resources"]["samplers"], [])
+        struct.pack_into("<I", data, 0x404, 0xffffffff)
+        with self.assertRaises(ArchiveError):
+            inspect_bnsh_reflection(data, 0x100, 5)
+
+    def test_compute_control_workgroup_is_explicit_and_bounded(self):
+        code = bytes(256)
+        control = bytearray(224)
+        control[:8] = bytes.fromhex("34127698c9000000")
+        struct.pack_into("<I", control, 56, 256)
+        struct.pack_into("<IIII", control, 84, 5 << 16, 64, 1, 1)
+        self.assertEqual(declared_compute_workgroup(code, control), [64, 1, 1])
+        self.assertIsNone(declared_compute_workgroup(code, control[:80]))
+        struct.pack_into("<I", control, 88, 0)
+        with self.assertRaises(ArchiveError):
+            declared_compute_workgroup(code, control)
+        struct.pack_into("<I", control, 88, 64)
+        struct.pack_into("<I", control, 56, 272)
+        with self.assertRaises(ArchiveError):
+            declared_compute_workgroup(code, control)
+
     def test_bnsh_graphics_and_compute(self):
         for stage, name in ((0, "vertex"), (3, "geometry"), (4, "fragment"), (5, "compute")):
             row, = parse_bnsh(bnsh(stage))

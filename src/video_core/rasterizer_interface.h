@@ -8,12 +8,14 @@
 
 #include <array>
 #include <functional>
+#include <filesystem>
 #include <optional>
 #include <span>
 #include <utility>
 #include "common/common_types.h"
 #include "common/polyfill_thread.h"
 #include "common/settings.h"
+#include "core/file_sys/vfs/vfs_types.h"
 #include "video_core/cache_types.h"
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/game_dlss_status.h"
@@ -40,12 +42,19 @@ enum class LoadCallbackStage {
     Prepare,
     Build,
     Complete,
+    PrecompileNup,
+    PrewarmNupGraphics,
+    ReadNupModels,
 };
 using DiskResourceLoadCallback = std::function<void(LoadCallbackStage, std::size_t, std::size_t)>;
 
 class RasterizerInterface {
 public:
     virtual ~RasterizerInterface() = default;
+
+    virtual void PrepareNupShaders(const FileSys::VirtualFile& file,
+                                   const std::filesystem::path& path, std::stop_token stop,
+                                   const DiskResourceLoadCallback& callback) {}
 
     /// Dispatches a draw invocation
     virtual void Draw(bool is_indexed, u32 instance_count) = 0;

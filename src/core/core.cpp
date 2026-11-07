@@ -6,9 +6,11 @@
 #include <atomic>
 #include <memory>
 #include <new>
+#include <optional>
 #include <utility>
 
 #include "game_settings.h"
+#include "video_core/shader_cache_io.h"
 #include "common/cpu_features.h"
 #include "audio_core/audio_core.h"
 #include "common/fs/fs.h"
@@ -524,6 +526,11 @@ struct System::Impl {
     }
 
     void ShutdownMainProcess() {
+        // Keep the frontend from interrupting the GPU cache snapshot during shutdown.
+        std::optional<VideoCommon::ShaderCacheCriticalScope> cache_shutdown;
+        if (Settings::CurrentProgramIsSwitch2()) {
+            cache_shutdown.emplace();
+        }
         debug_service.reset();
         SetShuttingDown(true);
         Common::ADPF::Shutdown();
@@ -541,7 +548,9 @@ struct System::Impl {
         core_timing.SyncPause(false);
         Network::CancelPendingSocketOperations();
         kernel.SuspendEmulation(true);
+        LOG_DEBUG(Core, "Shutdown: closing services");
         kernel.CloseServices();
+        LOG_DEBUG(Core, "Shutdown: stopping CPU cores");
         kernel.ShutdownCores();
         services.reset();
         service_manager.reset();
@@ -550,7 +559,10 @@ struct System::Impl {
         core_timing.ClearPendingEvents();
         app_loader.reset();
         audio_core.reset();
+        LOG_INFO(Core, "Shutdown: releasing GPU and saving pipeline cache");
+        VideoCommon::ShaderCacheWriteProgress();
         gpu_core.reset();
+        LOG_INFO(Core, "Shutdown: GPU and pipeline cache released");
         host1x_core.reset();
         perf_stats.reset();
         cpu_manager.Shutdown();

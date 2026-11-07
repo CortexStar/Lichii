@@ -153,6 +153,12 @@ void RasterizerOpenGL::LoadDiskResources(u64 title_id, std::stop_token stop_load
     shader_cache.LoadDiskResources(title_id, stop_loading, callback);
 }
 
+void RasterizerOpenGL::PrepareNupShaders(const FileSys::VirtualFile& file,
+                                        const std::filesystem::path& path, std::stop_token stop,
+                                        const VideoCore::DiskResourceLoadCallback& callback) {
+    shader_cache.PrepareNupShaders(file, path, stop, callback);
+}
+
 void RasterizerOpenGL::Clear(u32 layer_count) {
     gpu_memory->FlushCaching();
     const auto& regs = maxwell3d->regs;

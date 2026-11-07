@@ -71,6 +71,12 @@ struct ConstBufferAddr {
     u32 handle_program{~0U}; ///< index in Info::handle_programs for a handle computed per draw
 };
 
+struct TextureSpecialization {
+    TextureType type;
+    TexturePixelFormat format;
+    bool is_integer;
+};
+
 class Environment {
 public:
     virtual ~Environment() = default;
@@ -82,6 +88,9 @@ public:
     /// A Switch 2 native program lowered to Maxwell instructions. Its storage buffer pointers are
     /// raw 8-byte arguments in constant buffers, without the NVN descriptor layout.
     [[nodiscard]] virtual bool IsNativeProgram() const { return false; }
+
+    // Offline resource declarations identify address fields, not their live mapping.
+    [[nodiscard]] virtual bool UsesStaticResourceLayout() const { return false; }
 
     /// Native programs: whether the 8-byte constant at (index, offset) is a mapped GPU address.
     /// Native argument tables mix pointers with scalars (sizes, strides).
@@ -111,6 +120,10 @@ public:
     [[nodiscard]] virtual TexturePixelFormat ReadTexturePixelFormat(u32 raw_handle) = 0;
 
     [[nodiscard]] virtual bool IsTexturePixelFormatInteger(u32 raw_handle) = 0;
+
+    // Optional metadata for a descriptor location, without resolving a live texture handle.
+    [[nodiscard]] virtual std::optional<TextureSpecialization> DeclaredTextureSpecialization(
+        const ConstBufferAddr&) { return std::nullopt; }
 
     [[nodiscard]] virtual u32 ReadViewportTransformState() = 0;
 

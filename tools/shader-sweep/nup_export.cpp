@@ -124,6 +124,23 @@ Options Parse(const std::vector<std::string>& args) {
             options.output = NativePath(value);
         } else if (arg == "--path") {
             options.paths.insert(value);
+        } else if (arg == "--paths-file") {
+            std::ifstream paths(NativePath(value));
+            if (!paths) {
+                throw std::runtime_error("Cannot open shader selection file");
+            }
+            std::string path;
+            while (std::getline(paths, path)) {
+                if (!path.empty() && path.back() == '\r') {
+                    path.pop_back();
+                }
+                if (!path.empty()) {
+                    options.paths.insert(path);
+                }
+            }
+            if (!paths.eof()) {
+                throw std::runtime_error("Cannot read shader selection file");
+            }
         } else if (arg == "--max-file-bytes") {
             options.max_file_bytes = Number(value);
         } else if (arg == "--max-total-bytes") {

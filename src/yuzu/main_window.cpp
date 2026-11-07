@@ -4,6 +4,7 @@
 // Static Qt on macOS doesn't use Vulkan
 // Other platforms do, and thus have conflicting VulkanMemoryAllocator symbols
 #include "core/launch_params.h"
+#include "video_core/shader_cache_io.h"
 #if defined(QT_STATICPLUGIN) && !defined(__APPLE__)
 #undef VMA_IMPLEMENTATION
 #endif
@@ -2423,6 +2424,10 @@ void MainWindow::OnEmulationStopTimeExpired() {
 }
 
 void MainWindow::OnEmulationStopTimeout() {
+    if (VideoCommon::WaitForShaderCacheWrite()) {
+        emu_terminate_timer.start(1000);
+        return;
+    }
     TerminateEmulationThread();
     OnEmulationStopped();
 }
@@ -2545,6 +2550,11 @@ void MainWindow::ShutdownGame() {
         connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
         timeout.start(EmuThreadStopTimeoutMs);
         loop.exec(QEventLoop::ExcludeUserInputEvents);
+        while (QtCommon::emu_thread && QtCommon::emu_thread->isRunning() &&
+               VideoCommon::WaitForShaderCacheWrite()) {
+            timeout.start(1000);
+            loop.exec(QEventLoop::ExcludeUserInputEvents);
+        }
     }
     TerminateEmulationThread();
     OnEmulationStopped();

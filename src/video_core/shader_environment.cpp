@@ -39,6 +39,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_debug_control.h"
 #include "video_core/shader_environment.h"
+#include "video_core/nup_shader_cache.h"
 #include "video_core/texture_cache/format_lookup_table.h"
 #include "video_core/textures/texture.h"
 
@@ -84,7 +85,7 @@ static std::vector<u64> MappedStoragePointerKeys(
 
 // The shader hash of lowered native code (frame dump "shaders", pipeline cache keys), with a
 // version tag that isolates this experimental ABI.
-static u64 NativeShaderHash(std::span<const u64> code) {
+u64 NativeShaderHash(std::span<const u64> code) {
     return Common::CityHash64(reinterpret_cast<const char*>(code.data()), code.size() * sizeof(u64)) ^
            0x4f554e4345000002ULL;
 }
@@ -589,7 +590,10 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
                                    : stage == Shader::Stage::TessellationEval
                                        ? Shader::Ampere::TessellationStage::Evaluation
                                        : Shader::Ampere::TessellationStage::None;
-    auto lowered = Shader::Ampere::LowerToMaxwell(
+    auto precompiled = nup_shader_cache
+                                  ? nup_shader_cache->Find(native, stage, geometry_stage)
+                                  : nullptr;
+    auto lowered = precompiled ? std::move(*precompiled) : Shader::Ampere::LowerToMaxwell(
         native, {.geometry = geometry_stage,
                  .tensor = true,
                  .native_code_address = program_base + native_header_size,
@@ -749,8 +753,10 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
                                          Tegra::MemoryManager& gpu_memory_,
                                          Maxwell::ShaderType program, GPUVAddr program_base_,
                                          u32 start_address_,
-                                         std::shared_ptr<const LoweredNativeCode> lowered_native_)
+                                         std::shared_ptr<const LoweredNativeCode> lowered_native_,
+                                         const NupShaderCache* nup_shader_cache_)
     : GenericEnvironment{gpu_memory_, program_base_, start_address_}, maxwell3d{&maxwell3d_} {
+    nup_shader_cache = nup_shader_cache_;
     gpu_memory->ReadBlock(program_base + start_address, &sph, sizeof(sph));
     initial_offset = sizeof(sph);
     texture_bound = maxwell3d->regs.bindless_texture_const_buffer_slot;
@@ -977,9 +983,11 @@ u32 GraphicsEnvironment::ReadViewportTransformState() {
 ComputeEnvironment::ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_compute_,
                                        Tegra::MemoryManager& gpu_memory_, GPUVAddr program_base_,
                                        u32 start_address_,
-                                       std::shared_ptr<const LoweredNativeCode> lowered_native_)
+                                       std::shared_ptr<const LoweredNativeCode> lowered_native_,
+                                       const NupShaderCache* nup_shader_cache_)
     : GenericEnvironment{gpu_memory_, program_base_, start_address_}, kepler_compute{
                                                                           &kepler_compute_} {
+    nup_shader_cache = nup_shader_cache_;
     const auto& qmd{kepler_compute->launch_description};
     stage = Shader::Stage::Compute;
     local_memory_size = qmd.local_pos_alloc + qmd.local_crs_alloc;

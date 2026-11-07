@@ -68,12 +68,30 @@ class SharcbTests(unittest.TestCase):
         self.assertEqual(records[0]["code"], records[1]["code"])
         self.assertEqual(records[0]["code"][:144], graphics(0))
 
-    def test_compute_uses_declared_extent_without_graphics_header(self):
-        """Check compute instructions exclude allocation padding."""
+    def test_compute_preserves_allocation_without_graphics_header(self):
+        """Keep code/padding while recording the executable instruction extent."""
         data, _, _, _ = sharcb(3)
         for item in parse_sharcb(data):
             self.assertEqual(item["stage"], "compute")
-            self.assertEqual(item["code"], bytes(range(16)))
+            self.assertEqual(item["code"], bytes(range(16)) + bytes(240))
+            self.assertEqual(item["instruction_bytes"], 16)
+
+    def test_shared_allocations_preserve_nonzero_c1_tail(self):
+        for slot in (0, 3):
+            data, _, _, control = sharcb(slot)
+            data.extend(bytes(256))
+            struct.pack_into("<I", data, 8, len(data))
+            struct.pack_into("<I", data, 24, 512)
+            struct.pack_into("<I", data, control + 68, 512)
+            data[0x700:0x704] = b"C1!!"
+            first, second = parse_sharcb(data)
+            self.assertEqual(first["code"], second["code"])
+            self.assertEqual(first["code"][256:260], b"C1!!")
+            self.assertEqual(first["constant_offset"], 256)
+            self.assertEqual(first["constant_bytes"], 256)
+            struct.pack_into("<I", data, control + 68, 513)
+            with self.assertRaises(ArchiveError):
+                parse_sharcb(data)
 
     def test_rejects_cross_pool_or_invalid_control(self):
         """Reject descriptors that leave their pools or disagree with the stage."""

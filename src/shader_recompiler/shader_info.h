@@ -318,6 +318,7 @@ struct Info {
 
     bool stores_global_memory{};
     bool uses_local_memory{};
+    bool uses_static_buffer_bounds{};
 
     bool uses_fp16{};
     bool uses_fp64{};

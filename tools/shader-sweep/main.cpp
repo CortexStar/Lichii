@@ -21,20 +21,26 @@
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
 #include "shader_recompiler/frontend/ampere/program_address_map.h"
+#include "shader_recompiler/frontend/ampere/shader_archive.h"
 #include "shader_recompiler/frontend/ampere/program_capture.h"
 #include "shader_recompiler/frontend/ampere/trap_guards.h"
 #include "shader_recompiler/frontend/maxwell/structured_control_flow.h"
+#include "shader_recompiler/frontend/maxwell/decode.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/host_translate_info.h"
+#include "shader_recompiler/offline_environment.h"
+#include "shader_recompiler/offline_graphics.h"
+#include "shader_recompiler/nvn.h"
 
 namespace {
 using Json = nlohmann::json;
 using Shader::Stage;
 using Shader::Ampere::Instruction;
 
-struct MissingContext : std::runtime_error {
-    using std::runtime_error::runtime_error;
-};
+using MissingContext = Shader::MissingOfflineContext;
+using OfflineEnvironment = Shader::OfflineEnvironment;
+using ArchiveGroup = std::array<std::optional<Shader::Ampere::ArchiveProgram>, 9>;
+using ArchiveGroups = std::map<std::pair<size_t, u32>, ArchiveGroup>;
 
 constexpr std::array StageNames{"vertex",  "tess-control", "tess-eval", "geometry", "fragment",
                                 "compute", "vertex-a",     "task",      "mesh"};
@@ -62,275 +68,6 @@ std::vector<u8> ReadFile(const std::filesystem::path& path) {
     }
     return bytes;
 }
-
-class Reader {
-public:
-    explicit Reader(std::span<const u8> bytes_) : bytes{bytes_} {}
-
-    template <typename T>
-    T Read() {
-        T value;
-        Copy(&value, sizeof(value));
-        return value;
-    }
-
-    void Copy(void* destination, size_t size) {
-        if (size > bytes.size())
-            throw std::runtime_error("Truncated environment record");
-        std::memcpy(destination, bytes.data(), size);
-        bytes = bytes.subspan(size);
-    }
-
-    size_t Remaining() const {
-        return bytes.size();
-    }
-
-private:
-    std::span<const u8> bytes;
-};
-
-template <typename K, typename V>
-V Lookup(const std::map<K, V>& values, K key, std::string_view name) {
-    const auto it = values.find(key);
-    if (it == values.end()) {
-        throw MissingContext(fmt::format("Uncaptured {} at {:#x}", name, key));
-    }
-    return it->second;
-}
-
-u64 CbufKey(u32 bank, u32 offset) {
-    return (u64{bank} << 32) | offset;
-}
-
-u64 IndirectCbufKey(u32 bank, u32 offset, u32 indirect) {
-    return (u64{1} << 63) | (u64{indirect & 0x3fffff} << 40) | CbufKey(bank, offset);
-}
-
-class OfflineEnvironment final : public Shader::Environment {
-public:
-    void Load(std::span<const u8> bytes, u32 version) {
-        Reader reader{bytes};
-        const u64 size = reader.Read<u64>();
-        const u64 type_count = reader.Read<u64>();
-        const u64 format_count = reader.Read<u64>();
-        const u64 cbuf_count = reader.Read<u64>();
-        const u64 pointer_count = version >= 47 ? reader.Read<u64>() : 0;
-        const u64 replacement_count = reader.Read<u64>();
-        if (size % 8 || !size || size > reader.Remaining()) {
-            throw std::runtime_error("Invalid environment code size");
-        }
-        for (const u64 count :
-             {type_count, format_count, cbuf_count, pointer_count, replacement_count}) {
-            if (count > bytes.size() / 8)
-                throw std::runtime_error("Invalid environment entry count");
-        }
-        local_memory = reader.Read<u32>();
-        texture_bound = reader.Read<u32>();
-        start_address = reader.Read<u32>();
-        low = reader.Read<u32>();
-        high = reader.Read<u32>();
-        viewport = reader.Read<u32>();
-        const u32 stage_value = reader.Read<u32>();
-        if (stage_value >= StageNames.size())
-            throw std::runtime_error("Invalid cached stage");
-        stage = static_cast<Stage>(stage_value);
-        code.resize(size / 8);
-        reader.Copy(code.data(), size);
-        if (low % 8 || high < low || u64{high} - low + 8 != size) {
-            throw std::runtime_error("Invalid cached instruction bounds");
-        }
-        for (u64 i = 0; i < type_count; ++i) {
-            const u32 key = reader.Read<u32>();
-            const u32 type = reader.Read<u32>();
-            if (type >= Shader::NUM_TEXTURE_TYPES)
-                throw std::runtime_error("Invalid texture type");
-            texture_types.emplace(key, static_cast<Shader::TextureType>(type));
-        }
-        for (u64 i = 0; i < format_count; ++i) {
-            const u32 key = reader.Read<u32>();
-            const u32 value = reader.Read<u32>();
-            if (value > std::numeric_limits<u8>::max()) {
-                throw std::runtime_error("Invalid texture pixel format");
-            }
-            texture_formats.emplace(key, static_cast<Shader::TexturePixelFormat>(value));
-        }
-        for (u64 i = 0; i < cbuf_count; ++i) {
-            const u64 key = reader.Read<u64>();
-            cbuf_values.emplace(key, reader.Read<u32>());
-        }
-        for (u64 i = 0; i < pointer_count; ++i) {
-            const u64 key = reader.Read<u64>();
-            const u8 value = reader.Read<u8>();
-            if (value > 1)
-                throw std::runtime_error("Invalid storage pointer classification");
-            pointers.emplace(key, value);
-        }
-        for (u64 i = 0; i < replacement_count; ++i) {
-            const u64 key = reader.Read<u64>();
-            const u32 value = reader.Read<u32>();
-            if (value > 2)
-                throw std::runtime_error("Invalid constant replacement");
-            replacements.emplace(key, static_cast<Shader::ReplaceConstant>(value));
-        }
-        if (stage == Stage::Compute) {
-            workgroup = reader.Read<std::array<u32, 3>>();
-            shared_memory = reader.Read<u32>();
-            if (!workgroup[0] || !workgroup[1] || !workgroup[2]) {
-                throw std::runtime_error("Invalid cached workgroup dimensions");
-            }
-        } else {
-            sph = reader.Read<Shader::ProgramHeader>();
-            if (stage == Stage::Geometry)
-                gp_passthrough_mask = reader.Read<std::array<u32, 8>>();
-            if (stage == Stage::Task || stage == Stage::Mesh) {
-                if (version < 53)
-                    throw std::runtime_error("Task/mesh environments require cache version 53");
-                mesh_registers = reader.Read<std::array<u32, 3>>();
-                mesh_primitive_header = reader.Read<Shader::ProgramHeader>();
-            }
-        }
-        if (reader.Remaining())
-            throw std::runtime_error("Trailing bytes after environment record");
-        is_proprietary_driver = texture_bound == 2 || IsNativeProgram();
-        captured = true;
-    }
-
-    void SetStage(Stage value) {
-        stage = value;
-    }
-
-    void SetHeader(std::span<const u8> bytes) {
-        std::memcpy(&sph, bytes.data(), sizeof(sph));
-        const u64 size = sph.LocalMemorySize() + sph.common3.shader_local_memory_crs_size;
-        if (size > std::numeric_limits<u32>::max())
-            throw std::runtime_error("Local memory overflow");
-        local_memory = static_cast<u32>(size);
-    }
-
-    void SetCode(const Shader::Ampere::LoweredProgram& lowered) {
-        code.resize(sizeof(sph) / sizeof(u64));
-        std::memcpy(code.data(), &sph, sizeof(sph));
-        for (const u64 instruction : lowered.instructions) {
-            if (code.size() % 4 == 0)
-                code.push_back(0);
-            code.push_back(instruction);
-        }
-        code.push_back(0);
-        Shader::Ampere::AppendNativeAddressMap(code, lowered.source_instruction_offsets);
-        low = 0;
-        high = static_cast<u32>(code.size() * 8 - 8);
-        start_address = stage == Stage::Compute ? sizeof(sph) : 0;
-        if (lowered.required_texture_buffer != ~0U)
-            texture_bound = lowered.required_texture_buffer;
-        is_proprietary_driver = true;
-    }
-
-    u32 EntryPoint() const {
-        return start_address + (stage == Stage::Compute ? 0 : sizeof(sph));
-    }
-
-    u64 ReadInstruction(u32 address) override {
-        if (address < low || address > high || (address - low) % 8) {
-            throw std::runtime_error(
-                fmt::format("Instruction address outside capture: {:#x}", address));
-        }
-        return code.at((address - low) / 8);
-    }
-    u32 TranslateProgramAddress(u32 address) const override {
-        if (!IsNativeProgram())
-            return address;
-        const auto result = Shader::Ampere::NativeProgramAddress(code, address);
-        if (!result)
-            throw std::runtime_error("Invalid native indirect branch target");
-        return *result;
-    }
-    bool IsNativeProgram() const override {
-        return Shader::Ampere::HasNativeAddressMap(code);
-    }
-    bool HasNativeInstructions() const override {
-        return IsNativeProgram();
-    }
-    bool IsCbufStorageBufferPointer(u32 bank, u32 offset) override {
-        return Lookup(pointers, CbufKey(bank, offset), "storage pointer classification") != 0;
-    }
-    bool IsCbufIndirectStorageBufferPointer(u32 bank, u32 offset, u32 indirect) override {
-        return Lookup(pointers, IndirectCbufKey(bank, offset, indirect),
-                      "storage pointer table classification") != 0;
-    }
-    u32 ReadCbufValue(u32 bank, u32 offset) override {
-        return Lookup(cbuf_values, CbufKey(bank, offset), "constant buffer value");
-    }
-    Shader::TextureType ReadTextureType(u32 handle) override {
-        return Lookup(texture_types, handle, "texture type");
-    }
-    Shader::TexturePixelFormat ReadTexturePixelFormat(u32 handle) override {
-        return Lookup(texture_formats, handle, "texture pixel format");
-    }
-    bool IsTexturePixelFormatInteger(u32 handle) override {
-        using F = Shader::TexturePixelFormat;
-        switch (ReadTexturePixelFormat(handle)) {
-        case F::A8B8G8R8_SINT:
-        case F::A8B8G8R8_UINT:
-        case F::A2B10G10R10_UINT:
-        case F::R8_SINT:
-        case F::R8_UINT:
-        case F::R16G16B16A16_SINT:
-        case F::R16G16B16A16_UINT:
-        case F::R32G32B32A32_UINT:
-        case F::R32G32B32A32_SINT:
-        case F::R32G32_SINT:
-        case F::R16_UINT:
-        case F::R16_SINT:
-        case F::R16G16_UINT:
-        case F::R16G16_SINT:
-        case F::R8G8_SINT:
-        case F::R8G8_UINT:
-        case F::R32G32_UINT:
-        case F::R32_UINT:
-        case F::R32_SINT:
-            return true;
-        default:
-            return false;
-        }
-    }
-    u32 ReadViewportTransformState() override {
-        return viewport;
-    }
-    u32 TextureBoundBuffer() const override {
-        if (texture_bound == ~0U)
-            throw MissingContext("Uncaptured texture-bound constant buffer");
-        return texture_bound;
-    }
-    u32 LocalMemorySize() const override {
-        return local_memory;
-    }
-    u32 SharedMemorySize() const override {
-        return shared_memory;
-    }
-    std::array<u32, 3> WorkgroupSize() const override {
-        return workgroup;
-    }
-    bool HasHLEMacroState() const override {
-        return !replacements.empty();
-    }
-    std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32 bank, u32 offset) override {
-        const auto it = replacements.find(CbufKey(bank, offset));
-        return it == replacements.end() ? std::nullopt : std::optional{it->second};
-    }
-    void Dump(u64, u64) override {}
-
-    bool captured{};
-    std::vector<u64> code;
-
-private:
-    u32 low{}, high{}, local_memory{}, shared_memory{}, viewport{1}, texture_bound{~0U};
-    std::array<u32, 3> workgroup{1, 1, 1};
-    std::map<u32, Shader::TextureType> texture_types;
-    std::map<u32, Shader::TexturePixelFormat> texture_formats;
-    std::map<u64, u32> cbuf_values;
-    std::map<u64, u8> pointers;
-    std::map<u64, Shader::ReplaceConstant> replacements;
-};
 
 template <typename T>
 void WriteFile(const std::filesystem::path& path, const std::vector<T>& words) {
@@ -524,6 +261,176 @@ Shader::RuntimeInfo Runtime(std::span<const u8> key, Stage stage, Json& assumpti
                           "integer fragment attachments use typed outputs on every offline host");
     return info;
 }
+
+Shader::HostTranslateInfo OfflineHost() {
+    Shader::HostTranslateInfo host{};
+    host.support_float64 = true;
+    host.support_float16 = true;
+    host.support_int64 = true;
+    host.support_conditional_barrier = true;
+    host.support_viewport_index_layer = true;
+    host.support_geometry_shader_passthrough = true;
+    host.ApplyDescriptorLimitPolicy();
+    return host;
+}
+
+Shader::Profile OfflineProfile(const Shader::HostTranslateInfo& host) {
+    Shader::Profile profile{};
+    profile.supported_spirv = 0x00010400;
+    profile.unified_descriptor_binding = true;
+    profile.min_ssbo_alignment = host.min_ssbo_alignment;
+    profile.support_int64 = true;
+    profile.support_int16 = true;
+    profile.support_int8 = true;
+    profile.support_vote = true;
+    profile.support_shuffle_relative = true;
+    profile.support_geometry_streams = true;
+    profile.support_geometry_shader_passthrough = true;
+    profile.support_viewport_index_layer_non_geometry = true;
+    profile.support_multi_viewport = true;
+    profile.max_user_clip_distances = 8;
+    profile.max_subgroup_size = 32;
+    profile.support_typeless_image_loads = true;
+    return profile;
+}
+
+Json ProbeGraphics(const ArchiveGroups& groups, const std::filesystem::path& output,
+                   bool float_textures) {
+    if (std::filesystem::exists(output)) {
+        throw std::runtime_error("Graphics probe output directory must not exist");
+    }
+    std::filesystem::create_directories(output);
+    const auto host = OfflineHost();
+    const auto profile = OfflineProfile(host);
+    Json results = Json::array();
+    size_t compiled = 0;
+    for (const auto& [identity, group] : groups) {
+        Json result{{"container_offset", identity.first}, {"variation", identity.second},
+                    {"status", "deferred"}};
+        try {
+            Shader::ObjectPool<Shader::Maxwell::Flow::Block> flow_pool;
+            Shader::ObjectPool<Shader::IR::Inst> inst_pool;
+            Shader::ObjectPool<Shader::IR::Block> block_pool;
+            Shader::Backend::Bindings bindings{};
+            std::optional<Shader::IR::Program> previous;
+            std::vector<std::pair<size_t, std::vector<u32>>> modules;
+            Json constants = Json::array();
+            Json textures = Json::array();
+            Json layouts = Json::array();
+            std::vector<Shader::Ampere::ArchiveProgram> source_group;
+            for (const auto& stage : group) if (stage) source_group.push_back(*stage);
+            const auto layout = Shader::GetOfflineGraphicsLayout(source_group);
+            if (layout.mesh) {
+                result["mesh_contract"] = {{"topology", "triangles (test contract, not inferred)"},
+                    {"threads", layout.mesh->threads}, {"payload_bytes", layout.mesh->payload_bytes},
+                    {"max_vertices", layout.mesh->max_vertices}, {"max_primitives", layout.mesh->max_primitives}};
+            }
+            for (size_t index = 0; index < layout.count; ++index) {
+                const auto& source = *layout.programs[index];
+                const size_t stage = static_cast<size_t>(source.stage);
+                const auto native = Shader::CaptureOfflineGraphics(source);
+                const auto lowered = Shader::Ampere::LowerToMaxwell(native, {.tensor = true});
+                auto env = Shader::MakeOfflineGraphicsEnvironment(source, layout, lowered, float_textures);
+                Shader::Maxwell::Flow::CFG cfg{env, flow_pool,
+                    Shader::Maxwell::Location{env.EntryPoint()}};
+                auto program = Shader::Maxwell::TranslateProgram(inst_pool, block_pool, env, cfg, host);
+                if (!program.info.handle_programs.empty()) {
+                    throw MissingContext("Graphics probe requires runtime-computed texture handles");
+                }
+                Shader::RuntimeInfo runtime{};
+                runtime.input_topology = Shader::InputTopology::Triangles;
+                runtime.alpha_test_func = Shader::CompareFunction::Always;
+                runtime.mesh_has_task = previous && previous->stage == Stage::Task;
+                if (previous) {
+                    runtime.previous_stage_stores = previous->info.stores;
+                    runtime.previous_stage_legacy_stores_mapping = previous->info.legacy_stores_mapping;
+                    if (previous->stage == Stage::Mesh) {
+                        for (const u32 line : previous->mesh.primitive_lines) {
+                            const auto attribute = static_cast<Shader::IR::Attribute>(line);
+                            if (Shader::IR::IsGeneric(attribute)) {
+                                runtime.per_primitive_generics.set(Shader::IR::GenericAttributeIndex(attribute));
+                            }
+                        }
+                    }
+                } else {
+                    runtime.previous_stage_stores.mask.set();
+                }
+                Shader::Maxwell::ConvertLegacyToGeneric(program, runtime);
+                Json layout = Json::array();
+                u32 next_binding = bindings.unified;
+                const auto add_layout = [&](const auto& descriptors, const char* kind) {
+                    for (const auto& descriptor : descriptors) {
+                        if (descriptor.count != 1) {
+                            throw MissingContext("Driver probe requires single descriptors");
+                        }
+                        layout.push_back({{"binding", next_binding++}, {"kind", kind}, {"count", 1}});
+                    }
+                };
+                add_layout(program.info.constant_buffer_descriptors, "uniform_buffer");
+                add_layout(program.info.storage_buffers_descriptors, "storage_buffer");
+                add_layout(program.info.texture_buffer_descriptors, "uniform_texel_buffer");
+                add_layout(program.info.image_buffer_descriptors, "storage_texel_buffer");
+                add_layout(program.info.texture_descriptors, "combined_image_sampler");
+                add_layout(program.info.image_descriptors, "storage_image");
+                modules.emplace_back(stage, Shader::Backend::SPIRV::EmitSPIRV(profile, runtime, program, bindings));
+                if (next_binding != bindings.unified) {
+                    throw MissingContext("Driver probe layout disagrees with emitted bindings");
+                }
+                const auto& info = program.info;
+                const bool warp_ops = info.uses_subgroup_vote || info.uses_subgroup_invocation_id ||
+                    info.uses_subgroup_shuffles || info.uses_subgroup_mask || info.uses_quad_shuffles ||
+                    info.uses_fswzadd;
+                layouts.push_back({{"stage", StageNames[stage]}, {"bindings", std::move(layout)},
+                                   {"uses_warp_ops", warp_ops}});
+                Json stage_constants = Json::array();
+                for (const auto& [key, value] : env.RequiredConstants()) {
+                    stage_constants.push_back({{"bank", key >> 32}, {"offset", u32(key)},
+                                               {"value", value}});
+                }
+                constants.push_back(std::move(stage_constants));
+                Json stage_textures = Json::array();
+                for (const auto& key : env.RequiredTextures()) {
+                    stage_textures.push_back({{"bank", key.index}, {"offset", key.offset},
+                        {"shift_left", key.shift_left}, {"secondary_bank", key.sec_index},
+                        {"secondary_offset", key.sec_offset}, {"secondary_shift_left", key.sec_shift_left},
+                        {"has_secondary", key.has_secondary}, {"count", key.count}});
+                }
+                textures.push_back(std::move(stage_textures));
+                previous = std::move(program);
+            }
+            const auto name = fmt::format("{:x}-{}", identity.first, identity.second);
+            Json paths = Json::array();
+            for (const auto& [stage, words] : modules) {
+                const auto path = name + "-" + StageNames[stage] + ".spv";
+                WriteFile(output / path, words);
+                paths.push_back(path);
+            }
+            result["status"] = "compiled_under_contract";
+            result["modules"] = std::move(paths);
+            result["constant_dependencies"] = std::move(constants);
+            result["texture_dependencies"] = std::move(textures);
+            result["descriptor_layouts"] = std::move(layouts);
+            ++compiled;
+        } catch (const std::exception& error) {
+            result["reason"] = error.what();
+        }
+        results.push_back(std::move(result));
+    }
+    Json report{{"schema_version", 2}, {"compiled_groups", compiled}, {"groups", results.size()},
+                {"contract", "SPIR-V 1.4 test profile; float vertex attributes and fragment outputs; "
+                    "triangles; no depth conversion, Y-negate, XFB, early-Z or dual-source blending; "
+                    "alpha test Always. Actual sibling interfaces and cumulative bindings. "
+                    "Not a runtime or final-driver-pipeline cache."}, {"results", std::move(results)}};
+    report["texture_contract"] = float_textures
+        ? "Direct single C2 descriptors: Color2D, A8B8G8R8_UNORM, non-integer. "
+          "Test specialization only; raw handles are not read or invented."
+        : "No texture metadata assumed";
+    std::ofstream manifest(output / "report.json");
+    manifest << report.dump(2) << '\n';
+    if (!manifest) throw std::runtime_error("Cannot save graphics probe report");
+    return {{"compiled_groups", compiled}, {"groups", groups.size()},
+            {"report", (output / "report.json").string()}};
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -531,10 +438,70 @@ int main(int argc, char** argv) {
                     {"stage", nullptr},    {"input_format", nullptr},     {"source_bytes", 0},
                     {"spirv_words", 0},    {"assumptions", Json::array()}};
     try {
+        const bool graphics_probe = (argc == 4 || argc == 5) && std::string_view{argv[1]} == "--graphics-probe";
+        const bool float_textures = graphics_probe && argc == 5 && std::string_view{argv[4]} == "--float-textures";
+        if (graphics_probe && argc == 5 && !float_textures) {
+            throw std::runtime_error("Unknown graphics probe option");
+        }
+        if (graphics_probe || (argc == 3 && std::string_view{argv[1]} == "--archive-info")) {
+            const auto bytes = ReadFile(argv[2]);
+            std::array<size_t, 9> counts{};
+            ArchiveGroups groups;
+            size_t unlinked = 0;
+            Json mesh_metadata = Json::array();
+            Shader::Ampere::ReadShaderArchive(bytes, [&](const auto& program) {
+                const size_t stage = static_cast<size_t>(program.stage);
+                ++counts[stage];
+                if (const auto info = Shader::Ampere::ReadDeclaredMeshInfo(program.code, program.control)) {
+                    mesh_metadata.push_back({{"stage", StageNames[stage]},
+                        {"code_offset", program.code.data() - bytes.data()},
+                        {"threads", info->threads}, {"payload_bytes", info->payload_bytes},
+                        {"max_vertices", info->max_vertices}, {"max_primitives", info->max_primitives},
+                        {"has_task", info->has_task},
+                        {"primitive_header_bytes", info->primitive_header.size()}});
+                }
+                if (program.variation) {
+                    const size_t offset = program.container.data() - bytes.data();
+                    auto& slot = groups[{offset, *program.variation}][stage];
+                    if (slot) throw std::runtime_error("Duplicate stage in an archive variation");
+                    slot = program;
+                } else {
+                    ++unlinked;
+                }
+                return true;
+            });
+            Json linked = Json::array();
+            size_t vertex_fragment = 0;
+            for (const auto& [identity, group] : groups) {
+                Json stages = Json::object();
+                for (size_t stage = 0; stage < group.size(); ++stage) {
+                    if (!group[stage]) continue;
+                    const auto& program = *group[stage];
+                    stages[StageNames[stage]] = {
+                        {"code_offset", program.code.data() - bytes.data()},
+                        {"code_size", program.code.size()},
+                        {"control_offset", program.control.data() - bytes.data()},
+                        {"control_size", program.control.size()}};
+                }
+                if (group[0] && group[4]) ++vertex_fragment;
+                linked.push_back({{"container_offset", identity.first},
+                                  {"variation", identity.second}, {"stages", std::move(stages)}});
+            }
+            diagnostic["status"] = "ok";
+            diagnostic["phase"] = "archive";
+            diagnostic["stages"] = counts;
+            diagnostic["linked_variations"] = std::move(linked);
+            diagnostic["vertex_fragment_variations"] = vertex_fragment;
+            diagnostic["unlinked_stage_records"] = unlinked;
+            diagnostic["mesh_metadata"] = std::move(mesh_metadata);
+            if (graphics_probe) diagnostic["graphics_probe"] = ProbeGraphics(groups, argv[3], float_textures);
+            std::cout << diagnostic.dump() << '\n';
+            return 0;
+        }
         if constexpr (std::endian::native != std::endian::little) {
             throw std::runtime_error("Only little-endian hosts are supported");
         }
-        std::string input, output, environment, pipeline_key, format{"instructions"};
+        std::string input, output, environment, pipeline_key, control, format{"instructions"};
         std::optional<Stage> requested_stage;
         u32 version{};
         bool lower_only{};
@@ -546,8 +513,9 @@ int main(int argc, char** argv) {
                 std::cout << "shader-sweep [INPUT] [--stage "
                              "vertex|tess-control|tess-eval|geometry|fragment|compute|task|mesh]\n"
                              "  [--format instructions|native-header] [--environment FILE "
-                             "--cache-version 46|47|48|49|50|51|52|53]\n"
+                             "--cache-version 46|47|48|49|50|51|52|53|54]\n"
                              "  [--pipeline-key FILE] [--capture-extent] "
+                             "[--control NVN2_CONTROL] "
                              "(--output SPV | --lower-only WORDS | --packed-code WORDS)\n";
                 return 0;
             }
@@ -572,10 +540,12 @@ int main(int argc, char** argv) {
                 environment = value;
             else if (arg == "--pipeline-key")
                 pipeline_key = value;
+            else if (arg == "--control")
+                control = value;
             else if (arg == "--cache-version") {
                 if (value != "46" && value != "47" && value != "48" && value != "49" && value != "50" &&
-                    value != "51" && value != "52" && value != "53")
-                    throw std::runtime_error("Expected cache version 46 to 53");
+                    value != "51" && value != "52" && value != "53" && value != "54")
+                    throw std::runtime_error("Expected cache version 46 to 54");
                 version = static_cast<u32>(std::stoul(value));
             } else if (arg == "--output" || arg == "--lower-only" || arg == "--packed-code") {
                 if (!output.empty())
@@ -593,7 +563,11 @@ int main(int argc, char** argv) {
         }
         if (format != "instructions" && format != "native-header")
             throw std::runtime_error("Invalid input format");
-        for (const auto& path : {input, environment, pipeline_key}) {
+        if (!control.empty() && (input.empty() || !environment.empty() || lower_only ||
+                                (format == "instructions" && requested_stage != Stage::Compute))) {
+            throw std::runtime_error("--control requires native input and no captured environment");
+        }
+        for (const auto& path : {input, environment, pipeline_key, control}) {
             if (!path.empty() && std::filesystem::weakly_canonical(path) ==
                                      std::filesystem::weakly_canonical(output)) {
                 throw std::runtime_error("Output must not overwrite an input");
@@ -611,10 +585,36 @@ int main(int argc, char** argv) {
         if (!input.empty()) {
             const auto bytes = ReadFile(input);
             const size_t header_size = format == "native-header" ? 128 : 0;
-            if (bytes.size() <= header_size || (bytes.size() - header_size) % sizeof(Instruction) ||
-                (bytes.size() - header_size) / sizeof(Instruction) > 65536) {
+            if (bytes.size() <= header_size) {
                 throw std::runtime_error(
                     "Native input must contain 1..65536 complete 16-byte instructions");
+            }
+            size_t executable_size = bytes.size();
+            if (!control.empty()) {
+                const auto control_bytes = ReadFile(control);
+                const auto sections = Shader::Ampere::ReadArchiveCodeSections(bytes, control_bytes);
+                if (!sections || sections->instruction_bytes <= header_size) {
+                    throw std::runtime_error("Unsupported native control record or instruction extent");
+                }
+                executable_size = sections->instruction_bytes;
+                env.SetConstantWords(1, sections->constants);
+                diagnostic["archive_constant_bytes"] = sections->constants.size();
+                if (requested_stage == Stage::Compute) {
+                    const auto dimensions = Shader::Ampere::ReadDeclaredComputeWorkgroup(bytes, control_bytes);
+                    if (!dimensions) {
+                        throw std::runtime_error("Unsupported native compute control record");
+                    }
+                    env.SetWorkgroup(*dimensions);
+                    diagnostic["declared_workgroup"] = *dimensions;
+                    if (const auto bindings = Shader::Ampere::ReadDeclaredComputeBindings(control_bytes)) {
+                        env.SetDeclaredComputeBindings(*bindings);
+                        diagnostic["declared_pointer_slots"] = bindings->pointer_count;
+                    }
+                }
+            }
+            if ((executable_size - header_size) % sizeof(Instruction) ||
+                (executable_size - header_size) / sizeof(Instruction) > 65536) {
+                throw std::runtime_error("Native input must contain 1..65536 complete 16-byte instructions");
             }
             if (header_size) {
                 Shader::ProgramHeader header;
@@ -641,8 +641,8 @@ int main(int argc, char** argv) {
             if (requested_stage || env.captured || header_size) {
                 diagnostic["stage"] = StageNames[static_cast<u32>(env.ShaderStage())];
             }
-            diagnostic["source_bytes"] = bytes.size() - header_size;
-            std::vector<Instruction> native((bytes.size() - header_size) / sizeof(Instruction));
+            diagnostic["source_bytes"] = executable_size - header_size;
+            std::vector<Instruction> native((executable_size - header_size) / sizeof(Instruction));
             std::memcpy(native.data(), bytes.data() + header_size,
                         native.size() * sizeof(Instruction));
             if (capture_extent) {
@@ -699,6 +699,9 @@ int main(int argc, char** argv) {
                 return 1;
             }
             diagnostic["lowered_words"] = lowered.instructions.size();
+            if (!control.empty() && env.ShaderStage() == Stage::Compute) {
+                OfflineEnvironment::ValidateComputeMemory(lowered);
+            }
             if (lower_only) {
                 diagnostic["phase"] = "output";
                 if (packed_code) {
@@ -717,10 +720,14 @@ int main(int argc, char** argv) {
             }
             env.SetCode(lowered);
             if (!env.captured) {
-                diagnostic["assumptions"].push_back(
-                    "No environment: workgroup 1x1x1, shared memory 0, viewport enabled, no HLE "
-                    "replacements");
-                if (!header_size)
+                diagnostic["assumptions"].push_back(control.empty()
+                    ? "No environment: workgroup 1x1x1, shared memory 0, viewport enabled, no HLE replacements"
+                    : "Archive C1 constants and declared compute workgroup; runtime resource values unavailable");
+                if (!control.empty() && env.ShaderStage() == Stage::Compute) {
+                    diagnostic["assumptions"].push_back(
+                        "C0 resource declarations classify pointer slots; current GPU mapping is not verified");
+                }
+                if (!header_size && control.empty())
                     diagnostic["assumptions"].push_back(
                         "Compute local memory defaults to zero without a captured environment");
             }
@@ -741,33 +748,25 @@ int main(int argc, char** argv) {
         Shader::Maxwell::Flow::CFG cfg{env, flow_pool, Shader::Maxwell::Location{env.EntryPoint()}};
         Shader::ObjectPool<Shader::IR::Inst> inst_pool;
         Shader::ObjectPool<Shader::IR::Block> block_pool;
-        Shader::HostTranslateInfo host{};
-        host.support_float64 = true;
-        host.support_float16 = true;
-        host.support_int64 = true;
-        host.support_conditional_barrier = true;
-        host.support_viewport_index_layer = true;
-        host.support_geometry_shader_passthrough = true;
-        host.ApplyDescriptorLimitPolicy();
+        const auto host = OfflineHost();
         auto program = Shader::Maxwell::TranslateProgram(inst_pool, block_pool, env, cfg, host);
+        if (!control.empty() && env.ShaderStage() == Stage::Compute) {
+            if (program.info.uses_local_memory) {
+                throw MissingContext("Archive control does not establish the local memory size");
+            }
+            for (const auto* block : program.blocks) {
+                for (const auto& instruction : block->Instructions()) {
+                    const auto name = Shader::IR::NameOf(instruction.GetOpcode());
+                    if (name.starts_with("LoadShared") || name.starts_with("WriteShared") ||
+                        name.starts_with("SharedAtomic")) {
+                        throw MissingContext("Archive control does not establish the shared memory size");
+                    }
+                }
+            }
+        }
         Shader::Maxwell::ConvertLegacyToGeneric(program, runtime);
         diagnostic["phase"] = "spirv";
-        Shader::Profile profile{};
-        profile.supported_spirv = 0x00010400;
-        profile.unified_descriptor_binding = true;
-        profile.min_ssbo_alignment = host.min_ssbo_alignment;
-        profile.support_int64 = true;
-        profile.support_int16 = true;
-        profile.support_int8 = true;
-        profile.support_vote = true;
-        profile.support_shuffle_relative = true;
-        profile.support_geometry_streams = true;
-        profile.support_geometry_shader_passthrough = true;
-        profile.support_viewport_index_layer_non_geometry = true;
-        profile.support_multi_viewport = true;
-        profile.max_user_clip_distances = 8;
-        profile.max_subgroup_size = 32;
-        profile.support_typeless_image_loads = true;
+        const auto profile = OfflineProfile(host);
         Shader::Backend::Bindings bindings{};
         const auto spirv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime, program, bindings);
         diagnostic["spirv_words"] = spirv.size();

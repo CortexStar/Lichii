@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <string>
 #include <type_traits>
@@ -141,6 +142,20 @@ public:
                            const VideoCore::DiskResourceLoadCallback& callback);
 
 private:
+    void PreloadNupCompute(std::stop_token stop, const VideoCore::DiskResourceLoadCallback& callback);
+    bool PrewarmNupGraphics(std::stop_token stop, const VideoCore::DiskResourceLoadCallback& callback);
+    ComputePipeline* FindNupCompute(const ComputePipelineCacheKey& key, const ShaderInfo& shader);
+
+    struct NupComputeCandidate {
+        std::vector<u64> code;
+        std::map<u64, u32> constants;
+        std::unique_ptr<ComputePipeline> pipeline;
+    };
+    ::Common::unordered_map<ComputePipelineCacheKey, std::vector<NupComputeCandidate>> nup_compute_cache;
+    std::unordered_set<u64> ambiguous_nup_shaders;
+    u64 nup_compute_hits{};
+    u64 nup_compute_guard_misses{};
+
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipelineSlowPath();
 
     /// Returns `pipeline` when it is built or its draw must wait for it, nullptr when the draw
@@ -153,7 +168,9 @@ private:
         ShaderPools& pools, const GraphicsPipelineCacheKey& key,
         std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
         bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools = nullptr,
-        std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr);
+        std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr,
+        bool prewarm = false,
+        std::optional<std::array<u8, 32>> vertex_types = std::nullopt);
 
     [[nodiscard]] bool StaleNullPointerSlot(const ComputePipelineCacheEntry& entry) const;
 
@@ -174,6 +191,7 @@ private:
 
     vk::PipelineCache LoadVulkanPipelineCache(const std::filesystem::path& filename,
                                               u32 expected_cache_version);
+    vk::PipelineCache CreateVulkanPipelineCache(std::span<const u8> data);
 
     void QueueVulkanPipelineCacheFlush();
 
@@ -235,6 +253,10 @@ private:
     std::chrono::steady_clock::time_point last_flush{};
     std::atomic<size_t> last_cache_size{};
     std::atomic_bool flush_in_flight{};
+    std::optional<std::array<u8, 32>> loaded_driver_cache_digest;
+    std::optional<std::array<u8, 32>> nup_prewarm_profile;
+    std::optional<std::array<u8, 32>> nup_prewarm_source;
+    bool nup_prewarm_complete{};
 
     Common::ThreadWorker workers;
     Common::ThreadWorker serialization_thread;

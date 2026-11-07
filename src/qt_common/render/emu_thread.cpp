@@ -28,6 +28,13 @@ void EmuThread::run() {
 
     emit LoadProgress(VideoCore::LoadCallbackStage::Prepare, 0, 0);
     if (Settings::values.use_disk_shader_cache.GetValue()) {
+        const auto& path = QtCommon::system->GetCurrentApplicationFilePath();
+        QtCommon::system->Renderer().ReadRasterizer()->PrepareNupShaders(
+            Core::GetGameFileFromPath(QtCommon::system->GetFilesystem(), path),
+            std::filesystem::u8path(path), stop_token,
+            [this](VideoCore::LoadCallbackStage stage, std::size_t value, std::size_t total) {
+                emit LoadProgress(stage, value, total);
+            });
         QtCommon::system->Renderer().ReadRasterizer()->LoadDiskResources(
             QtCommon::system->GetApplicationProcessProgramID(), stop_token,
             [this](VideoCore::LoadCallbackStage stage, std::size_t value, std::size_t total) {
@@ -37,6 +44,10 @@ void EmuThread::run() {
     emit LoadProgress(VideoCore::LoadCallbackStage::Complete, 0, 0);
 
     gpu.ReleaseContext();
+    if (stop_token.stop_requested()) {
+        QtCommon::system->ShutdownMainProcess();
+        return;
+    }
     gpu.Start();
 
     QtCommon::system->GetCpuManager().OnGpuReady();

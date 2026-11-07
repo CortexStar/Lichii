@@ -56,6 +56,7 @@
 #include "video_core/gpu.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
+#include "video_core/nup_shader_cache.h"
 #include "yuzu_cmd/emu_window/emu_window_sdl3.h"
 #ifdef HAS_OPENGL
 #include "yuzu_cmd/emu_window/emu_window_sdl3_gl.h"
@@ -541,6 +542,16 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
         return UnpackNup(*lp.unpack_nup_source, lp.filepath) ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
     }
 
+    if (lp.precompile_nup_source) {
+        FileSys::RealVfsFilesystem filesystem;
+        const auto file = filesystem.OpenFile(*lp.precompile_nup_source, FileSys::OpenMode::Read);
+        VideoCommon::NupShaderCache cache;
+        return cache.Prepare(file, std::filesystem::u8path(*lp.precompile_nup_source), {},
+            [](size_t value, size_t total) {
+                std::cout << "Preparing NUP shader archives " << value << '/' << total << '\n';
+            }) ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
+    }
+
     if (lp.edit_nup_source) {
         return EditNup(lp) ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
     }
@@ -667,6 +678,11 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     state->system.GetCpuManager().OnGpuReady();
 
     if (Settings::values.use_disk_shader_cache.GetValue()) {
+        const auto& path = state->system.GetCurrentApplicationFilePath();
+        state->system.Renderer().ReadRasterizer()->PrepareNupShaders(
+            Core::GetGameFileFromPath(state->system.GetFilesystem(), path),
+            std::filesystem::u8path(path), std::stop_token{},
+            [](VideoCore::LoadCallbackStage, size_t, size_t) {});
         state->system.Renderer().ReadRasterizer()->LoadDiskResources(
             state->system.GetApplicationProcessProgramID(), std::stop_token{},
             [](VideoCore::LoadCallbackStage, size_t value, size_t total) {});

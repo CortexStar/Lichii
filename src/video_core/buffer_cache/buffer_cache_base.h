@@ -310,6 +310,7 @@ public:
 
     void BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
                                   bool is_written, u32 indirect_offset = ~0U);
+    [[nodiscard]] u64 ComputeStorageBufferValidityMask() const;
 
     void UnbindComputeTextureBuffers();
 

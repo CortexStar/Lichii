@@ -9,6 +9,9 @@ import sys
 import tempfile
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "nx2"))
+from test_shader_archive import bnsh
+from test_shader_containers import sharcb
 
 BINARY = Path(sys.argv.pop(1)).resolve()
 NATIVE_EXIT = struct.pack("<4I", 0x794D, 0, 0x03800000, 0)
@@ -25,6 +28,80 @@ def header(stage):
     if stage == 4:
         words[18] = 15
     return struct.pack("<20I", *words)
+
+
+def variable_storage_classes(data):
+    words = struct.unpack("<" + "I" * (len(data) // 4), data)
+    cursor, classes = 5, []
+    while cursor < len(words):
+        size, op = words[cursor] >> 16, words[cursor] & 0xffff
+        if not size or cursor + size > len(words):
+            raise ValueError("invalid SPIR-V extent")
+        if op == 59:  # OpVariable
+            classes.append(words[cursor + 3])
+        cursor += size
+    return classes
+
+
+def builtin_load_count(data, builtin):
+    words = struct.unpack("<" + "I" * (len(data) // 4), data)
+    cursor, variables, loads = 5, set(), []
+    while cursor < len(words):
+        size, op = words[cursor] >> 16, words[cursor] & 0xffff
+        if not size or cursor + size > len(words):
+            raise ValueError("invalid SPIR-V extent")
+        if op == 71 and size == 4 and words[cursor + 2] == 11 and words[cursor + 3] == builtin:
+            variables.add(words[cursor + 1])
+        if op == 61:
+            loads.append(words[cursor + 3])
+        cursor += size
+    return sum(pointer in variables for pointer in loads)
+
+
+def linked_archive():
+    data = bytearray(bnsh())
+    data.extend(bytes(0x200))
+    struct.pack_into("<I", data, 0x1c, len(data))
+    struct.pack_into("<Q", data, 0x128, 0x300)
+    struct.pack_into("<QQII", data, 0x308, 0x340, 0x400, 0x100, 104)
+    struct.pack_into("<I", data, 0x15c, 104)
+    struct.pack_into("<I", data, 0x400, 5 << 10)
+    for offset, stage in ((0x180, 0), (0x340, 1)):
+        struct.pack_into("<Q", data, offset, 0x000000c998761234)
+        struct.pack_into("<I", data, offset + 56, 144)
+        struct.pack_into("<II", data, offset + 64, 144, 144)
+        struct.pack_into("<I", data, offset + 84, stage << 16)
+    data[0x280:0x290] = NATIVE_EXIT
+    data[0x480:0x490] = NATIVE_EXIT
+    return data
+
+
+def mesh_archive(with_task=True, task_payload=128):
+    data = bytearray(bnsh())
+    data.extend(bytes(0xc00))
+    struct.pack_into("<I", data, 8, 0x00020401)
+    struct.pack_into("<I", data, 0x1c, len(data))
+    struct.pack_into("<Q", data, 0x100, 2)
+    struct.pack_into("<Q", data, 0x108, 0)
+    stages = [(4, 0x128, 1, 5), (8, 0x148, 7, 1)]
+    if with_task:
+        stages.insert(1, (7, 0x140, 6, 1))
+    for index, (stage, slot, control_stage, header_stage) in enumerate(stages):
+        record, control, code = 0x300 + index * 0x40, 0x500 + index * 0x100, 0x800 + index * 0x200
+        struct.pack_into("<Q", data, slot, record)
+        struct.pack_into("<QQII", data, record + 8, control, code, 256, 224)
+        struct.pack_into("<Q", data, control, 0x000000c998761234)
+        struct.pack_into("<I", data, control + 56, 144)
+        struct.pack_into("<II", data, control + 64, 256, 256)
+        struct.pack_into("<I", data, control + 84, control_stage << 16)
+        struct.pack_into("<I", data, code, header_stage << 10)
+        data[code + 128:code + 144] = NATIVE_EXIT
+        if stage in (7, 8):
+            struct.pack_into("<HH", data, control + 0x58, 32, task_payload if stage == 7 else 128)
+        if stage == 8:
+            data[control + 0x5e] = int(with_task)
+            struct.pack_into("<HH", data, control + 0x60, 3, 1)
+    return data
 
 
 def environment(version, stage, instructions=(MAXWELL_EXIT,), formats=()):
@@ -268,6 +345,63 @@ class CliTests(unittest.TestCase):
         self.assertTrue(any("workgroup 1x1x1" in item for item in result["assumptions"]))
         self.validate()
 
+    def test_compute_archive_control_supplies_workgroup_without_inventing_resources(self):
+        source = self.write("native.bin", NATIVE_EXIT)
+        control = bytearray(224)
+        control[:8] = bytes.fromhex("34127698c9000000")
+        struct.pack_into("<I", control, 56, len(NATIVE_EXIT))
+        struct.pack_into("<II", control, 64, len(NATIVE_EXIT), len(NATIVE_EXIT))
+        struct.pack_into("<IIII", control, 84, 5 << 16, 64, 1, 1)
+        struct.pack_into("<H", control, 0xba, 16)
+        path = self.write("native.control", control)
+        result = self.run_cli(source, "--stage", "compute", "--control", path,
+                              "--output", self.output)
+        self.assertEqual(result["declared_workgroup"], [64, 1, 1])
+        self.assertFalse(any("workgroup 1x1x1" in item for item in result["assumptions"]))
+        self.assertTrue(any(op == 16 and args[1:] == (17, 64, 1, 1)
+                            for op, args in spirv_instructions(self.output.read_bytes())))
+        self.validate()
+        struct.pack_into("<I", control, 88, 0)
+        path.write_bytes(control)
+        self.run_cli(source, "--stage", "compute", "--control", path,
+                     "--output", self.output, code=2)
+
+    def test_archive_control_does_not_guess_shared_allocation(self):
+        code = struct.pack("<4I", 0x00087984, 0, 0xa00, 0) + NATIVE_EXIT
+        source = self.write("shared.bin", code)
+        control = bytearray(224)
+        control[:8] = bytes.fromhex("34127698c9000000")
+        struct.pack_into("<I", control, 56, len(code))
+        struct.pack_into("<II", control, 64, len(code), len(code))
+        struct.pack_into("<IIII", control, 84, 5 << 16, 64, 1, 1)
+        struct.pack_into("<H", control, 0xba, 16)
+        path = self.write("shared.control", control)
+        result = self.run_cli(source, "--stage", "compute", "--control", path,
+                              "--output", self.output, code=1)
+        self.assertEqual(result["phase"], "context")
+        self.assertIn("shared memory", result["error"]["message"])
+        self.assertFalse(self.output.exists())
+
+    def test_archive_constant_tail_is_not_executed_as_native_code(self):
+        code = NATIVE_EXIT + struct.pack("<I", 0x3f800000)
+        source = self.write("constant-tail.bin", code)
+        control = bytearray(224)
+        control[:8] = bytes.fromhex("34127698c9000000")
+        struct.pack_into("<I", control, 56, len(NATIVE_EXIT))
+        struct.pack_into("<II", control, 64, len(NATIVE_EXIT), len(code))
+        struct.pack_into("<IIII", control, 84, 5 << 16, 32, 1, 1)
+        struct.pack_into("<H", control, 0xba, 16)
+        path = self.write("constant-tail.control", control)
+        result = self.run_cli(source, "--stage", "compute", "--control", path,
+                              "--capture-extent", "--output", self.output)
+        self.assertEqual(result["archive_constant_bytes"], 4)
+        self.assertEqual(result["source_bytes"], 16)
+        self.validate()
+        struct.pack_into("<I", control, 68, len(code) + 4)
+        path.write_bytes(control)
+        self.run_cli(source, "--stage", "compute", "--control", path,
+                     "--output", self.output, code=2)
+
     def test_exact_native_header_stages(self):
         for stage, name in enumerate(STAGES[:5]):
             with self.subTest(stage=name):
@@ -311,7 +445,7 @@ class CliTests(unittest.TestCase):
 
     def test_both_cache_versions_all_stages(self):
         """Validate ordinary stage output for each supported cache version."""
-        for version in (46, 47, 48, 49, 50, 51, 52, 53):
+        for version in (46, 47, 48, 49, 50, 51, 52, 53, 54):
             for stage, name in enumerate(STAGES):
                 with self.subTest(version=version, stage=name):
                     capture = self.write("shader.env", environment(version, stage))
@@ -427,6 +561,130 @@ class CliTests(unittest.TestCase):
                               "--lower-only", self.output, code=1)
         self.assertEqual(result["phase"], "context")
         self.assertIn("complete runtime capture", result["error"]["message"])
+
+    def test_archive_info_preserves_linked_stages_and_container_identity(self):
+        data = bytearray(bnsh())
+        data.extend(bytes(0x200))
+        struct.pack_into("<I", data, 0x1c, len(data))
+        struct.pack_into("<Q", data, 0x128, 0x300)
+        struct.pack_into("<QQII", data, 0x308, 0x340, 0x400, 0x100, 4)
+        struct.pack_into("<I", data, 0x400, 5 << 10)
+        data[0x340:0x344] = b"frag"
+        combined = bytes(data) + bnsh(4)
+        source = self.write("linked.bin", combined)
+        result = self.run_cli("--archive-info", source)
+        self.assertEqual(result["vertex_fragment_variations"], 1)
+        groups = result["linked_variations"]
+        self.assertEqual(len(groups), 2)
+        self.assertEqual([g["container_offset"] for g in groups], [0, len(data)])
+        self.assertEqual([g["variation"] for g in groups], [0, 0])
+        self.assertEqual(set(groups[0]["stages"]), {"vertex", "fragment"})
+        self.assertEqual(set(groups[1]["stages"]), {"fragment"})
+        frag = groups[0]["stages"]["fragment"]
+        self.assertEqual(combined[frag["control_offset"]:frag["control_offset"] +
+                                  frag["control_size"]], b"frag")
+
+    def test_archive_info_does_not_invent_bahs_linkage(self):
+        source = self.write("unlinked.sharcb", sharcb()[0])
+        result = self.run_cli("--archive-info", source)
+        self.assertEqual(result["linked_variations"], [])
+        self.assertEqual(result["unlinked_stage_records"], 2)
+
+    def test_graphics_probe_emits_linked_modules_under_explicit_contract(self):
+        source = self.write("linked.bnsh", linked_archive())
+        output = self.output.parent / "linked-output"
+        result = self.run_cli("--graphics-probe", source, output)
+        self.assertEqual(result["graphics_probe"]["compiled_groups"], 1)
+        report = json.loads((output / "report.json").read_text())
+        self.assertIn("Not a runtime or final-driver-pipeline cache", report["contract"])
+        self.assertEqual(report["results"][0]["status"], "compiled_under_contract")
+        self.assertEqual(len(report["results"][0]["modules"]), 2)
+        for name in report["results"][0]["modules"]:
+            self.output.write_bytes((output / name).read_bytes())
+            self.validate()
+
+    def test_graphics_probe_defers_missing_archive_context(self):
+        data = linked_archive()
+        data[0x180:0x188] = bytes(8)
+        source = self.write("missing-control.bnsh", data)
+        output = self.output.parent / "missing-output"
+        result = self.run_cli("--graphics-probe", source, output)
+        self.assertEqual(result["graphics_probe"]["compiled_groups"], 0)
+        report = json.loads((output / "report.json").read_text())
+        self.assertIn("extents are unavailable", report["results"][0]["reason"])
+        self.assertEqual(list(output.glob("*.spv")), [])
+
+    def test_graphics_probe_uses_archive_mesh_and_task_dimensions(self):
+        source = self.write("mesh.bnsh", mesh_archive())
+        output = self.output.parent / "mesh-output"
+        result = self.run_cli("--graphics-probe", source, output)
+        self.assertEqual(result["graphics_probe"]["compiled_groups"], 1)
+        report = json.loads((output / "report.json").read_text())
+        group = report["results"][0]
+        self.assertEqual(group["mesh_contract"]["threads"], 32)
+        self.assertEqual(group["mesh_contract"]["payload_bytes"], 128)
+        self.assertIn("not inferred", group["mesh_contract"]["topology"])
+        self.assertEqual(len(group["modules"]), 3)
+        for name in group["modules"]:
+            self.output.write_bytes((output / name).read_bytes())
+            if name.endswith(("-task.spv", "-mesh.spv")):
+                self.assertIn(5402, variable_storage_classes(self.output.read_bytes()))
+            self.validate()
+
+    def test_graphics_probe_rejects_mismatched_task_payload(self):
+        source = self.write("mesh.bnsh", mesh_archive(task_payload=256))
+        output = self.output.parent / "mesh-mismatch-output"
+        result = self.run_cli("--graphics-probe", source, output)
+        self.assertEqual(result["graphics_probe"]["compiled_groups"], 0)
+        report = json.loads((output / "report.json").read_text())
+        self.assertIn("launch layout", report["results"][0]["reason"])
+
+    def test_graphics_probe_mesh_without_task_does_not_declare_payload(self):
+        source = self.write("mesh-no-task.bnsh", mesh_archive(with_task=False))
+        output = self.output.parent / "mesh-no-task-output"
+        result = self.run_cli("--graphics-probe", source, output)
+        self.assertEqual(result["graphics_probe"]["compiled_groups"], 1)
+        report = json.loads((output / "report.json").read_text())
+        mesh_path = next(output / p for p in report["results"][0]["modules"] if p.endswith("-mesh.spv"))
+        data = mesh_path.read_bytes()
+        self.assertNotIn(5402, variable_storage_classes(data))  # TaskPayloadWorkgroupEXT
+        self.output.write_bytes(data)
+        self.validate()
+
+    def test_native_isberd_distinguishes_workgroup_from_absent_input(self):
+        modules = []
+        for skew in (0, 1):
+            data = mesh_archive(with_task=False)
+            read = 0x7923 | (255 << 24) | (1 << 75) | (3 << 76) | (skew << 78)
+            write = 0x7927 | (255 << 24) | (1 << 75) | (3 << 76) | (1 << 79)
+            data[0xa80:0xab0] = read.to_bytes(16, "little") + write.to_bytes(16, "little") + NATIVE_EXIT
+            struct.pack_into("<I", data, 0x600 + 56, 176)
+            source = self.write(f"isberd-{skew}.bnsh", data)
+            output = self.output.parent / f"isberd-{skew}-output"
+            result = self.run_cli("--graphics-probe", source, output)
+            self.assertEqual(result["graphics_probe"]["compiled_groups"], 1)
+            report = json.loads((output / "report.json").read_text())
+            path = next(output / p for p in report["results"][0]["modules"] if p.endswith("-mesh.spv"))
+            modules.append(path.read_bytes())
+            self.output.write_bytes(modules[-1])
+            self.validate()
+        self.assertNotEqual(modules[0], modules[1], "native ISBERD mode was discarded")
+        self.assertEqual(builtin_load_count(modules[0], 26), 0)  # WorkgroupId
+        self.assertGreater(builtin_load_count(modules[1], 26), 0)
+
+    def test_graphics_probe_texture_contract_is_explicit(self):
+        source = self.write("linked.bnsh", linked_archive())
+        output = self.output.parent / "texture-contract-output"
+        self.run_cli("--graphics-probe", source, output, "--float-textures")
+        report = json.loads((output / "report.json").read_text())
+        self.assertIn("raw handles are not read or invented", report["texture_contract"])
+        self.assertEqual(report["results"][0]["texture_dependencies"], [[], []])
+
+    def test_graphics_probe_rejects_unknown_contract_option(self):
+        source = self.write("linked.bnsh", linked_archive())
+        output = self.output.parent / "invalid-contract-output"
+        self.run_cli("--graphics-probe", source, output, "--unknown-contract", code=2)
+        self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":

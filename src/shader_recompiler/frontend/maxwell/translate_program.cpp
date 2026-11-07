@@ -90,59 +90,6 @@ void CollectInterpolationInfo(Environment& env, IR::Program& program) {
     }
 }
 
-void AddNVNStorageBuffers(IR::Program& program, const HostTranslateInfo& host_info) {
-    if (!program.info.uses_global_memory) {
-        return;
-    }
-    const u32 driver_cbuf{0};
-    const u32 descriptor_size{0x10};
-    const u32 num_buffers{16};
-    const u32 base{[&] {
-        switch (program.stage) {
-        case Stage::VertexA:
-        case Stage::VertexB:
-        case Stage::Task: // bound in the vertex slot
-            return 0x110u;
-        case Stage::TessellationControl:
-            return 0x210u;
-        case Stage::TessellationEval:
-        case Stage::Mesh: // bound in the tessellation slot
-            return 0x310u;
-        case Stage::Geometry:
-            return 0x410u;
-        case Stage::Fragment:
-            return 0x510u;
-        case Stage::Compute:
-            return 0x310u;
-        }
-        throw InvalidArgument("Invalid stage {}", program.stage);
-    }()};
-    auto& descs{program.info.storage_buffers_descriptors};
-    for (u32 index = 0; index < num_buffers; ++index) {
-        if (!program.info.nvn_buffer_used[index]) {
-            continue;
-        }
-        const u32 offset{base + index * descriptor_size};
-        const auto it{std::ranges::find_if(descs, [=](const StorageBufferDescriptor& desc) {
-            return desc.cbuf_index == driver_cbuf && desc.cbuf_offset == offset;
-        })};
-        if (it != descs.end()) {
-            it->is_written |= program.info.stores_global_memory;
-            continue;
-        }
-        if (descs.size() >= Optimization::StorageBufferLimit(host_info)) {
-            throw NotImplementedException("Binding {} storage buffers to a stage that binds {}",
-                                          descs.size() + 1,
-                                          Optimization::StorageBufferLimit(host_info));
-        }
-        descs.push_back({
-            .cbuf_index = driver_cbuf,
-            .cbuf_offset = offset,
-            .count = 1,
-            .is_written = program.info.stores_global_memory,
-        });
-    }
-}
 
 using IR::IsLegacyAttribute; //rescoped to attribute.h to make it visible in load_store_attribute.cpp IPA
 
@@ -480,7 +427,15 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
     Optimization::VendorWorkaroundPass(program);
 
     CollectInterpolationInfo(env, program);
-    AddNVNStorageBuffers(program, normalized_host_info);
+    Optimization::AddNVNStorageBuffers(program);
+    const size_t storage_limit{Optimization::StorageBufferLimit(normalized_host_info)};
+    if (program.info.storage_buffers_descriptors.size() > storage_limit) {
+        throw NotImplementedException("Binding {} storage buffers to a stage that binds {}",
+                                      program.info.storage_buffers_descriptors.size(), storage_limit);
+    }
+    if (env.UsesStaticResourceLayout()) {
+        program.info.used_storage_buffer_types |= IR::Type::U32;
+    }
     Optimization::LimitSampledTextureArrays(program, normalized_host_info);
     return program;
 }

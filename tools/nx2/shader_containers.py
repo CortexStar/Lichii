@@ -319,13 +319,17 @@ def parse_sharcb(data):
                 code_relative + allocation > pool_size):
             raise ArchiveError("invalid BAHS code extent")
         code_offset = pool + code_relative
-        code_size = declared if stage == "compute" else instruction_allocation
+        # The code pool also carries C1 constants after the padded instructions.
+        # Keep the complete allocation; capture/compilation uses the declared extent.
+        code_size = allocation
         location = (code_offset, code_size)
         if location not in allocations:
             allocations[location] = data[code_offset:code_offset + code_size]
         code = allocations[location]
         origin = {"variation": index, "slot": slot, "record_offset": cursor,
-                  "code_offset": code_offset, "control_offset": control_offset}
+                  "code_offset": code_offset, "control_offset": control_offset,
+                  "instruction_bytes": declared, "constant_offset": instruction_allocation,
+                  "constant_bytes": allocation - instruction_allocation}
         if stage in ("task", "mesh"):
             header_type = (struct.unpack_from("<I", extent(code, 0, 4))[0] >> 10) & 15
             if (len(code) <= 128 or (len(code) - 128) % 16 or

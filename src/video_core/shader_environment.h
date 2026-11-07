@@ -29,6 +29,7 @@ class Memorymanager;
 }
 
 namespace VideoCommon {
+class NupShaderCache;
 
 /// A native (Switch 2) program after capture and lowering to Maxwell code. The shader cache keeps
 /// it so the environments built for the program's pipelines don't capture and lower it again.
@@ -44,6 +45,8 @@ struct LoweredNativeCode {
     /// (the engine's register value is used).
     u32 texture_bound = ~0U;
 };
+
+u64 NativeShaderHash(std::span<const u64> code);
 
 class GenericEnvironment : public Shader::Environment {
 public:
@@ -122,6 +125,7 @@ protected:
                                                           bool geometry_stage);
     size_t native_source_size{};
     std::shared_ptr<const LoweredNativeCode> lowered_native;
+    const NupShaderCache* nup_shader_cache{};
 
     Tegra::Texture::TICEntry ReadTextureInfo(GPUVAddr tic_addr, u32 tic_limit,
                                              bool via_header_index, u32 raw);
@@ -161,7 +165,8 @@ public:
                                  Tegra::MemoryManager& gpu_memory_,
                                  Tegra::Engines::Maxwell3D::Regs::ShaderType program,
                                  GPUVAddr program_base_, u32 start_address_,
-                                 std::shared_ptr<const LoweredNativeCode> lowered_native_ = {});
+                                 std::shared_ptr<const LoweredNativeCode> lowered_native_ = {},
+                                 const NupShaderCache* nup_shader_cache_ = nullptr);
 
     ~GraphicsEnvironment() override = default;
 
@@ -188,7 +193,8 @@ public:
     explicit ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_compute_,
                                 Tegra::MemoryManager& gpu_memory_, GPUVAddr program_base_,
                                 u32 start_address_,
-                                std::shared_ptr<const LoweredNativeCode> lowered_native_ = {});
+                                std::shared_ptr<const LoweredNativeCode> lowered_native_ = {},
+                                const NupShaderCache* nup_shader_cache_ = nullptr);
 
     ~ComputeEnvironment() override = default;
 

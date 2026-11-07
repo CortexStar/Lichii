@@ -190,14 +190,14 @@ AddJsonPackage(spirv-headers)
 
 # Sirit
 if (YUZU_USE_BUNDLED_SIRIT)
-    AddJsonPackage(sirit-ci)
-else()
-    AddJsonPackage(sirit)
-    if(MSVC AND CXX_CLANG)
-        target_compile_options(siritobj PRIVATE
-            $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-error=unused-command-line-argument>
-        )
-    endif()
+    message(STATUS "Building patched sirit source: bundled v1.0.7 lacks OpArrayLength")
+endif()
+# The local OpArrayLength extension is required by static resource bounds.
+AddJsonPackage(NAME sirit FORCE_BUNDLED_PACKAGE ON)
+if(MSVC AND CXX_CLANG)
+    target_compile_options(siritobj PRIVATE
+        $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-error=unused-command-line-argument>
+    )
 endif()
 
 # reshadefx

@@ -10,6 +10,7 @@
 #include "shader_recompiler/frontend/ir/program.h"
 #include "shader_recompiler/frontend/ir/value.h"
 #include "shader_recompiler/ir_opt/passes.h"
+#include "shader_recompiler/nvn.h"
 #include "shader_recompiler/shader_info.h"
 
 namespace Shader::Optimization {
@@ -997,26 +998,7 @@ void GatherInfoFromHeader(Environment& env, Info& info) {
 
 void CollectShaderInfoPass(Environment& env, IR::Program& program) {
     Info& info{program.info};
-    const u32 base{[&] {
-        switch (program.stage) {
-        case Stage::VertexA:
-        case Stage::VertexB:
-        case Stage::Task: // bound in the vertex slot
-            return 0x110u;
-        case Stage::TessellationControl:
-            return 0x210u;
-        case Stage::TessellationEval:
-        case Stage::Mesh: // bound in the tessellation slot
-            return 0x310u;
-        case Stage::Geometry:
-            return 0x410u;
-        case Stage::Fragment:
-            return 0x510u;
-        case Stage::Compute:
-            return 0x310u;
-        }
-        throw InvalidArgument("Invalid stage {}", program.stage);
-    }()};
+    const u32 base{NvnStorageBufferBase(program.stage)};
     info.nvn_buffer_base = base;
     if (program.stage == Stage::Task || program.stage == Stage::Mesh) {
         // The stage buffer reads the workgroup index; the epilogue splits work by invocation.
@@ -1030,6 +1012,39 @@ void CollectShaderInfoPass(Environment& env, IR::Program& program) {
         }
     }
     GatherInfoFromHeader(env, info);
+}
+
+void AddNVNStorageBuffers(IR::Program& program) {
+    if (!program.info.uses_global_memory) {
+        return;
+    }
+    const u32 driver_cbuf{0};
+    const u32 descriptor_size{0x10};
+    const u32 num_buffers{16};
+    const u32 base{NvnStorageBufferBase(program.stage)};
+    auto& descs{program.info.storage_buffers_descriptors};
+    for (u32 index = 0; index < num_buffers; ++index) {
+        if (!program.info.nvn_buffer_used[index]) {
+            continue;
+        }
+        const u32 offset{base + index * descriptor_size};
+        const auto it{std::ranges::find_if(descs, [=](const StorageBufferDescriptor& desc) {
+            return desc.cbuf_index == driver_cbuf && desc.cbuf_offset == offset;
+        })};
+        if (it != descs.end()) {
+            it->is_written |= program.info.stores_global_memory;
+            continue;
+        }
+        if (descs.size() == descs.capacity()) {
+            throw NotImplementedException("NVN storage buffer descriptor limit exceeded");
+        }
+        descs.push_back({
+            .cbuf_index = driver_cbuf,
+            .cbuf_offset = offset,
+            .count = 1,
+            .is_written = program.info.stores_global_memory,
+        });
+    }
 }
 
 } // namespace Shader::Optimization

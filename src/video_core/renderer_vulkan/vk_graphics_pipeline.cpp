@@ -23,6 +23,7 @@
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_frame_dump.h"
+#include "video_core/renderer_vulkan/graphics_pipeline_library.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -1269,7 +1270,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     const bool unoptimized = (flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT) != 0;
     const auto trace_begin = std::chrono::steady_clock::now();
     TracePipelineBuild("BEGIN", "graphics", key.Hash(), key.unique_hashes, unoptimized);
-    pipeline = device.GetLogical().CreateGraphicsPipeline({
+    const VkGraphicsPipelineCreateInfo create_info{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext = nullptr,
         .flags = flags,
@@ -1289,7 +1290,39 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .subpass = 0,
         .basePipelineHandle = nullptr,
         .basePipelineIndex = 0,
-    }, *pipeline_cache);
+    };
+    const bool has_fragment = std::ranges::any_of(shader_stages, [](const auto& stage) {
+        return stage.stage == VK_SHADER_STAGE_FRAGMENT_BIT;
+    });
+    const bool use_libraries = Settings::CurrentProgramIsSwitch2() &&
+        device.CanUseGraphicsPipelineLibraries() && *pipeline_cache != VK_NULL_HANDLE &&
+        has_fragment && !rasterization_ci.rasterizerDiscardEnable;
+    if (use_libraries) {
+        try {
+            std::array<vk::Pipeline, 4> libraries;
+            std::array<VkPipeline, 4> handles{};
+            u32 count = 0;
+            ForEachGraphicsPipelineLibrary(create_info, [&](const auto& info) {
+                libraries[count] = device.GetLogical().CreateGraphicsPipeline(info, *pipeline_cache);
+                handles[count] = *libraries[count];
+                ++count;
+            });
+            const VkPipelineLibraryCreateInfoKHR link{
+                VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR, nullptr, count, handles.data()};
+            pipeline = device.GetLogical().CreateGraphicsPipeline(
+                LinkedGraphicsPipelineInfo(create_info, link), *pipeline_cache);
+        } catch (const vk::Exception& error) {
+            if (error.GetResult() == VK_ERROR_DEVICE_LOST) {
+                throw;
+            }
+            LOG_WARNING(Render_Vulkan,
+                        "Graphics pipeline {:016x}: library build failed ({}), retrying monolithic build",
+                        key.Hash(), error.what());
+            pipeline = device.GetLogical().CreateGraphicsPipeline(create_info, *pipeline_cache);
+        }
+    } else {
+        pipeline = device.GetLogical().CreateGraphicsPipeline(create_info, *pipeline_cache);
+    }
     TracePipelineBuild("END", "graphics", key.Hash(), key.unique_hashes, unoptimized,
                        std::chrono::duration<double, std::milli>(
                            std::chrono::steady_clock::now() - trace_begin)

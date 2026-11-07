@@ -117,6 +117,9 @@ struct RuntimeInfo {
 
     /// Dual source blending
     bool dual_source_blend{};
+
+    /// A mesh stage can read task payload only when a task stage precedes it.
+    bool mesh_has_task{};
 };
 
 } // namespace Shader

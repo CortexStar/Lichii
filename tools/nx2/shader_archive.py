@@ -18,6 +18,68 @@ def _range(data, offset, size):
     return data[offset:offset + size]
 
 
+def _name(data, offset):
+    length, = struct.unpack("<H", _range(data, offset, 2))
+    text = _range(data, offset + 2, length)
+    if _range(data, offset + 2 + length, 1) != b"\0":
+        raise ArchiveError("unterminated shader metadata name")
+    return text.decode("utf-8")
+
+
+def _dictionary_names(data, offset, magic=b"_DIC"):
+    if not offset:
+        return []
+    signature, count = struct.unpack("<4sI", _range(data, offset, 8))
+    if signature != magic:
+        raise ArchiveError("invalid shader metadata dictionary")
+    nodes = _range(data, offset + 8, (count + 1) * 16)
+    return [_name(data, struct.unpack_from("<Q", nodes, index * 16 + 8)[0])
+            for index in range(1, count + 1)]
+
+
+def inspect_bfsha_models(data):
+    """Read observed v9 model metadata, keeping absent defaults distinct from zero.
+
+    Block indices here are logical archive indices, not runtime constant banks.
+    Layout reference: ShaderLibrary Switch/BfshaLoader.ReadShaderModel and
+    ReadBfshaUniformBlock at 790dd2e501926e536a9193907d1256d446104162.
+    """
+    _range(data, 0, 0x80)
+    if (data[:4] != b"FSHA" or data[12:14] != b"\xff\xfe" or
+            struct.unpack_from("<I", data, 28)[0] != len(data) or
+            struct.unpack_from("<H", data, 10)[0] != 9):
+        raise ArchiveError("unsupported BFSHA model metadata layout")
+    models, = struct.unpack_from("<Q", data, 0x48)
+    count, = struct.unpack_from("<H", data, 0x78)
+    _range(data, models, count * 0x100)
+    result = []
+    for index in range(count):
+        start = models + index * 0x100
+        qword = lambda off: struct.unpack_from("<Q", data, start + off)[0]
+        name = qword(0)
+        blocks = qword(88)
+        block_names = _dictionary_names(data, qword(96), b"\0" * 4)
+        block_count = data[start + 239]
+        if block_names and len(block_names) != block_count:
+            raise ArchiveError("BFSHA uniform block count disagrees with dictionary")
+        _range(data, blocks, block_count * 32)
+        uniforms = []
+        for block in range(block_count):
+            position = blocks + block * 32
+            default, = struct.unpack_from("<Q", data, position + 16)
+            logical_index, kind, size = struct.unpack_from("<BBH", data, position + 24)
+            payload = _range(data, default, size).hex() if default else None
+            uniforms.append({"name": block_names[block] if block_names else None,
+                             "index": logical_index, "type": kind, "size": size,
+                             "default_data": payload})
+        result.append({"name": _name(data, name) if name else None,
+                       "bnsh_offset": qword(168), "uniform_blocks": uniforms,
+                       "samplers": _dictionary_names(data, qword(64), b"\0" * 4),
+                       "images": _dictionary_names(data, qword(80), b"\0" * 4),
+                       "storage_buffers": _dictionary_names(data, qword(120), b"\0" * 4)})
+    return result
+
+
 def parse_sarc(data: bytes) -> list[tuple[str, bytes]]:
     _range(data, 0, 0x20)
     if data[:4] != b"SARC":
@@ -65,6 +127,42 @@ def parse_sarc(data: bytes) -> list[tuple[str, bytes]]:
             raise ArchiveError("invalid SARC member range")
         result.append((name, _range(data, data_offset + start, end - start)))
     return result
+
+
+def inspect_bnsh_reflection(data: bytes, program: int, stage_index: int) -> dict:
+    """Read the resource dictionaries without inventing missing runtime values.
+
+    Layout reference: ShaderLibrary's pinned BnshLoader.ReadReflectionData and
+    BnshShaderReflectionHeader. Scalar fields are retained raw: NVN2's layout is
+    not identical to the older NVN header.
+    """
+    table, = struct.unpack("<Q", _range(data, program + 0x78, 8))
+    if not table:
+        return {"present": False}
+    pointer, = struct.unpack("<Q", _range(data, table + stage_index * 8, 8))
+    if not pointer:
+        return {"present": False}
+    header = _range(data, pointer, 96)
+    dictionaries = {}
+    for kind, offset in zip(("inputs", "outputs", "samplers", "uniform_buffers",
+                             "storage_buffers"), struct.unpack_from("<5Q", header)):
+        dictionaries[kind] = _dictionary_names(data, offset)
+    return {"present": True, "resources": dictionaries,
+            "raw_scalar_fields": list(struct.unpack_from("<10i", header, 40))}
+
+
+def declared_compute_workgroup(code: bytes, control: bytes):
+    """Read the workgroup declaration of the observed NVN2 c9 control record."""
+    if (len(control) < 100 or control[:8] != bytes.fromhex("34127698c9000000") or
+            struct.unpack_from("<I", control, 84)[0] >> 16 != 5):
+        return None
+    size, = struct.unpack_from("<I", control, 56)
+    if not size or size > len(code) or size % 16:
+        raise ArchiveError("invalid compute control code extent")
+    dimensions = struct.unpack_from("<3I", control, 88)
+    if not all(0 < value <= 1024 for value in dimensions):
+        raise ArchiveError("invalid declared compute workgroup")
+    return list(dimensions)
 
 
 def parse_bnsh(data: bytes) -> list[dict]:
@@ -123,9 +221,17 @@ def parse_bnsh(data: bytes) -> list[dict]:
                         raise ArchiveError("invalid BNSH task/mesh stage metadata")
                 elif header_type != index + 1:
                     raise ArchiveError("BNSH graphics stage disagrees with native header")
+            metadata = {}
+            try:
+                metadata["reflection"] = inspect_bnsh_reflection(data, program, index)
+                if stage == "compute":
+                    metadata["declared_workgroup"] = declared_compute_workgroup(code, control)
+            except (ArchiveError, UnicodeDecodeError) as error:
+                metadata["reflection_error"] = str(error)
             result.append(dict(variation=variation, stage=stage, code=code, control=control,
                                code_offset=code_offset, control_offset=control_offset,
-                               api_type=api_type, api_version=api_version, version=version))
+                               api_type=api_type, api_version=api_version, version=version,
+                               **metadata))
     return result
 
 
