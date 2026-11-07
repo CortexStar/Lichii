@@ -653,7 +653,7 @@ private:
                 Tegra::Nx2AddSparseSpan(start, size);
                 LOG_INFO(Service, "nx2:gpu 214 sparse region [{:#x}, {:#x}] backed as the GPU writes it",
                          start, last);
-            } else if (LazyGpuOnlyRegions()) {
+            } else if (LazyGpuOnlyRegions() && !KeepsConstantsInGpuOnlyRegions()) {
                 // The rest is written by the host GPU, not through guest memory (title 1's and
                 // title 4's render targets, 285-300 MB regions): like a sparse region it gets a
                 // device range of its own and memory per block only when something writes guest
@@ -836,10 +836,16 @@ private:
         // pool, title 4's six regions left it 1.8 GB less than the kernel reports to it. Not
         // cleared: the GPU writes these before reading them, and touching 300 MB would commit it
         // on the host.
-        if (R_FAILED(kernel_core.MemoryManager().AllocateAndOpen(
+        // A title that fills the system pool (The Duskbloods network test's six regions) falls
+        // back to the application pool.
+        const auto allocate = [&](Kernel::KMemoryManager::Pool pool) {
+            return kernel_core.MemoryManager().AllocateAndOpen(
                 pg.get(), size / YUZU_PAGESIZE,
-                Kernel::KMemoryManager::EncodeOption(Kernel::KMemoryManager::Pool::SystemNonSecure,
-                                                     Kernel::KMemoryManager::Direction::FromBack)))) {
+                Kernel::KMemoryManager::EncodeOption(pool,
+                                                     Kernel::KMemoryManager::Direction::FromBack));
+        };
+        if (R_FAILED(allocate(Kernel::KMemoryManager::Pool::SystemNonSecure)) &&
+            R_FAILED(allocate(Kernel::KMemoryManager::Pool::Application))) {
             if (log_failure) {
                 LOG_ERROR(Service, "nx2:gpu 214 could not allocate {:#x} bytes", size);
             }
@@ -1063,6 +1069,13 @@ private:
     }
 
     // EDEN_NX2_GPU_ONLY_LAZY=0 backs GPU-only regions whole, as before.
+    // The Duskbloods network test binds constant buffers there and the CPU writes them, so unbacked
+    // blocks read as zero and nothing draws.
+    bool KeepsConstantsInGpuOnlyRegions() const {
+        const auto* const process = system.ApplicationProcess();
+        return process != nullptr && process->GetProgramId() == 0x0400D1D02399A000ULL;
+    }
+
     static bool LazyGpuOnlyRegions() {
         static const bool lazy = [] {
             const char* value = std::getenv("EDEN_NX2_GPU_ONLY_LAZY");
