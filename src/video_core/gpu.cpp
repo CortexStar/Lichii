@@ -309,9 +309,13 @@ struct GPU::Impl {
         }
         // The GPU thread submitted the downloads without waiting for the host GPU: this thread
         // waits for them and writes them to guest memory, while the GPU thread goes on.
+        const u64 finish_start = Stats::Now();
         renderer->ReadRasterizer()->FinishRead(raster_area.start_address,
                                                raster_area.end_address - raster_area.start_address);
-        Stats::RecordReactive(raster_area, core, request, timing, Stats::Now());
+        const u64 woke = Stats::Now();
+        timing.finish_ns = woke - finish_start;
+        timing.in_flight = raster_area.in_flight;
+        Stats::RecordReactive(raster_area, core, request, timing, woke);
         return raster_area;
     }
 

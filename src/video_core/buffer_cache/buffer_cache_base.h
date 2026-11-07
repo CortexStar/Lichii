@@ -778,6 +778,38 @@ private:
     PendingCpuWrites pending_cpu_writes;
     std::optional<Async_Buffer> current_buffer;
 
+    /// TEST (EDEN_NX2_READ_CHECK=n, 1 in n read downloads): what a synchronous flush of the read
+    /// would have copied, copied again in the same submission, to compare guest memory with once
+    /// the download is written.
+    struct ReadCheck {
+        Async_Buffer staging{};
+        /// src_offset: the device address copied; dst_offset: where it is in `staging`.
+        boost::container::small_vector<BufferCopy, 4> copies;
+        /// Replaced in guest memory since (ClearDownload): not compared.
+        Common::RangeSet<DAddr> changed;
+    };
+    struct ReadCheckTotals {
+        u64 next{};       ///< Read downloads seen, for the sampling
+        u64 checked{};    ///< Read downloads compared
+        u64 compared{};   ///< Bytes compared
+        u64 mismatched{}; ///< Bytes that differ from the synchronous copy
+        u64 uncovered{};  ///< Bytes a synchronous flush copies that no download brings
+        u64 logged{};     ///< Error lines so far (at most 16)
+        u64 last_log{};
+    };
+    ReadCheckTotals read_check{};
+    static u64 ReadCheckEvery() {
+        static const u64 every = [] {
+            const char* value = std::getenv("EDEN_NX2_READ_CHECK");
+            if (value == nullptr) {
+                return u64{0};
+            }
+            return (std::max)(u64{1}, static_cast<u64>(std::strtoull(value, nullptr, 10)));
+        }();
+        return every;
+    }
+    void CheckReadDownload(const ReadCheck& check, const Common::RangeSet<DAddr>& cpu_written);
+
     /// A DownloadMemoryForRead: its copies, and what is left of them to do once the host GPU has
     /// run them.
     struct ReadDownload {
@@ -792,6 +824,7 @@ private:
         /// No longer GPU-modified once written: a newer GPU write (MarkWrittenBuffer) or value in
         /// guest memory takes its bytes out.
         Common::RangeSet<DAddr> clean_ranges;
+        std::unique_ptr<ReadCheck> check; ///< TEST: EDEN_NX2_READ_CHECK
     };
     /// Oldest first, and written to guest memory in that order: none lands over newer bytes.
     std::deque<ReadDownload> read_downloads;

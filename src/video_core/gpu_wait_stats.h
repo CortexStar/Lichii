@@ -25,13 +25,14 @@
 // flush on the GPU thread and waits for it. Each wait is timed from the request to the wake-up and
 // split into: queue (until the GPU thread starts the flush), flush (applying the collected CPU
 // writes, then the downloads; "host GPU" is the time in Vulkan's Scheduler::Finish, waiting for
-// the host GPU) and wake (until the waiting thread runs again). Also counted: guest reads and
-// writes that take the rasterizer path, by core, with the time of their cache lookups
-// (GetFlushArea, OnCPUWrite: both take the cache locks the GPU thread holds while it draws); the
-// other sync operations guest threads wait for; the GPU thread's (and the split's back thread's)
-// idle time; every Scheduler::Finish and every wait for pending query results (FlushQueryResults);
-// the time between presents; and, for the pages that waited longest, the GPU writes that marked
-// them.
+// the host GPU), wake (until the waiting thread runs again) and the copies (the waiting thread's
+// own wait for the downloads the flush submitted, and writing them to guest memory: FinishRead).
+// Also counted: guest reads and writes that take the rasterizer path, by core, with the time of
+// their cache lookups (GetFlushArea, OnCPUWrite: both take the cache locks the GPU thread holds
+// while it draws); the other sync operations guest threads wait for; the GPU thread's (and the
+// split's back thread's) idle time; every Scheduler::Finish and every wait for pending query
+// results (FlushQueryResults); the time between presents; and, for the pages that waited longest,
+// the GPU writes that marked them.
 namespace VideoCommon::GpuWaitStats {
 
 /// One slot per guest core, the last one for every other thread.
@@ -104,6 +105,10 @@ struct FlushTiming {
     u64 host_ns{}; ///< Of the flush: time in Scheduler::Finish
     u64 finishes{};
     u64 bytes{}; ///< Downloaded by the flush
+    /// The reading thread, after the flush: waiting for its downloads and writing them to guest
+    /// memory (RasterizerInterface::FinishRead)
+    u64 finish_ns{};
+    bool in_flight{}; ///< No flush: only waited for an earlier read's downloads
 };
 
 struct HostWaits {
@@ -294,6 +299,8 @@ struct ReactiveTotals {
     u64 bytes{};
     u64 max_bytes{};
     u64 wake_ns{};
+    u64 finish_ns{};
+    u64 in_flight{};
     u64 other_areas{}; ///< Flushes of areas past MaxAreas
     std::array<u64, 3> count_by_source{};
     std::array<u64, 3> ns_by_source{};
@@ -314,12 +321,15 @@ inline void RecordReactive(const VideoCore::RasterizerDownloadArea& area, size_t
     ++totals.count;
     totals.wait_ns += wait;
     totals.max_ns = (std::max)(totals.max_ns, wait);
-    if (timing.start >= request && timing.end >= timing.start && woke >= timing.end) {
+    if (timing.start >= request && timing.end >= timing.start &&
+        woke >= timing.end + timing.finish_ns) {
         totals.queue_ns += timing.start - request;
         totals.apply_ns += timing.applied - timing.start;
         totals.flush_ns += timing.end - timing.start;
-        totals.wake_ns += woke - timing.end;
+        totals.wake_ns += woke - timing.end - timing.finish_ns;
     }
+    totals.finish_ns += timing.finish_ns;
+    totals.in_flight += timing.in_flight ? 1 : 0;
     totals.host_ns += timing.host_ns;
     totals.finishes += timing.finishes;
     totals.without_finish += timing.finishes == 0 ? 1 : 0;
@@ -466,10 +476,12 @@ inline void MaybeReport(bool split_active) {
         end_list();
         line += fmt::format(" | queue {:.1f} ms, flush {:.1f} ms (CPU writes {:.1f}, host GPU "
                             "{:.1f} in {} finishes, {} flushes without one; downloaded {} KiB, "
-                            "at most {} KiB), wake {:.1f} ms | by core:",
+                            "at most {} KiB), wake {:.1f} ms, then copies on the reading thread "
+                            "{:.1f} ms ({} reads only waited for an earlier read's) | by core:",
                             Ms(reactive.queue_ns), Ms(reactive.flush_ns), Ms(reactive.apply_ns),
                             Ms(reactive.host_ns), reactive.finishes, reactive.without_finish,
-                            reactive.bytes / 1024, reactive.max_bytes / 1024, Ms(reactive.wake_ns));
+                            reactive.bytes / 1024, reactive.max_bytes / 1024, Ms(reactive.wake_ns),
+                            Ms(reactive.finish_ns), reactive.in_flight);
         for (size_t i = 0; i < CoreSlots; ++i) {
             if (reactive.ns_by_core[i] == 0) {
                 continue;
