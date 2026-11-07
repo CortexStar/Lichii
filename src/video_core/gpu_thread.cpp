@@ -25,6 +25,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/gpu_wait_stats.h"
 #include "video_core/nx2_drain_check.h"
+#include "video_core/nx2_list_stats.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/renderer_base.h"
@@ -119,6 +120,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 auto* const rasterizer_ptr = renderer.ReadRasterizer();
                 if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
                     Profile::Scope scope{Profile::Zone::Push};
+                    Tegra::Nx2ListStats::NoteListQueued(submit_list->channel, -1);
                     scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
                 } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
                     split.Defer([gpu = &system.GPU()] { gpu->TickWork(); });
@@ -149,6 +151,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
             }
             if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
                 Profile::Scope scope{Profile::Zone::Push};
+                Tegra::Nx2ListStats::NoteListQueued(submit_list->channel, -1);
                 scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
             } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
                 Profile::Scope scope{Profile::Zone::Tick};
@@ -171,6 +174,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
 }
 
 void ThreadManager::SubmitList(s32 channel, Tegra::CommandList&& entries, bool is_async) {
+    Tegra::Nx2ListStats::NoteListQueued(channel, 1);
     PushCommand(SubmitListCommand(channel, std::move(entries)), false, is_async);
 }
 

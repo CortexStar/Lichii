@@ -9,6 +9,8 @@
 #include <bit>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -30,12 +32,39 @@
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
 #include "video_core/nx2_drain_check.h"
+#include "video_core/nx2_list_stats.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace Tegra {
 
 constexpr u32 MacroRegistersStart = 0xE00;
 constexpr u32 ComputeInline = 0x6D;
+
+namespace {
+
+/// EDEN_NX2_LIST_STATS and _VERIFY: the front read `words` of a command list at `address`
+/// (`device`) on a GPU-written page, as `where` tells; see Nx2ListStats::NoteRead.
+void NoteListRead(MemoryManager& memory, s32 channel, GPUVAddr address, u64 device,
+                  std::span<const u8> words, VideoCore::RasterizerInterface::GpuWrittenList where,
+                  bool after_sync, u64 backlog, u64 unpublished) {
+    using GpuWrittenList = VideoCore::RasterizerInterface::GpuWrittenList;
+    using Nx2ListStats::Served;
+    std::optional<bool> copy_equal;
+    if (Nx2ListStats::g_enabled && where == GpuWrittenList::Copied) {
+        std::vector<u8> guest(words.size());
+        memory.ReadBlockUnsafe(address, guest.data(), guest.size());
+        copy_equal = std::ranges::equal(guest, words);
+    }
+    const Served result = where == GpuWrittenList::Copied   ? Served::CopyReady
+                          : where == GpuWrittenList::Synced ? Served::PageSynced
+                                                            : Served::Unknown;
+    constexpr u64 page_mask = Nx2ListStats::PageBytes - 1;
+    Nx2ListStats::NoteRead(device & ~page_mask, static_cast<u32>(device & page_mask),
+                           static_cast<u32>(words.size()), result, after_sync, copy_equal, backlog,
+                           unpublished, channel);
+}
+
+} // Anonymous namespace
 
 bool DmaPusher::IsMemoryWriter(const Engines::EngineInterface& engine, Engines::EngineTypes type,
                               u32 method) {
@@ -697,6 +726,9 @@ bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count) {
     }
     bool past_sync = !split.Active();
     using GpuWrittenList = VideoCore::RasterizerInterface::GpuWrittenList;
+    if (Nx2ListStats::Any()) [[unlikely]] {
+        Nx2ListStats::BeginList(count);
+    }
     command_headers.resize_destructive(count);
     u8* const out = reinterpret_cast<u8*>(command_headers.data());
     for (GPUVAddr chunk = address; chunk < end;) {
@@ -708,7 +740,11 @@ bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count) {
         }
         GpuWrittenList where = GpuWrittenList::Synced;
         if (Tegra::Nx2IsGpuWritten(*device)) {
+            const bool stats = Nx2ListStats::g_enabled && split.Active();
+            const u64 backlog = stats ? split.Backlog() : 0;
+            const u64 unpublished = stats ? split.Unpublished() : 0;
             where = rasterizer->ReadGpuWrittenCommandList(*device, part, past_sync);
+            const bool after_sync = where == GpuWrittenList::NeedsSync;
             if (where == GpuWrittenList::NeedsSync) {
                 const auto wait_start = Nx2CmdPageDiag::g_enabled
                                             ? std::chrono::steady_clock::now()
@@ -741,6 +777,10 @@ bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count) {
                     }
                 }
             }
+            if (Nx2ListStats::Any()) [[unlikely]] {
+                NoteListRead(memory_manager, channel_state.bind_id, chunk, *device, part, where,
+                             after_sync, backlog, unpublished);
+            }
         }
         if (where == GpuWrittenList::Unknown) {
             return false;
@@ -750,7 +790,66 @@ bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count) {
         }
         chunk = chunk_end;
     }
+    if (Nx2ListStats::g_verify) [[unlikely]] {
+        VerifyGpuWrittenCommands(address, count);
+    }
     return true;
+}
+
+void DmaPusher::VerifyGpuWrittenCommands(GPUVAddr address, u32 count) {
+    // The list again as the front read lists before it tracked the words GPU work wrote: after
+    // every dispatch and copy sent so far, from the pages' whole copies, or drained and flushed.
+    using GpuWrittenList = VideoCore::RasterizerInterface::GpuWrittenList;
+    const size_t bytes = size_t{count} * sizeof(u32);
+    std::vector<u32> parsed(count);
+    std::memcpy(parsed.data(), command_headers.data(), bytes);
+    auto& split = VideoCommon::GpuSplit::Get();
+    if (split.Active()) {
+        split.WaitForWriters();
+    }
+    bool past_sync = !split.Active();
+    std::vector<u32> reference(count);
+    bool reference_drained = false;
+    {
+        const Nx2ListStats::ReferenceScope reference_read;
+        u8* const out = reinterpret_cast<u8*>(reference.data());
+        const GPUVAddr end = address + bytes;
+        for (GPUVAddr chunk = address; chunk < end && !reference_drained;) {
+            const GPUVAddr chunk_end = (std::min)(end, (chunk & ~GPUVAddr{0xfff}) + 0x1000);
+            const std::span<u8> part{out + (chunk - address),
+                                     static_cast<size_t>(chunk_end - chunk)};
+            const auto device = memory_manager.GpuToCpuAddress(chunk);
+            GpuWrittenList where = device ? GpuWrittenList::Synced : GpuWrittenList::Unknown;
+            if (device && Tegra::Nx2IsGpuWritten(*device)) {
+                where = rasterizer->ReadGpuWrittenCommandList(*device, part, past_sync);
+                if (where == GpuWrittenList::NeedsSync) {
+                    split.WaitForSync();
+                    past_sync = true;
+                    where = rasterizer->ReadGpuWrittenCommandList(*device, part, true);
+                }
+            }
+            if (where == GpuWrittenList::Synced) {
+                memory_manager.ReadBlockUnsafe(chunk, part.data(), part.size());
+            }
+            reference_drained = where == GpuWrittenList::Unknown;
+            chunk = chunk_end;
+        }
+    }
+    const auto read_drained = [&](std::vector<u32>& words) {
+        FlushGpuWrittenCommands(address, bytes);
+        memory_manager.ReadBlockUnsafe(address, words.data(), bytes);
+    };
+    if (reference_drained) {
+        read_drained(reference);
+    }
+    std::vector<u32> drained;
+    if (!reference_drained && reference != parsed) {
+        drained.resize(count);
+        read_drained(drained);
+    }
+    Nx2ListStats::NoteVerify(address, parsed, reference, drained, reference_drained);
+    // The front parses the words read last.
+    std::memcpy(command_headers.data(), drained.empty() ? reference.data() : drained.data(), bytes);
 }
 
 bool DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {

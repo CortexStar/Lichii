@@ -74,6 +74,7 @@
 #include "video_core/nx2.h"
 #include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_drain_check.h"
+#include "video_core/nx2_list_stats.h"
 #include "video_core/nx2_profile.h"
 
 namespace Vulkan {
@@ -1757,6 +1758,8 @@ void RasterizerVulkan::DispatchCompute() {
     }
     std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
     std::optional<ByteAddressedShadow> byte_addressed_shadow;
+    const Tegra::Nx2ListStats::WriterScope list_writer{Tegra::Nx2ListStats::Writer::Dispatch,
+                                                       pipeline->ShaderHash()};
     buffer_cache.Nx2CollectListCopies(true);
     SCOPE_EXIT {
         buffer_cache.Nx2CollectListCopies(false);
@@ -3124,6 +3127,8 @@ bool AccelerateDMA::BufferClear(GPUVAddr src_address, u64 amount, u32 value) {
 
 bool AccelerateDMA::BufferCopy(GPUVAddr src_address, GPUVAddr dest_address, u64 amount) {
     std::scoped_lock lock{buffer_cache.mutex};
+    const Tegra::Nx2ListStats::WriterScope list_writer{Tegra::Nx2ListStats::Writer::Copy,
+                                                       src_address};
     buffer_cache.Nx2CollectListCopies(true);
     const bool copied = buffer_cache.DMACopy(src_address, dest_address, amount);
     if (buffer_cache.Nx2CopyListPages(scheduler.CurrentTick())) {

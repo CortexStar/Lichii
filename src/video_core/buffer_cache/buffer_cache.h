@@ -27,6 +27,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
+#include "video_core/nx2_list_stats.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/texture_cache/util.h"
@@ -3101,6 +3102,9 @@ void BufferCache<P>::Nx2NoteListWrite(BufferId buffer_id, DAddr device_addr, u64
                     Tegra::Nx2CmdPageDiag::NoteWrite(page_addr, device_addr, size,
                                                      !nx2_collect_list_copies);
                 }
+                if (Tegra::Nx2ListStats::Any()) {
+                    Tegra::Nx2ListStats::NoteWrite(page_addr, device_addr, size);
+                }
             }
             ++page;
         }
@@ -3140,6 +3144,9 @@ bool BufferCache<P>::Nx2CopyListPages(u64 tick) {
             buffer.MarkUsage(copy.src_offset, copy.size);
             runtime.CopyBuffer(staging.buffer, buffer, std::span{&copy, 1}, true);
             recorded = true;
+            if (Tegra::Nx2ListStats::Any()) {
+                Tegra::Nx2ListStats::NoteCopy(page);
+            }
             std::scoped_lock lock{nx2_list_mutex};
             Nx2ListPage& entry = nx2_list_pages[page];
             if (entry.copy) {
@@ -3204,7 +3211,11 @@ auto BufferCache<P>::Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool 
             // a list on none of the words GPU work wrote since the page was flushed is in guest
             // memory too: it waits for no copy.
             if (entry.synced_writes == entry.writes ||
-                (entry.flushed && !Nx2HasListWords(entry, offset, offset + out.size()))) {
+                (!Tegra::Nx2ListStats::t_reference && entry.flushed &&
+                 !Nx2HasListWords(entry, offset, offset + out.size()))) {
+                if (entry.synced_writes != entry.writes) {
+                    Tegra::Nx2ListStats::NoteServed(Tegra::Nx2ListStats::Served::WordsClean);
+                }
                 return Nx2ListRead::Synced;
             }
             if (!current(entry)) {
@@ -3219,7 +3230,12 @@ auto BufferCache<P>::Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool 
             writes = entry.copy_writes;
         }
         // Submitted with the work that wrote the page (Nx2CopyListPages's caller flushes).
+        const u64 wait_start = Tegra::Nx2ListStats::Any() ? Tegra::Nx2ListStats::NowNs() : 0;
         runtime.WaitSubmittedTick(tick);
+        if (Tegra::Nx2ListStats::Any()) {
+            Tegra::Nx2ListStats::NoteServed(Tegra::Nx2ListStats::Served::CopyWaited, wait_start,
+                                            Tegra::Nx2ListStats::NowNs() - wait_start);
+        }
         std::scoped_lock lock{nx2_list_mutex};
         const auto it = nx2_list_pages.find(page);
         if (it == nx2_list_pages.end() || !current(it->second) || it->second.copy_tick != tick ||
@@ -3237,14 +3253,14 @@ void BufferCache<P>::Nx2ReadListWords(const Nx2ListPage& entry, DAddr device_add
     if constexpr (!IS_OPENGL) {
         // The copy holds the words GPU work wrote. Guest memory holds the others once the page
         // was flushed: the host wrote them, and the buffer the copy came from need not have had
-        // those writes uploaded.
+        // those writes uploaded. EDEN_NX2_LIST_VERIFY's read as before takes the whole copy.
         const u8* const copy = entry.copy->mapped_span.data();
         const u64 end = offset + out.size();
         bool all_gpu = true;
         for (u64 word = offset / 4; word < (end + 3) / 4 && all_gpu; ++word) {
             all_gpu = entry.gpu_words.test(static_cast<size_t>(word));
         }
-        if (all_gpu || !entry.flushed) {
+        if (all_gpu || !entry.flushed || Tegra::Nx2ListStats::t_reference) {
             std::memcpy(out.data(), copy + offset, out.size());
             return;
         }

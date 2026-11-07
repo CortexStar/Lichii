@@ -24,6 +24,7 @@
 #include "video_core/buffer_cache/memory_tracker_base.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/gpu.h"
+#include "video_core/nx2_list_stats.h"
 #include "video_core/renderer_null/null_rasterizer.h"
 
 namespace {
@@ -817,6 +818,34 @@ TEST_CASE("Copy engine clears give command list words back to guest memory", "[b
     std::array<u8, 16> list{};
     REQUIRE(f.cache->Nx2ReadListCopy(0x20830, list, true) == Read::Synced);
     REQUIRE(f.cache->Nx2ReadListCopy(0x20840, list, true) == Read::Unknown);
+}
+
+TEST_CASE("EDEN_NX2_LIST_VERIFY reads command lists as before, from the page's whole copy",
+          "[buffer_ports]") {
+    Fixture f;
+    const ListPage list_page{0x20000};
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    std::ranges::fill(Access::Get(*f.cache, id).bytes, 0x77);
+    std::memset(f.bytes + 0x10000, 0x11, 0x1000);
+    f.cache->Nx2NoteListSynced(0x20000);
+    f.cache->Nx2CollectListCopies(true);
+    Access::ListWrite(*f.cache, id, 0x20800, 0x100);
+    REQUIRE(f.cache->Nx2CopyListPages(f.runtime.CurrentTick()));
+    f.cache->Nx2CollectListCopies(false);
+    f.runtime.Finish();
+    using Read = Cache::Nx2ListRead;
+    std::array<u8, 32> list{};
+    {
+        // Whatever words GPU work wrote: once it wrote the page, every list there reads the copy.
+        const Tegra::Nx2ListStats::ReferenceScope reference;
+        REQUIRE(f.cache->Nx2ReadListCopy(0x20100, list, true) == Read::Copied);
+        REQUIRE(AllBytes(list, 0x77));
+        REQUIRE(f.cache->Nx2ReadListCopy(0x207f0, list, true) == Read::Copied);
+        REQUIRE(AllBytes(list, 0x77));
+    }
+    REQUIRE(f.cache->Nx2ReadListCopy(0x20100, list, true) == Read::Synced);
+    REQUIRE(f.cache->Nx2ReadListCopy(0x207f0, list, true) == Read::Copied);
+    REQUIRE(AllBytes(std::span{list}.first(16), 0x11));
 }
 
 TEST_CASE("Native uniform banks upload directly without overwriting GPU-owned bytes",
