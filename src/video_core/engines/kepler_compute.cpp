@@ -633,6 +633,7 @@ bool KeplerCompute::ProcessGameDlss(u64 program_id, u64 native_key) {
     }
     if (native_key == passes->prepass) {
         dlss_chain.spatial_only = passes->spatial_only;
+        dlss_chain.render_region = passes->render_region;
         CaptureFireEmblemJitter();
         dlss_chain.active = true;
         dlss_chain.rejected = 0;
@@ -1116,6 +1117,59 @@ void KeplerCompute::TraceDlssContract(u64 native_key, bool warn_unvalidated) {
     }
 }
 
+// Scales the region the game rendered up to the output, in place of the network's output pass.
+bool KeplerCompute::ScaleDlssRenderRegion(GPUVAddr constants,
+                                          const std::optional<Texture::TICEntry>& input,
+                                          const std::optional<Texture::TICEntry>& output) {
+    using namespace VideoCommon::FireEmblemUpscale;
+    if (!input || !output || !PlainImage(*input) || !PlainImage(*output) ||
+        input->format != Texture::TextureFormat::B10G11R11 ||
+        output->format != Texture::TextureFormat::B10G11R11 ||
+        input->Address() == output->Address() ||
+        launch_description.const_buffer_config[0].size.Value() < RenderLastColumnOffset + 4 ||
+        !memory_manager.IsFullyMappedRange(constants, RenderLastColumnOffset + 4)) {
+        return false;
+    }
+    const u32 width = memory_manager.Read<u32>(constants + RenderLastColumnOffset) + 1;
+    const u32 height = memory_manager.Read<u32>(constants + RenderLastRowOffset) + 1;
+    if (width == 0 || height == 0 || width > input->Width() || height > input->Height()) {
+        return false;
+    }
+    const auto surface = [](const Texture::TICEntry& tic) {
+        Fermi2D::Surface result{};
+        result.format = Tegra::RenderTargetFormat::B10G11R11_FLOAT;
+        result.linear = Fermi2D::MemoryLayout::BlockLinear;
+        result.block_width.Assign(tic.block_width);
+        result.block_height.Assign(tic.block_height);
+        result.block_depth.Assign(tic.block_depth);
+        result.depth = 1;
+        result.width = tic.Width();
+        result.height = tic.Height();
+        result.addr_upper = static_cast<u32>(tic.Address() >> 32);
+        result.addr_lower = static_cast<u32>(tic.Address());
+        return result;
+    };
+    Fermi2D::Config config{};
+    config.operation = Fermi2D::Operation::SrcCopy;
+    config.filter = Fermi2D::Filter::Bilinear;
+    config.dst_x0 = 0;
+    config.dst_y0 = 0;
+    config.dst_x1 = static_cast<s32>(output->Width());
+    config.dst_y1 = static_cast<s32>(output->Height());
+    config.src_x0 = 0;
+    config.src_y0 = 0;
+    config.src_x1 = static_cast<s32>(width);
+    config.src_y1 = static_cast<s32>(height);
+    const bool done = rasterizer->AccelerateSurfaceCopy(surface(*input), surface(*output), config);
+    static u32 logged{};
+    if (logged++ < 8) {
+        LOG_INFO(HW_GPU, "DLSS replacement: {} region {}x{} of {}x{} to {}x{}",
+                 done ? "scaled" : "could not scale", width, height, input->Width(),
+                 input->Height(), output->Width(), output->Height());
+    }
+    return done;
+}
+
 bool KeplerCompute::TryFireEmblemUpscale(bool allow_history) {
     using namespace VideoCommon::FireEmblemUpscale;
     static const bool requested_history = [] {
@@ -1153,6 +1207,9 @@ bool KeplerCompute::TryFireEmblemUpscale(bool allow_history) {
     };
     const auto input = image(OutputColorInputOffset);
     const auto output = image(OutputColorOffset);
+    if (dlss_chain.render_region) {
+        return ScaleDlssRenderRegion(address, input, output);
+    }
     if (!input || !output || !ValidPair(*input, *output, dlss_chain.spatial_only) ||
         jitter->color != input->Address() || (use_history && dlss_motion_color != input->Address()) ||
         jitter->width != input->Width() || jitter->height != input->Height()) {

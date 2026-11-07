@@ -26,11 +26,16 @@ constexpr u32 PrepassColorOffset = 0x278;
 constexpr u32 JitterOffset = 0x1b0;
 constexpr u32 OutputColorInputOffset = 0x328;
 constexpr u32 OutputColorOffset = 0x348;
+constexpr u32 RenderLastRowOffset = 0x394;
+constexpr u32 RenderLastColumnOffset = 0x39c;
 
 struct Passes {
     u64 prepass;
     u64 output;
     bool spatial_only;
+    // The game renders a varying region of a target the size of the output, and the network's
+    // constants give that region.
+    bool render_region = false;
 };
 
 constexpr std::optional<Passes> CapturedPasses(u64 program_id) {
@@ -41,7 +46,7 @@ constexpr std::optional<Passes> CapturedPasses(u64 program_id) {
         return Passes{StarFoxPrepassProgramKey, StarFoxOutputProgramKey, true};
     }
     if (program_id == DuskbloodsProgramId) {
-        return Passes{DuskbloodsPrepassProgramKey, DuskbloodsOutputProgramKey, false};
+        return Passes{DuskbloodsPrepassProgramKey, DuskbloodsOutputProgramKey, false, true};
     }
     return std::nullopt;
 }

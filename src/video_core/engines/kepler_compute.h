@@ -287,6 +287,8 @@ private:
     std::optional<Texture::TICEntry> ConstBuffer0Image(u32 offset) const;
     void RememberDlssMotionVectors();
     bool TryFireEmblemUpscale(bool allow_history = true);
+    bool ScaleDlssRenderRegion(GPUVAddr constants, const std::optional<Texture::TICEntry>& input,
+                               const std::optional<Texture::TICEntry>& output);
     void CaptureFireEmblemJitter();
     bool FinishDlssEvaluation();
     void CheckDlssNetwork();
@@ -298,6 +300,7 @@ private:
     struct DlssChain {
         bool active{};
         bool spatial_only{};
+        bool render_region{};
         bool output_pass{};
         u32 rejected{};
         u32 clean_evaluations{};
