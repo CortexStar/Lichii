@@ -825,8 +825,8 @@ TEST_CASE("Disabled viewport transform uses the surface clip and window origin",
     };
     Maxwell regs{};
     regs.viewport_scale_offset_enabled = false;
-    regs.surface_clip.x = 17;
-    regs.surface_clip.y = 23;
+    regs.surface_clip.x.Assign(17);
+    regs.surface_clip.y.Assign(23);
     // Stale programmed transforms must not replace the actual surface-clip viewport.
     regs.viewport_transform[0].translate_x = 900.0f;
     regs.viewport_transform[0].translate_y = 700.0f;
@@ -834,9 +834,9 @@ TEST_CASE("Disabled viewport transform uses the surface clip and window origin",
     regs.viewport_transform[0].scale_y = 100.0f;
     for (const auto& test : cases) {
         CAPTURE(test.width, test.height, test.origin);
-        regs.surface_clip.width = test.width;
-        regs.surface_clip.height = test.height;
-        regs.window_origin.mode = test.origin;
+        regs.surface_clip.width.Assign(test.width);
+        regs.surface_clip.height.Assign(test.height);
+        regs.window_origin.mode.Assign(test.origin);
         CHECK(Vulkan::GetSurfaceClipViewport(regs) == test.expected);
     }
 }
