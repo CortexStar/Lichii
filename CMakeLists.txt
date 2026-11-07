@@ -770,6 +770,6 @@ endif()
 if (YUZU_INSTALL_UDEV_RULES)
     include(GNUInstallDirs)
 
-    install(FILES "dist/72-eden-input.rules"
+    install(FILES "dist/72-lichii-input.rules"
         DESTINATION "${CMAKE_INSTALL_LIBDIR}/udev/rules.d")
 endif()
