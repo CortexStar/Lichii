@@ -388,7 +388,7 @@ TEST_CASE("Batch downloads clamp buffers, deduplicate pages and finish before pu
         {0x20000, 0},
     }};
     Access::Download(*f.cache, ranges);
-    REQUIRE(f.runtime.finishes == 1);
+    REQUIRE(f.runtime.finishes == u64{1});
     REQUIRE(f.runtime.allocations == 1);
     REQUIRE(f.runtime.downloads == 2);
     REQUIRE(f.bytes[0x1f000] == 0x12);
@@ -399,7 +399,7 @@ TEST_CASE("Batch downloads clamp buffers, deduplicate pages and finish before pu
     REQUIRE_FALSE(Access::Pending(*f.cache, 0x2f000, 0x2000));
     REQUIRE(Access::Pending(*f.cache, 0x32000, 0x1000));
     Access::Download(*f.cache, ranges);
-    REQUIRE(f.runtime.finishes == 1);
+    REQUIRE(f.runtime.finishes == u64{1});
 }
 
 TEST_CASE("Mapped and mixed batches make device writes host visible in one completion",
@@ -430,7 +430,7 @@ TEST_CASE("Mapped and mixed batches make device writes host visible in one compl
     Access::Download(*f.cache, ranges);
     REQUIRE(f.runtime.waits == 0);
     REQUIRE(f.runtime.host_read_barriers == 1);
-    REQUIRE(f.runtime.finishes == 1);
+    REQUIRE(f.runtime.finishes == u64{1});
     REQUIRE(f.runtime.allocations == 0);
     REQUIRE(f.bytes[0x10000] == 0x56);
     REQUIRE(f.bytes[0x20000] == 0x78);
@@ -468,12 +468,12 @@ TEST_CASE("Single mapped download completes host visibility before guest publica
         std::ranges::fill(buffer.bytes, 0xcd);
     };
     f.cache->DownloadMemory(0x20000, 0x1000);
-    REQUIRE(f.runtime.finishes == 1);
+    REQUIRE(f.runtime.finishes == u64{1});
     REQUIRE(f.runtime.waits == 0);
     REQUIRE(f.runtime.allocations == 0);
     REQUIRE(f.bytes[0x10000] == 0xcd);
     f.cache->DownloadMemory(0x20000, 0x1000);
-    REQUIRE(f.runtime.finishes == 1);
+    REQUIRE(f.runtime.finishes == u64{1});
 }
 
 TEST_CASE("Command page batch publishes only completed matching write generations",
@@ -496,8 +496,8 @@ TEST_CASE("Command page batch publishes only completed matching write generation
     };
     const std::array<DAddr, 1> requested{0x20000};
     f.cache->Nx2FlushListPages(requested);
-    REQUIRE(f.runtime.finishes == 1);
-    REQUIRE(f.runtime.downloads == (mapped ? 0 : 3));
+    REQUIRE(f.runtime.finishes == u64{1});
+    REQUIRE(f.runtime.downloads == (mapped ? u64{0} : u64{3}));
     REQUIRE(f.cache->Nx2ReadListCopy(0x20000, out, true) == Read::Synced);
     REQUIRE(f.cache->Nx2ReadListCopy(0x21000, out, true) == Read::Synced);
     REQUIRE(f.cache->Nx2ReadListCopy(0x22000, out, true) == Read::Unknown);
@@ -537,7 +537,7 @@ TEST_CASE("Command page readers remain ordered during batch completion", "[buffe
     reader.join();
     REQUIRE(before == Cache::Nx2ListRead::Unknown);
     REQUIRE(after == Cache::Nx2ListRead::Synced);
-    REQUIRE(f.runtime.finishes == 1);
+    REQUIRE(f.runtime.finishes == u64{1});
     REQUIRE(f.runtime.downloads == 1);
 }
 

@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <array>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -64,6 +66,8 @@ struct KernelProgram {
         Shader::HostTranslateInfo host{};
         host.min_ssbo_alignment = 16;
         host.support_int64 = int64;
+        // A desktop device that can host the recompiler's full slot count.
+        host.max_descriptor_set_storage_buffers = Shader::Info::MAX_SSBOS;
         Shader::Optimization::GlobalMemoryToStorageBufferPass(env, program, host);
         std::vector<u32> offsets;
         for (const auto& descriptor : program.info.storage_buffers_descriptors) {
@@ -473,6 +477,99 @@ TEST_CASE("Loaded pointers that compete with a pair do not take the last storage
     CHECK(program.LoadedDescriptors() == 0);
     CHECK(program.Count(IR::Opcode::LoadStorage128) == 1);
     CHECK(program.Count(IR::Opcode::LoadGlobal128) == 0);
+}
+
+class SetSSBO64 {
+public:
+    explicit SetSSBO64(const char* value) {
+        const char* prior = std::getenv("EDEN_NX2_SSBO64");
+        if (prior != nullptr) {
+            restore_.emplace(prior);
+        }
+        SetVariable("EDEN_NX2_SSBO64", value);
+    }
+    ~SetSSBO64() {
+        if (restore_) {
+            SetVariable("EDEN_NX2_SSBO64", restore_->c_str());
+        } else {
+            SetVariable("EDEN_NX2_SSBO64", nullptr);
+        }
+    }
+
+private:
+    static void SetVariable(const char* name, const char* value) {
+#ifdef _WIN32
+        _putenv_s(name, value != nullptr ? value : "");
+#else
+        if (value != nullptr) {
+            setenv(name, value, 1);
+        } else {
+            unsetenv(name);
+        }
+#endif
+    }
+
+    std::optional<std::string> restore_;
+};
+
+TEST_CASE("Native pointer tables retain pools beyond 32 bindings in the SSBO64 experiment",
+          "[shader][storage_buffer][ssbo64]") {
+    // CI-independence: run the extended case with the variable set, not ambient.
+    SetSSBO64 ssbo64_guard{"1"};
+    KernelProgram fixture;
+    fixture.env.native = true;
+    IR::IREmitter ir{fixture.entry};
+    for (u32 index = 0; index < 29; ++index) {
+        const u32 offset = 0x100 + index * 16;
+        ir.WriteGlobal32(Address(ir, Word(ir, offset), Word(ir, offset + 4)), ir.Imm32(1));
+    }
+    const auto condition = ir.IEqual(ir.LocalInvocationIdX(), ir.Imm32(0));
+    for (u32 index = 0; index < 3; ++index) {
+        const u32 offset = 0x100 + index * 32;
+        const IR::U32 low{ir.Select(condition, Word(ir, offset), Word(ir, offset + 16))};
+        const IR::U32 high{ir.Select(condition, Word(ir, offset + 4), Word(ir, offset + 20))};
+        const IR::Value loaded{ir.LoadGlobal64(Address(ir, low, high))};
+        static_cast<void>(ir.LoadGlobal32(Address(ir, IR::U32{ir.CompositeExtract(loaded, 0)},
+                                                 IR::U32{ir.CompositeExtract(loaded, 1)})));
+    }
+    static_cast<void>(fixture.TrackedOffsets());
+    const auto& descriptors = fixture.program.info.storage_buffers_descriptors;
+    CHECK(descriptors.size() == 35U);
+    CHECK(std::ranges::count_if(descriptors, [](const auto& descriptor) {
+              return descriptor.indirect_offset != ~0U;
+          }) == 6U);
+    {
+        // The default case (variable unset) must keep the 32-binding behavior.
+        SetSSBO64 restore_guard{nullptr};
+        KernelProgram default_fixture;
+        default_fixture.env.native = true;
+        IR::IREmitter default_ir{default_fixture.entry};
+        for (u32 index = 0; index < 29; ++index) {
+            const u32 offset = 0x100 + index * 16;
+            default_ir.WriteGlobal32(
+                Address(default_ir, Word(default_ir, offset), Word(default_ir, offset + 4)),
+                default_ir.Imm32(1));
+        }
+        for (u32 index = 0; index < 3; ++index) {
+            const u32 offset = 0x100 + index * 32;
+            const IR::U32 low{
+                default_ir.Select(condition, Word(default_ir, offset),
+                                  Word(default_ir, offset + 16))};
+            const IR::U32 high{
+                default_ir.Select(condition, Word(default_ir, offset + 4),
+                                  Word(default_ir, offset + 20))};
+            const IR::Value loaded{default_ir.LoadGlobal64(Address(default_ir, low, high))};
+            static_cast<void>(default_ir.LoadGlobal32(
+                Address(default_ir, IR::U32{default_ir.CompositeExtract(loaded, 0)},
+                        IR::U32{default_ir.CompositeExtract(loaded, 1)})));
+        }
+        static_cast<void>(default_fixture.TrackedOffsets());
+        const auto& default_descriptors = default_fixture.program.info.storage_buffers_descriptors;
+        CHECK(default_descriptors.size() == 32U);
+        CHECK(std::ranges::count_if(default_descriptors, [](const auto& descriptor) {
+                  return descriptor.indirect_offset != ~0U;
+              }) == 3U);
+    }
 }
 
 TEST_CASE("NVN fallback descriptors use guest slots rather than compact binding indices",

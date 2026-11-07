@@ -18,6 +18,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "common/alignment.h"
+#include "common/logging.h"
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ir/basic_block.h"
 #include "shader_recompiler/frontend/ir/breadth_first_search.h"
@@ -91,6 +92,8 @@ struct StorageInfo {
     bool tables_seen{};
     size_t table_budget{};
     size_t table_used{};
+    /// Table candidates the budget could not take, see the eviction in CollectStorageBuffers
+    size_t table_dropped{};
     small_vector<StorageBufferAddr, 8> table_candidates;
 };
 
@@ -1389,7 +1392,8 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
                              ? 1U
                              : 0U)};
                     if (info.table_used + added > info.table_budget) {
-                        continue;
+                        ++info.table_dropped;
+
                     }
                     info.table_used += added;
                 }
@@ -1622,7 +1626,17 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
         }
     };
     collect();
-    if (info.competing_loaded_bound && info.set.size() > Info::MAX_SSBOS) {
+    // OoT's additional direct lists can crowd their indirect object pools out of the 32
+    // bindings the descriptor budget guarantees. Raise the budget for native programs when
+    // the device supports the recompiler's full slot count.
+    const char* const ssbo64 = std::getenv("EDEN_NX2_SSBO64");
+    const size_t binding_limit = env.IsNativeProgram() && ssbo64 && ssbo64[0] == '1' &&
+                                         ssbo64[1] == '\0' &&
+                                         (host_info.max_descriptor_set_storage_buffers == 0 ||
+                                          host_info.max_descriptor_set_storage_buffers >= Info::MAX_SSBOS)
+                                     ? Info::MAX_SSBOS
+                                     : 32;
+    if (info.competing_loaded_bound && info.set.size() > binding_limit) {
         // Not enough bindings for the loaded pointers that compete with paired ones: keep the
         // pairs, as if no loaded pointer competed.
         StorageInfo paired;
@@ -1632,16 +1646,27 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
         info = std::move(paired);
         collect();
     }
-    if (info.tables_seen && info.set.size() < Info::MAX_SSBOS) {
+    if (info.tables_seen && info.set.size() < binding_limit) {
         // Again with pointer table entries, in the bindings the first pass left free.
         StorageInfo with_tables;
         with_tables.iterator_words = std::move(info.iterator_words);
         with_tables.atomic_pointers = std::move(info.atomic_pointers);
         with_tables.bind_competing_loaded = info.bind_competing_loaded;
         with_tables.tables_enabled = true;
-        with_tables.table_budget = Info::MAX_SSBOS - info.set.size();
+        with_tables.table_budget = binding_limit - info.set.size();
         info = std::move(with_tables);
         collect();
+    }
+    // Never evict a storage binding silently: evicted pools produce empty consumer output
+    // (OoT Hyrule Field lost its grass this way).
+    if (info.table_dropped > 0) {
+        LOG_WARNING(Shader,
+                    "Storage binding budget exceeded: program has {} storage bindings bound "
+                    "at the limit of {} (native {}, stage {}, start {:x}); {} binding "
+                    "requests were evicted and their consumers see empty data",
+                    info.set.size(), binding_limit, env.IsNativeProgram(),
+                    static_cast<int>(env.ShaderStage()), env.StartAddress(),
+                    info.table_dropped);
     }
     program.info.native_global_bounds |= info.native_runtime_bounds;
     for (const StorageBufferAddr& storage_buffer : info.set) {
