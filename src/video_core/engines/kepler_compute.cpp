@@ -599,11 +599,16 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
         dispatched = false;
         if (dlss_chain.active) {
             ++dlss_chain.rejected;
-        } else if (std::string_view{error.what()}.find("matrix multiply") !=
-                   std::string_view::npos) {
-            DescribeNativeResources(qmd);
-            // The console runs this on tensor cores; stand in with a plain upscale of its input.
-            return UpscaleInsteadOfNativeProgram();
+        } else {
+            const GPUVAddr program = regs.code_loc.Address() + launch_description.program_start;
+            if (std::string_view{error.what()}.find("matrix multiply") != std::string_view::npos) {
+                matrix_rejected_programs.insert(program);
+            }
+            if (matrix_rejected_programs.contains(program)) {
+                DescribeNativeResources(qmd);
+                // The console runs this on tensor cores; stand in with a plain upscale of its input.
+                return UpscaleInsteadOfNativeProgram();
+            }
         }
     }
     if (dlss_chain.output_pass) {

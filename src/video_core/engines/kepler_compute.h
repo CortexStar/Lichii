@@ -327,6 +327,11 @@ private:
         VideoCore::GameDlssStatus status{};
     } dlss_chain;
 
+    /// Programs rejected as native matrix multiplies (the upscale stand-in replaces them). Later
+    /// dispatches of the same program fail on the cached pipeline with another message, and must
+    /// still reach the stand-in, or its output stops updating after the first frame.
+    std::unordered_set<GPUVAddr> matrix_rejected_programs;
+
     /// Motion vectors and depth of Fire Emblem: Fortune's Weave's DLSS evaluation, from its first
     /// pass (run earlier in the frame than the network pass the stand-in replaces), with the input
     /// colour image and camera jitter they go with.
