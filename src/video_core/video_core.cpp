@@ -60,6 +60,7 @@ void CreateGPU(std::optional<Tegra::GPU>& gpu, Core::Frontend::EmuWindow& emu_wi
     VideoCommon::Nx2DrainCheck::ReadSwitch();
     VideoCommon::ReadTrace::ReadSwitch();
     Tegra::Nx2ListStats::ReadSwitches();
+    VideoCommon::Nx2AcquireStats::ReadSwitch();
 
     const auto nvdec_value = Settings::values.nvdec_emulation.GetValue();
     const bool use_nvdec = nvdec_value != Settings::NvdecEmulation::Off;

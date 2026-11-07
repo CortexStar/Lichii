@@ -90,6 +90,7 @@ public:
         /// the drain this replaces.
         u64 sent_at{};
         bool fences_released{};
+        bool flushed{}; ///< TEST (EDEN_NX2_ACQUIRE_STATS): a flush was sent for it
 
         [[nodiscard]] bool Matches(u32 current) const;
         /// Whether it waits for the word to reach `value` (greater or equal).

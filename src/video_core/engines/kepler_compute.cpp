@@ -25,6 +25,7 @@
 #include "video_core/fire_emblem_upscale.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_drain_check.h"
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/native_upscale.h"
@@ -374,7 +375,8 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                                                           memory_manager.Read<u32>(address), payload);
                         memory_manager.Write<u32>(address, value);
                         if (const auto device = memory_manager.GpuToCpuAddress(address)) {
-                            Tegra::Nx2SemaphoreWaiters::Get().OnWrite(*device, value);
+                            Tegra::Nx2SemaphoreWaiters::Get().OnWrite(
+                                *device, value, Tegra::Nx2SemaphoreWaiters::Source::QmdReduction);
                         }
                         static const u64 watch = [] {
                             const char* text = std::getenv("EDEN_NX2_SEM_WATCH");
@@ -398,7 +400,8 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                         const u32 value = (std::max)(memory_manager.Read<u32>(address), payload);
                         memory_manager.Write<u32>(address, value);
                         if (const auto device = memory_manager.GpuToCpuAddress(address)) {
-                            Tegra::Nx2SemaphoreWaiters::Get().OnWrite(*device, value);
+                            Tegra::Nx2SemaphoreWaiters::Get().OnWrite(
+                                *device, value, Tegra::Nx2SemaphoreWaiters::Source::QmdMax);
                         }
                     });
                 } else {
@@ -1544,6 +1547,8 @@ void KeplerCompute::FrontNoteReport(VideoCommon::GpuSplit& split, const FrontSta
     if (!device) {
         return;
     }
+    VideoCommon::Nx2AcquireStats::NoteRelease(
+        *device, VideoCommon::Nx2AcquireStats::Releaser::ReportCompute);
     // A reduction combines the payload with the word's value then. The front knows that value
     // when no compute or copy work sent since it may write the word (QMD releases): from the last
     // release sent to the word if it is known, or from memory if nothing queued may change it.

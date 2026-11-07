@@ -626,6 +626,8 @@ void DmaPusher::NoteDmaSemaphore(u32 method, u32 argument) {
     }
     auto& split = VideoCommon::GpuSplit::Get();
     split.NoteSemaphoreWrite(*device, dma_semaphore[2], true);
+    VideoCommon::Nx2AcquireStats::NoteRelease(*device,
+                                              VideoCommon::Nx2AcquireStats::Releaser::Copy);
     if (type == SemaphoreType::RELEASE_FOUR_WORD_SEMAPHORE) {
         // The payload as 64 bits (a timestamp follows).
         split.NoteSemaphoreWrite(*device + 4, 0, true);

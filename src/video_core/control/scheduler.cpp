@@ -14,6 +14,7 @@
 #include "video_core/control/scheduler.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_split.h"
+#include "video_core/nx2_profile.h"
 
 namespace Tegra::Control {
 
@@ -68,7 +69,16 @@ bool Scheduler::ResumePending(GPU& gpu) {
             if (!dma_pusher.system.IsPoweredOn()) {
                 return resumed;
             }
-            if (!dma_pusher.HasPendingAcquire() || !dma_pusher.CanResumeAcquire()) {
+            if (!dma_pusher.HasPendingAcquire()) {
+                continue;
+            }
+            // TEST: the poll apart from the resumed channel's commands (EDEN_NX2_GPU_PROFILE).
+            bool can_resume;
+            {
+                VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::AcquirePoll};
+                can_resume = dma_pusher.CanResumeAcquire();
+            }
+            if (!can_resume) {
                 continue;
             }
             BindChannel(gpu, state->bind_id);

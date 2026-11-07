@@ -325,7 +325,10 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
             u32 value = static_cast<u32>(query_base->value);
             std::memcpy(pointer, &value, sizeof(value));
         }
-        Tegra::Nx2SemaphoreWaiters::Get().OnWrite(cpu_addr, static_cast<u32>(query_base->value));
+        Tegra::Nx2SemaphoreWaiters::Get().OnWrite(
+            cpu_addr, static_cast<u32>(query_base->value),
+            counter_type == QueryType::Payload ? Tegra::Nx2SemaphoreWaiters::Source::PayloadRelease
+                                               : Tegra::Nx2SemaphoreWaiters::Source::QueryResult);
         if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Write)) {
             const bool wide = True(query_base->flags & QueryFlagBits::HasTimestamp);
             LOG_INFO(HW_GPU,
@@ -352,7 +355,8 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
             } else {
                 std::memcpy(pointer, &payload, sizeof(payload));
             }
-            Tegra::Nx2SemaphoreWaiters::Get().OnWrite(cpu_addr, payload);
+            Tegra::Nx2SemaphoreWaiters::Get().OnWrite(
+                cpu_addr, payload, Tegra::Nx2SemaphoreWaiters::Source::PayloadRelease);
             if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Write)) {
                 LOG_INFO(HW_GPU,
                          "DKB_QUERY write n={} path=immediate as={} gpu={:#x} device={:#x} type={} "

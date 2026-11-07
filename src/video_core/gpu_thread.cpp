@@ -81,6 +81,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
             split.MaybeStart(system);
             WaitStats::MaybeReport(split.Active());
             VideoCommon::Nx2DrainCheck::MaybeReport();
+            VideoCommon::Nx2AcquireStats::MaybeReport();
             if (scheduler.HasPendingChannels()) {
                 // Suspended channels wait on semaphores the CPU releases: poll them meanwhile.
                 {

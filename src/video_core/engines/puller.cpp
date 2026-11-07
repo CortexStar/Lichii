@@ -91,6 +91,8 @@ void NoteRelease(DmaPusher& dma_pusher, GPUVAddr address, u32 payload, bool four
         return;
     }
     split.NoteSemaphoreWrite(*device, payload, true);
+    VideoCommon::Nx2AcquireStats::NoteRelease(*device,
+                                              VideoCommon::Nx2AcquireStats::Releaser::Puller);
     if (four_words) {
         // The payload as 64 bits (a timestamp follows).
         split.NoteSemaphoreWrite(*device + 4, 0, true);
@@ -171,6 +173,77 @@ void RequestFlush(DmaPusher& dma_pusher, Puller::PendingAcquire& acquire, u64 de
         rasterizer->FlushRegion(device, sizeof(u32), VideoCommon::CacheType::BufferCache);
     });
     acquire.flush_position = split.Position();
+    acquire.flushed = true;
+}
+
+// EDEN_NX2_DRAIN_CHECK: what the drain path decides instead, to verify the view (a release the
+// back ran latches `waiter`, a suspended acquire's).
+bool MetAfterDrain(DmaPusher& dma_pusher, const Puller::PendingAcquire& acquire,
+                   const void* waiter) {
+    DrainBack();
+    return acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address)) ||
+           (waiter != nullptr && Nx2SemaphoreWaiters::Get().Latched(waiter));
+}
+
+// TEST: counts the view's decision on an acquire (EDEN_NX2_ACQUIRE_STATS) and checks it against
+// the drain path (EDEN_NX2_DRAIN_CHECK): a pass the drained word doesn't meet suspends instead,
+// a suspension the drained word meets passes.
+ViewAnswer CheckAcquire(DmaPusher& dma_pusher, const Puller::PendingAcquire& acquire,
+                        ViewAnswer answer, bool waited, u64 device) {
+    using Kind = ViewAnswer::Kind;
+    namespace Check = VideoCommon::Nx2DrainCheck;
+    namespace Stats = VideoCommon::Nx2AcquireStats;
+    const bool pass = answer.kind == Kind::Met || answer.kind == Kind::MetByQueued;
+    const auto how = waited                             ? Check::ViewPass::Waited
+                     : answer.kind == Kind::MetByQueued ? Check::ViewPass::Queued
+                                                        : Check::ViewPass::Memory;
+    if (Stats::g_enabled) {
+        const auto decision = !pass                            ? Stats::Decision::Suspended
+                              : how == Check::ViewPass::Waited ? Stats::Decision::Waited
+                              : how == Check::ViewPass::Queued ? Stats::Decision::Queued
+                                                               : Stats::Decision::Memory;
+        Stats::NoteAcquire(acquire.operation, decision, device, waited,
+                           Nx2MayBeGpuWritten(device, sizeof(u32)), answer.kind == Kind::Flush);
+    }
+    if (Check::g_enabled) {
+        const bool met = MetAfterDrain(dma_pusher, acquire, nullptr);
+        if (pass) {
+            Check::NoteViewPass(false, how, met);
+            if (!met) {
+                return {Kind::NotMet};
+            }
+        } else {
+            Check::NoteViewWait(false, met);
+            if (met) {
+                return {Kind::Met};
+            }
+        }
+    }
+    return answer;
+}
+
+// TEST: whether the view's resume of a poll stands (EDEN_NX2_DRAIN_CHECK).
+bool PollPassStands(DmaPusher& dma_pusher, const Puller::PendingAcquire& acquire,
+                    const void* waiter, VideoCommon::Nx2DrainCheck::ViewPass how) {
+    if (!VideoCommon::Nx2DrainCheck::g_enabled) {
+        return true;
+    }
+    const bool met = MetAfterDrain(dma_pusher, acquire, waiter);
+    VideoCommon::Nx2DrainCheck::NoteViewPass(true, how, met);
+    return met;
+}
+
+// TEST: a suspended acquire resumes (EDEN_NX2_ACQUIRE_STATS).
+void NoteResumed(const void* waiter, const Puller::PendingAcquire& acquire,
+                 VideoCommon::Nx2AcquireStats::Resume how) {
+    namespace Stats = VideoCommon::Nx2AcquireStats;
+    if (!Stats::g_enabled) {
+        return;
+    }
+    const auto source = how == Stats::Resume::Latch ? Nx2SemaphoreWaiters::Get().LatchSource(waiter)
+                                                    : Stats::Source::Unknown;
+    Stats::NoteResume(how, source, acquire.flushed,
+                      std::chrono::steady_clock::now() - acquire.since);
 }
 
 // The fence work an acquire that still waits after the drain sends (ReleaseFences), sent once the
@@ -264,23 +337,38 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
 
 bool Puller::PollWithoutDrain(DmaPusher& dma_pusher, u64 device) {
     using Kind = ViewAnswer::Kind;
+    using Resume = VideoCommon::Nx2AcquireStats::Resume;
+    using ViewPass = VideoCommon::Nx2DrainCheck::ViewPass;
     PendingAcquire& acquire = *pending_acquire;
     auto& split = VideoCommon::GpuSplit::Get();
     // A release the back ran latches the waiter, even if a later one changed the word again.
     if (Nx2SemaphoreWaiters::Get().Latched(this)) {
+        NoteResumed(this, acquire, Resume::Latch);
         return true;
     }
     if (acquire.flush_position && split.Ran(*acquire.flush_position)) {
         acquire.flush_position.reset();
     }
+    // TEST: a resume the drained word contradicts was checked already.
+    bool checked = false;
     if (!acquire.flush_position) {
         const ViewAnswer answer = AskView(dma_pusher, acquire, device);
         switch (answer.kind) {
         case Kind::Met:
+            if (!PollPassStands(dma_pusher, acquire, this, ViewPass::Memory)) {
+                checked = true;
+                break;
+            }
+            NoteResumed(this, acquire, Resume::Memory);
             return true;
         case Kind::MetByQueued:
+            if (!PollPassStands(dma_pusher, acquire, this, ViewPass::Queued)) {
+                checked = true;
+                break;
+            }
             // What the front reads after the acquire waits for the work sent before the release.
             split.NoteSync();
+            NoteResumed(this, acquire, Resume::Queued);
             return true;
         case Kind::Flush:
             RequestFlush(dma_pusher, acquire, device);
@@ -291,6 +379,14 @@ bool Puller::PollWithoutDrain(DmaPusher& dma_pusher, u64 device) {
             // the acquire (which latches the waiter) or the work before `position`, nothing the
             // front sees meets it.
             break;
+        }
+    }
+    if (VideoCommon::Nx2DrainCheck::g_enabled && !checked) [[unlikely]] {
+        const bool met = MetAfterDrain(dma_pusher, acquire, this);
+        VideoCommon::Nx2DrainCheck::NoteViewWait(true, met);
+        if (met) {
+            NoteResumed(this, acquire, Resume::Drain);
+            return true;
         }
     }
     MaybeReleaseFences(dma_pusher, acquire);
@@ -436,6 +532,11 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         if (AcquireWithoutDrain(dma_pusher, acquire)) {
             return;
         }
+        if (VideoCommon::Nx2AcquireStats::g_enabled) [[unlikely]] {
+            VideoCommon::Nx2AcquireStats::NoteAcquire(
+                acquire.operation, VideoCommon::Nx2AcquireStats::Decision::Drained, 0, false, false,
+                false);
+        }
         const bool check = VideoCommon::Nx2DrainCheck::g_enabled;
         const bool met_before =
             check && acquire.Matches(dma_pusher.memory_manager.Read<u32>(acquire.address));
@@ -505,9 +606,14 @@ bool Puller::AcquireWithoutDrain(DmaPusher& dma_pusher, PendingAcquire& acquire)
     ViewAnswer answer = AskView(dma_pusher, acquire, *device);
     // The value is in memory once the back ran that work, before what was sent after it. A
     // release the front can't value, then the writers before the acquire: two waits at most.
-    for (u32 waits = 0; answer.kind == Kind::Unknown && waits < 2; ++waits) {
+    u32 waits = 0;
+    for (; answer.kind == Kind::Unknown && waits < 2; ++waits) {
         split.WaitForPosition(answer.position, VideoCommon::DrainSite::Acquire);
         answer = AskView(dma_pusher, acquire, *device);
+    }
+    if (VideoCommon::Nx2DrainCheck::g_enabled || VideoCommon::Nx2AcquireStats::g_enabled)
+        [[unlikely]] {
+        answer = CheckAcquire(dma_pusher, acquire, answer, waits != 0, *device);
     }
     switch (answer.kind) {
     case Kind::Met:
