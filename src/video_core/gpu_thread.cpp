@@ -119,6 +119,10 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 } else {
                     ASSERT(false);
                 }
+                if (!std::holds_alternative<SubmitListCommand>(next.data)) {
+                    // Syncs, maps, flushes and composites write guest memory anywhere.
+                    split.NoteUnboundedWrite();
+                }
                 split.Defer([state_ptr = &state, fence = next.fence, block = next.block] {
                     SignalCommand(*state_ptr, fence, block);
                 });

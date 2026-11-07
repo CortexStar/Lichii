@@ -74,6 +74,31 @@
 #include "common/windows/timer_resolution.h"
 #endif
 
+#ifdef LICHII_PGO_DUMP
+#include <thread>
+extern "C" int __llvm_profile_write_file(void);
+extern "C" void __llvm_profile_reset_counters(void);
+// Instrumented builds only: reset counters at LICHII_PGO_RESET_AT seconds, write the profile at
+// LICHII_PGO_DUMP_AFTER seconds and terminate (a hard kill would lose the profile).
+static const bool g_pgo_dump = [] {
+    const char* reset = std::getenv("LICHII_PGO_RESET_AT");
+    const char* dump = std::getenv("LICHII_PGO_DUMP_AFTER");
+    if (dump != nullptr) {
+        std::thread{[r = reset ? std::atof(reset) : -1.0, d = std::atof(dump)] {
+            const auto start = std::chrono::steady_clock::now();
+            if (r >= 0.0) {
+                std::this_thread::sleep_until(start + std::chrono::duration<double>(r));
+                __llvm_profile_reset_counters();
+            }
+            std::this_thread::sleep_until(start + std::chrono::duration<double>(d));
+            __llvm_profile_write_file();
+            TerminateProcess(GetCurrentProcess(), 0);
+        }}.detach();
+    }
+    return true;
+}();
+#endif
+
 #ifdef _WIN32
 extern "C" {
 // tells Nvidia and AMD drivers to use the dedicated GPU by default on laptops with switchable

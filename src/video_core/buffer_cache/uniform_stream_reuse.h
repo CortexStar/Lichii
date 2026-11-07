@@ -40,6 +40,16 @@ concept StreamUniformReusable = requires(R& runtime, u32 size) {
     return enabled;
 }
 
+/// EDEN_NX2_OPT_UBO_INPLACE=0: copy the guest bytes to a scratch buffer and compare that copy
+/// (as before), instead of comparing the guest memory where it is when it is contiguous.
+[[nodiscard]] inline bool UniformStreamInPlaceEnabled() noexcept {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_OPT_UBO_INPLACE");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
 template <class Ref>
 class UniformStreamReuse {
 public:
@@ -97,6 +107,34 @@ template <class Runtime, class DeviceMemory>
     }
     Reuse& reuse = UniformStreamReuseState<typename Runtime::StreamUniformRef>();
     typename Reuse::Slot& slot = reuse.slots[stage][index];
+    if constexpr (requires(DeviceMemory& memory) {
+                      { memory.GetSpan(u64{}, std::size_t{}) } -> std::convertible_to<const u8*>;
+                  }) {
+        // The bytes are compared where they are, and copied once into the slot when they differ:
+        // the stream allocation is filled from that copy, so it always holds what the slot
+        // holds (a guest write racing with the copies cannot make them differ). One copy of the
+        // buffer fewer than through the scratch buffer below, on every bind.
+        const u8* const guest =
+            UniformStreamInPlaceEnabled() ? device_memory.GetSpan(device_addr, size) : nullptr;
+        if (guest != nullptr) {
+            const bool same_bytes =
+                slot.size == size && std::memcmp(slot.bytes.data(), guest, size) == 0;
+            if (same_bytes && slot.tick == runtime.CurrentTick()) {
+                runtime.RebindStreamUniform(slot.ref, size);
+                return true;
+            }
+            if (!same_bytes) {
+                slot.size = size;
+                std::memcpy(slot.bytes.data(), guest, size);
+            }
+            const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
+            std::memcpy(span.data(), slot.bytes.data(), size);
+            slot.ref = runtime.LastStreamUniformRef();
+            // After the allocation: the tick the stream region is tagged with is the one current now.
+            slot.tick = runtime.CurrentTick();
+            return true;
+        }
+    }
     u8* const scratch = reuse.scratch.data();
     device_memory.ReadBlockUnsafe(device_addr, scratch, size);
 

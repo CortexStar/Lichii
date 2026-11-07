@@ -39,13 +39,17 @@ enum class DrainSite : u32 {
     Map,            ///< GPU memory maps before later command reads
     FrontStart,     ///< The front takes an engine's macros over
     FrontVerify,    ///< EDEN_NX2_FRONT_VERIFY
+    NarrowMacroDmaRead, ///< MacroDmaRead narrowed (WaitForWritesTo)
+    NarrowAcquire,      ///< Acquire narrowed: an acquire already met
+    NarrowListWriters,  ///< ListWriters narrowed (WaitForWritersTo)
     Count,
 };
 
 inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> drain_site_names{
     "other",       "fetch drain",     "acquire",    "semaphore flush", "fence release",
     "list writers", "list sync",      "list flush", "macro dma read",  "macro dma flush",
-    "gp sync fence", "map",           "front start", "front verify",
+    "gp sync fence", "map",           "front start", "front verify",   "macro dma read (narrow)",
+    "acquire (narrow)", "list writers (narrow)",
 };
 
 // Splits the GPU thread in two (NX2_GPU_THREAD_SPLIT.md). The GPU thread (the front) takes the
@@ -124,6 +128,7 @@ public:
     }
 
     /// Runs `func` on the back after everything sent before it. Must be trivially copyable.
+    /// Work that writes guest memory notes it after (NoteWrite, NoteUnboundedWrite).
     template <typename Func>
     void Defer(const Func& func) {
         static_assert(std::is_trivially_copyable_v<Func> && alignof(Func) <= alignof(u64));
@@ -174,6 +179,62 @@ public:
     /// Waits until the back executed the work sent before the last NoteSync. Returns whether any
     /// of it was still queued.
     bool WaitForSync();
+
+    // Narrow drains (EDEN_NX2_NARROW_DRAIN, on unless 0; only with the macros on the front, whose
+    // register copies give the destinations): a front read of guest memory waits only for the
+    // queued work that may write what it reads, not for everything queued. The front records
+    // each queued write whose destination it knows (NoteWrite: 3D constant buffer data, inline
+    // uploads and reports, semaphore releases, copy engine launches) and the position of the
+    // latest work that may write memory it can't bound (NoteUnboundedWrite: dispatches, blits,
+    // copies into images, forced fence releases, host waits, GPU thread commands). Draws only
+    // write storage buffers (and transform feedback), whose ranges the front can't know either;
+    // the guest orders them before a read from the command stream with a host wait (WFI, GP
+    // entry sync, syncpoint acquire), which counts as an unbounded write. EDEN_NX2_NARROW_DRAIN=2
+    // counts every 3D method as one too (as exact as the full drain, without the draw rule).
+    // Readers still drain fully for memory GPU work wrote through the buffer cache (newer words
+    // may be in its caches): MemoryManager::Nx2ReadNeedsDrain.
+    [[nodiscard]] bool NarrowDrains() const {
+        return narrow;
+    }
+    /// EDEN_NX2_NARROW_VERIFY=1 (debug): narrowed reads are compared with a full drain.
+    [[nodiscard]] static bool NarrowVerify();
+    /// EDEN_NX2_NARROW_VERIFY: logs, now and then, narrowed reads that differed from a full drain
+    /// (`mismatches`: words that differed; `macro`: the macro that read, 0 if none).
+    static void ReportNarrowCheck(DrainSite site, u32 mismatches, u32 macro, GPUVAddr address);
+    /// Counts starts of the split: engines keeping front copies of their registers rebuild them.
+    [[nodiscard]] u64 Session() const {
+        return session;
+    }
+    /// The work just sent writes [address, address + size) of the GPU address space `space` (its
+    /// MemoryManager) when the back runs it.
+    void NoteWrite(const void* space, GPUVAddr address, u64 size) {
+        if (narrow && size != 0) {
+            RecordWrite(space, address, size);
+        }
+    }
+    /// The work just sent may write guest memory the front can't bound. `writer`: it is compute
+    /// or copy work (what WaitForWriters waits for).
+    void NoteUnboundedWrite(bool writer = false) {
+        if (narrow) {
+            unbounded_position = write_position;
+            if (writer) {
+                unbounded_writer_position = write_position;
+            }
+        }
+    }
+    /// The work just sent may draw (only EDEN_NX2_NARROW_DRAIN=2 counts it as unbounded).
+    void NoteDraw() {
+        if (narrow_strict) {
+            unbounded_position = write_position;
+        }
+    }
+    /// Waits until the back executed the queued work that may write [address, address + size) of
+    /// `space`: the unbounded writes and the overlapping ones NoteWrite recorded. Returns whether
+    /// any of it was still queued.
+    bool WaitForWritesTo(const void* space, GPUVAddr address, u64 size, DrainSite site);
+    /// WaitForWriters for a command list at [address, address + size): the compute and copy work
+    /// with unbounded writes, and the queued writes overlapping the list.
+    bool WaitForWritersTo(const void* space, GPUVAddr address, u64 size);
 
 private:
     friend struct GpuSplitTestAccess;
@@ -238,9 +299,30 @@ private:
     /// Runs the entry at `entry` (of the `words` published before the ring's end), returns its size.
     size_t Execute(const u64* entry, size_t words);
 
+    /// Narrow drains: a queued write with a known destination, done once `consumed` reaches
+    /// `position` (the end of the work that makes it).
+    struct PendingWrite {
+        const void* space;
+        GPUVAddr begin;
+        GPUVAddr end;
+        u64 position;
+    };
+    static constexpr size_t MaxPendingWrites = 512;
+    static constexpr size_t PendingWriteMask = MaxPendingWrites - 1;
+    void RecordWrite(const void* space, GPUVAddr address, u64 size);
+    /// Forgets the recorded writes the back executed (by consumed_cache).
+    void PrunePendingWrites();
+    /// The position to wait for before reading [address, address + size) of `space`: at least
+    /// `base`, and past the latest recorded write that may overlap it.
+    [[nodiscard]] u64 PendingWriteTarget(const void* space, GPUVAddr address, u64 size,
+                                         u64 base) const;
+
     Core::System* system{};
     bool active{};
     bool front_macros{};
+    bool narrow{};
+    bool narrow_strict{};
+    u64 session{};
     std::unique_ptr<u64[]> ring;
 
     // Front side.
@@ -252,6 +334,13 @@ private:
     /// Words between publishes: small right after a drain, while the back has nothing to do.
     size_t publish_every{PublishEvery};
     Tegra::Engines::EngineInterface* front_engine{};
+    /// Narrow drains: the end of the latest work with unbounded writes (of compute or copy work).
+    u64 unbounded_position{};
+    u64 unbounded_writer_position{};
+    /// Recorded writes not yet known done, oldest first: [pending_head, pending_tail).
+    std::array<PendingWrite, MaxPendingWrites> pending_writes{};
+    u64 pending_head{};
+    u64 pending_tail{};
 
     // Back side.
     Tegra::Engines::EngineInterface* back_engine{};

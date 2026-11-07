@@ -34,6 +34,7 @@
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/native_query_trace.h"
+#include "video_core/nx2_reactive.h"
 #include "video_core/native_indirect_reset.h"
 #include "video_core/render_trace.h"
 #include "video_core/indirect_reset.h"
@@ -249,6 +250,18 @@ bool IsPrimitiveRestartSupported(const Device& device, VkPrimitiveTopology topol
             SupportsPrimitiveRestart(topology) ||
             (topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST &&
              device.IsPatchListPrimitiveRestartSupported()));
+}
+
+// EDEN_NX2_OPT_PIPELINE_ONCE=0: UpdateDynamicStates looks the graphics pipeline up a second time
+// each draw (RefreshStages, FixedPipelineState::Refresh and the key compares again), as before,
+// instead of taking the one PrepareDraw found. Nothing between the two lookups writes the
+// registers or draw state the key is made from, so both find the same pipeline.
+bool PipelineOnceEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_OPT_PIPELINE_ONCE");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
 }
 } // Anonymous namespace
 
@@ -510,7 +523,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
 
     {
         Profile::Scope scope{Profile::Zone::DynamicState};
-        UpdateDynamicStates();
+        UpdateDynamicStates(PipelineOnceEnabled() ? pipeline : nullptr);
     }
 
     query_cache.NotifySegment(true);
@@ -1596,6 +1609,10 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
         std::scoped_lock lock{texture_cache.mutex};
         auto area = texture_cache.GetFlushArea(addr, size);
         if (area) {
+            if (VideoCommon::Nx2Reactive::g_diag) [[unlikely]] {
+                VideoCommon::Nx2Reactive::NoteLookup(area->start_address, area->end_address,
+                                                     VideoCommon::Nx2Reactive::Kind::Image);
+            }
             return *area;
         }
     }
@@ -1603,6 +1620,10 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
         std::scoped_lock lock{buffer_cache.mutex};
         auto area = buffer_cache.GetFlushArea(addr, size);
         if (area) {
+            if (VideoCommon::Nx2Reactive::g_diag) [[unlikely]] {
+                VideoCommon::Nx2Reactive::NoteLookup(area->start_address, area->end_address,
+                                                     VideoCommon::Nx2Reactive::Kind::Buffer);
+            }
             return *area;
         }
     }
@@ -1611,6 +1632,10 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
         .end_address = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE),
         .preemtive = true,
     };
+    if (VideoCommon::Nx2Reactive::g_diag) [[unlikely]] {
+        VideoCommon::Nx2Reactive::NoteLookup(new_area.start_address, new_area.end_address,
+                                             VideoCommon::Nx2Reactive::Kind::Clean);
+    }
     return new_area;
 }
 
@@ -2314,7 +2339,7 @@ bool AccelerateDMA::BufferToImage(const Tegra::DMA::ImageCopy& copy_info,
     return DmaBufferImageCopy<true>(copy_info, buffer_operand, image_operand);
 }
 
-void RasterizerVulkan::UpdateDynamicStates() {
+void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* draw_pipeline) {
     auto& regs = maxwell3d->regs;
     auto& flags = maxwell3d->dirty.flags;
     const auto topology = maxwell3d->draw_manager.draw_state.topology;
@@ -2392,7 +2417,10 @@ void RasterizerVulkan::UpdateDynamicStates() {
     }
 
     if (device.IsExtVertexInputDynamicStateSupported()) {
-        if (auto* gp = pipeline_cache.CurrentGraphicsPipeline(); gp && gp->HasDynamicVertexInput()) {
+        const GraphicsPipeline* const gp = draw_pipeline != nullptr
+                                               ? draw_pipeline
+                                               : pipeline_cache.CurrentGraphicsPipeline();
+        if (gp && gp->HasDynamicVertexInput()) {
             UpdateVertexInput(regs);
         }
     }

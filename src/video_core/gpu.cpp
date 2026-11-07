@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <list>
 #include <memory>
 #include <utility>
@@ -39,10 +40,26 @@
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_reactive.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 
 namespace Tegra {
+
+namespace {
+
+// EDEN_NX2_OPT_TICKWORK=0: TickWork locks the sync request mutex on every call (each draw, clear
+// and dispatch), as before, instead of first checking without the lock whether a request is
+// queued at all.
+bool TickWorkFastEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_OPT_TICKWORK");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+} // Anonymous namespace
 
 struct GPU::Impl {
     explicit Impl(Core::System& system_, bool is_async_, bool use_nvdec_)
@@ -127,6 +144,7 @@ struct GPU::Impl {
         std::unique_lock lck{sync_request_mutex};
         const u64 fence = ++last_sync_fence;
         sync_requests.emplace_back(std::forward<Func>(action));
+        has_sync_requests.store(true, std::memory_order_release);
         return fence;
     }
 
@@ -148,6 +166,12 @@ struct GPU::Impl {
 
     /// Tick pending requests within the GPU.
     void TickWork() {
+        // A request queued after this check is run by the next TickWork, as one queued just
+        // after the loop below empties the queue is. Whoever made it and then had this thread
+        // tick (WaitForIdle's TickGPU) is ordered after its store, so that tick sees it.
+        if (TickWorkFastEnabled() && !has_sync_requests.load(std::memory_order_acquire)) {
+            return;
+        }
         std::unique_lock lck{sync_request_mutex};
         while (!sync_requests.empty()) {
             auto request = std::move(sync_requests.front());
@@ -158,6 +182,8 @@ struct GPU::Impl {
             sync_request_mutex.lock();
             sync_request_cv.notify_all();
         }
+        // Under the lock with the queue empty: no request can be queued in between.
+        has_sync_requests.store(false, std::memory_order_relaxed);
     }
 
     [[nodiscard]] u64 GetTicks() const {
@@ -238,6 +264,9 @@ struct GPU::Impl {
                      raster_area.start_address, raster_area.end_address,
                      reads.load(std::memory_order_relaxed));
         }
+        const auto stall_begin = VideoCommon::Nx2Reactive::g_diag
+                                     ? std::chrono::steady_clock::now()
+                                     : std::chrono::steady_clock::time_point{};
         const u64 fence = RequestSyncOperation([this, raster_area]() {
             // Apply collected guest writes before downloading GPU data over guest memory.
             InvalidateGPUCache();
@@ -245,6 +274,13 @@ struct GPU::Impl {
         });
         gpu_thread.TickGPU(is_async);
         WaitForSyncOperation(fence);
+        if (VideoCommon::Nx2Reactive::g_diag) [[unlikely]] {
+            const auto waited = std::chrono::steady_clock::now() - stall_begin;
+            VideoCommon::Nx2Reactive::NoteStall(
+                raster_area.start_address, raster_area.end_address,
+                static_cast<u64>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count()));
+        }
         return raster_area;
     }
 
@@ -362,6 +398,9 @@ struct GPU::Impl {
     std::condition_variable sync_cv;
 
     std::list<std::function<void()>> sync_requests;
+    /// sync_requests is not empty (set and cleared under sync_request_mutex; TickWork reads it
+    /// without the lock to skip the lock when nothing is queued).
+    std::atomic<bool> has_sync_requests{};
     std::atomic<u64> current_sync_fence{};
     u64 last_sync_fence{};
 

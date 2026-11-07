@@ -45,6 +45,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_download_trace.h"
+#include "video_core/nx2_reactive.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/types.h"
 
@@ -679,6 +680,7 @@ private:
             if (memory_tracker.IsRegionPreflushable(device_addr, size)) {
                 uncommitted_gpu_modified_ranges.Add(device_addr, size);
             } else {
+                PrefetchCpuReadRanges(device_addr, size);
                 ArmReadTraps(device_addr, size);
             }
             return;
@@ -694,10 +696,28 @@ private:
             }
         });
         if (queued < size) {
+            PrefetchCpuReadRanges(device_addr, size);
             ArmReadTraps(device_addr, size);
         }
         if (Nx2DownloadTrace::g_enabled && queued != 0) [[unlikely]] {
             Nx2DownloadTrace::Queued(device_addr, size, queued);
+        }
+    }
+
+    /// EDEN_NX2_REACTIVE_PREFETCH: the parts of a trapped GPU write over pages the guest CPU has
+    /// read GPU data from are also copied back at the next fence. The trap stays armed, so a read
+    /// before that copy reaches guest memory still flushes; a later one finds nothing to flush.
+    void PrefetchCpuReadRanges(DAddr device_addr, u64 size) {
+        if (!Nx2Reactive::Prefetch() || cpu_read_ranges.Empty()) {
+            return;
+        }
+        u64 prefetched = 0;
+        cpu_read_ranges.ForEachInRange(device_addr, size, [&](DAddr lower, DAddr upper) {
+            uncommitted_gpu_modified_ranges.Add(lower, upper - lower);
+            prefetched += upper - lower;
+        });
+        if (Nx2Reactive::g_diag && prefetched != 0) [[unlikely]] {
+            Nx2Reactive::NotePrefetch(prefetched);
         }
     }
 

@@ -21,6 +21,7 @@
 #include "video_core/control/channel_state.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/engines/maxwell_dma.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_split.h"
 #include "video_core/guest_memory.h"
@@ -136,6 +137,7 @@ bool DmaPusher::Step() {
     if (header.size > 0) {
         if (header.sync && g_nx2_ampere.load(std::memory_order_relaxed)) {
             VideoCommon::GpuSplit::Get().NoteSync();
+            VideoCommon::GpuSplit::Get().NoteUnboundedWrite();
         }
         // EDEN_NX2_FETCH_DRAIN=1: wait for the back before every entry, as before the split
         // overlapped the two halves again.
@@ -199,7 +201,7 @@ bool DmaPusher::Step() {
         const bool use_safe = !VideoCommon::GpuSplit::Get().Active() &&
                               (Settings::IsDMALevelDefault() ? Settings::IsGPULevelHigh() : Settings::IsDMALevelSafe());
         if (!gpu_written && VideoCommon::GpuSplit::Get().Active() &&
-            VideoCommon::GpuSplit::Get().WaitForWriters()) {
+            WaitForListWriters(dma_state.dma_get, size_t{header.size} * sizeof(u32))) {
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
         }
@@ -473,10 +475,15 @@ void DmaPusher::CallMethod(u32 argument) {
         const auto engine_type = subchannel_type[dma_state.subchannel];
         const bool writer = split.Active() &&
                             IsMemoryWriter(*subchannel, engine_type, dma_state.method);
+        const BackWrites back_writes =
+            split.NarrowDrains()
+                ? FrontBackWrites(*subchannel, engine_type, dma_state.method, &argument, 1)
+                : BackWrites{};
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
             }
+            NoteBackWrites(back_writes);
         };
         if (split.Active()) {
             const GPUVAddr segment = dma_state.dma_get + dma_state.dma_word_offset;
@@ -531,10 +538,16 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
         const auto engine_type = subchannel_type[dma_state.subchannel];
         const bool writer = split.Active() &&
                             IsMemoryWriter(*subchannel, engine_type, dma_state.method);
+        const BackWrites back_writes =
+            split.NarrowDrains()
+                ? FrontBackWrites(*subchannel, engine_type, dma_state.method, base_start,
+                                  num_methods)
+                : BackWrites{};
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
             }
+            NoteBackWrites(back_writes);
         };
         if (split.Active()) {
             const GPUVAddr segment = dma_state.dma_get + dma_state.dma_word_offset;
@@ -565,6 +578,83 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
         subchannel->current_dma_segment = dma_state.dma_get + dma_state.dma_word_offset;
         subchannel->CallMultiMethod(system, dma_state.method, base_start, num_methods, dma_state.method_count);
     }
+}
+
+DmaPusher::BackWrites DmaPusher::FrontBackWrites(Engines::EngineInterface& engine,
+                                                 Engines::EngineTypes type, u32 method,
+                                                 const u32* arguments, u32 count) {
+    BackWrites writes;
+    switch (type) {
+    case Engines::EngineTypes::Nv01Timer:
+        break;
+    case Engines::EngineTypes::Maxwell3D:
+        // With its macros on the front it notes its own (Maxwell3D::FrontNoteWrites).
+        writes.unbounded =
+            !static_cast<Engines::Maxwell3D&>(engine).GetNativeMacroEngine().native_turing;
+        break;
+    case Engines::EngineTypes::KeplerCompute:
+        // Dispatches write wherever their shaders store.
+        writes.unbounded = static_cast<Engines::KeplerCompute&>(engine).MayWriteMemory(method);
+        writes.writer = writes.unbounded;
+        break;
+    case Engines::EngineTypes::MaxwellDMA: {
+        auto& dma = static_cast<Engines::MaxwellDMA&>(engine);
+        const u64 session = VideoCommon::GpuSplit::Get().Session();
+        for (u32 i = 0; i < count; ++i) {
+            Engines::MaxwellDMA::FrontLaunchWrites launch;
+            if (!dma.FrontMethod(method, arguments[i], session, launch)) {
+                continue;
+            }
+            writes.writer = true;
+            writes.unbounded |= !launch.bounded;
+            for (u32 range = 0; range < launch.count; ++range) {
+                if (writes.count == writes.ranges.size()) {
+                    writes.unbounded = true;
+                    break;
+                }
+                writes.ranges[writes.count++] = launch.ranges[range];
+            }
+        }
+        break;
+    }
+    default:
+        // Fermi2D blits, KeplerMemory inline uploads.
+        writes.unbounded = method >= engine.execution_mask.size() || engine.execution_mask[method];
+        break;
+    }
+    return writes;
+}
+
+void DmaPusher::NoteBackWrites(const BackWrites& writes) {
+    auto& split = VideoCommon::GpuSplit::Get();
+    for (u32 i = 0; i < writes.count; ++i) {
+        const auto& [begin, end] = writes.ranges[i];
+        split.NoteWrite(&memory_manager, begin, end - begin);
+    }
+    if (writes.unbounded) {
+        split.NoteUnboundedWrite(writes.writer);
+    }
+}
+
+bool DmaPusher::WaitForListWriters(GPUVAddr address, size_t size) {
+    auto& split = VideoCommon::GpuSplit::Get();
+    if (!split.NarrowDrains()) {
+        return split.WaitForWriters();
+    }
+    // By page: the pages are what IsGpuWrittenCommands and the buffer cache's list copies go by.
+    const GPUVAddr first = address & ~GPUVAddr{0xfff};
+    const GPUVAddr last = (address + size + 0xfff) & ~GPUVAddr{0xfff};
+    const bool waited = split.WaitForWritersTo(&memory_manager, first, last - first);
+    if (VideoCommon::GpuSplit::NarrowVerify()) {
+        // EDEN_NX2_NARROW_VERIFY: the pages GPU-written now and after all the writers.
+        const bool written = IsGpuWrittenCommands(address, size);
+        const bool waited_all = split.WaitForWriters();
+        VideoCommon::GpuSplit::ReportNarrowCheck(
+            VideoCommon::DrainSite::NarrowListWriters,
+            written != IsGpuWrittenCommands(address, size) ? 1U : 0U, 0, address);
+        return waited || waited_all;
+    }
+    return waited;
 }
 
 void DmaPusher::RefreshSnapshot(CommandList& list, u64 now) {
@@ -636,7 +726,7 @@ bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count) {
     }
     auto& split = VideoCommon::GpuSplit::Get();
     if (split.Active()) {
-        split.WaitForWriters();
+        WaitForListWriters(address, size_t{count} * sizeof(u32));
     }
     bool past_sync = !split.Active();
     using GpuWrittenList = VideoCore::RasterizerInterface::GpuWrittenList;

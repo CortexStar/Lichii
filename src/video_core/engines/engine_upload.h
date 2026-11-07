@@ -4,6 +4,7 @@
 #pragma once
 
 #include <span>
+#include <utility>
 
 #include "common/bit_field.h"
 #include "common/common_types.h"
@@ -56,6 +57,12 @@ struct Registers {
         }
     } dest;
 };
+
+/// The guest memory [first, second) inline data can land in with these registers, for a copy
+/// launched with `is_linear` (pitch layout) and `copy_size` (line_length_in * line_count then):
+/// the split GPU thread's front bounds the uploads it queues with it (GpuSplit::NoteWrite).
+[[nodiscard]] std::pair<GPUVAddr, GPUVAddr> WriteRange(const Registers& regs, bool is_linear,
+                                                       u32 copy_size);
 
 class State {
 public:

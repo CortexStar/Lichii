@@ -196,7 +196,9 @@ private:
     /// the GPU makes them now (BufferCache::Nx2CopyListPages).
     void SubmitNx2ListCopies();
 
-    void UpdateDynamicStates();
+    /// `draw_pipeline`: the pipeline PrepareDraw looked up for this draw (no second lookup), or
+    /// null to look it up here (DrawTexture, EDEN_NX2_OPT_PIPELINE_ONCE=0).
+    void UpdateDynamicStates(const GraphicsPipeline* draw_pipeline = nullptr);
 
     void HandleTransformFeedback();
 

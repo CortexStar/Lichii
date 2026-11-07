@@ -120,8 +120,18 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     active = true;
     const char* jit = std::getenv("EDEN_NX2_MME_JIT");
     front_macros = mode == '2' && (jit == nullptr || jit[0] != '0');
-    LOG_INFO(HW_GPU, "GPU thread split: engine methods run on a second thread{}",
-             front_macros ? ", macros on the first" : "");
+    // EDEN_NX2_NARROW_DRAIN=0: the front's reads drain the split fully, as before; 2: draws count
+    // as unbounded writes too (see NarrowDrains).
+    static const char narrow_mode = [] {
+        const char* value = std::getenv("EDEN_NX2_NARROW_DRAIN");
+        return value != nullptr ? value[0] : '1';
+    }();
+    narrow = front_macros && narrow_mode != '0';
+    narrow_strict = narrow && narrow_mode == '2';
+    ++session;
+    LOG_INFO(HW_GPU, "GPU thread split: engine methods run on a second thread{}{}",
+             front_macros ? ", macros on the first" : "",
+             narrow ? (narrow_strict ? ", narrow drains (strict)" : ", narrow drains") : "");
 }
 
 void GpuSplit::Stop() {
@@ -147,6 +157,12 @@ void GpuSplit::Stop() {
     front_engine = nullptr;
     back_engine = nullptr;
     front_macros = false;
+    narrow = false;
+    narrow_strict = false;
+    unbounded_position = 0;
+    unbounded_writer_position = 0;
+    pending_head = 0;
+    pending_tail = 0;
     published.store(0, std::memory_order_relaxed);
     consumed.store(0, std::memory_order_relaxed);
     back_waiting.store(false, std::memory_order_relaxed);
@@ -224,6 +240,106 @@ bool GpuSplit::WaitForWriters() {
 
 bool GpuSplit::WaitForSync() {
     return WaitFor(std::min(last_sync_position, write_position), DrainSite::ListSync);
+}
+
+bool GpuSplit::NarrowVerify() {
+    static const bool verify = [] {
+        const char* value = std::getenv("EDEN_NX2_NARROW_VERIFY");
+        return value != nullptr && value[0] != '0';
+    }();
+    return verify;
+}
+
+void GpuSplit::ReportNarrowCheck(DrainSite site, u32 mismatches, u32 macro, GPUVAddr address) {
+    struct Counts {
+        std::atomic<u64> checks;
+        std::atomic<u64> mismatched;
+    };
+    static std::array<Counts, static_cast<size_t>(DrainSite::Count)> counts{};
+    Counts& count = counts[static_cast<size_t>(site)];
+    const u64 checks = count.checks.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (mismatches != 0) {
+        const u64 mismatched = count.mismatched.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (mismatched <= 32 || (mismatched & 1023) == 0) {
+            LOG_WARNING(HW_GPU,
+                        "Narrow drain verify: {} at {:#x} (macro {:#x}) read {} words other than "
+                        "a full drain; {} of {} checks differed so far",
+                        drain_site_names[static_cast<size_t>(site)], address, macro, mismatches,
+                        mismatched, checks);
+        }
+    }
+    if ((checks & 0xffff) == 0) {
+        LOG_INFO(HW_GPU, "Narrow drain verify: {}: {} checks, {} differed",
+                 drain_site_names[static_cast<size_t>(site)], checks,
+                 count.mismatched.load(std::memory_order_relaxed));
+    }
+}
+
+void GpuSplit::RecordWrite(const void* space, GPUVAddr address, u64 size) {
+    const GPUVAddr end = address + size;
+    if (pending_tail != pending_head) {
+        // Runs of writes to the same memory (constant buffer words, one by one) share a record:
+        // done once the last of them is.
+        PendingWrite& last = pending_writes[(pending_tail - 1) & PendingWriteMask];
+        if (last.space == space && address <= last.end && last.begin <= end) {
+            last.begin = (std::min)(last.begin, address);
+            last.end = (std::max)(last.end, end);
+            last.position = write_position;
+            return;
+        }
+        PrunePendingWrites();
+    }
+    if (pending_tail - pending_head == MaxPendingWrites) {
+        consumed_cache = consumed.load(std::memory_order_acquire);
+        PrunePendingWrites();
+        if (pending_tail - pending_head == MaxPendingWrites) {
+            // Full: the oldest counts as unbounded from now on (no read stops short of it).
+            const PendingWrite& oldest = pending_writes[pending_head & PendingWriteMask];
+            unbounded_position = (std::max)(unbounded_position, oldest.position);
+            unbounded_writer_position = (std::max)(unbounded_writer_position, oldest.position);
+            ++pending_head;
+        }
+    }
+    pending_writes[pending_tail & PendingWriteMask] = {space, address, end, write_position};
+    ++pending_tail;
+}
+
+void GpuSplit::PrunePendingWrites() {
+    while (pending_head != pending_tail &&
+           pending_writes[pending_head & PendingWriteMask].position <= consumed_cache) {
+        ++pending_head;
+    }
+}
+
+u64 GpuSplit::PendingWriteTarget(const void* space, GPUVAddr address, u64 size, u64 base) const {
+    const GPUVAddr end = address + size;
+    // Newest first: positions only grow, so the first overlap is the latest one, and records
+    // at or before `base` can't move the target.
+    for (u64 index = pending_tail; index != pending_head;) {
+        const PendingWrite& pending = pending_writes[--index & PendingWriteMask];
+        if (pending.position <= base) {
+            break;
+        }
+        // Another address space may map the same memory.
+        if (pending.space != space || (pending.begin < end && address < pending.end)) {
+            return pending.position;
+        }
+    }
+    return base;
+}
+
+bool GpuSplit::WaitForWritesTo(const void* space, GPUVAddr address, u64 size, DrainSite site) {
+    consumed_cache = consumed.load(std::memory_order_acquire);
+    PrunePendingWrites();
+    const u64 target = PendingWriteTarget(space, address, size, unbounded_position);
+    return WaitFor((std::min)(target, write_position), site);
+}
+
+bool GpuSplit::WaitForWritersTo(const void* space, GPUVAddr address, u64 size) {
+    consumed_cache = consumed.load(std::memory_order_acquire);
+    PrunePendingWrites();
+    const u64 target = PendingWriteTarget(space, address, size, unbounded_writer_position);
+    return WaitFor((std::min)(target, write_position), DrainSite::NarrowListWriters);
 }
 
 bool GpuSplit::WaitFor(u64 target, DrainSite site) {

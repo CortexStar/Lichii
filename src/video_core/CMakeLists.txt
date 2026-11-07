@@ -119,6 +119,7 @@ add_library(video_core STATIC
     nx2_profile.h
     nx2_perf.h
     nx2_download_trace.h
+    nx2_reactive.h
     pending_maps.h
     present.h
     pte_kind.h
