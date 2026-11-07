@@ -10,6 +10,7 @@
 #include <memory>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
 
 #include "common/common_types.h"
 
@@ -171,6 +172,30 @@ public:
     void NoteSync() {
         last_sync_position = write_position;
     }
+    /// A semaphore or report release to `address` was just sent (front thread only).
+    void NoteSemaphoreWrite(u64 address) {
+        if (pending_semaphore_writes.size() >= 4096) {
+            consumed_cache = consumed.load(std::memory_order_acquire);
+            std::erase_if(pending_semaphore_writes,
+                          [this](const auto& entry) { return entry.second <= consumed_cache; });
+        }
+        pending_semaphore_writes[address] = write_position;
+    }
+    /// Whether a release to `address` was sent and the back has not executed it yet (front only).
+    [[nodiscard]] bool SemaphoreWritePending(u64 address) {
+        const auto it = pending_semaphore_writes.find(address);
+        if (it == pending_semaphore_writes.end()) {
+            return false;
+        }
+        if (it->second > consumed_cache) {
+            consumed_cache = consumed.load(std::memory_order_acquire);
+        }
+        if (it->second <= consumed_cache) {
+            pending_semaphore_writes.erase(it);
+            return false;
+        }
+        return true;
+    }
     /// Waits until the back executed the work sent before the last NoteSync. Returns whether any
     /// of it was still queued.
     bool WaitForSync();
@@ -247,6 +272,7 @@ private:
     u64 write_position{};
     u64 last_writer_position{};
     u64 last_sync_position{};
+    std::unordered_map<u64, u64> pending_semaphore_writes;
     u64 published_local{};
     u64 consumed_cache{};
     /// Words between publishes: small right after a drain, while the back has nothing to do.

@@ -73,10 +73,16 @@ private:
     }
 
     ~LinePool() {
-        for (auto& worker : workers) {
-            worker.request_stop();
+        {
+            // Under the mutex: a worker between its predicate check and its wait would otherwise
+            // miss the notification and never return to be joined.
+            std::scoped_lock lock{mutex};
+            for (auto& worker : workers) {
+                worker.request_stop();
+            }
         }
         work_cv.notify_all();
+        workers.clear();
     }
 
     void Work(const std::function<void(u32, u32)>& func) {
