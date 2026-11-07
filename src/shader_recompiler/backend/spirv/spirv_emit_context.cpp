@@ -493,6 +493,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
                           profile_.support_int64},
       program_info{&program.info} {
     const bool is_unified{profile.unified_descriptor_binding};
+    oot_motion.enabled = UsesOotMotion(program.info);
     u32& uniform_binding{is_unified ? bindings.unified : bindings.uniform_buffer};
     u32& storage_binding{is_unified ? bindings.unified : bindings.storage_buffer};
     u32& texture_binding{is_unified ? bindings.unified : bindings.texture};
@@ -514,6 +515,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineImageBuffers(program.info, image_binding);
     DefineTextures(program.info, texture_binding, bindings.texture_scaling_index);
     DefineImages(program.info, image_binding, bindings.image_scaling_index);
+    DefineOotMotion(program.info, image_binding);
     DefineAttributeMemAccess(program.info);
     DefineWriteStorageCasLoopFunction(program.info);
     DefineGlobalMemoryFunctions(program);
@@ -1312,13 +1314,13 @@ void EmitContext::DefinePushConstants(const Info& info) {
     const bool rescaling_block{rescaling && profile.unified_descriptor_binding};
     const bool page_table{storage_by_address && profile.unified_descriptor_binding};
     const bool bank_table{uniforms_by_address && profile.unified_descriptor_binding};
-    if (!rescaling_block && !render_area && !page_table && !bank_table) {
+    if (!rescaling_block && !render_area && !page_table && !bank_table && !oot_motion.enabled) {
         return;
     }
     // One block with every member this stage reads, at the offsets of PushConstantLayout.
-    boost::container::static_vector<Id, 6> members;
-    boost::container::static_vector<u32, 6> offsets;
-    boost::container::static_vector<const char*, 6> names;
+    boost::container::static_vector<Id, 14> members;
+    boost::container::static_vector<u32, 14> offsets;
+    boost::container::static_vector<const char*, 14> names;
     const auto add_member{[&](Id type, u32 offset, const char* name) {
         members.push_back(type);
         offsets.push_back(offset);
@@ -1349,6 +1351,14 @@ void EmitContext::DefinePushConstants(const Info& info) {
     if (page_table) {
         page_table_member_index = add_member(U64, PAGE_TABLE_OFFSET, "page_table");
     }
+    if (oot_motion.enabled) {
+        // Ocarina of Time's per-draw object motion words (OotMotionLayout), consecutive members.
+        constexpr u32 words{sizeof(OotMotionLayout) / sizeof(u32)};
+        oot_motion.member_index = static_cast<u32>(members.size());
+        for (u32 i = 0; i < words; ++i) {
+            add_member(U32[1], OOT_MOTION_OFFSET + i * 4, "oot_motion");
+        }
+    }
     const Id push_constant_struct{TypeStruct(std::span(members.data(), members.size()))};
     Decorate(push_constant_struct, spv::Decoration::Block);
     Name(push_constant_struct, "PushConstants");
@@ -1370,6 +1380,9 @@ void EmitContext::DefinePushConstants(const Info& info) {
     }
     if (bank_table) {
         bank_table_push_constant = variable;
+    }
+    if (oot_motion.enabled) {
+        oot_motion.push_constant = variable;
     }
     if (profile.supported_spirv >= 0x00010400) {
         interfaces.push_back(variable);
@@ -1651,6 +1664,106 @@ void EmitContext::DefineRescalingInputUniformConstant() {
     if (profile.supported_spirv >= 0x00010400) {
         interfaces.push_back(rescaling_uniform_constant);
     }
+}
+
+bool EmitContext::UsesOotMotion(const Info& info) const {
+    if (!profile.unified_descriptor_binding) {
+        return false;
+    }
+    return ((stage == Stage::VertexB || stage == Stage::Mesh) && info.oot_motion.history) ||
+           (stage == Stage::Fragment && info.oot_motion.image);
+}
+
+void EmitContext::DefineOotMotion(const Info& info, u32& binding) {
+    if (!oot_motion.enabled) {
+        return;
+    }
+    const bool mesh{stage == Stage::Mesh};
+    const auto define_varying = [&](bool output, u32 location, const char* name) {
+        // A mesh stage writes one value per vertex of its workgroup.
+        const Id type{mesh ? TypeArray(F32[4], Const(mesh_info.max_vertices)) : F32[4]};
+        const Id id{output ? DefineOutput(*this, type, std::nullopt)
+                           : DefineInput(*this, F32[4], true)};
+        Decorate(id, spv::Decoration::Location, location);
+        Name(id, name);
+        return id;
+    };
+    const bool vertex{stage == Stage::VertexB || mesh};
+    oot_motion.current = define_varying(vertex, info.oot_motion.location_current, "oot_current");
+    oot_motion.previous =
+        define_varying(vertex, info.oot_motion.location_previous, "oot_previous");
+    if (vertex) {
+        AddExtension("SPV_KHR_storage_buffer_storage_class");
+        const Id array_type{TypeRuntimeArray(F32[4])};
+        Decorate(array_type, spv::Decoration::ArrayStride, 16U);
+        const Id struct_type{TypeStruct(array_type)};
+        Decorate(struct_type, spv::Decoration::Block);
+        MemberDecorate(struct_type, 0, spv::Decoration::Offset, 0U);
+        Name(struct_type, "OotMotionHistory");
+        const Id pointer{TypePointer(spv::StorageClass::StorageBuffer, struct_type)};
+        oot_motion.history = AddGlobalVariable(pointer, spv::StorageClass::StorageBuffer);
+        Decorate(oot_motion.history, spv::Decoration::Binding, binding);
+        Decorate(oot_motion.history, spv::Decoration::DescriptorSet, 0U);
+        Name(oot_motion.history, "oot_motion_history");
+        if (profile.supported_spirv >= 0x00010400) {
+            interfaces.push_back(oot_motion.history);
+        }
+        oot_motion.history_element = TypePointer(spv::StorageClass::StorageBuffer, F32[4]);
+        if (mesh) {
+            if (!Sirit::ValidId(workgroup_id)) {
+                workgroup_id = DefineInput(*this, U32[3], false, spv::BuiltIn::WorkgroupId);
+            }
+            if (info.oot_motion.shadow) {
+                oot_motion.shadow = true;
+                oot_motion.shadow_base = info.oot_motion.shadow_base;
+                oot_motion.shadow_size = info.oot_motion.shadow_size;
+                oot_motion.shadow_positions = DefineVariable(
+                    *this, TypeArray(U32[1], Const(mesh_info.max_vertices * 4 + 1)), std::nullopt,
+                    spv::StorageClass::Workgroup);
+                Name(oot_motion.shadow_positions, "oot_shadow_positions");
+                oot_motion.counter =
+                    DefineVariable(*this, U32[1], std::nullopt, spv::StorageClass::Private);
+                Name(oot_motion.counter, "oot_counter");
+                if (!Sirit::ValidId(local_invocation_id)) {
+                    local_invocation_id =
+                        DefineInput(*this, U32[3], false, spv::BuiltIn::LocalInvocationId);
+                }
+            }
+            ++binding;
+            return;
+        }
+        oot_motion.vertex_index =
+            Sirit::ValidId(vertex_index)
+                ? vertex_index
+                : DefineInput(*this, U32[1], true, spv::BuiltIn::VertexIndex);
+        oot_motion.instance_index =
+            Sirit::ValidId(instance_index)
+                ? instance_index
+                : DefineInput(*this, U32[1], true, spv::BuiltIn::InstanceIndex);
+    } else {
+        oot_motion.frag_coord = Sirit::ValidId(input_position)
+                                    ? input_position
+                                    : DefineInput(*this, F32[4], true, spv::BuiltIn::FragCoord);
+        // U64 and the Int64 capabilities come from the stage's uses_int64 flags (set with
+        // oot_motion.image by the pipeline cache).
+        AddExtension("SPV_KHR_storage_buffer_storage_class");
+        const Id array_type{TypeRuntimeArray(U64)};
+        Decorate(array_type, spv::Decoration::ArrayStride, 8U);
+        const Id struct_type{TypeStruct(array_type)};
+        Decorate(struct_type, spv::Decoration::Block);
+        MemberDecorate(struct_type, 0, spv::Decoration::Offset, 0U);
+        Name(struct_type, "OotMotionPixels");
+        const Id pointer{TypePointer(spv::StorageClass::StorageBuffer, struct_type)};
+        oot_motion.buffer = AddGlobalVariable(pointer, spv::StorageClass::StorageBuffer);
+        Decorate(oot_motion.buffer, spv::Decoration::Binding, binding);
+        Decorate(oot_motion.buffer, spv::Decoration::DescriptorSet, 0U);
+        Name(oot_motion.buffer, "oot_motion_pixels");
+        if (profile.supported_spirv >= 0x00010400) {
+            interfaces.push_back(oot_motion.buffer);
+        }
+        oot_motion.buffer_element = TypePointer(spv::StorageClass::StorageBuffer, U64);
+    }
+    ++binding;
 }
 
 void EmitContext::DefineConstantBuffers(const Info& info, u32& binding) {

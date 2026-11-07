@@ -83,6 +83,21 @@ static_assert(RESCALING_LAYOUT_WORDS_OFFSET == 32 && RESCALING_LAYOUT_IMAGES_OFF
                   PUSH_CONSTANT_LAYOUT_SIZE == 80,
               "push constant offsets are shared with the descriptor heap push data layout");
 
+// Per-draw constants of Ocarina of Time's object motion, after every PushConstantLayout member.
+struct OotMotionLayout {
+    u32 current_base;
+    u32 previous_base; // ~0 without history
+    u32 vertex_bias;
+    u32 vertex_range;
+    u32 instance_bias;
+    u32 flags; // bit 0: enabled for this draw
+    u32 image_width; // pixels per row of the motion buffer
+};
+constexpr u32 OOT_MOTION_OFFSET = PUSH_CONSTANT_LAYOUT_SIZE;
+constexpr u32 OOT_MOTION_PUSH_END = OOT_MOTION_OFFSET + 32;
+static_assert(OOT_MOTION_OFFSET >= PUSH_CONSTANT_LAYOUT_SIZE);
+static_assert(OOT_MOTION_OFFSET + sizeof(OotMotionLayout) <= OOT_MOTION_PUSH_END);
+
 [[nodiscard]] std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_info, IR::Program& program, Bindings& bindings);
 [[nodiscard]] inline std::vector<u32> EmitSPIRV(const Profile& profile, IR::Program& program) {
     Bindings binding;

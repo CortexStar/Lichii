@@ -32,6 +32,7 @@
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_frame_dump.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
+#include "video_core/renderer_vulkan/vk_oot_object_motion.h"
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -109,6 +110,21 @@ VkShaderStageFlagBits SlotStage(size_t index) {
         VK_SHADER_STAGE_FRAGMENT_BIT,
     };
     return stages.at(index);
+}
+
+// Ocarina of Time object motion: the history buffer (vertex) or motion image (fragment), bound
+// after the stage's own images (DescriptorLayoutBuilder::Add).
+void PushOotMotionDescriptor(GuestDescriptorQueue& queue, const Shader::Info& info) {
+    if (!info.oot_motion.history && !info.oot_motion.image) {
+        return;
+    }
+    const OotObjectMotion* const motion = OotObjectMotion::Get();
+    if (info.oot_motion.history) {
+        queue.AddBuffer(motion->HistoryBuffer(), motion->HistoryAddress(), 0,
+                        motion->HistorySize());
+    } else {
+        queue.AddBuffer(motion->PixelBuffer(), motion->PixelAddress(), 0, motion->PixelBytes());
+    }
 }
 
 DescriptorLayoutBuilder MakeBuilder(const Device& device, std::span<const Shader::Info> infos,
@@ -395,8 +411,13 @@ GraphicsPipeline::GraphicsPipeline(
                any_written(info.image_descriptors) || any_written(info.image_buffer_descriptors);
     });
 
+    // Ocarina of Time's object motion binds its buffers through descriptor sets and pushes its
+    // words as push constants: those pipelines keep a pipeline layout.
+    const bool oot_motion = std::ranges::any_of(stage_infos, [](const Shader::Info& info) {
+        return info.oot_motion.history || info.oot_motion.image;
+    });
     heap_mode = texture_cache.GetRuntime().Heap() != nullptr &&
-                device.IsKhrMaintenance5Supported() &&
+                device.IsKhrMaintenance5Supported() && !oot_motion &&
                 HeapMappings::Eligible(stage_infos, mesh_emulation.has_value());
     if (heap_mode) {
         // Textures through the pool-mirroring heaps, everything else by device address: no
@@ -988,6 +1009,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             } else {
                 PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
                                      rescaling, samplers_it, views_it, record ? &*record : nullptr);
+                PushOotMotionDescriptor(guest_descriptor_queue, stage_infos[stage]);
             }
         }
         const auto& info{stage_infos[stage]};
