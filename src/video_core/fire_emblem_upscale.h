@@ -19,6 +19,9 @@ constexpr u64 PrepassProgramKey = 0x4cbf6eff32525aecULL;
 constexpr u64 StarFoxProgramId = 0x0400E88025B1A000ULL;
 constexpr u64 StarFoxPrepassProgramKey = 0xd686ca0b9fad9e6dULL;
 constexpr u64 StarFoxOutputProgramKey = 0x7d3764ff101bec27ULL;
+constexpr u64 DuskbloodsProgramId = 0x0400D1D02399A000ULL;
+constexpr u64 DuskbloodsPrepassProgramKey = 0xe5efe04581720f15ULL;
+constexpr u64 DuskbloodsOutputProgramKey = 0x50e47e31c31fc1f8ULL;
 constexpr u32 PrepassColorOffset = 0x278;
 constexpr u32 JitterOffset = 0x1b0;
 constexpr u32 OutputColorInputOffset = 0x328;
@@ -36,6 +39,9 @@ constexpr std::optional<Passes> CapturedPasses(u64 program_id) {
     }
     if (program_id == StarFoxProgramId) {
         return Passes{StarFoxPrepassProgramKey, StarFoxOutputProgramKey, true};
+    }
+    if (program_id == DuskbloodsProgramId) {
+        return Passes{DuskbloodsPrepassProgramKey, DuskbloodsOutputProgramKey, false};
     }
     return std::nullopt;
 }
