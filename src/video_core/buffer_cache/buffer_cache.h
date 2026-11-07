@@ -491,7 +491,8 @@ void BufferCache<P>::DownloadMemoryForRead(DAddr device_addr, u64 size) {
         std::unique_ptr<ReadCheck> check;
         boost::container::small_vector<Copy, 16> check_copies;
         u64 check_size = 0;
-        if (ReadCheckEvery() != 0 && read_check.next++ % ReadCheckEvery() == 0) [[unlikely]] {
+        const u64 check_every = read_check.every != 0 ? read_check.every : ReadCheckEvery();
+        if (check_every != 0 && read_check.next++ % check_every == 0) [[unlikely]] {
             check = std::make_unique<ReadCheck>();
             ForEachBufferInRange(device_addr, size, [&](BufferId buffer_id, Buffer& buffer) {
                 const DAddr buffer_addr = buffer.CpuAddr();
@@ -555,19 +556,24 @@ void BufferCache<P>::DownloadMemoryForRead(DAddr device_addr, u64 size) {
             });
         }
         if (check) [[unlikely]] {
-            // Each byte a synchronous flush copies is in this download or an earlier one.
+            // Each byte a synchronous flush copies is in this download or an earlier one (kept).
             for (const Copy& entry : check_copies) {
                 const DAddr start = slot_buffers[entry.buffer_id].CpuAddr() + entry.copy.src_offset;
                 Common::RangeSet<DAddr> rest;
                 rest.Add(start, entry.copy.size);
-                const auto take_out = [&](const Common::RangeSet<DAddr>& taken) {
+                const auto take_out = [&](const Common::RangeSet<DAddr>& taken, bool earlier_one) {
                     taken.ForEachInRange(start, entry.copy.size, [&](DAddr lower, DAddr upper) {
+                        if (earlier_one) {
+                            rest.ForEachInRange(lower, upper - lower, [&](DAddr from, DAddr to) {
+                                check->kept.Add(from, to - from);
+                            });
+                        }
                         rest.Subtract(lower, upper - lower);
                     });
                 };
-                take_out(download.write_ranges);
+                take_out(download.write_ranges, false);
                 for (const ReadDownload& earlier : read_downloads) {
-                    take_out(earlier.write_ranges);
+                    take_out(earlier.write_ranges, true);
                 }
                 rest.ForEach([&](DAddr lower, DAddr upper) {
                     if (read_check.logged++ < 16) {
@@ -613,6 +619,9 @@ void BufferCache<P>::DownloadMemoryForRead(DAddr device_addr, u64 size) {
                     .dst_offset = entry.copy.dst_offset,
                     .size = entry.copy.size,
                 });
+            }
+            if (!check->kept.Empty()) {
+                check->landed_bytes.resize(check_size);
             }
             download.check = std::move(check);
         }
@@ -676,6 +685,12 @@ void BufferCache<P>::WriteReadDownloads(u64 tick) {
                                               end - start);
                     });
             }
+            // TEST: what later reads' checks find of an earlier download where they kept its bytes.
+            for (size_t later = 1; later < read_downloads.size(); ++later) {
+                if (read_downloads[later].check) [[unlikely]] {
+                    NoteLandedBytes(*read_downloads[later].check, download.write_ranges);
+                }
+            }
             if (download.check) [[unlikely]] {
                 CheckReadDownload(*download.check, cpu_written);
                 async_buffers_death_ring.push_back(download.check->staging);
@@ -731,13 +746,58 @@ void BufferCache<P>::CheckReadDownload(const ReadCheck& check,
                                        const Common::RangeSet<DAddr>& cpu_written) {
     // Guest memory now holds this download and the earlier ones: compare it with the synchronous
     // copy, except where a newer value replaced it since (CPU writes, ClearDownload). Writes
-    // collected since the download was written count as newer too.
+    // collected since the download was written count as newer too. Where an earlier download
+    // brought the bytes (kept), the synchronous flush of its own read left them, and guest memory
+    // keeps what the GPU's side writes there after that, as without these downloads: those bytes
+    // are compared as they landed (NoteLandedBytes).
     const Common::RangeSet<DAddr> cpu_written_since = PendingCpuWriteRanges();
     const u8* const base = check.staging.mapped_span.data();
+    enum class Source : u8 {
+        Own,    ///< This download brings it
+        Kept,   ///< An earlier one was to bring it, and hasn't
+        Landed, ///< An earlier one brought it
+    };
+    enum class Result : u8 {
+        Same,
+        Rewritten, ///< Newer bytes since an earlier download landed it
+        Differs,   ///< This download's bytes differ
+        Outdated,  ///< An earlier download's bytes differ: the GPU wrote them since
+        NotLanded, ///< No earlier download wrote it
+    };
+    const auto report = [this](Result result, DAddr address, u64 size, u8 found, u8 wanted) {
+        if (result == Result::Rewritten) {
+            read_check.rewritten += size;
+            if (read_check.logged_rewrites++ < 16) {
+                LOG_INFO(HW_GPU,
+                         "Read download check: guest memory {:#x}+{:#x} got newer bytes after an "
+                         "earlier read's download brought it, as it does after synchronous "
+                         "flushes: not compared (written by {})",
+                         address, size, VideoCore::ReadCheckWrites::Find(address, size));
+            }
+            return;
+        }
+        read_check.mismatched += size;
+        if (read_check.logged++ >= 16) {
+            return;
+        }
+        const char* const why =
+            result == Result::Outdated
+                ? ": an earlier read's download brought it, and the GPU wrote it since without "
+                  "taking it out of that download"
+                : (result == Result::NotLanded ? ": no earlier read's download wrote it" : "");
+        LOG_ERROR(HW_GPU,
+                  "Read download check: guest memory {:#x}+{:#x} differs from a synchronous "
+                  "flush ({:#04x} for {:#04x} at its start){}",
+                  address, size, found, wanted, why);
+    };
     std::vector<u8> guest;
+    std::vector<Source> sources;
     for (const BufferCopy& copy : check.copies) {
         const DAddr copy_addr = static_cast<DAddr>(copy.src_offset);
-        const u8* const expected = base + (copy.dst_offset - check.staging.offset);
+        const u64 copy_offset = copy.dst_offset - check.staging.offset;
+        const u8* const expected = base + copy_offset;
+        const u8* const landed =
+            check.landed_bytes.empty() ? nullptr : check.landed_bytes.data() + copy_offset;
         Common::RangeSet<DAddr> compared;
         compared.Add(copy_addr, copy.size);
         const auto take_out = [&](const Common::RangeSet<DAddr>& taken) {
@@ -753,26 +813,42 @@ void BufferCache<P>::CheckReadDownload(const ReadCheck& check,
             guest.resize(length);
             device_memory.ReadBlockUnsafe(start, guest.data(), length);
             read_check.compared += length;
-            const u8* const wanted = expected + (start - copy_addr);
-            if (std::memcmp(guest.data(), wanted, length) == 0) {
-                return;
-            }
+            const u64 offset = start - copy_addr;
+            sources.assign(length, Source::Own);
+            const auto mark = [&](const Common::RangeSet<DAddr>& ranges, Source source) {
+                ranges.ForEachInRange(start, length, [&](DAddr lower, DAddr upper) {
+                    std::fill(sources.begin() + static_cast<std::ptrdiff_t>(lower - start),
+                              sources.begin() + static_cast<std::ptrdiff_t>(upper - start), source);
+                });
+            };
+            mark(check.kept, Source::Kept);
+            mark(check.landed, Source::Landed);
+            const auto result_at = [&](u64 i) {
+                const u8 wanted = expected[offset + i];
+                switch (sources[i]) {
+                case Source::Own:
+                    return guest[i] == wanted ? Result::Same : Result::Differs;
+                case Source::Kept:
+                    return guest[i] == wanted ? Result::Same : Result::NotLanded;
+                case Source::Landed:
+                    if (guest[i] != landed[offset + i]) {
+                        return Result::Rewritten;
+                    }
+                    return guest[i] == wanted ? Result::Same : Result::Outdated;
+                }
+                return Result::Same;
+            };
             for (u64 i = 0; i < length;) {
-                if (guest[i] == wanted[i]) {
+                const Result result = result_at(i);
+                if (result == Result::Same) {
                     ++i;
                     continue;
                 }
-                u64 run_end = i;
-                while (run_end < length && guest[run_end] != wanted[run_end]) {
+                u64 run_end = i + 1;
+                while (run_end < length && result_at(run_end) == result) {
                     ++run_end;
                 }
-                if (read_check.logged++ < 16) {
-                    LOG_ERROR(HW_GPU,
-                              "Read download check: guest memory {:#x}+{:#x} differs from a "
-                              "synchronous flush ({:#04x} for {:#04x} at its start)",
-                              start + i, run_end - i, guest[i], wanted[i]);
-                }
-                read_check.mismatched += run_end - i;
+                report(result, start + i, run_end - i, guest[i], expected[offset + i]);
                 i = run_end;
             }
         });
@@ -786,9 +862,27 @@ void BufferCache<P>::CheckReadDownload(const ReadCheck& check,
         LOG_INFO(HW_GPU,
                  "Read download check (EDEN_NX2_READ_CHECK): {} downloads compared with a "
                  "synchronous flush, {} KiB; {} bytes differ, {} GPU-modified bytes no download "
-                 "brought (both must stay 0)",
+                 "brought (both must stay 0); {} bytes got newer values after an earlier read's "
+                 "download brought them (not compared)",
                  read_check.checked, read_check.compared / 1024, read_check.mismatched,
-                 read_check.uncovered);
+                 read_check.uncovered, read_check.rewritten);
+    }
+}
+
+template <class P>
+void BufferCache<P>::NoteLandedBytes(ReadCheck& check, const Common::RangeSet<DAddr>& written) {
+    if (check.kept.Empty()) {
+        return;
+    }
+    for (const BufferCopy& copy : check.copies) {
+        const DAddr copy_addr = static_cast<DAddr>(copy.src_offset);
+        u8* const landed = check.landed_bytes.data() + (copy.dst_offset - check.staging.offset);
+        written.ForEachInRange(copy_addr, copy.size, [&](DAddr lower, DAddr upper) {
+            check.kept.ForEachInRange(lower, upper - lower, [&](DAddr start, DAddr end) {
+                device_memory.ReadBlockUnsafe(start, landed + (start - copy_addr), end - start);
+                check.landed.Add(start, end - start);
+            });
+        });
     }
 }
 

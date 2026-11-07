@@ -3,7 +3,11 @@
 
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstdlib>
+#include <mutex>
 
 #include "common/common_types.h"
 #include "video_core/nx2.h"
@@ -42,5 +46,44 @@ inline std::atomic<u32> g_read_downloads{};
            (!Tegra::g_nx2_ampere.load(std::memory_order_relaxed) ||
             Tegra::Nx2MayBeGpuWritten(addr, size));
 }
+
+/// TEST (EDEN_NX2_READ_CHECK): the latest writes from the GPU's side that ReadDownloadsMayCover
+/// let through, to name the writer when the check finds newer bytes where an earlier read's
+/// download landed.
+class ReadCheckWrites {
+public:
+    [[nodiscard]] static bool Enabled() {
+        static const bool enabled = std::getenv("EDEN_NX2_READ_CHECK") != nullptr;
+        return enabled;
+    }
+
+    static void Note(DAddr addr, u64 size, const char* writer) {
+        std::scoped_lock lock{mutex};
+        ring[next++ % Size] = {addr, size, writer};
+    }
+
+    /// The newest noted write over [addr, addr + size).
+    [[nodiscard]] static const char* Find(DAddr addr, u64 size) {
+        std::scoped_lock lock{mutex};
+        for (u64 i = 0; i < (std::min)(next, Size); ++i) {
+            const Write& entry = ring[(next - 1 - i) % Size];
+            if (entry.addr < addr + size && addr < entry.addr + entry.size) {
+                return entry.writer;
+            }
+        }
+        return "a writer the check doesn't hear of";
+    }
+
+private:
+    struct Write {
+        DAddr addr;
+        u64 size;
+        const char* writer;
+    };
+    static constexpr u64 Size = 1024;
+    inline static std::mutex mutex;
+    inline static std::array<Write, Size> ring{};
+    inline static u64 next{};
+};
 
 } // namespace VideoCore

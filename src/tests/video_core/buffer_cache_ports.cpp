@@ -276,6 +276,13 @@ struct BufferCacheTestAccess {
     static size_t ReadDownloads(Cache& cache) {
         return cache.read_downloads.size();
     }
+    /// TEST (EDEN_NX2_READ_CHECK): every read download compared with a synchronous flush.
+    static void CheckEveryRead(Cache& cache) {
+        cache.read_check.every = 1;
+    }
+    static const auto& ReadChecks(Cache& cache) {
+        return cache.read_check;
+    }
 };
 
 } // namespace VideoCommon
@@ -954,4 +961,65 @@ TEST_CASE("Switch 2 writes to guest memory land read downloads only on GPU-writt
     REQUIRE(value == 0xdeadbeef);
     REQUIRE(f.bytes[0x10000] == 0x12);
     REQUIRE(f.bytes[0x10fff] == 0x12);
+}
+
+TEST_CASE("Read download check leaves out newer bytes over an earlier read's download",
+          "[buffer_ports]") {
+    Fixture f;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    auto& buffer = Access::Get(*f.cache, id);
+    std::ranges::fill(buffer.bytes, 0x12);
+    Access::CheckEveryRead(*f.cache);
+    ReadRasterizer reads{*f.cache};
+    Tegra::MemoryManager gpu_memory{f.system, f.device, 32, 1ULL << 31, 16};
+    gpu_memory.BindRasterizer(&reads);
+    gpu_memory.Map(0x200000, 0x20000, 0x10000, Tegra::PTEKind::PITCH, true);
+    // The first read takes the page's GPU-written bytes, the second only those written since.
+    Access::MarkWritten(*f.cache, id, 0x20000, 0x100);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    f.runtime.pending.push_back(
+        [&buffer] { std::fill_n(buffer.bytes.begin() + 0x800, 0x10, u8{0x34}); });
+    Access::MarkWritten(*f.cache, id, 0x20800, 0x10);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 2);
+    // Constant buffer data over bytes the first read brings: that read lands first, and the
+    // buffer cache hears of the write at the next FlushCaching. Synchronous flushes leave it too.
+    std::array<u8, 0x30> words;
+    words.fill(0xb6);
+    gpu_memory.WriteBlockCached(0x200060, words.data(), words.size());
+    REQUIRE(Access::ReadDownloads(*f.cache) == 1);
+    f.cache->FinishReadDownloads(0x20000, 0x1000);
+    REQUIRE(f.bytes[0x1005f] == 0x12);
+    REQUIRE(f.bytes[0x10060] == 0xb6);
+    REQUIRE(f.bytes[0x1008f] == 0xb6);
+    REQUIRE(f.bytes[0x10090] == 0x12);
+    REQUIRE(f.bytes[0x10800] == 0x34);
+    REQUIRE(Access::ReadChecks(*f.cache).checked == 2);
+    REQUIRE(Access::ReadChecks(*f.cache).mismatched == 0);
+    REQUIRE(Access::ReadChecks(*f.cache).rewritten == 0x30);
+    REQUIRE(Access::ReadChecks(*f.cache).uncovered == 0);
+}
+
+TEST_CASE("Read download check finds an earlier read's bytes the GPU changed unrecorded",
+          "[buffer_ports]") {
+    Fixture f;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    auto& buffer = Access::Get(*f.cache, id);
+    std::ranges::fill(buffer.bytes, 0x12);
+    Access::CheckEveryRead(*f.cache);
+    Access::MarkWritten(*f.cache, id, 0x20000, 0x100);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    // A GPU write into the first read's bytes that nothing takes out of its download.
+    f.runtime.pending.push_back(
+        [&buffer] { std::fill_n(buffer.bytes.begin() + 0x40, 0x10, u8{0x56}); });
+    f.runtime.pending.push_back(
+        [&buffer] { std::fill_n(buffer.bytes.begin() + 0x800, 0x10, u8{0x34}); });
+    Access::MarkWritten(*f.cache, id, 0x20800, 0x10);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    f.cache->FinishReadDownloads(0x20000, 0x1000);
+    REQUIRE(f.bytes[0x10040] == 0x12);
+    REQUIRE(f.bytes[0x10800] == 0x34);
+    REQUIRE(Access::ReadChecks(*f.cache).checked == 2);
+    REQUIRE(Access::ReadChecks(*f.cache).mismatched == 0x10);
+    REQUIRE(Access::ReadChecks(*f.cache).rewritten == 0);
 }

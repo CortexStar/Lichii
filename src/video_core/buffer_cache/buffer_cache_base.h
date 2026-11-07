@@ -793,14 +793,25 @@ private:
         boost::container::small_vector<BufferCopy, 4> copies;
         /// Replaced in guest memory since (ClearDownload): not compared.
         Common::RangeSet<DAddr> changed;
+        /// Not in this download: an earlier one brings them, as the synchronous flush of its own
+        /// read did. Guest memory may get newer bytes there after it lands, which the
+        /// synchronous flushes would have kept too.
+        Common::RangeSet<DAddr> kept;
+        /// What guest memory held over `kept` right after those downloads landed (`landed`), at
+        /// the offsets the copies have in `staging`.
+        std::vector<u8> landed_bytes;
+        Common::RangeSet<DAddr> landed;
     };
     struct ReadCheckTotals {
+        u64 every{};      ///< Tests: check 1 in `every` read downloads, over EDEN_NX2_READ_CHECK
         u64 next{};       ///< Read downloads seen, for the sampling
         u64 checked{};    ///< Read downloads compared
         u64 compared{};   ///< Bytes compared
         u64 mismatched{}; ///< Bytes that differ from the synchronous copy
         u64 uncovered{};  ///< Bytes a synchronous flush copies that no download brings
+        u64 rewritten{};  ///< Kept bytes guest memory got anew after their download landed
         u64 logged{};     ///< Error lines so far (at most 16)
+        u64 logged_rewrites{}; ///< Lines about rewritten bytes so far (at most 16)
         u64 last_log{};
     };
     ReadCheckTotals read_check{};
@@ -815,6 +826,8 @@ private:
         return every;
     }
     void CheckReadDownload(const ReadCheck& check, const Common::RangeSet<DAddr>& cpu_written);
+    /// A download landed `written`: what guest memory holds now over a later check's `kept`.
+    void NoteLandedBytes(ReadCheck& check, const Common::RangeSet<DAddr>& written);
 
     /// A DownloadMemoryForRead: its copies, and what is left of them to do once the host GPU has
     /// run them.

@@ -333,6 +333,10 @@ void MemoryManager::Write(GPUVAddr addr, T data) {
         if (const auto address = GpuToCpuAddress(addr);
             address && rasterizer != nullptr &&
             VideoCore::ReadDownloadsMayCover(*address, sizeof(T))) {
+            if (VideoCore::ReadCheckWrites::Enabled()) {
+                VideoCore::ReadCheckWrites::Note(*address, sizeof(T),
+                                                 "MemoryManager::Write (a semaphore or report)");
+            }
             rasterizer->FinishRead(*address, sizeof(T));
         }
     }
@@ -537,9 +541,16 @@ void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffe
         src_buffer = static_cast<const u8*>(src_buffer) + copy_amount;
     };
     // A download for a guest read not yet in guest memory would land over this write later.
-    const auto finish_reads = [this](DAddr dev_addr, std::size_t amount) {
+    const auto finish_reads = [this, unsafe](DAddr dev_addr, std::size_t amount) {
         if (VideoCore::g_read_downloads.load(std::memory_order_relaxed) != 0) [[unlikely]] {
             if (rasterizer != nullptr && VideoCore::ReadDownloadsMayCover(dev_addr, amount)) {
+                if (VideoCore::ReadCheckWrites::Enabled()) {
+                    VideoCore::ReadCheckWrites::Note(
+                        dev_addr, amount,
+                        unsafe ? "MemoryManager::WriteBlockUnsafe/Cached (inline-to-memory or "
+                                 "constant buffer data)"
+                               : "MemoryManager::WriteBlock");
+                }
                 rasterizer->FinishRead(dev_addr, amount);
             }
         }
