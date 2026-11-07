@@ -248,3 +248,10 @@ A serialized driver cache can be loaded in a separate library-mode process with:
 ```text
 pipeline-prewarm-test report.json reloaded.json 14 saved.cache.bin --libraries
 ```
+
+
+When depth-clip control and provoking-vertex support are available, the pipeline
+probe adds isolated negative-one-to-one depth, last-provoking-vertex, and combined
+HDR trials. `trial_labels` names every measurement in `trial_total_ms`. These are
+controlled driver experiments; they do not reproduce all host-profile settings,
+resource activity or concurrent compilation of a running game.

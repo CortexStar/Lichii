@@ -55,6 +55,8 @@ struct Device {
     bool mesh{};
     bool application_cache{true};
     bool libraries{};
+    bool depth_clip_control{};
+    bool provoking_vertex{};
     VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT library_properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT};
     bool subgroup_control{};
     VkPhysicalDeviceSubgroupSizeControlPropertiesEXT subgroup_properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES_EXT};
@@ -120,6 +122,8 @@ struct Device {
         for (const auto& extension : extensions) {
             mesh |= std::string_view(extension.extensionName) == VK_EXT_MESH_SHADER_EXTENSION_NAME;
             subgroup_control |= std::string_view(extension.extensionName) == VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME;
+            depth_clip_control |= std::string_view(extension.extensionName) == VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME;
+            provoking_vertex |= std::string_view(extension.extensionName) == VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME;
         }
         VkPhysicalDeviceSubgroupSizeControlFeaturesEXT subgroup_features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
         VkPhysicalDeviceMeshShaderFeaturesEXT mesh_features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
@@ -157,6 +161,29 @@ struct Device {
             VkPhysicalDeviceProperties2 query_properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &library_properties};
             vkGetPhysicalDeviceProperties2(physical, &query_properties);
         }
+        VkPhysicalDeviceDepthClipControlFeaturesEXT depth_clip_features{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT};
+        VkPhysicalDeviceProvokingVertexFeaturesEXT provoking_features{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT};
+        depth_clip_features.pNext = provoking_vertex ? &provoking_features : nullptr;
+        VkPhysicalDeviceFeatures2 extra{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            depth_clip_control ? static_cast<void*>(&depth_clip_features)
+                               : provoking_vertex ? static_cast<void*>(&provoking_features) : nullptr};
+        vkGetPhysicalDeviceFeatures2(physical, &extra);
+        depth_clip_control &= depth_clip_features.depthClipControl != VK_FALSE;
+        provoking_vertex &= provoking_features.provokingVertexLast != VK_FALSE;
+        provoking_features.transformFeedbackPreservesProvokingVertex = VK_FALSE;
+        auto* tail = reinterpret_cast<VkBaseOutStructure*>(&features11);
+        while (tail->pNext) tail = tail->pNext;
+        if (depth_clip_control) {
+            tail->pNext = reinterpret_cast<VkBaseOutStructure*>(&depth_clip_features);
+            tail = tail->pNext;
+        }
+        if (provoking_vertex) {
+            tail->pNext = reinterpret_cast<VkBaseOutStructure*>(&provoking_features);
+            tail = tail->pNext;
+        }
+        tail->pNext = nullptr;
         const float priority = 1;
         const VkDeviceQueueCreateInfo queue{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, nullptr,
             0, family, 1, &priority};
@@ -165,6 +192,8 @@ struct Device {
             enabled_extensions.push_back(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
             enabled_extensions.push_back(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
         }
+        if (depth_clip_control) enabled_extensions.push_back(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
+        if (provoking_vertex) enabled_extensions.push_back(VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME);
         if (mesh) enabled_extensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
         if (subgroup_control) enabled_extensions.push_back(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
         const VkDeviceCreateInfo info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &features11, 0,
@@ -320,13 +349,19 @@ Json Build(Device& device, const Json& group, const std::filesystem::path& direc
             nullptr, 0, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_FALSE};
         const VkViewport viewport{0, 0, 640, 480, 0, 1};
         const VkRect2D scissor{{0, 0}, {640, 480}};
+        VkPipelineViewportDepthClipControlCreateInfoEXT clip{
+            VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_DEPTH_CLIP_CONTROL_CREATE_INFO_EXT, nullptr, VK_FALSE};
         const VkPipelineViewportStateCreateInfo view{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-            nullptr, 0, 1, &viewport, 1, &scissor};
+            device.depth_clip_control ? &clip : nullptr, 0, 1, &viewport, 1, &scissor};
         VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
         raster.polygonMode = VK_POLYGON_MODE_FILL;
         raster.cullMode = VK_CULL_MODE_NONE;
         raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
         raster.lineWidth = 1;
+        VkPipelineRasterizationProvokingVertexStateCreateInfoEXT provoking{
+            VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_PROVOKING_VERTEX_STATE_CREATE_INFO_EXT,
+            nullptr, VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT};
+        raster.pNext = device.provoking_vertex ? &provoking : nullptr;
         VkPipelineMultisampleStateCreateInfo samples{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
         samples.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
         VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
@@ -380,7 +415,10 @@ Json Build(Device& device, const Json& group, const std::filesystem::path& direc
         };
         Json total_times = Json::array();
         Json times = Json::array();
-        for (uint32_t trial = 0; trial < (device.hdr_render_pass ? 6U : 4U); ++trial) {
+        Json labels = Json::array();
+        const bool raster_variants = device.depth_clip_control && device.provoking_vertex && device.hdr_render_pass;
+        const uint32_t trial_count = raster_variants ? 14U : device.hdr_render_pass ? 6U : 4U;
+        for (uint32_t trial = 0; trial < trial_count; ++trial) {
             const auto trial_start = std::chrono::steady_clock::now();
             if (trial == 2) {
                 for (auto& color : colors) color.blendEnable = VK_TRUE;
@@ -388,6 +426,24 @@ Json Build(Device& device, const Json& group, const std::filesystem::path& direc
                 depth.depthWriteEnable = VK_TRUE;
             }
             if (trial == 4) pipeline.renderPass = device.hdr_render_pass;
+            if (trial == 6) {
+                pipeline.renderPass = device.render_pass;
+                for (auto& color : colors) color.blendEnable = VK_FALSE;
+                depth.depthTestEnable = VK_FALSE;
+                depth.depthWriteEnable = VK_FALSE;
+                clip.negativeOneToOne = VK_TRUE;
+            }
+            if (trial == 8) {
+                clip.negativeOneToOne = VK_FALSE;
+                provoking.provokingVertexMode = VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT;
+            }
+            if (trial == 10) clip.negativeOneToOne = VK_TRUE;
+            if (trial == 12) pipeline.renderPass = device.hdr_render_pass;
+            constexpr std::array names{"baseline", "baseline-repeat", "blend-depth", "blend-depth-repeat",
+                "hdr", "hdr-repeat", "negative-one-to-one", "negative-one-to-one-repeat",
+                "provoking-last", "provoking-last-repeat", "ndc-and-provoking-last",
+                "ndc-and-provoking-last-repeat", "ndc-provoking-hdr", "ndc-provoking-hdr-repeat"};
+            labels.push_back(names[trial]);
             if (device.libraries) build_libraries();
             VkPipeline handle{};
             trace << "trial " << trial << " begin\n" << std::flush;
@@ -409,7 +465,7 @@ Json Build(Device& device, const Json& group, const std::filesystem::path& direc
         cleanup();
         return {{"status", "compiled"}, {"first_ms", times[0]}, {"repeat_ms", times[1]},
                 {"changed_state_ms", times[2]}, {"changed_repeat_ms", times[3]},
-                {"library_build_ms", library_build_ms}, {"trial_total_ms", total_times},
+                {"library_build_ms", library_build_ms}, {"trial_total_ms", total_times}, {"trial_labels", labels},
                 {"initial_with_libraries_ms", total_times[0]},
                 {"changed_with_libraries_ms", total_times[2]},
                 {"hdr_with_libraries_ms", total_times.size() > 4 ? total_times[4] : Json{}},
@@ -465,6 +521,7 @@ int main(int argc, char** argv) try {
                 {"note", "Pipeline creation only; no draw or dispatch. First is not guaranteed driver-cache-cold."},
                 {"application_cache", device.application_cache},
                 {"graphics_pipeline_libraries", device.libraries},
+                {"depth_clip_control", device.depth_clip_control}, {"provoking_vertex", device.provoking_vertex},
                 {"fast_linking", bool(device.library_properties.graphicsPipelineLibraryFastLinking)},
                 {"independent_interpolation", bool(device.library_properties.graphicsPipelineLibraryIndependentInterpolationDecoration)},
                 {"loaded_cache_bytes", initial_cache.size()},
