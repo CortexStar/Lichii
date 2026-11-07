@@ -1200,8 +1200,8 @@ void PipelineCache::EvictUnusedPipelines() {
 }
 
 /// Returns `pipeline` when it is built or the current draw must wait for it, and nullptr when the
-/// draw may be skipped while it builds (asynchronous shaders; native draws only with
-/// EDEN_NX2_ASYNC_DISCARD=1). Each nullptr returned for an unbuilt pipeline is counted for the log.
+/// draw may be skipped while it builds (asynchronous shaders; native draws only on AMD's driver or
+/// with EDEN_NX2_ASYNC_DISCARD=1). Each nullptr returned for an unbuilt pipeline is counted for the log.
 GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const noexcept {
     if (pipeline->IsBuilt()) {
         return pipeline;
@@ -1209,12 +1209,15 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
     if (!use_asynchronous_shaders) {
         return pipeline;
     }
-    // EDEN_NX2_ASYNC_DISCARD=1: skip native draws whose pipeline is still building instead of
-    // waiting for it (experimental; the draw may be missing for a frame or more).
-    /// Reads EDEN_NX2_ASYNC_DISCARD once and logs when it is on.
-    static const bool discard_native = [] {
+    // Skip native draws whose pipeline is still building instead of waiting for it (the draw
+    // may be missing for a frame or more). On by default on AMD's proprietary driver, whose
+    // pipeline builds froze Ocarina of Time for 1-1.4 s each while running into a new area;
+    // EDEN_NX2_ASYNC_DISCARD=1/0 turns it on or off on any driver.
+    static const bool discard_native = [this] {
         const char* value = std::getenv("EDEN_NX2_ASYNC_DISCARD");
-        const bool enabled = value != nullptr && value[0] == '1';
+        const bool enabled = value != nullptr
+                                 ? value[0] == '1'
+                                 : device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY;
         if (enabled) {
             LOG_INFO(Render_Vulkan, "EDEN_NX2_ASYNC_DISCARD: native draws skip unbuilt pipelines");
         }

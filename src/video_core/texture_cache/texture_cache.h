@@ -264,8 +264,15 @@ template <class P>
 void TextureCache<P>::ApplyThresholdOverrides(bool log) {
     // On every GPU: past what a frame needs, more device memory only keeps the textures of earlier
     // scenes (title 1 filled 6.7 GB of an 8 GB card and draws its races in ~5 GB), so collect from
-    // MaxCriticalMemory on rather than near the card's budget.
-    critical_memory = (std::min)(critical_memory, MaxCriticalMemory);
+    // MaxCriticalMemory on rather than near the card's budget. Larger cards get 3/5 of their device
+    // memory: at 5 GiB on a 16 GB card, Ocarina of Time's Kokiri Forest kept the collector in its
+    // aggressive mode, re-creating ~10k images and re-uploading 13-16 GB every 22 s (with ~9 GiB:
+    // ~600 images and 1.5 GB). 8 GB cards keep 5 GiB.
+    u64 max_critical = MaxCriticalMemory;
+    if constexpr (HAS_DEVICE_MEMORY_INFO) {
+        max_critical = (std::max)(max_critical, runtime.GetDeviceLocalMemory() / 5 * 3);
+    }
+    critical_memory = (std::min)(critical_memory, max_critical);
     expected_memory =
         (std::min)(expected_memory, critical_memory - (std::min)(critical_memory, u64{768_MiB}));
     minimum_memory =
