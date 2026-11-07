@@ -39,6 +39,7 @@ public:
         /// Turns a motion vector into render pixels (the render size for UV offsets).
         std::array<f32, 2> motion_vector_scale;
         bool reset;
+        bool depth_inverted = true;
     };
 
     /// Throws vk::Exception when Streamline has no DLSS for this device.
@@ -49,6 +50,10 @@ public:
     /// Records one evaluation into the output image (RGBA16F at the upscale size, GENERAL
     /// layout). Returns false when DLSS can't run, so the caller can fall back to FSR 3.1.
     bool Upscale(const Inputs& inputs);
+
+    [[nodiscard]] bool Failed() const noexcept {
+        return failed.load();
+    }
 
     [[nodiscard]] VkImage OutputImage() const noexcept {
         return *output_image;
