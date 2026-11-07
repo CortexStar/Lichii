@@ -69,6 +69,12 @@ Missing constant-buffer values, texture descriptors, or storage-pointer classifi
 are errors, not zero values. v46 records do not contain storage-pointer classifications.
 Native trap guards require captured constant-buffer values and must verify before lowering.
 
+For a compute allocation with an observed NVN2 c9 control record, `--control FILE`
+reads the workgroup declaration from that record instead of using 1x1x1. This mode
+rejects shaders that need an unknown local/shared-memory allocation, and still
+requires real resource types, pointer classifications and constants whenever the
+compiler reads them. It does not invent those values or create a driver pipeline.
+
 The compiler reports assumptions in each JSON result. Without an environment, compute
 uses a 1x1x1 workgroup and zero local/shared memory. Without a graphics pipeline key,
 the runtime uses point input topology, isolines with equal tessellation spacing, float
@@ -187,3 +193,58 @@ observed c9 control record's declared code region before runtime extent discover
 All 683 complete compute captures in this corpus fit that bound. The other eight
 remain incomplete. Workgroup dimensions, resource descriptors and mesh launch
 state are not guessed.
+
+`--archive-info` and the production NUP preloader share the bounded C++ reader
+for BNSH, AGL BAHS/SHARCB and uncompressed members of SARC archives. BAHS control
+references may point backwards, and code allocations retain their C1 tails.
+Task/mesh lowering is cached separately by stage; this does not reconstruct
+their final pipeline linkage or launch state.
+
+`shader-sweep --archive-info ARCHIVE` also reports BNSH stage groups and their
+byte ranges. `shader-sweep --graphics-probe ARCHIVE NEW_OUTPUT_DIRECTORY` tests
+exact VS/FS and task/mesh/fragment groups with shared bindings and the preceding
+stage's real output interface. Mesh dimensions and payload come from c9 metadata;
+triangles remain an explicit test contract. Its `report.json` states the contract and any missing
+context. These modules are diagnostic artifacts, not ready-to-import runtime
+pipelines; validate the emitted `.spv` files with `spirv-val`.
+
+The optional `--float-textures` argument to `--graphics-probe` supplies an
+explicit Color2D/RGBA8/non-integer metadata contract for direct C2 descriptors.
+It does not supply raw handles. The report records all descriptor locations
+used by this assumption; it is still a probe, not an importable runtime cache.
+
+`pipeline-prewarm-test REPORT OUTPUT [LIMIT]` is a manual Vulkan hardware test
+for reports from `--graphics-probe`. It requires `VK_LAYER_KHRONOS_validation`
+and creates pipelines only: it issues no draw or dispatch. The output compares
+first/repeated creation and a changed blend/depth state; the `.trace` companion
+records progress. The first creation is not guaranteed to miss the driver's
+disk cache, and the test does not measure cross-process cache persistence.
+
+It writes `OUTPUT.cache.bin` when its application cache is enabled. An optional
+fifth argument accepts that cache for a subsequent process, or `--no-app-cache`
+to measure the driver's behavior without a Vulkan application cache. For example:
+
+```sh
+pipeline-prewarm-test report.json first.json 3
+pipeline-prewarm-test report.json reused.json 3 first.json.cache.bin
+pipeline-prewarm-test report.json uncached.json 3 --no-app-cache
+```
+
+
+### Graphics pipeline library probe
+
+`pipeline-prewarm-test REPORT OUTPUT LIMIT --libraries` enables the Vulkan
+`VK_EXT_graphics_pipeline_library` feature for a headless compilation experiment.
+It builds the vertex-input (when present), pre-rasterization, fragment-shader and
+fragment-output parts separately, then links them without link-time optimization.
+Every trial recreates the parts through the same driver pipeline cache, so the
+changed-state trials also measure cached part creation. The report distinguishes link timings from
+`initial_with_libraries_ms` and `changed_with_libraries_ms`, which also include
+part compilation. Validation layers remain required; no draw or dispatch occurs.
+This probe does not start the emulator.
+
+A serialized driver cache can be loaded in a separate library-mode process with:
+
+```text
+pipeline-prewarm-test report.json reloaded.json 14 saved.cache.bin --libraries
+```
