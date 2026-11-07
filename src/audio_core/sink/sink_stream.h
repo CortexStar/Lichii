@@ -90,6 +90,8 @@ public:
 
     virtual bool TryAppendOutputBlock(SinkBuffer& buffer, std::span<s16> samples);
 
+    u32 SysmixQueueLimit() const;
+
     /**
      * Check if the stream is paused.
      *
@@ -289,6 +291,8 @@ private:
     u64 level_frames{};
     /// Number of buffers waiting to be played
     std::atomic<u32> queued_buffers{};
+    /// Largest number of frames the host device has asked for in one callback (sysmix streams)
+    std::atomic<u64> largest_request_frames{};
     /// The ring size for audio out buffers (usually 4, rarely 2 or 8)
     u32 max_queue_size{};
     /// Locks access to sample count tracking info
