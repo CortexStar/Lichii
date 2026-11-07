@@ -1,4 +1,4 @@
-# Eglantine CI and release guide
+# Lichii CI and release guide
 
 This document describes the split GitHub Actions pipeline added with this change. It is not yet a live workflow until the files have been merged to the required branches and the repository settings below have been applied.
 
@@ -91,10 +91,10 @@ Build artifacts are retained for seven days. Published GitHub Release assets rem
 
 | Kind              | Tag                    | Release title                            | GitHub Release flag                |
 | ----------------- | ---------------------- | ---------------------------------------- | ---------------------------------- |
-| Stable            | `vX.Y.Z`               | `Eglantine vX.Y.Z`                       | Not a pre-release; marked latest   |
+| Stable            | `vX.Y.Z`               | `Lichii vX.Y.Z`                       | Not a pre-release; marked latest   |
 | Release candidate | `vX.Y.Z-rcN`           | `Eglantine vX.Y.Z-rcN`                   | Pre-release                        |
-| Daily             | `daily-YYYYMMDD`       | `Eglantine Build DD/MM/YYYY`             | Pre-release; replaces same-day tag |
-| Branch / PR       | `branch-<slug>-<hash>` | `Eglantine Branch: <PR title or branch>` | Pre-release; rolling               |
+| Daily             | `daily-YYYYMMDD`       | `Lichii Build DD/MM/YYYY`             | Pre-release; replaces same-day tag |
+| Branch / PR       | `branch-<slug>-<hash>` | `Lichii Branch: <PR title or branch>` | Pre-release; rolling               |
 
 Only stable and RC publications send the optional Discord notification. Daily and branch releases do not.
 
@@ -102,7 +102,7 @@ Only stable and RC publications send the optional Discord notification. Daily an
 
 The local `setup-build` action writes the four root-level files consumed by the repository's `GetSCMRev` CMake module: `GIT-COMMIT`, `GIT-REFSPEC`, `GIT-TAG`, and (for stable/RC only) `GIT-RELEASE`. This avoids depending on tags being present in shallow checkouts or on a named branch being available in detached PR checkouts.
 
-Stable and RC builds get `GIT-RELEASE`, so CMake marks them as release builds. Daily and branch builds omit that file and are configured with `NIGHTLY_BUILD=ON`; stable and RC builds are configured with it off. The project currently disables the update checker in the CI build flags. The SCM/update-server template still contains upstream Eden URLs; do not enable the updater until those URLs are intentionally migrated to Eglantine's own service.
+Stable and RC builds get `GIT-RELEASE`, so CMake marks them as release builds. Daily and branch builds omit that file and are configured with `NIGHTLY_BUILD=ON`; stable and RC builds are configured with it off. The project currently disables the update checker in the CI build flags. The SCM/update-server template still contains upstream Eden URLs; do not enable the updater until those URLs are intentionally migrated to Lichii's own service.
 
 ## Troubleshooting
 
