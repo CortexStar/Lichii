@@ -138,6 +138,27 @@ AcquireCheck CheckWithoutDrain(DmaPusher& dma_pusher, const Puller::PendingAcqui
                : AcquireCheck::NotMet;
 }
 
+// EDEN_NX2_DRAIN_CHECK: what the drain path decides instead, to verify a decision made without it
+// (a release the back ran latches `waiter`, a suspended acquire's).
+bool MetAfterDrain(DmaPusher& dma_pusher, const Puller::PendingAcquire& acquire,
+                   const void* waiter) {
+    DrainBack();
+    return acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address)) ||
+           (waiter != nullptr && Nx2SemaphoreWaiters::Get().Latched(waiter));
+}
+
+// Whether a pass without the drain stands. Verified, a pass the drained word contradicts takes
+// the drain path instead.
+bool PassStands(DmaPusher& dma_pusher, const Puller::PendingAcquire& acquire, bool queued,
+                const void* waiter) {
+    if (!VideoCommon::Nx2DrainCheck::g_enabled) {
+        return true;
+    }
+    const bool met = MetAfterDrain(dma_pusher, acquire, waiter);
+    VideoCommon::Nx2DrainCheck::NotePass(waiter != nullptr, queued, met);
+    return met;
+}
+
 } // Anonymous namespace
 
 bool Puller::PendingAcquire::Matches(u32 current) const {
@@ -163,10 +184,16 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     }
     switch (CheckWithoutDrain(dma_pusher, *pending_acquire)) {
     case AcquireCheck::MetByQueued:
+        if (!PassStands(dma_pusher, *pending_acquire, true, this)) {
+            break;
+        }
         // What the front reads after the acquire waits for the work sent before the release.
         VideoCommon::GpuSplit::Get().NoteSync();
         return true;
     case AcquireCheck::Met:
+        if (!PassStands(dma_pusher, *pending_acquire, false, this)) {
+            break;
+        }
         return true;
     case AcquireCheck::NotMet:
         // A release the back ran latches the waiter. Otherwise poll again later, without waiting
@@ -174,6 +201,13 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
         // drain below reports the wait.
         if (Nx2SemaphoreWaiters::Get().Latched(this)) {
             return true;
+        }
+        if (VideoCommon::Nx2DrainCheck::g_enabled) [[unlikely]] {
+            const bool met = MetAfterDrain(dma_pusher, *pending_acquire, this);
+            VideoCommon::Nx2DrainCheck::NoteKeptWaiting(met);
+            if (met) {
+                return true;
+            }
         }
         if (pending_acquire->reported ||
             std::chrono::steady_clock::now() - pending_acquire->since <= std::chrono::seconds{2}) {
@@ -360,7 +394,8 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         }
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireChecks, 1);
         if (const AcquireCheck without_drain = CheckWithoutDrain(dma_pusher, acquire);
-            without_drain == AcquireCheck::Met || without_drain == AcquireCheck::MetByQueued) {
+            (without_drain == AcquireCheck::Met || without_drain == AcquireCheck::MetByQueued) &&
+            PassStands(dma_pusher, acquire, without_drain == AcquireCheck::MetByQueued, nullptr)) {
             if (without_drain == AcquireCheck::MetByQueued) {
                 // What the front reads after the acquire waits for the work sent before the
                 // release (GpuSplit::NoteSync).
