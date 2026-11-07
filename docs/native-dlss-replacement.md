@@ -44,7 +44,8 @@ enabled and the runtime is available; otherwise an enabled temporal selection us
 `EDEN_NX2_DLSS_REPLACEMENT=fsr` explicitly enables FSR; `native` disables both replacements.
 `dlss` opts into temporal replacement, preferring DLSS only when its setting is enabled.
 
-- Max Resolution add-on off: the 3/4-scale pass (`e40f5efb5480e692`) is replaced and FSR/DLSS
+- Max Resolution add-on off: the 3/4-scale pass (`e40f5efb5480e692`; `ef542df87cacfe9e` on the
+  Linux RADV build, same contract) is replaced and FSR/DLSS
   writes the game's output size (1080p to 1440p docked, 810p to 1080p handheld).
 - Max Resolution add-on on, docked: the full-size pass (`6bd913e1f34e83eb`) at 2560x1440 is
   replaced by a 3840x2160 temporal image. The game still finishes its 1440p frame. At presentation,
