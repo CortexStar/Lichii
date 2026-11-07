@@ -128,10 +128,23 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     }();
     narrow = front_macros && narrow_mode != '0';
     narrow_strict = narrow && narrow_mode == '2';
+    narrow_compute = narrow && Nx2Switch("EDEN_NX2_NARROW_COMPUTE", true);
+    narrow_render_enable = narrow && Nx2Switch("EDEN_NX2_NARROW_RENDER_ENABLE", true);
+    narrow_dma_recorded = narrow && Nx2Switch("EDEN_NX2_NARROW_DMA_RECORDED", true);
+    narrow_list_sync = narrow && Nx2Switch("EDEN_NX2_NARROW_LIST_SYNC", true);
+    sem_predict = narrow && Nx2Switch("EDEN_NX2_SEM_PREDICT", true);
+    diag = narrow && Nx2Switch("EDEN_NX2_NARROW_DIAG", false);
     ++session;
     LOG_INFO(HW_GPU, "GPU thread split: engine methods run on a second thread{}{}",
              front_macros ? ", macros on the first" : "",
              narrow ? (narrow_strict ? ", narrow drains (strict)" : ", narrow drains") : "");
+    if (narrow) {
+        LOG_INFO(HW_GPU,
+                 "GPU thread split narrow switches: compute {} render_enable {} dma_recorded {} "
+                 "list_sync {} sem_predict {} diag {}",
+                 narrow_compute, narrow_render_enable, narrow_dma_recorded, narrow_list_sync,
+                 sem_predict, diag);
+    }
 }
 
 void GpuSplit::Stop() {
@@ -161,6 +174,10 @@ void GpuSplit::Stop() {
     narrow_strict = false;
     unbounded_position = 0;
     unbounded_writer_position = 0;
+    acquire_position = 0;
+    overflow_position = 0;
+    queued_releases = {};
+    next_release = 0;
     pending_head = 0;
     pending_tail = 0;
     published.store(0, std::memory_order_relaxed);
@@ -295,8 +312,22 @@ void GpuSplit::RecordWrite(const void* space, GPUVAddr address, u64 size) {
         if (pending_tail - pending_head == MaxPendingWrites) {
             // Full: the oldest counts as unbounded from now on (no read stops short of it).
             const PendingWrite& oldest = pending_writes[pending_head & PendingWriteMask];
-            unbounded_position = (std::max)(unbounded_position, oldest.position);
-            unbounded_writer_position = (std::max)(unbounded_writer_position, oldest.position);
+            if (oldest.position > unbounded_position) {
+                unbounded_position = oldest.position;
+                unbounded_cause = UnboundedCause::Overflow;
+            }
+            if (oldest.position > acquire_position) {
+                acquire_position = oldest.position;
+                acquire_cause = UnboundedCause::Overflow;
+            }
+            if (oldest.position > unbounded_writer_position) {
+                unbounded_writer_position = oldest.position;
+                writer_cause = UnboundedCause::Overflow;
+            }
+            overflow_position = (std::max)(overflow_position, oldest.position);
+            if (diag) [[unlikely]] {
+                ++diag_notes[static_cast<size_t>(UnboundedCause::Overflow)];
+            }
             ++pending_head;
         }
     }
@@ -328,18 +359,141 @@ u64 GpuSplit::PendingWriteTarget(const void* space, GPUVAddr address, u64 size, 
     return base;
 }
 
-bool GpuSplit::WaitForWritesTo(const void* space, GPUVAddr address, u64 size, DrainSite site) {
+bool GpuSplit::WaitForWritesTo(const void* space, GPUVAddr address, u64 size, DrainSite site,
+                               NarrowBase base_kind) {
     consumed_cache = consumed.load(std::memory_order_acquire);
     PrunePendingWrites();
-    const u64 target = PendingWriteTarget(space, address, size, unbounded_position);
-    return WaitFor((std::min)(target, write_position), site);
+    u64 base = unbounded_position;
+    UnboundedCause cause = unbounded_cause;
+    if (base_kind == NarrowBase::Acquire) {
+        base = acquire_position;
+        cause = acquire_cause;
+    } else if (base_kind == NarrowBase::Recorded) {
+        base = overflow_position;
+        cause = UnboundedCause::Overflow;
+    }
+    const u64 target = PendingWriteTarget(space, address, size, base);
+    if (target != base) {
+        cause = UnboundedCause::Record;
+    }
+    return WaitForAttributed((std::min)(target, write_position), site, cause);
 }
 
-bool GpuSplit::WaitForWritersTo(const void* space, GPUVAddr address, u64 size) {
+bool GpuSplit::WaitForWritersTo(const void* space, GPUVAddr address, u64 size, bool sync_only) {
     consumed_cache = consumed.load(std::memory_order_acquire);
     PrunePendingWrites();
-    const u64 target = PendingWriteTarget(space, address, size, unbounded_writer_position);
-    return WaitFor((std::min)(target, write_position), DrainSite::NarrowListWriters);
+    u64 base = unbounded_writer_position;
+    UnboundedCause cause = writer_cause;
+    if (sync_only) {
+        base = last_sync_position;
+        cause = UnboundedCause::Sync;
+        if (overflow_position > base) {
+            base = overflow_position;
+            cause = UnboundedCause::Overflow;
+        }
+    }
+    const u64 target = PendingWriteTarget(space, address, size, base);
+    if (target != base) {
+        cause = UnboundedCause::Record;
+    }
+    return WaitForAttributed((std::min)(target, write_position), DrainSite::NarrowListWriters,
+                             cause);
+}
+
+bool GpuSplit::WaitForAttributed(u64 target, DrainSite site, UnboundedCause cause) {
+    if (!diag) [[likely]] {
+        return WaitFor(target, site);
+    }
+    const u64 start = Nx2Profile::Ticks();
+    const bool waited = WaitFor(target, site);
+    if (waited) {
+        const auto s = static_cast<size_t>(site);
+        const auto c = static_cast<size_t>(cause);
+        ++diag_waits[s][c];
+        diag_wait_ticks[s][c] += Nx2Profile::Ticks() - start;
+    }
+    MaybeReportDiag();
+    return waited;
+}
+
+void GpuSplit::MaybeReportDiag() {
+    const u64 now = Nx2Profile::Now();
+    if (diag_window_start == 0) {
+        diag_window_start = now;
+        diag_window_ticks = Nx2Profile::Ticks();
+        return;
+    }
+    const u64 window = now - diag_window_start;
+    if (window < 10'000'000'000ULL) {
+        return;
+    }
+    const u64 ticks = (std::max<u64>)(Nx2Profile::Ticks() - diag_window_ticks, 1);
+    const double seconds = static_cast<double>(window) / 1e9;
+    std::string notes;
+    for (size_t c = 0; c < diag_notes.size(); ++c) {
+        if (diag_notes[c] != 0) {
+            notes += fmt::format(" {} {:.0f}/s,", unbounded_cause_names[c],
+                                 static_cast<double>(diag_notes[c]) / seconds);
+        }
+    }
+    LOG_INFO(HW_GPU, "Narrow diag: unbounded notes per second:{}", notes);
+    for (size_t s = 0; s < diag_waits.size(); ++s) {
+        std::string waits;
+        for (size_t c = 0; c < diag_waits[s].size(); ++c) {
+            if (diag_waits[s][c] != 0) {
+                // Wall time per second from the counter's ticks over the window.
+                waits += fmt::format(" {} {:.1f} ms ({:.0f}/s),", unbounded_cause_names[c],
+                                     static_cast<double>(diag_wait_ticks[s][c]) * 1000.0 /
+                                         static_cast<double>(ticks),
+                                     static_cast<double>(diag_waits[s][c]) / seconds);
+            }
+        }
+        if (!waits.empty()) {
+            LOG_INFO(HW_GPU, "Narrow diag: {} waits by cause:{}", drain_site_names[s], waits);
+        }
+    }
+    LOG_INFO(HW_GPU,
+             "Narrow diag: acquires per second: unpredicted {:.0f} (waited {:.0f}), predicted "
+             "{:.0f} (waited {:.0f})",
+             static_cast<double>(diag_acquires[0] + diag_acquires[1]) / seconds,
+             static_cast<double>(diag_acquires[1]) / seconds,
+             static_cast<double>(diag_acquires[2] + diag_acquires[3]) / seconds,
+             static_cast<double>(diag_acquires[3]) / seconds);
+    diag_notes = {};
+    diag_waits = {};
+    diag_wait_ticks = {};
+    diag_acquires = {};
+    diag_window_start = now;
+    diag_window_ticks = Nx2Profile::Ticks();
+}
+
+void GpuSplit::NoteRelease(const void* space, GPUVAddr address, u32 value) {
+    if (!sem_predict) {
+        return;
+    }
+    for (QueuedRelease& release : queued_releases) {
+        if (release.space == space && release.address == address) {
+            release.position = write_position;
+            release.value = value;
+            return;
+        }
+    }
+    queued_releases[next_release] = {space, address, write_position, value};
+    next_release = (next_release + 1) % MaxQueuedReleases;
+}
+
+std::optional<u32> GpuSplit::PredictedSemaphore(const void* space, GPUVAddr address) {
+    if (!sem_predict) {
+        return std::nullopt;
+    }
+    consumed_cache = consumed.load(std::memory_order_acquire);
+    for (const QueuedRelease& release : queued_releases) {
+        if (release.space == space && release.address == address &&
+            release.position > consumed_cache) {
+            return release.value;
+        }
+    }
+    return std::nullopt;
 }
 
 bool GpuSplit::WaitFor(u64 target, DrainSite site) {

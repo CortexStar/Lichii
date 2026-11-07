@@ -5,9 +5,11 @@
 
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <type_traits>
 
@@ -51,6 +53,58 @@ inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> 
     "gp sync fence", "map",           "front start", "front verify",   "macro dma read (narrow)",
     "acquire (narrow)", "list writers (narrow)",
 };
+
+/// What made the front note an unbounded write (EDEN_NX2_NARROW_DIAG attributes waits to it).
+enum class UnboundedCause : u8 {
+    Unknown,
+    RenderEnable,     ///< 3D render_enable.mode (conditional rendering)
+    Wfi3D,            ///< 3D wait_for_idle
+    TexInvalidate,    ///< 3D invalidate_texture_data_cache
+    Inline3D,         ///< 3D inline upload without a known destination
+    Maxwell3DBack,    ///< 3D methods with the macros on the back
+    ComputeMacro,     ///< A compute macro call (per parameter word)
+    ComputeLaunch,    ///< A compute dispatch (QMD launch, inline QMD)
+    ComputeUpload,    ///< Compute inline upload (exec/data upload)
+    ComputeReport,    ///< Compute report semaphore
+    ComputeOther,     ///< Other compute methods MayWriteMemory counts
+    BlockLinearDma,   ///< Copy engine launch with writes the front can't bound
+    OtherEngine,      ///< Fermi2D blits, KeplerMemory uploads
+    PullerWfi,        ///< Puller WaitForIdle
+    SyncpointAcquire, ///< Puller fence action acquire (forced fence release)
+    MemOpB,
+    GpSync,           ///< A GP entry's sync bit
+    GpuThreadCommand, ///< GPU thread commands (maps, flushes, syncs)
+    Overflow,         ///< The pending write records overflowed
+    Record,           ///< (Wait attribution only) a recorded write overlapping the read
+    Sync,             ///< (Wait attribution only) the last host-level wait
+    Count,
+};
+
+inline constexpr std::array<const char*, static_cast<size_t>(UnboundedCause::Count)>
+    unbounded_cause_names{
+        "unknown",        "render_enable",     "3D WFI",          "tex invalidate",
+        "3D inline",      "3D (back macros)",  "compute macro",   "compute launch",
+        "compute upload", "compute report",    "compute other",   "block-linear DMA",
+        "fermi2d/inline", "puller WFI",        "syncpoint acquire", "MemOpB",
+        "GP sync",        "GPU thread cmd",    "overflow",        "record",
+        "sync",
+};
+
+/// Which unbounded position a narrowed front read waits for (GpuSplit::WaitForWritesTo).
+enum class NarrowBase : u8 {
+    Read,     ///< Every unbounded write (macro DMA reads)
+    Acquire,  ///< Every unbounded write and dispatch (semaphore acquires)
+    Recorded, ///< Only the recorded writes (and overflowed records): EDEN_NX2_NARROW_DMA_RECORDED
+};
+
+/// An EDEN_NX2_* on/off switch: '0' off, anything else on, unset `default_on`.
+[[nodiscard]] inline bool Nx2Switch(const char* name, bool default_on) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == 0) {
+        return default_on;
+    }
+    return value[0] != '0';
+}
 
 // Splits the GPU thread in two (NX2_GPU_THREAD_SPLIT.md). The GPU thread (the front) takes the
 // CPU's commands, parses command lists and runs the puller; engine method calls and everything
@@ -214,27 +268,96 @@ public:
     }
     /// The work just sent may write guest memory the front can't bound. `writer`: it is compute
     /// or copy work (what WaitForWriters waits for).
-    void NoteUnboundedWrite(bool writer = false) {
+    void NoteUnboundedWrite(bool writer = false, UnboundedCause cause = UnboundedCause::Unknown) {
         if (narrow) {
             unbounded_position = write_position;
+            unbounded_cause = cause;
+            acquire_position = write_position;
+            acquire_cause = cause;
             if (writer) {
                 unbounded_writer_position = write_position;
+                writer_cause = cause;
             }
+            if (diag) [[unlikely]] {
+                ++diag_notes[static_cast<size_t>(cause)];
+            }
+        }
+    }
+    /// A compute dispatch was just sent. EDEN_NX2_NARROW_COMPUTE: the front end runs MME DMA
+    /// reads in method order without waiting for earlier grids (barriers come as WFIs, which
+    /// count as unbounded), so dispatches only hold semaphore acquires and command list reads.
+    void NoteDispatch(UnboundedCause cause = UnboundedCause::ComputeLaunch) {
+        if (!narrow) {
+            return;
+        }
+        if (!narrow_compute) {
+            NoteUnboundedWrite(true, cause);
+            return;
+        }
+        acquire_position = write_position;
+        acquire_cause = cause;
+        unbounded_writer_position = write_position;
+        writer_cause = cause;
+        if (diag) [[unlikely]] {
+            ++diag_notes[static_cast<size_t>(cause)];
+        }
+    }
+    /// EDEN_NX2_NARROW_COMPUTE: compute work is unbounded only where it launches or writes.
+    [[nodiscard]] bool NarrowCompute() const {
+        return narrow_compute;
+    }
+    /// EDEN_NX2_NARROW_RENDER_ENABLE: render_enable.mode is no unbounded write.
+    [[nodiscard]] bool NarrowRenderEnable() const {
+        return narrow_render_enable;
+    }
+    /// EDEN_NX2_NARROW_DMA_RECORDED: macro DMA reads wait only for the recorded writes.
+    [[nodiscard]] bool NarrowDmaRecorded() const {
+        return narrow_dma_recorded;
+    }
+    /// EDEN_NX2_NARROW_LIST_SYNC: GPU-written command lists wait for the work before the last
+    /// host-level wait and the recorded writes over them, not for every dispatch and copy.
+    [[nodiscard]] bool NarrowListSync() const {
+        return narrow_list_sync;
+    }
+    /// EDEN_NX2_NARROW_DIAG=1.
+    [[nodiscard]] bool NarrowDiag() const {
+        return diag;
+    }
+
+    // Semaphore prediction (EDEN_NX2_SEM_PREDICT): the values of the releases the front queued.
+    // While a release is still queued, an acquire it meets is met: the back runs the work after
+    // the acquire behind the release, as the hardware would once the release lands.
+    [[nodiscard]] bool SemaphorePredict() const {
+        return sem_predict;
+    }
+    /// A release of `value` at `address` of `space` was just sent.
+    void NoteRelease(const void* space, GPUVAddr address, u32 value);
+    /// The value of the latest still-queued release at `address` of `space`, if any.
+    [[nodiscard]] std::optional<u32> PredictedSemaphore(const void* space, GPUVAddr address);
+    /// EDEN_NX2_NARROW_DIAG: an acquire check (`predicted`: met by a queued release; `waited`:
+    /// it still waited for the back).
+    void NoteAcquireDiag(bool predicted, bool waited) {
+        if (diag) [[unlikely]] {
+            ++diag_acquires[(predicted ? 2 : 0) + (waited ? 1 : 0)];
         }
     }
     /// The work just sent may draw (only EDEN_NX2_NARROW_DRAIN=2 counts it as unbounded).
     void NoteDraw() {
         if (narrow_strict) {
             unbounded_position = write_position;
+            acquire_position = write_position;
         }
     }
     /// Waits until the back executed the queued work that may write [address, address + size) of
     /// `space`: the unbounded writes and the overlapping ones NoteWrite recorded. Returns whether
     /// any of it was still queued.
-    bool WaitForWritesTo(const void* space, GPUVAddr address, u64 size, DrainSite site);
+    bool WaitForWritesTo(const void* space, GPUVAddr address, u64 size, DrainSite site,
+                         NarrowBase base = NarrowBase::Read);
     /// WaitForWriters for a command list at [address, address + size): the compute and copy work
-    /// with unbounded writes, and the queued writes overlapping the list.
-    bool WaitForWritersTo(const void* space, GPUVAddr address, u64 size);
+    /// with unbounded writes, and the queued writes overlapping the list. `sync_only`
+    /// (EDEN_NX2_NARROW_LIST_SYNC): the work before the last host-level wait instead of every
+    /// dispatch and copy.
+    bool WaitForWritersTo(const void* space, GPUVAddr address, u64 size, bool sync_only = false);
 
 private:
     friend struct GpuSplitTestAccess;
@@ -284,6 +407,9 @@ private:
     }
     void SwitchEngine(Tegra::Engines::EngineInterface* engine);
     bool WaitFor(u64 target, DrainSite site);
+    /// WaitFor, with EDEN_NX2_NARROW_DIAG attributing a real wait to `cause`.
+    bool WaitForAttributed(u64 target, DrainSite site, UnboundedCause cause);
+    void MaybeReportDiag();
 
     /// One step of a front wait for the back to consume `target`.
     void Backoff(u32 spins, u64 target);
@@ -322,6 +448,12 @@ private:
     bool front_macros{};
     bool narrow{};
     bool narrow_strict{};
+    bool narrow_compute{};
+    bool narrow_render_enable{};
+    bool narrow_dma_recorded{};
+    bool narrow_list_sync{};
+    bool sem_predict{};
+    bool diag{};
     u64 session{};
     std::unique_ptr<u64[]> ring;
 
@@ -337,6 +469,35 @@ private:
     /// Narrow drains: the end of the latest work with unbounded writes (of compute or copy work).
     u64 unbounded_position{};
     u64 unbounded_writer_position{};
+    /// Unbounded writes and dispatches (semaphore acquires wait for those).
+    u64 acquire_position{};
+    /// The latest overflowed record (NarrowBase::Recorded reads wait for it).
+    u64 overflow_position{};
+    UnboundedCause unbounded_cause{};
+    UnboundedCause acquire_cause{};
+    UnboundedCause writer_cause{};
+    /// Releases the front queued (EDEN_NX2_SEM_PREDICT), round robin.
+    struct QueuedRelease {
+        const void* space;
+        GPUVAddr address;
+        u64 position;
+        u32 value;
+    };
+    static constexpr size_t MaxQueuedReleases = 32;
+    std::array<QueuedRelease, MaxQueuedReleases> queued_releases{};
+    size_t next_release{};
+    // EDEN_NX2_NARROW_DIAG (front only): notes per cause; real waits and their ticks per site
+    // and cause; acquire checks (predicted, waited).
+    std::array<u64, static_cast<size_t>(UnboundedCause::Count)> diag_notes{};
+    std::array<std::array<u64, static_cast<size_t>(UnboundedCause::Count)>,
+               static_cast<size_t>(DrainSite::Count)>
+        diag_waits{};
+    std::array<std::array<u64, static_cast<size_t>(UnboundedCause::Count)>,
+               static_cast<size_t>(DrainSite::Count)>
+        diag_wait_ticks{};
+    std::array<u64, 4> diag_acquires{};
+    u64 diag_window_start{};
+    u64 diag_window_ticks{};
     /// Recorded writes not yet known done, oldest first: [pending_head, pending_tail).
     std::array<PendingWrite, MaxPendingWrites> pending_writes{};
     u64 pending_head{};
