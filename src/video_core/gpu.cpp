@@ -35,6 +35,7 @@
 #include "video_core/pending_maps.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/gpu_timestamp.h"
+#include "video_core/gpu_wait_stats.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/memory_manager.h"
@@ -150,9 +151,12 @@ struct GPU::Impl {
     }
 
     void WaitForIdle() {
+        const u64 request = VideoCommon::GpuWaitStats::Now();
         const u64 fence = RequestSyncOperation([] {});
         gpu_thread.TickGPU(is_async);
         WaitForSyncOperation(fence);
+        VideoCommon::GpuWaitStats::RecordSync(VideoCommon::GpuWaitStats::Site::Idle,
+                                              VideoCommon::GpuWaitStats::Now() - request);
     }
 
     /// Tick pending requests within the GPU.
@@ -240,7 +244,12 @@ struct GPU::Impl {
     }
 
     VideoCore::RasterizerDownloadArea OnCPURead(DAddr addr, u64 size) {
+        namespace Stats = VideoCommon::GpuWaitStats;
+        const size_t core = system.GetCurrentHostThreadID();
+        const u64 check_start = Stats::Now();
         auto raster_area = renderer->ReadRasterizer()->GetFlushArea(addr, size);
+        const u64 request = Stats::Now();
+        Stats::AddAreaCheck(core, request - check_start);
         if (raster_area.preemtive) {
             return raster_area;
         }
@@ -252,13 +261,24 @@ struct GPU::Impl {
                      raster_area.start_address, raster_area.end_address,
                      reads.load(std::memory_order_relaxed));
         }
-        const u64 fence = RequestSyncOperation([this, raster_area]() {
+        // Filled on the GPU thread while this thread waits for it.
+        Stats::FlushTiming timing{};
+        const u64 fence = RequestSyncOperation([this, raster_area, &timing]() {
+            timing.start = Stats::Now();
+            const Stats::HostWaits host_before = Stats::t_host_waits;
+            const u64 bytes_before = Stats::t_download_bytes;
             // Apply collected guest writes before downloading GPU data over guest memory.
             InvalidateGPUCache();
+            timing.applied = Stats::Now();
             renderer->ReadRasterizer()->FlushRegion(raster_area.start_address, raster_area.end_address - raster_area.start_address);
+            timing.host_ns = Stats::t_host_waits.ns - host_before.ns;
+            timing.finishes = Stats::t_host_waits.count - host_before.count;
+            timing.bytes = Stats::t_download_bytes - bytes_before;
+            timing.end = Stats::Now();
         });
         gpu_thread.TickGPU(is_async);
         WaitForSyncOperation(fence);
+        Stats::RecordReactive(raster_area, core, request, timing, Stats::Now());
         return raster_area;
     }
 
@@ -267,12 +287,15 @@ struct GPU::Impl {
         if (preserve_gpu_writes) {
             VideoCore::RasterizerInterface* rasterizer = renderer->ReadRasterizer();
             if (!rasterizer->TryCacheInvalidation(addr, size)) {
+                const u64 request = VideoCommon::GpuWaitStats::Now();
                 const u64 fence = RequestSyncOperation([rasterizer, addr, size] {
                     rasterizer->FlushRegion(addr, size, VideoCommon::CacheType::BufferCache);
                     rasterizer->OnCacheInvalidation(addr, size);
                 });
                 gpu_thread.TickGPU(is_async);
                 WaitForSyncOperation(fence);
+                VideoCommon::GpuWaitStats::RecordSync(VideoCommon::GpuWaitStats::Site::Invalidate,
+                                                      VideoCommon::GpuWaitStats::Now() - request);
             }
             return;
         }

@@ -7,10 +7,18 @@
 
 namespace VideoCore {
 
+/// The cache that reported a flush area (GetFlushArea), for statistics (GpuWaitStats).
+enum class DownloadAreaSource : u8 {
+    None,
+    TextureCache,
+    BufferCache,
+};
+
 struct RasterizerDownloadArea {
     VAddr start_address;
     VAddr end_address;
     bool preemtive;
+    DownloadAreaSource source{};
 };
 
 } // namespace VideoCore

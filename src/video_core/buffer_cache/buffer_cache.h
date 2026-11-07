@@ -387,6 +387,12 @@ void BufferCache<P>::DownloadRangesMemory(std::span<const std::pair<DAddr, u64>>
         if (staged.empty() && mapped.empty()) {
             return;
         }
+        for (const Download& download : staged) {
+            GpuWaitStats::AddDownloadBytes(download.copy.size);
+        }
+        for (const Download& download : mapped) {
+            GpuWaitStats::AddDownloadBytes(download.copy.size);
+        }
         const Common::RangeSet<DAddr> cpu_written = PendingCpuWriteRanges();
         if (staged.empty()) {
             if constexpr (has_mapped) {
@@ -482,6 +488,7 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
     const bool has_new_downloads = tmp_intervals.size() != 0;
     for (const auto& pair : tmp_intervals) {
         gpu_modified_ranges.Add(pair.first, pair.second);
+        GpuWaitStats::NoteGpuWrite(pair.first, pair.second, GpuWaitStats::WriteSite::DmaCopy);
         if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
             Tegra::Nx2MarkGpuWritten(pair.first, pair.second);
             Nx2NoteListWrite(buffer_b, pair.first, pair.second);
@@ -556,7 +563,8 @@ std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainCPUBuffer(
 
     switch (post_op) {
     case ObtainBufferOperation::MarkAsWritten:
-        MarkWrittenBuffer(buffer_id, device_addr, size);
+        MarkWrittenBuffer(buffer_id, device_addr, size, false,
+                          GpuWaitStats::WriteSite::ImageToBuffer);
         buffer.MarkUsage(buffer.Offset(device_addr), size);
         break;
     case ObtainBufferOperation::DiscardWrite: {
@@ -1564,7 +1572,8 @@ bool BufferCache<P>::BindMultiRangeStorage(const Binding& binding, bool is_writt
             const u32 offset = buffer.Offset(segment.device_addr);
             buffer.MarkUsage(offset, segment.size);
             if (is_written) {
-                MarkWrittenBuffer(segment.buffer_id, segment.device_addr, segment.size);
+                MarkWrittenBuffer(segment.buffer_id, segment.device_addr, segment.size, false,
+                                  GpuWaitStats::WriteSite::MultiRangeStorage);
             }
             runtime.PushMultiRangeSource(buffer, offset, segment.size);
         }
@@ -1592,7 +1601,8 @@ void BufferCache<P>::BindHostGraphicsStorageBuffers(size_t stage) {
         buffer.MarkUsage(offset, size);
 
         if (is_written) {
-            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size);
+            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size, false,
+                              GpuWaitStats::WriteSite::GraphicsStorage);
         }
 
         if constexpr (NEEDS_BIND_STORAGE_INDEX) {
@@ -1614,7 +1624,8 @@ void BufferCache<P>::BindHostGraphicsTextureBuffers(size_t stage) {
 
         const bool is_written = ((channel_state->written_texture_buffers[stage] >> index) & 1) != 0;
         if (is_written) {
-            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size);
+            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size, false,
+                              GpuWaitStats::WriteSite::GraphicsTexel);
         }
 
         const u32 offset = buffer.Offset(binding.device_addr);
@@ -1652,7 +1663,8 @@ void BufferCache<P>::BindHostTransformFeedbackBuffers() {
             TouchBuffer(buffer, binding.buffer_id);
             size = binding.size;
             SynchronizeBuffer(buffer, binding.device_addr, size);
-            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size);
+            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size, false,
+                              GpuWaitStats::WriteSite::TransformFeedback);
             offset = buffer.Offset(binding.device_addr);
             buffer.MarkUsage(offset, size);
             host_buffer = &buffer;
@@ -1739,7 +1751,8 @@ void BufferCache<P>::BindHostComputeStorageBuffers() {
         buffer.MarkUsage(offset, size);
 
         if (is_written) {
-            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size, true);
+            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size, true,
+                              GpuWaitStats::WriteSite::ComputeStorage);
         }
 
         if constexpr (NEEDS_BIND_STORAGE_INDEX) {
@@ -1762,7 +1775,8 @@ void BufferCache<P>::BindHostComputeTextureBuffers() {
         const bool is_written =
             ((channel_state->written_compute_texture_buffers >> index) & 1) != 0;
         if (is_written) {
-            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size);
+            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size, false,
+                              GpuWaitStats::WriteSite::ComputeTexel);
         }
 
         const u32 offset = buffer.Offset(binding.device_addr);
@@ -2041,7 +2055,9 @@ void BufferCache<P>::UpdateComputeTextureBuffers() {
 }
 
 template <class P>
-void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync) {
+void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size,
+                                       bool needs_sync, GpuWaitStats::WriteSite site) {
+    GpuWaitStats::NoteGpuWrite(device_addr, size, site);
     if constexpr (!IS_OPENGL) {
         if (needs_sync) {
             Buffer& buffer = slot_buffers[buffer_id];
@@ -2727,6 +2743,7 @@ void BufferCache<P>::DownloadBuffersMemory(std::span<const BufferId> buffer_ids)
     if (total_size_bytes == 0) {
         return;
     }
+    GpuWaitStats::AddDownloadBytes(total_size_bytes);
     auto download_staging = runtime.DownloadStagingBuffer(total_size_bytes);
     for (Download& download : downloads) {
         download.copy.dst_offset += download_staging.offset;
@@ -2776,6 +2793,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
     if (total_size_bytes == 0) {
         return;
     }
+    GpuWaitStats::AddDownloadBytes(total_size_bytes);
     const Common::RangeSet<DAddr> cpu_written = PendingCpuWriteRanges();
 
     if constexpr (requires { buffer.Mapped(); }) {

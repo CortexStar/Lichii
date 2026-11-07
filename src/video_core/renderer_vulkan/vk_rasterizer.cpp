@@ -35,6 +35,7 @@
 #include "common/settings.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/gpu_logging/gpu_logging.h"
+#include "video_core/gpu_wait_stats.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/native_query_trace.h"
 #include "video_core/native_indirect_reset.h"
@@ -2029,6 +2030,7 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
         std::scoped_lock lock{texture_cache.mutex};
         auto area = texture_cache.GetFlushArea(addr, size);
         if (area) {
+            area->source = VideoCore::DownloadAreaSource::TextureCache;
             return *area;
         }
     }
@@ -2036,6 +2038,7 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
         std::scoped_lock lock{buffer_cache.mutex};
         auto area = buffer_cache.GetFlushArea(addr, size);
         if (area) {
+            area->source = VideoCore::DownloadAreaSource::BufferCache;
             return *area;
         }
     }
@@ -2224,6 +2227,7 @@ void RasterizerVulkan::FlushQueryResults(DAddr addr, u64 size) {
     // Below High GPU accuracy a fence runs its own callback at once, so wait for an operation
     // queued behind the pending report writes instead. On the split's back the fence's
     // submission may be deferred, and the fencing thread would wait for this thread to submit it.
+    const u64 wait_start = VideoCommon::GpuWaitStats::Now();
     std::mutex wait_mutex;
     std::condition_variable wait_cv;
     bool written{};
@@ -2236,6 +2240,7 @@ void RasterizerVulkan::FlushQueryResults(DAddr addr, u64 size) {
     scheduler.FlushDeferred();
     std::unique_lock lock{wait_mutex};
     wait_cv.wait(lock, [&written] { return written; });
+    VideoCommon::GpuWaitStats::AddQueryWait(VideoCommon::GpuWaitStats::Now() - wait_start);
 }
 
 void RasterizerVulkan::FlushAndInvalidateRegion(DAddr addr, u64 size,
