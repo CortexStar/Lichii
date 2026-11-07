@@ -112,17 +112,33 @@ struct GPU::Impl {
     /// Synchronizes CPU writes with Host GPU memory.
     void InvalidateGPUCache() {
         std::vector<std::pair<DAddr, u64>> writes;
-        std::function<void(PAddr, size_t)> callback_writes(
-            [&writes](PAddr address, size_t size) { writes.emplace_back(address, size); });
-        system.GatherGPUDirtyMemory(callback_writes);
-        if (!writes.empty()) {
-            renderer->ReadRasterizer()->OnCacheInvalidations(writes);
+        {
+            // Gathered writes stay pending (ForEachPendingCpuWrite) until they are applied: a
+            // download written to guest memory meanwhile on another thread (FinishRead) would
+            // otherwise write the GPU's older bytes over them.
+            std::scoped_lock lock{applying_writes_mutex};
+            std::function<void(PAddr, size_t)> callback_writes(
+                [&writes](PAddr address, size_t size) { writes.emplace_back(address, size); });
+            system.GatherGPUDirtyMemory(callback_writes);
+            if (writes.empty()) {
+                return;
+            }
+            applying_writes.push_back(&writes);
         }
+        renderer->ReadRasterizer()->OnCacheInvalidations(writes);
+        std::scoped_lock lock{applying_writes_mutex};
+        std::erase(applying_writes, &writes);
     }
 
     void ForEachPendingCpuWrite(const std::function<void(DAddr, size_t)>& callback) {
+        std::scoped_lock lock{applying_writes_mutex};
         for (auto& manager : system.GetGPUDirtyMemoryManager()) {
             manager.ForEachPending(callback);
+        }
+        for (const auto* writes : applying_writes) {
+            for (const auto& [address, size] : *writes) {
+                callback(address, size);
+            }
         }
     }
 
@@ -269,24 +285,32 @@ struct GPU::Impl {
         }
         // Filled on the GPU thread while this thread waits for it.
         Stats::FlushTiming timing{};
-        const u64 fence = RequestSyncOperation([this, raster_area, &timing]() {
-            timing.start = Stats::Now();
-            const Stats::HostWaits host_before = Stats::t_host_waits;
-            const u64 bytes_before = Stats::t_download_bytes;
-            // Apply collected guest writes before downloading GPU data over guest memory.
-            InvalidateGPUCache();
-            timing.applied = Stats::Now();
-            renderer->ReadRasterizer()->FlushRegion(raster_area.start_address, raster_area.end_address - raster_area.start_address);
-            timing.host_ns = Stats::t_host_waits.ns - host_before.ns;
-            timing.finishes = Stats::t_host_waits.count - host_before.count;
-            timing.bytes = Stats::t_download_bytes - bytes_before;
-            timing.end = Stats::Now();
-        });
-        // The split's back runs it after the entry it is on. The tick sent through the GPU
-        // thread's queue still runs it without the split.
-        VideoCommon::GpuSplit::Get().RequestTick();
-        gpu_thread.TickGPU(is_async);
-        WaitForSyncOperation(fence);
+        // In flight: an earlier read's downloads cover the area, only FinishRead is left.
+        if (!raster_area.in_flight) {
+            const u64 fence = RequestSyncOperation([this, raster_area, &timing]() {
+                timing.start = Stats::Now();
+                const Stats::HostWaits host_before = Stats::t_host_waits;
+                const u64 bytes_before = Stats::t_download_bytes;
+                // Apply collected guest writes before downloading GPU data over guest memory.
+                InvalidateGPUCache();
+                timing.applied = Stats::Now();
+                renderer->ReadRasterizer()->FlushRegionForRead(
+                    raster_area.start_address, raster_area.end_address - raster_area.start_address);
+                timing.host_ns = Stats::t_host_waits.ns - host_before.ns;
+                timing.finishes = Stats::t_host_waits.count - host_before.count;
+                timing.bytes = Stats::t_download_bytes - bytes_before;
+                timing.end = Stats::Now();
+            });
+            // The split's back runs it after the entry it is on. The tick sent through the GPU
+            // thread's queue still runs it without the split.
+            VideoCommon::GpuSplit::Get().RequestTick();
+            gpu_thread.TickGPU(is_async);
+            WaitForSyncOperation(fence);
+        }
+        // The GPU thread submitted the downloads without waiting for the host GPU: this thread
+        // waits for them and writes them to guest memory, while the GPU thread goes on.
+        renderer->ReadRasterizer()->FinishRead(raster_area.start_address,
+                                               raster_area.end_address - raster_area.start_address);
         Stats::RecordReactive(raster_area, core, request, timing, Stats::Now());
         return raster_area;
     }
@@ -415,6 +439,10 @@ struct GPU::Impl {
     VideoCommon::PendingMaps pending_maps;
     std::mutex sync_request_mutex;
     std::condition_variable sync_request_cv;
+
+    /// InvalidateGPUCache: the writes it gathered and is applying, on each thread doing so.
+    std::vector<const std::vector<std::pair<DAddr, u64>>*> applying_writes;
+    std::mutex applying_writes_mutex;
 
     const bool is_async;
 

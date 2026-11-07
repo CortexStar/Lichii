@@ -4,6 +4,8 @@
 #include <array>
 #include <barrier>
 #include <cstring>
+#include <deque>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <thread>
@@ -70,17 +72,22 @@ struct Runtime {
     u32 GetUniformBufferAlignment() const {
         return 1;
     }
-    bool IsFree(u64) const {
-        return true;
+    bool IsFree(u64 tick) const {
+        return tick <= completed_tick;
+    }
+    u64 CurrentTick() const {
+        return submitted_tick + 1;
     }
     void WaitSubmittedTick(u64) {}
     bool CanReorderUpload(const Buffer&, std::span<VideoCommon::BufferCopy>) const {
         return false;
     }
     Staging DownloadStagingBuffer(u64 size, bool = false) {
-        staging = std::make_unique<Buffer>(*this, 0, size + 128, false);
+        // Kept until the end: read downloads hold theirs past the next request.
+        stagings.push_back(std::make_unique<Buffer>(*this, 0, size + 128, false));
         ++allocations;
-        return {staging.get(), 128, std::span{staging->bytes}.subspan(128)};
+        Buffer* const staging = stagings.back().get();
+        return {staging, 128, std::span{staging->bytes}.subspan(128)};
     }
     Staging UploadStagingBuffer(u64 size) {
         return DownloadStagingBuffer(size);
@@ -112,11 +119,35 @@ struct Runtime {
         if (before_completion) {
             before_completion();
         }
+        Complete(submitted_tick);
         for (auto& copy : pending) {
             copy();
         }
         pending.clear();
         ++finishes;
+    }
+    u64 SubmitForHostRead() {
+        ++host_read_barriers;
+        submitted.emplace_back(++submitted_tick, std::move(pending));
+        pending.clear();
+        return submitted_tick;
+    }
+    void WaitForHostRead(u64 tick) {
+        if (before_completion) {
+            before_completion();
+        }
+        Complete(tick);
+        ++host_read_waits;
+    }
+    /// The host GPU runs what was submitted up to `tick`.
+    void Complete(u64 tick) {
+        while (!submitted.empty() && submitted.front().first <= tick) {
+            for (auto& copy : submitted.front().second) {
+                copy();
+            }
+            submitted.pop_front();
+        }
+        completed_tick = (std::max)(completed_tick, tick);
     }
     void Wait(u64 tick) {
         if (before_completion) {
@@ -129,6 +160,8 @@ struct Runtime {
         ++host_read_barriers;
         Finish();
     }
+    void PreCopyBarrier() {}
+    void PostCopyBarrier() {}
     void BindUniformBuffer(Buffer&, u32, u32) {}
     std::span<u8> BindMappedUniformBuffer(size_t, u32, u32 size) {
         stream.resize(size);
@@ -137,11 +170,13 @@ struct Runtime {
 
     u32 alignment{256};
     u32 allocations{}, downloads{}, uploads{}, finishes{}, waits{};
-    u32 host_read_barriers{};
+    u32 host_read_barriers{}, host_read_waits{};
     u64 upload_bytes{}, waited_tick{};
-    std::unique_ptr<Buffer> staging;
+    u64 submitted_tick{}, completed_tick{};
+    std::vector<std::unique_ptr<Buffer>> stagings;
     std::vector<u8> stream;
     std::vector<std::function<void()>> pending;
+    std::deque<std::pair<u64, std::vector<std::function<void()>>>> submitted;
     std::function<void()> before_completion;
 };
 
@@ -235,6 +270,12 @@ struct BufferCacheTestAccess {
     static u32 CpuMarks(Cache& cache) {
         return cache.memory_tracker.cpu_marks;
     }
+    static void MarkWritten(Cache& cache, BufferId id, DAddr address, u32 size) {
+        cache.MarkWrittenBuffer(id, address, size);
+    }
+    static size_t ReadDownloads(Cache& cache) {
+        return cache.read_downloads.size();
+    }
 };
 
 } // namespace VideoCommon
@@ -296,6 +337,59 @@ struct Fixture {
     VideoCommon::Binding Bind(bool written = false, bool native = false, bool table = false) {
         return Access::Bind(*cache, *memory, 0x100000, written, native, table);
     }
+};
+
+/// Hands FinishRead to a buffer cache, as RasterizerVulkan does.
+class ReadRasterizer final : public VideoCore::RasterizerInterface {
+public:
+    explicit ReadRasterizer(Cache& cache_) : cache{cache_} {}
+
+    void FinishRead(DAddr addr, u64 size) override {
+        cache.FinishReadDownloads(addr, size);
+    }
+    void Draw(bool, u32) override {}
+    void DrawTexture() override {}
+    void Clear(u32) override {}
+    void DispatchCompute() override {}
+    void ResetCounter(VideoCommon::QueryType) override {}
+    void Query(GPUVAddr, VideoCommon::QueryType, VideoCommon::QueryPropertiesFlags, u32,
+               u32) override {}
+    void BindGraphicsUniformBuffer(size_t, u32, GPUVAddr, u32) override {}
+    void DisableGraphicsUniformBuffer(size_t, u32) override {}
+    void SignalFence(std::function<void()>&&) override {}
+    void SyncOperation(std::function<void()>&&) override {}
+    void SignalSyncPoint(u32) override {}
+    void SignalReference() override {}
+    void ReleaseFences(bool) override {}
+    void FlushAll() override {}
+    void FlushRegion(DAddr, u64, VideoCommon::CacheType) override {}
+    bool MustFlushRegion(DAddr, u64, VideoCommon::CacheType) override {
+        return false;
+    }
+    VideoCore::RasterizerDownloadArea GetFlushArea(DAddr addr, u64 size) override {
+        return {addr, addr + size, true};
+    }
+    void InvalidateRegion(DAddr, u64, VideoCommon::CacheType) override {}
+    void OnCacheInvalidation(DAddr, u64) override {}
+    bool OnCPUWrite(DAddr, u64) override {
+        return false;
+    }
+    void InvalidateGPUCache() override {}
+    void UnmapMemory(DAddr, u64) override {}
+    void ModifyGPUMemory(size_t, GPUVAddr, u64) override {}
+    void FlushAndInvalidateRegion(DAddr, u64, VideoCommon::CacheType) override {}
+    void WaitForIdle() override {}
+    void FragmentBarrier() override {}
+    void TiledCacheBarrier() override {}
+    void FlushCommands() override {}
+    void TickFrame() override {}
+    Tegra::Engines::AccelerateDMAInterface& AccessAccelerateDMA() override {
+        std::terminate();
+    }
+    void AccelerateInlineToMemory(GPUVAddr, size_t, std::span<const u8>) override {}
+
+private:
+    Cache& cache;
 };
 
 } // namespace
@@ -626,4 +720,176 @@ TEST_CASE("Downloads keep CPU writes collected and not yet applied", "[buffer_po
     REQUIRE(f.bytes[0x20ff7] == 0x34);
     REQUIRE(std::all_of(f.bytes + 0x20ff8, f.bytes + 0x21008, [](u8 b) { return b == 0xee; }));
     REQUIRE(f.bytes[0x21008] == 0x34);
+}
+
+TEST_CASE("Read downloads stay GPU-modified until the reading thread writes them",
+          "[buffer_ports]") {
+    Fixture f;
+    const bool mapped = GENERATE(false, true);
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000, mapped);
+    std::ranges::fill(Access::Get(*f.cache, id).bytes, 0x12);
+    Access::Dirty(*f.cache, 0x20000, 0x2000);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    REQUIRE(f.runtime.finishes == 0);
+    REQUIRE(f.runtime.downloads == 1);
+    REQUIRE(f.runtime.host_read_barriers == 1);
+    REQUIRE(VideoCore::g_read_downloads == 1);
+    REQUIRE(f.bytes[0x10000] == 0);
+    REQUIRE(Access::Pending(*f.cache, 0x20000, 0x1000));
+    // Another read of the range waits for the same copy, and its flush copies nothing.
+    const auto area = f.cache->GetFlushArea(0x20800, 4);
+    REQUIRE(area);
+    REQUIRE_FALSE(area->preemtive);
+    REQUIRE(area->in_flight);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    REQUIRE(f.runtime.downloads == 1);
+    REQUIRE(f.runtime.submitted_tick == 1);
+    f.cache->FinishReadDownloads(0x20800, 4);
+    REQUIRE(f.runtime.host_read_waits == 1);
+    REQUIRE(VideoCore::g_read_downloads == 0);
+    REQUIRE(f.bytes[0x10000] == 0x12);
+    REQUIRE(f.bytes[0x10fff] == 0x12);
+    REQUIRE(f.bytes[0x11000] == 0);
+    REQUIRE_FALSE(Access::Pending(*f.cache, 0x20000, 0x1000));
+    REQUIRE(Access::Pending(*f.cache, 0x21000, 0x1000));
+    REQUIRE(f.cache->GetFlushArea(0x20800, 4)->preemtive);
+    f.cache->FinishReadDownloads(0x20000, 0x2000);
+    REQUIRE(f.runtime.host_read_waits == 1);
+}
+
+TEST_CASE("Read downloads keep CPU writes made while they were on their way", "[buffer_ports]") {
+    Fixture f;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    std::ranges::fill(Access::Get(*f.cache, id).bytes, 0x12);
+    Access::Dirty(*f.cache, 0x20000, 0x1000);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    // After the submission: one write still collected, one already applied.
+    std::memset(f.bytes + 0x10100, 0xee, 0x10);
+    std::memset(f.bytes + 0x10200, 0xdd, 0x10);
+    f.cache->SetPendingCpuWrites(
+        [](const std::function<void(DAddr, size_t)>& callback) { callback(0x20100, 0x10); });
+    const std::array<std::pair<DAddr, u64>, 1> applied{{{0x20200, 0x10}}};
+    f.cache->ClaimCpuWrites(applied);
+    f.cache->FinishReadDownloads(0x20000, 0x1000);
+    REQUIRE(f.bytes[0x100ff] == 0x12);
+    REQUIRE(std::all_of(f.bytes + 0x10100, f.bytes + 0x10110, [](u8 b) { return b == 0xee; }));
+    REQUIRE(f.bytes[0x10110] == 0x12);
+    REQUIRE(std::all_of(f.bytes + 0x10200, f.bytes + 0x10210, [](u8 b) { return b == 0xdd; }));
+    REQUIRE(f.bytes[0x10210] == 0x12);
+    REQUIRE(f.bytes[0x10fff] == 0x12);
+    REQUIRE_FALSE(Access::Pending(*f.cache, 0x20000, 0x1000));
+}
+
+TEST_CASE("Read downloads land oldest first and leave newer GPU writes to download",
+          "[buffer_ports]") {
+    Fixture f;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    auto& buffer = Access::Get(*f.cache, id);
+    std::ranges::fill(buffer.bytes, 0x12);
+    Access::Dirty(*f.cache, 0x20000, 0x1000);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    // The GPU thread's next work writes part of the range: on the host GPU, after the copy.
+    f.runtime.pending.push_back(
+        [&buffer] { std::fill_n(buffer.bytes.begin() + 0x800, 0x100, u8{0x34}); });
+    Access::MarkWritten(*f.cache, id, 0x20800, 0x100);
+    const auto area = f.cache->GetFlushArea(0x20800, 4);
+    REQUIRE_FALSE(area->preemtive);
+    REQUIRE_FALSE(area->in_flight);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    REQUIRE(f.runtime.downloads == 2);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 2);
+    REQUIRE(f.cache->GetFlushArea(0x20800, 4)->in_flight);
+    // The first copy holds what a synchronous flush would have left for the whole range.
+    f.cache->FinishReadDownloads(0x20000, 4);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 1);
+    REQUIRE(f.bytes[0x10000] == 0x12);
+    REQUIRE(f.bytes[0x10800] == 0x12);
+    REQUIRE(Access::Pending(*f.cache, 0x20800, 0x100));
+    REQUIRE_FALSE(Access::Pending(*f.cache, 0x20000, 0x800));
+    f.cache->FinishReadDownloads(0x20800, 4);
+    REQUIRE(f.bytes[0x107ff] == 0x12);
+    REQUIRE(f.bytes[0x10800] == 0x34);
+    REQUIRE(f.bytes[0x108ff] == 0x34);
+    REQUIRE(f.bytes[0x10900] == 0x12);
+    REQUIRE_FALSE(Access::Pending(*f.cache, 0x20000, 0x1000));
+    // Both written in order even when the newer one's reader comes first.
+    Access::Dirty(*f.cache, 0x20000, 0x1000);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    f.runtime.pending.push_back(
+        [&buffer] { std::fill_n(buffer.bytes.begin() + 0x800, 0x100, u8{0x56}); });
+    Access::MarkWritten(*f.cache, id, 0x20800, 0x100);
+    f.cache->DownloadMemoryForRead(0x20800, 0x100);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 2);
+    f.cache->FinishReadDownloads(0x20800, 4);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 0);
+    REQUIRE(f.bytes[0x10800] == 0x56);
+    REQUIRE(f.bytes[0x10900] == 0x12);
+    REQUIRE_FALSE(Access::Pending(*f.cache, 0x20000, 0x1000));
+}
+
+TEST_CASE("Read downloads land before a later fence's downloads", "[buffer_ports]") {
+    Fixture f;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    auto& buffer = Access::Get(*f.cache, id);
+    std::ranges::fill(buffer.bytes, 0x12);
+    Access::MarkWritten(*f.cache, id, 0x20000, 0x1000);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    // A later GPU write the next fence downloads, and the host GPU runs all of it before anyone
+    // waits for the read's copy.
+    f.runtime.pending.push_back([&buffer] { std::fill_n(buffer.bytes.begin(), 0x100, u8{0x34}); });
+    Access::MarkWritten(*f.cache, id, 0x20000, 0x100);
+    f.cache->CommitAsyncFlushes();
+    f.runtime.Finish();
+    f.cache->PopAsyncFlushes();
+    f.cache->FinishReadDownloads(0x20000, 0x1000);
+    REQUIRE(f.bytes[0x10000] == 0x34);
+    REQUIRE(f.bytes[0x100ff] == 0x34);
+    REQUIRE(f.bytes[0x10100] == 0x12);
+    REQUIRE(f.bytes[0x10fff] == 0x12);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 0);
+    REQUIRE_FALSE(Access::Pending(*f.cache, 0x20000, 0x1000));
+}
+
+TEST_CASE("Preflushed ranges wait for the read download still on its way", "[buffer_ports]") {
+    Fixture f;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    std::ranges::fill(Access::Get(*f.cache, id).bytes, 0x12);
+    Access::Dirty(*f.cache, 0x20000, 0x1000);
+    // The first read marks the range for fence downloads, then flushes it.
+    const auto first = f.cache->GetFlushArea(0x20000, 4);
+    REQUIRE_FALSE(first->preemtive);
+    REQUIRE_FALSE(first->in_flight);
+    f.cache->DownloadMemoryForRead(first->start_address, first->end_address - first->start_address);
+    const auto second = f.cache->GetFlushArea(0x20010, 4);
+    REQUIRE_FALSE(second->preemtive);
+    REQUIRE(second->in_flight);
+    f.cache->FinishReadDownloads(second->start_address,
+                                 second->end_address - second->start_address);
+    REQUIRE(f.bytes[0x10010] == 0x12);
+    REQUIRE(f.cache->GetFlushArea(0x20010, 4)->preemtive);
+}
+
+TEST_CASE("GPU writes to guest memory land the read downloads under them first", "[buffer_ports]") {
+    Fixture f;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    std::ranges::fill(Access::Get(*f.cache, id).bytes, 0x12);
+    ReadRasterizer reads{*f.cache};
+    Tegra::MemoryManager gpu_memory{f.system, f.device, 32, 1ULL << 31, 16};
+    gpu_memory.BindRasterizer(&reads);
+    gpu_memory.Map(0x200000, 0x20000, 0x10000, Tegra::PTEKind::PITCH, true);
+    Access::Dirty(*f.cache, 0x20000, 0x1000);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    // A semaphore release, then an inline upload, after the copy was taken.
+    gpu_memory.Write<u32>(0x200100, 0xdeadbeef);
+    REQUIRE(VideoCore::g_read_downloads == 0);
+    const u32 words = 0x55555555;
+    gpu_memory.WriteBlockUnsafe(0x200200, &words, sizeof(words));
+    u32 value{};
+    std::memcpy(&value, f.bytes + 0x10100, sizeof(value));
+    REQUIRE(value == 0xdeadbeef);
+    std::memcpy(&value, f.bytes + 0x10200, sizeof(value));
+    REQUIRE(value == 0x55555555);
+    REQUIRE(f.bytes[0x10000] == 0x12);
+    REQUIRE(f.bytes[0x10104] == 0x12);
+    REQUIRE(f.bytes[0x10fff] == 0x12);
 }

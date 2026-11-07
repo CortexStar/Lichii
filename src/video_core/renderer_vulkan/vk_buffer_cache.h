@@ -134,6 +134,12 @@ public:
 
     void FinishForHostRead();
 
+    /// FinishForHostRead without the wait: submits, and returns the tick to wait for.
+    u64 SubmitForHostRead();
+
+    /// Waits for a SubmitForHostRead tick, on any thread.
+    void WaitForHostRead(u64 tick);
+
     u64 GetDeviceLocalMemory() const;
 
     u64 GetDeviceMemoryUsage() const;

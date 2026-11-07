@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include "common/common_types.h"
 
 namespace VideoCore {
@@ -19,6 +21,14 @@ struct RasterizerDownloadArea {
     VAddr end_address;
     bool preemtive;
     DownloadAreaSource source{};
+    /// What guest memory lacks there is on its way for an earlier read: nothing to flush, only to
+    /// wait for (RasterizerInterface::FinishRead).
+    bool in_flight{};
 };
+
+/// Downloads for guest CPU reads that are submitted but not yet written to guest memory
+/// (RasterizerInterface::FlushRegionForRead). While there are any, a write to guest memory from
+/// the GPU's side first finishes those it overlaps (FinishRead), so none lands over it later.
+inline std::atomic<u32> g_read_downloads{};
 
 } // namespace VideoCore

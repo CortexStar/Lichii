@@ -514,6 +514,17 @@ void BufferCacheRuntime::FinishForHostRead() {
     scheduler.Finish();
 }
 
+u64 BufferCacheRuntime::SubmitForHostRead() {
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record(HostReadBarrier);
+    return scheduler.Flush();
+}
+
+void BufferCacheRuntime::WaitForHostRead(u64 tick) {
+    // Flushed at once by SubmitForHostRead: the worker submits it without the GPU thread.
+    scheduler.GetMasterSemaphore().Wait(tick);
+}
+
 bool BufferCacheRuntime::CanReorderUpload(const Buffer& buffer,
                                           std::span<const VideoCommon::BufferCopy> copies) {
     if (Settings::values.disable_buffer_reorder) {

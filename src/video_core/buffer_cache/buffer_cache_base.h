@@ -46,6 +46,7 @@
 #include "video_core/gpu_wait_stats.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_download_trace.h"
+#include "video_core/rasterizer_download_area.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/types.h"
 
@@ -254,7 +255,8 @@ public:
 
     void CachedWriteMemory(DAddr device_addr, u64 size);
 
-    /// Cancels pending downloads over the range, so a fence can't write them over newer bytes.
+    /// Cancels pending downloads over the range (fences' and reads'), so none writes them over
+    /// newer bytes.
     void ClearDownload(DAddr base_addr, u64 size);
 
     /// CPU writes collected but not yet applied (SetPendingCpuWrites).
@@ -267,6 +269,17 @@ public:
     bool OnCPUWrite(DAddr device_addr, u64 size);
 
     void DownloadMemory(DAddr device_addr, u64 size);
+
+    /// DownloadMemory for a guest CPU read: submits the copies without waiting for the host GPU,
+    /// for FinishReadDownloads to write to guest memory. Their ranges stay GPU-modified until
+    /// then, and another read of them waits for these copies (GetFlushArea: in_flight).
+    void DownloadMemoryForRead(DAddr device_addr, u64 size);
+
+    /// Writes the DownloadMemoryForRead copies over [device_addr, device_addr + size), and those
+    /// submitted before them, to guest memory, waiting for the host GPU if it must. Any thread:
+    /// the reading one before it reads, the GPU's side before it writes guest memory there. Takes
+    /// `mutex` itself (a caller holding it keeps it held while the host GPU finishes).
+    void FinishReadDownloads(DAddr device_addr, u64 size);
 
     std::optional<VideoCore::RasterizerDownloadArea> GetFlushArea(DAddr device_addr, u64 size);
 
@@ -601,6 +614,19 @@ private:
 
     void DownloadRangesMemory(std::span<const std::pair<DAddr, u64>> ranges);
 
+    /// ClearDownload, for the downloads taken at fences only.
+    void ClearFenceDownloads(DAddr device_addr, u64 size);
+
+    /// Whether every GPU-modified byte in the range is in a read download's clean_ranges.
+    [[nodiscard]] bool ReadDownloadsCover(DAddr device_addr, u64 size) const;
+
+    /// Writes the read downloads up to `tick` to guest memory, oldest first (`mutex` held, the
+    /// host GPU past `tick`).
+    void WriteReadDownloads(u64 tick);
+
+    /// WriteReadDownloads for those the host GPU has completed: nothing waits.
+    void WriteCompletedReadDownloads();
+
     void DeleteBuffer(BufferId buffer_id, bool do_not_mark = false);
 
     [[nodiscard]] Binding StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index, bool is_written,
@@ -751,6 +777,27 @@ private:
     std::deque<Common::RangeSet<DAddr>> pending_download_ranges;
     PendingCpuWrites pending_cpu_writes;
     std::optional<Async_Buffer> current_buffer;
+
+    /// A DownloadMemoryForRead: its copies, and what is left of them to do once the host GPU has
+    /// run them.
+    struct ReadDownload {
+        u64 tick{}; ///< The submission with the copies
+        Async_Buffer staging{};
+        /// src_offset: the device address copied; dst_offset: where it is in `staging`.
+        boost::container::small_vector<BufferCopy, 4> copies;
+        /// Still to write to guest memory: a newer value there (ClearDownload) takes its bytes
+        /// out. A newer GPU write doesn't: until a download of its own lands, guest memory is to
+        /// hold what a synchronous flush would have left.
+        Common::RangeSet<DAddr> write_ranges;
+        /// No longer GPU-modified once written: a newer GPU write (MarkWrittenBuffer) or value in
+        /// guest memory takes its bytes out.
+        Common::RangeSet<DAddr> clean_ranges;
+    };
+    /// Oldest first, and written to guest memory in that order: none lands over newer bytes.
+    std::deque<ReadDownload> read_downloads;
+    /// All the read downloads' clean_ranges (they don't overlap): GPU-modified bytes already on
+    /// their way, which later reads wait for rather than download again.
+    Common::RangeSet<DAddr> read_download_ranges;
 
     std::deque<Async_Buffer> async_buffers_death_ring;
 
