@@ -117,6 +117,16 @@ public:
         return fragment_has_color0_output;
     }
 
+    /// Color components of a render target the fragment shader writes, as VkColorComponentFlags
+    VkColorComponentFlags ColorOutputMask(size_t render_target) const noexcept {
+        return (color_output_mask >> (render_target * 4)) & 0xF;
+    }
+
+    /// Color components the fragment shader writes, 4 bits per render target
+    u32 ColorOutputMask() const noexcept {
+        return color_output_mask;
+    }
+
     bool UsesExtendedDynamicState() const noexcept {
         return key.state.extended_dynamic_state != 0;
     }
@@ -217,6 +227,7 @@ private:
     std::vector<SampledImage> sampled_images;
     u32 num_textures{};
     bool fragment_has_color0_output{};
+    u32 color_output_mask{};
     bool writes_storage{};
 
     vk::DescriptorSetLayout descriptor_set_layout;
