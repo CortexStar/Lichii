@@ -752,7 +752,7 @@ jobs:
           Windows packages are in-place zip files: extract and run \`lichii.exe\`, or \`eden-cli.exe\` from a terminal.
 
           $({
-            row "amd64 / x86_64 (MSVC)" "$(link "MSVC zip" lichii-windows-x86_64.zip)" "" "Use if you run into graphical issues on other builds"
+            row "amd64 / x86_64 (clang-cl)" "$(link zip lichii-windows-x86_64.zip)" "" "Built with clang-cl and ThinLTO"
             row "amd64 / x86_64 (MinGW)" "" "$(link "PGO zip" lichii-windows-x86_64-pgo.zip)" "Built with MinGW clang; bundles its own DLLs, no Visual C++ redistributable needed"
           } | table)
 
