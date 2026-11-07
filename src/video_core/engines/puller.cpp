@@ -152,7 +152,190 @@ void ReleaseFences(DmaPusher& dma_pusher) {
         VideoCommon::DrainSite::FenceRelease);
 }
 
+// EDEN_NX2_FRONT_DEFER: an acquire whose check would wait for the back parks the channel at
+// the acquire instead (Puller::StepDeferred). It mirrors the polled check, so it needs it.
+bool DeferAcquires() {
+    auto& split = VideoCommon::GpuSplit::Get();
+    return split.Active() && split.FrontDefer() && split.AcquirePoll() &&
+           !VideoCommon::GpuSplit::NarrowVerify();
+}
+
 } // Anonymous namespace
+
+Puller::DeferResult Puller::StepDeferred(DmaPusher& dma_pusher) {
+    auto& split = VideoCommon::GpuSplit::Get();
+    auto& memory = dma_pusher.memory_manager;
+    auto& waiters = Nx2SemaphoreWaiters::Get();
+    PendingAcquire& acquire = *pending_acquire;
+    // Met by a release sent or landed since (another channel's, sent while this one was
+    // parked), as a suspended acquire is.
+    if (PredictedMet(
+            dma_pusher, acquire.address, [&acquire](u32 value) { return acquire.Matches(value); },
+            [&acquire](u32 lower) {
+                return acquire.operation ==
+                           static_cast<u32>(GpuSemaphoreOperation::AcquireGequal) &&
+                       lower >= acquire.value;
+            })) {
+        return DeferResult::Met;
+    }
+    if (acquire.watched && waiters.Latched(this)) {
+        return DeferResult::Met;
+    }
+    // The split stopped (or started again) meanwhile: its positions mean nothing any more, and a
+    // drain stands in for each of them.
+    const bool split_gone = !split.Active() || split.Session() != acquire.session;
+    const auto read = [&](bool needs_drain) {
+        if (needs_drain) {
+            DrainBack();
+            return ReadSemaphoreWord(dma_pusher, acquire.address);
+        }
+        return memory.Read<u32>(acquire.address);
+    };
+    const auto watch = [&] {
+        // From here other channels' work may run before the check ends: a GPU release among it
+        // that meets the value counts even if a later one overwrites it.
+        if (!acquire.watched) {
+            if (const auto device = memory.GpuToCpuAddress(acquire.address)) {
+                waiters.Add(this, *device, acquire.value, acquire.operation);
+            }
+            acquire.watched = true;
+        }
+    };
+    for (;;) {
+        u64 target{};
+        VideoCommon::DeferKind kind{};
+        switch (acquire.stage) {
+        case DeferStage::Poll:
+            target = acquire.poll_target;
+            kind = VideoCommon::DeferKind::AcquirePoll;
+            break;
+        case DeferStage::Narrow:
+            target = acquire.narrow_target;
+            kind = VideoCommon::DeferKind::AcquireNarrow;
+            break;
+        case DeferStage::Full:
+            target = acquire.sent;
+            kind = VideoCommon::DeferKind::AcquireFull;
+            break;
+        case DeferStage::Fences:
+            target = acquire.fence_target;
+            kind = VideoCommon::DeferKind::AcquireFences;
+            break;
+        default:
+            return DeferResult::Suspended;
+        }
+        if (!split_gone && !split.Reached(target)) {
+            watch();
+            split.NoteDeferredWait(target);
+            if (acquire.parked != acquire.stage) {
+                acquire.parked = acquire.stage;
+                split.NoteDeferDiag(kind);
+            }
+            return DeferResult::Waiting;
+        }
+        // Where only a drain tells (GPU-written pages: the buffer cache may hold a newer word),
+        // the stages read as the blocking check does, after a drain.
+        const bool needs_drain =
+            split_gone || memory.Nx2ReadNeedsDrain(acquire.address, sizeof(u32));
+        switch (acquire.stage) {
+        case DeferStage::Poll:
+            // PollSemaphoreRead: met once the recorded writes over the word ran.
+            if (!needs_drain && acquire.Matches(memory.Read<u32>(acquire.address))) {
+                NoteAcquireSync(acquire.address);
+                return DeferResult::Met;
+            }
+            acquire.stage = DeferStage::Narrow;
+            break;
+        case DeferStage::Narrow:
+            // NarrowSemaphoreRead: the release may be a QMD's, behind the dispatches.
+            if (!needs_drain && acquire.Matches(memory.Read<u32>(acquire.address))) {
+                split.NoteSyncDone(VideoCommon::UnboundedCause::AcquireSync);
+                return DeferResult::Met;
+            }
+            acquire.stage = DeferStage::Full;
+            break;
+        case DeferStage::Full: {
+            // The drained read: everything sent before the acquire ran.
+            if (acquire.Matches(read(needs_drain))) {
+                return DeferResult::Met;
+            }
+            // Registered before the fences run, as the blocking check.
+            watch();
+            // ReleaseFences runs on the back in order: its position, not a drain.
+            OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); });
+            acquire.fence_target = split.Active() ? split.WritePosition() : 0;
+            acquire.stage = DeferStage::Fences;
+            break;
+        }
+        case DeferStage::Fences: {
+            const u32 current = read(needs_drain);
+            if (waiters.Latched(this) || acquire.Matches(current)) {
+                return DeferResult::Met;
+            }
+            acquire.checked = acquire.fence_target;
+            return DeferResult::Suspended;
+        }
+        default:
+            return DeferResult::Suspended;
+        }
+    }
+}
+
+void Puller::BeginSuspension(DmaPusher& dma_pusher) {
+    pending_acquire->stage = DeferStage::Suspended;
+    dma_pusher.suspensions.fetch_add(1, std::memory_order_release);
+    VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireWaits, 1);
+}
+
+bool Puller::CanResumeSuspended(DmaPusher& dma_pusher) {
+    auto& split = VideoCommon::GpuSplit::Get();
+    auto& memory = dma_pusher.memory_manager;
+    auto& waiters = Nx2SemaphoreWaiters::Get();
+    PendingAcquire& acquire = *pending_acquire;
+    if (acquire.session != split.Session()) {
+        // Suspended before the split (re)started: check against all of its work.
+        acquire.session = split.Session();
+        acquire.checked = 0;
+    }
+    // As the polled read: the recorded writes over the word ran. CPU releases show here.
+    const u64 recorded = split.WritesToTarget(&memory, acquire.address, sizeof(u32),
+                                              VideoCommon::NarrowBase::Recorded);
+    if (split.Reached(recorded)) {
+        if (acquire.Matches(memory.Read<u32>(acquire.address)) || waiters.Latched(this)) {
+            NoteAcquireSync(acquire.address);
+            return true;
+        }
+    } else {
+        split.NoteDeferredWait(recorded);
+    }
+    // A release the front doesn't record (a QMD's) may be queued in the work sent since the
+    // last full check. The blocking poll drained for it each time; this reads once the back got
+    // there and has the GPU thread wait for that only when it has nothing else to run.
+    const u64 sent = split.WritePosition();
+    if (sent > acquire.checked) {
+        const u64 narrow = split.WritesToTarget(&memory, acquire.address, sizeof(u32),
+                                                VideoCommon::NarrowBase::Acquire);
+        const bool narrow_reached = split.Reached(narrow);
+        if (narrow_reached && narrow > acquire.checked &&
+            acquire.Matches(memory.Read<u32>(acquire.address))) {
+            split.NoteSyncDone(VideoCommon::UnboundedCause::AcquireSync);
+            return true;
+        }
+        if (split.Reached(sent)) {
+            acquire.checked = sent;
+            if (acquire.Matches(memory.Read<u32>(acquire.address))) {
+                return true;
+            }
+        } else {
+            split.NoteDeferredWait(narrow_reached ? sent : narrow);
+            if (acquire.fence_target != sent) {
+                acquire.fence_target = sent;
+                split.NoteDeferDiag(VideoCommon::DeferKind::Suspended);
+            }
+        }
+    }
+    return waiters.Latched(this);
+}
 
 bool Puller::PendingAcquire::Matches(u32 current) const {
     switch (static_cast<GpuSemaphoreOperation>(operation)) {
@@ -171,6 +354,23 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     if (!pending_acquire) {
         return true;
     }
+    if (pending_acquire->met) {
+        return true;
+    }
+    if (pending_acquire->stage != DeferStage::Suspended) {
+        // EDEN_NX2_FRONT_DEFER: a parked check goes on where it stopped.
+        switch (StepDeferred(dma_pusher)) {
+        case DeferResult::Met:
+            pending_acquire->met = true;
+            return true;
+        case DeferResult::Suspended:
+            BeginSuspension(dma_pusher);
+            return false;
+        case DeferResult::Waiting:
+            return false;
+        }
+        return false;
+    }
     if (PredictedMet(
             dma_pusher, pending_acquire->address,
             [this](u32 value) { return pending_acquire->Matches(value); },
@@ -185,6 +385,15 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     const bool overdue =
         !pending_acquire->reported &&
         std::chrono::steady_clock::now() - pending_acquire->since >= std::chrono::seconds{2};
+    if (!overdue && DeferAcquires() &&
+        !dma_pusher.memory_manager.Nx2ReadNeedsDrain(pending_acquire->address, sizeof(u32))) {
+        // EDEN_NX2_FRONT_DEFER: no drain per poll (below); the overdue report still drains.
+        if (CanResumeSuspended(dma_pusher)) {
+            pending_acquire->met = true;
+            return true;
+        }
+        return false;
+    }
     const std::optional<u32> polled =
         overdue ? std::optional<u32>{} : PollSemaphoreRead(dma_pusher, pending_acquire->address);
     if (polled &&
@@ -254,8 +463,15 @@ bool Puller::ResumeAcquire(DmaPusher& dma_pusher) {
     // counting those made the count odd ("suspended") at random, so submit-time snapshots were
     // thrown away for about half of all entries (CommandList::snapshot_suspensions).
     if (pending_acquire) {
+        // A check that only parked (EDEN_NX2_FRONT_DEFER) never counted as a suspension.
+        const bool suspended = pending_acquire->stage == DeferStage::Suspended;
+        if (!suspended) {
+            VideoCommon::GpuSplit::Get().NoteDeferResume(pending_acquire->sent);
+        }
         pending_acquire.reset();
-        dma_pusher.suspensions.fetch_add(1, std::memory_order_release);
+        if (suspended) {
+            dma_pusher.suspensions.fetch_add(1, std::memory_order_release);
+        }
         Nx2SemaphoreWaiters::Get().Remove(this);
     }
     return true;
@@ -392,6 +608,33 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
                                static_cast<u32>(GpuSemaphoreOperation::AcquireGequal) &&
                            lower >= acquire.value;
                 })) {
+            return;
+        }
+        if (DeferAcquires()) {
+            // EDEN_NX2_FRONT_DEFER: the checks below, each once the back reached its position
+            // (taken now, as the blocking check takes them); until then the channel parks here
+            // and the front runs the other channels' work.
+            auto& split = VideoCommon::GpuSplit::Get();
+            acquire.session = split.Session();
+            acquire.poll_target =
+                split.WritesToTarget(&dma_pusher.memory_manager, acquire.address, sizeof(u32),
+                                     VideoCommon::NarrowBase::Recorded);
+            acquire.narrow_target =
+                split.WritesToTarget(&dma_pusher.memory_manager, acquire.address, sizeof(u32),
+                                     VideoCommon::NarrowBase::Acquire);
+            acquire.sent = split.WritePosition();
+            acquire.stage = DeferStage::Poll;
+            pending_acquire = acquire;
+            const DeferResult result = StepDeferred(dma_pusher);
+            split.NoteAcquireDiag(false, result != DeferResult::Met);
+            if (result == DeferResult::Met) {
+                if (pending_acquire->watched) {
+                    Nx2SemaphoreWaiters::Get().Remove(this);
+                }
+                pending_acquire.reset();
+            } else if (result == DeferResult::Suspended) {
+                BeginSuspension(dma_pusher);
+            }
             return;
         }
         if (const std::optional<u32> polled = PollSemaphoreRead(dma_pusher, acquire.address);

@@ -64,8 +64,9 @@ public:
     /// once); otherwise it goes with the next one. The back submits deferred work before it
     /// sleeps and when another thread asks (WaitSubmitted). True when the flush was deferred.
     bool DeferFlush();
-    /// Submits deferred work (the split's back, from its idle hook).
-    void FlushDeferred();
+    /// Submits deferred work (the split's back, from its idle hook). `location` is counted as
+    /// the submission's site by EDEN_NX2_GPU_PROFILE.
+    void FlushDeferred(std::source_location location = std::source_location::current());
     /// The split's back: the work so far is submitted with the next submission, when the back
     /// goes idle or when another thread waits for it (WaitSubmitted), with no time window. False
     /// on other threads (the caller submits).

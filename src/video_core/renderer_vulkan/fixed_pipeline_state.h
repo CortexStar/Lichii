@@ -264,6 +264,10 @@ struct FixedPipelineState {
 
     void Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFeatures& features);
 
+    /// The part of Refresh a raised Dirty::Blending redoes without dynamic blend state: the
+    /// attachments, from the blend and color mask registers. Clears the flag.
+    void RefreshBlending(Tegra::Engines::Maxwell3D& maxwell3d);
+
     size_t Hash() const noexcept;
 
     bool operator==(const FixedPipelineState& rhs) const noexcept;
@@ -308,14 +312,35 @@ static_assert(std::is_trivially_constructible_v<FixedPipelineState>);
 /// those whose two slots are taken are compared by value.
 class PipelineStateWatch {
 public:
+    /// The parts of the key a Refresh would change that StateUnchanged left to ApplyPatch
+    /// (EDEN_NX2_PIPE_PATCH).
+    struct Patch {
+        bool blending{};          ///< Dirty::Blending raised (no dynamic blend state)
+        bool vertex_input{};      ///< dynamic vertex input: the attribute types differ
+        u64 attribute_types{};    ///< what Refresh would compute for them
+
+        [[nodiscard]] bool Any() const noexcept {
+            return blending || vertex_input;
+        }
+    };
+
     /// Whether Refresh would leave `state` as it is: no flag raised, the same draw topology,
     /// engine hint and dual-source blending, the value-compared registers unchanged, and the
     /// parts Refresh redoes under a raised VertexInput (dynamic) or ViewportSwizzles flag equal
     /// to what it would compute. Clears ViewportSwizzles then, as Refresh would. A raised flag
     /// passes when every watched register holds its value at the last Store again
     /// (EDEN_NX2_PIPE_SKIP_VALUES); the flag is cleared then.
+    /// With `patch`: a raised Blending flag and changed dynamic attribute types don't fail it but
+    /// are noted there, for ApplyPatch to redo alone; everything else is checked as without.
     [[nodiscard]] bool StateUnchanged(Tegra::Engines::Maxwell3D& maxwell3d,
-                                      const FixedPipelineState& state) noexcept;
+                                      const FixedPipelineState& state,
+                                      Patch* patch = nullptr) noexcept;
+
+    /// After StateUnchanged passed with `patch`: redoes the noted parts of `state` as Refresh
+    /// would. The other Refresh inputs are unchanged, so the rest of the key and the last
+    /// Store's snapshot both stand.
+    static void ApplyPatch(Tegra::Engines::Maxwell3D& maxwell3d, FixedPipelineState& state,
+                           const Patch& patch);
 
     /// Called right after Refresh: remembers its inputs and clears Dirty::PipelineState.
     void Store(Tegra::Engines::Maxwell3D& maxwell3d, const DynamicFeatures& features);

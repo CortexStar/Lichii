@@ -16,6 +16,7 @@
 
 #include "common/common_types.h"
 #include "common/logging.h"
+#include "video_core/buffer_cache/word_manager.h"
 #include "video_core/nx2_profile.h"
 
 namespace VideoCommon::Nx2BufCache {
@@ -99,6 +100,25 @@ inline const bool g_shadow_refresh = EnvOn("EDEN_NX2_SHADOW_REFRESH");
 /// EDEN_NX2_STORAGE_MEMO=0: when a stage's storage bindings miss the resolve cache, every
 /// binding is looked up again, instead of reusing the ones unchanged since their last lookup.
 inline const bool g_storage_memo = EnvOn("EDEN_NX2_STORAGE_MEMO");
+
+/// EDEN_NX2_SYNC_PRECHECK=0: a sync whose SYNC_SKIP entry is gone always walks the tracker,
+/// instead of first checking (read only) that no page of its range is CPU-dirty or unprotected,
+/// in which case the walk would find and change nothing.
+inline const bool g_sync_precheck = EnvOn("EDEN_NX2_SYNC_PRECHECK");
+
+/// EDEN_NX2_DIRTY_WRITE_SKIP=0: a write over pages that are all CPU-dirty already (constant
+/// buffer and inline writes, before nearly every draw) marks them again and bumps the SYNC_SKIP
+/// generations of its regions and buffers, instead of only noting vertex buffer staleness. No
+/// SYNC_SKIP entry can cover a CPU-dirty page that is not hot (a walk or precheck that stores one
+/// leaves its range clean, and a page turning dirty bumps the generations), and hot pages are
+/// compared on every hit, so the bump only drops entries that were still right.
+inline const bool g_dirty_write_skip = EnvOn("EDEN_NX2_DIRTY_WRITE_SKIP");
+
+/// EDEN_NX2_WRITE_GPU_BITMAP=0: BufferCache::IsRegionGpuModified (every write and inline upload)
+/// always asks gpu_modified_ranges (a tree lookup), instead of first asking the GPU-written page
+/// bitmap, which marks every page such a range ever covered (Switch 2 sessions: both add sites
+/// mark it), for ranges up to 64 KiB.
+inline const bool g_write_gpu_bitmap = EnvOn("EDEN_NX2_WRITE_GPU_BITMAP");
 
 /// Whether [a, a + size) and [b, b + size) hold the same bytes. Inline (memcmp is an out-of-line
 /// ucrt call that clang does not expand for 4 KiB), 128 bytes per step with an early exit.
@@ -251,7 +271,66 @@ enum class Stat : u32 {
     SyncWalk,
     StorageMemoHit,
     UboRebindKept,
+    UboSlotHit,     ///< stream: the slot's copy bound again (same bytes, same command buffer)
+    UboRangeHit,    ///< stream: another bind's copy of the range bound again (UBO_RANGE_REUSE)
+    UboRecopied,    ///< stream: same bytes as an older command buffer's copy, copied from it
+    UboCopied,      ///< stream: guest bytes copied
+    UboCopiedBytes, ///< bytes of UboRecopied and UboCopied
+    UboLarge,       ///< stream binds over 4 KiB (misaligned buffers): copied every time
+    UboLargeBytes,
+    SyncPrecheckClean, ///< syncs a SYNC_SKIP miss sent to the walk, found clean by the precheck
+    WriteMemoryCalls,  ///< BufferCache::WriteMemory calls
+    DirtyWriteSkip,    ///< of those, over pages all CPU-dirty already (EDEN_NX2_DIRTY_WRITE_SKIP)
     Count,
+};
+
+/// Time inside "bind stage buffers" and "update buffers" by part (EDEN_NX2_GPU_PROFILE), logged
+/// with the buffer cache counters. Inclusive: Sync is also inside the others.
+enum class Sub : u32 {
+    UboStream,    ///< BindHostGraphicsUniformBuffer, stream path
+    UboClassic,   ///< BindHostGraphicsUniformBuffer, cached path (sync, native bank upload)
+    Storage,      ///< BindHostGraphicsStorageBuffers
+    TexBuffers,   ///< BindHostGraphicsTextureBuffers
+    Resolve,      ///< UpdateGraphicsBuffers (index, vertex, uniform, storage lookups)
+    IndexBind,    ///< BindHostIndexBuffer
+    VertexBind,   ///< BindHostVertexBuffers
+    Sync,         ///< SynchronizeBuffer, every caller
+    Count,
+};
+
+inline std::array<std::atomic<u64>, static_cast<size_t>(Sub::Count)> g_sub_ticks{};
+inline std::array<std::atomic<u64>, static_cast<size_t>(Sub::Count)> g_sub_calls{};
+inline u64 g_sub_start_ticks{};
+
+/// EDEN_NX2_BUFCACHE_SPLIT=1 (with EDEN_NX2_GPU_PROFILE): time the parts above. Off by default:
+/// two time stamps per uniform buffer and per sync (~1.2 million a second) would inflate the
+/// "bind stage buffers" and "update buffers" zones of the usual profile.
+inline const bool g_sub_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr &&
+                                  std::getenv("EDEN_NX2_BUFCACHE_SPLIT") != nullptr;
+
+/// Adds the ticks from construction to destruction to `sub` (changeable meanwhile).
+class SubTimer {
+public:
+    explicit SubTimer(Sub sub_) : sub{sub_}, start{g_sub_enabled ? Nx2Profile::Ticks() : 0} {}
+    ~SubTimer() {
+        if (start == 0) {
+            return;
+        }
+        // The GPU back thread is the only writer: no locked add.
+        const auto index = static_cast<size_t>(sub);
+        auto& ticks = g_sub_ticks[index];
+        ticks.store(ticks.load(std::memory_order_relaxed) + (Nx2Profile::Ticks() - start),
+                    std::memory_order_relaxed);
+        auto& calls = g_sub_calls[index];
+        calls.store(calls.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    }
+    SubTimer(const SubTimer&) = delete;
+    SubTimer& operator=(const SubTimer&) = delete;
+
+    Sub sub;
+
+private:
+    u64 start;
 };
 
 inline std::array<std::atomic<u64>, static_cast<size_t>(Stat::Count)> g_stats{};
@@ -270,6 +349,7 @@ inline void Report() {
     const u64 now = Nx2Profile::Now();
     if (g_stats_start == 0) {
         g_stats_start = now;
+        g_sub_start_ticks = Nx2Profile::Ticks();
         return;
     }
     const u64 window = now - g_stats_start;
@@ -301,6 +381,50 @@ inline void Report() {
              rate(Stat::HotUpload), rate(Stat::SyncSkipHit), rate(Stat::SyncSkipHotHit),
              rate(Stat::SyncWalk), rate(Stat::StorageMemoHit),
              rate(Stat::UboRebindKept));
+    const u64 now_ticks = Nx2Profile::Ticks();
+    const double ns_per_tick =
+        now_ticks > g_sub_start_ticks
+            ? static_cast<double>(window) / static_cast<double>(now_ticks - g_sub_start_ticks)
+            : 0.0;
+    std::array<u64, static_cast<size_t>(Sub::Count)> sub_ticks{};
+    std::array<u64, static_cast<size_t>(Sub::Count)> sub_calls{};
+    for (size_t i = 0; i < sub_ticks.size(); ++i) {
+        sub_ticks[i] = g_sub_ticks[i].exchange(0, std::memory_order_relaxed);
+        sub_calls[i] = g_sub_calls[i].exchange(0, std::memory_order_relaxed);
+    }
+    const auto ms = [&](Sub sub) {
+        return static_cast<double>(sub_ticks[static_cast<size_t>(sub)]) * ns_per_tick * 1e3 /
+               static_cast<double>(window);
+    };
+    const auto calls = [&](Sub sub) {
+        return static_cast<double>(sub_calls[static_cast<size_t>(sub)]) * 1e9 /
+               static_cast<double>(window);
+    };
+    const auto protects = Nx2TrackerStats::Take();
+    LOG_INFO(HW_GPU,
+             "Buffer cache split per second{}: bind stage: UBO stream {:.1f} ms ({:.0f}), UBO "
+             "classic {:.1f} ms ({:.0f}), storage {:.1f} ms ({:.0f}), texture buffers {:.1f} ms "
+             "({:.0f}) | update buffers: resolve {:.1f} ms ({:.0f}), index {:.1f} ms ({:.0f}), "
+             "vertex {:.1f} ms ({:.0f}) | sync (all callers) {:.1f} ms ({:.0f}), precheck clean "
+             "{:.0f} | UBO stream: slot hits {:.0f}, range hits {:.0f}, recopied {:.0f}, copied "
+             "{:.0f} ({:.0f} KiB), over 4 KiB {:.0f} ({:.0f} KiB) | tracker protects {:.0f} "
+             "({:.0f} pages), unprotects {:.0f} ({:.0f} pages) | WriteMemory {:.0f}, on dirty "
+             "pages only {:.0f}",
+             g_sub_enabled ? "" : " (times need EDEN_NX2_BUFCACHE_SPLIT=1)",
+             ms(Sub::UboStream), calls(Sub::UboStream), ms(Sub::UboClassic),
+             calls(Sub::UboClassic), ms(Sub::Storage), calls(Sub::Storage), ms(Sub::TexBuffers),
+             calls(Sub::TexBuffers), ms(Sub::Resolve), calls(Sub::Resolve), ms(Sub::IndexBind),
+             calls(Sub::IndexBind), ms(Sub::VertexBind), calls(Sub::VertexBind), ms(Sub::Sync),
+             calls(Sub::Sync), rate(Stat::SyncPrecheckClean), rate(Stat::UboSlotHit),
+             rate(Stat::UboRangeHit), rate(Stat::UboRecopied), rate(Stat::UboCopied),
+             rate(Stat::UboCopiedBytes) / 1024.0, rate(Stat::UboLarge),
+             rate(Stat::UboLargeBytes) / 1024.0,
+             static_cast<double>(protects[0]) * 1e9 / static_cast<double>(window),
+             static_cast<double>(protects[1]) * 1e9 / static_cast<double>(window),
+             static_cast<double>(protects[2]) * 1e9 / static_cast<double>(window),
+             static_cast<double>(protects[3]) * 1e9 / static_cast<double>(window),
+             rate(Stat::WriteMemoryCalls), rate(Stat::DirtyWriteSkip));
+    g_sub_start_ticks = now_ticks;
     g_stats_start = now;
 }
 

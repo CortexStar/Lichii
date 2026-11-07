@@ -415,12 +415,35 @@ inline void FindImageBindings(TextureCache& texture_cache,
                               BindingMisses& misses, bool& aliased_hit) {
     u32 sampler_index = 0;
     aliased_hit = false;
+    // EDEN_NX2_BINDMEMO_BATCH: every binding's tag line, then its memo and guest entry lines are
+    // asked for before the first is checked, so the misses of a draw's bindings overlap.
+    const bool batch = VideoCommon::Nx2BindMemo::BatchEnabled();
+    boost::container::small_vector<TextureCache::BindingProbe, 32> probes;
+    boost::container::small_vector<u32, 32> tsc_indices;
+    if (batch) {
+        probes.resize(views.size());
+        tsc_indices.resize(views.size());
+        for (size_t index = 0; index < views.size(); ++index) {
+            const u32 kind = kinds[index];
+            const bool is_texture = (kind & BindingKind::ClassMask) == BindingKind::Texture;
+            const u32 tsc_index = is_texture ? sampler_handles[sampler_index++] : ~0U;
+            tsc_indices[index] = tsc_index;
+            probes[index] = texture_cache.ProbeBinding(views[index].index, tsc_index, kind);
+        }
+        for (size_t index = 0; index < views.size(); ++index) {
+            texture_cache.PrefetchBinding(lookup, probes[index], views[index].index,
+                                          tsc_indices[index]);
+        }
+        sampler_index = 0;
+    }
     for (size_t index = 0; index < views.size(); ++index) {
         const u32 kind = kinds[index];
         const bool is_texture = (kind & BindingKind::ClassMask) == BindingKind::Texture;
         const u32 tsc_index = is_texture ? sampler_handles[sampler_index] : ~0U;
         TextureCache::BindingMemo* const memo =
-            texture_cache.FindBinding(lookup, views[index].index, tsc_index, kind);
+            batch ? texture_cache.FindBinding(lookup, views[index].index, tsc_index, kind,
+                                              probes[index])
+                  : texture_cache.FindBinding(lookup, views[index].index, tsc_index, kind);
         memos[index] = memo;
         if (memo) {
             views[index].id = memo->view;

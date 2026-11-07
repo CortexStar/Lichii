@@ -485,6 +485,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     {
         Profile::Scope scope{Profile::Zone::FlushWork};
         FlushWork();
+        // On the back the "flush/inval" zone is this: the caches' invalidation of the constant
+        // buffer and inline writes accumulated since the last draw (the bulk of "flush work").
+        Profile::Scope caching_scope{Profile::Zone::FlushInvalidate};
         gpu_memory->FlushCaching();
     }
     if (frame_dump.Capturing()) {
@@ -1760,6 +1763,48 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
     return new_area;
 }
 
+namespace {
+/// The buffer cache's queue of a range's GPU-written bytes for the next fence's downloads
+/// (BufferCache::Nx2QueueReadDownload), where the cache has it.
+template <typename Cache>
+bool QueueBufferReadDownload(Cache& cache, DAddr addr, u64 size) {
+    if constexpr (requires { cache.Nx2QueueReadDownload(addr, size); }) {
+        return cache.Nx2QueueReadDownload(addr, size);
+    } else {
+        return false;
+    }
+}
+} // Anonymous namespace
+
+bool RasterizerVulkan::QueueFlushRegion(DAddr addr, u64 size) {
+    // A guest read of GPU-written buffer data that no fence download covered (~34 a second in
+    // Ocarina, each page read a few times a minute): the flush waited for the host GPU to finish
+    // all work submitted so far (Scheduler::Finish, ~0.4 ms) on this thread. Instead the
+    // range is downloaded at a fence made and submitted now, as prefetched data is, and the
+    // reader waits for it to land: the copy holds the same data (what the GPU wrote up to this
+    // point), and this thread goes on.
+    if (!VideoCommon::Nx2Reactive::AsyncFlush() || !VideoCommon::Nx2Reactive::Prefetch() ||
+        !VideoCommon::Nx2Reactive::WaitLanding() || addr == 0 || size == 0) {
+        return false;
+    }
+    {
+        // Image data is flushed as before.
+        std::scoped_lock lock{texture_cache.mutex};
+        if (texture_cache.IsRegionGpuModified(addr, size)) {
+            return false;
+        }
+    }
+    {
+        std::scoped_lock lock{buffer_cache.mutex};
+        if (!QueueBufferReadDownload(buffer_cache, addr, size)) {
+            return false;
+        }
+    }
+    fence_manager.SignalReference();
+    scheduler.Flush();
+    return true;
+}
+
 void RasterizerVulkan::PrepareRegionWrite(DAddr addr, u64 size, VideoCommon::CacheType which) {
     if (addr == 0 || size == 0 || False(which & VideoCommon::CacheType::BufferCache)) {
         return;
@@ -2178,6 +2223,19 @@ void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
 }
 
 void RasterizerVulkan::TickFrame() {
+    // EDEN_NX2_GPU_PROFILE: where the frame tick's time goes, logged every 10 s. It runs in the
+    // present's composite, inside the syncpoint increment that reaches the frame's fence (the
+    // puller's syncpoint thunk), on the back only.
+    const bool profile = VideoCommon::Nx2Profile::Enabled();
+    std::array<u64, 7> tick_ns{};
+    u64 tick_mark = profile ? VideoCommon::Nx2Profile::Now() : 0;
+    const auto lap = [&](size_t part) {
+        if (profile) [[unlikely]] {
+            const u64 now = VideoCommon::Nx2Profile::Now();
+            tick_ns[part] += now - tick_mark;
+            tick_mark = now;
+        }
+    };
     if (VideoCore::Nx2Debug::HasRequests()) {
         if (auto capture = VideoCore::Nx2Debug::TakeCapture()) {
             frame_dump.Arm(std::move(capture->directory), capture->sampled, capture->buffers,
@@ -2261,19 +2319,57 @@ void RasterizerVulkan::TickFrame() {
     ComputePipeline::TickUpscalerTrace();
     draw_counter = 0;
     pending_native_work = false;
+    lap(0);
     pipeline_cache.TickFrame();
+    lap(1);
     guest_descriptor_queue.TickFrame();
     compute_pass_descriptor_queue.TickFrame();
     descriptor_buffer_ring.TickFrame();
+    lap(2);
     fence_manager.TickFrame();
+    lap(3);
     staging_pool.TickFrame();
+    lap(4);
     {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.TickFrame();
     }
+    lap(5);
     {
         std::scoped_lock lock{buffer_cache.mutex};
         buffer_cache.TickFrame();
+    }
+    lap(6);
+    if (profile) [[unlikely]] {
+        static std::array<u64, 7> totals{};
+        static u64 ticks{};
+        static u64 window_start{};
+        for (size_t i = 0; i < totals.size(); ++i) {
+            totals[i] += tick_ns[i];
+        }
+        ++ticks;
+        if (window_start == 0) {
+            window_start = tick_mark;
+        } else if (tick_mark - window_start >= 10'000'000'000ULL) {
+            const double seconds = static_cast<double>(tick_mark - window_start) / 1e9;
+            const auto ms = [&](size_t i) {
+                return static_cast<double>(totals[i]) / 1e6 / seconds;
+            };
+            u64 sum{};
+            for (const u64 part : totals) {
+                sum += part;
+            }
+            LOG_INFO(Render_Vulkan,
+                     "Frame tick per second: {:.0f} ticks, {:.2f} ms: debug and traces {:.2f}, "
+                     "pipeline cache {:.2f}, descriptors {:.2f}, fences {:.2f}, staging {:.2f}, "
+                     "texture cache {:.2f}, buffer cache {:.2f}",
+                     static_cast<double>(ticks) / seconds,
+                     static_cast<double>(sum) / 1e6 / seconds, ms(0), ms(1), ms(2), ms(3), ms(4),
+                     ms(5), ms(6));
+            totals.fill(0);
+            ticks = 0;
+            window_start = tick_mark;
+        }
     }
 }
 

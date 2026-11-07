@@ -58,9 +58,61 @@ public:
 
     /// Returns true if a region has been modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr query_cpu_addr, u64 query_size) noexcept {
+        // Within one word of one manager (each streamed uniform buffer, inline writes): the same
+        // answer from one mask test, without the generic page and word iteration.
+        const u64 local = query_cpu_addr & HIGHER_PAGE_MASK;
+        if (query_size != 0 && local + query_size <= HIGHER_PAGE_SIZE &&
+            local / BYTES_PER_WORD == (local + query_size - 1) / BYTES_PER_WORD) {
+            const Manager* const manager = top_tier[query_cpu_addr >> HIGHER_PAGE_BITS];
+            return manager != nullptr &&
+                   manager->IsWordRangeGpuModified(local, local + query_size - 1);
+        }
         return IteratePages<false>(query_cpu_addr, query_size, [](Manager* manager, u64 offset, size_t size) {
             return manager->IsRegionModified(Type::GPU, offset, size);
         });
+    }
+
+    /// True when every page of the region is already CPU-dirty, so MarkRegionAsCpuModified would
+    /// change nothing (CPU-dirty pages are unprotected; CachedCpuWrite is unused). False when a
+    /// part has no manager yet. Read only.
+    [[nodiscard]] bool IsRegionFullyCpuModified(VAddr query_cpu_addr, u64 query_size) const noexcept {
+        if (query_size == 0) {
+            return false;
+        }
+        std::size_t page_index{query_cpu_addr >> HIGHER_PAGE_BITS};
+        u64 page_offset{query_cpu_addr & HIGHER_PAGE_MASK};
+        u64 remaining{query_size};
+        while (remaining > 0) {
+            const u64 amount = (std::min<u64>)(HIGHER_PAGE_SIZE - page_offset, remaining);
+            const Manager* const manager = top_tier[page_index];
+            if (manager == nullptr || !manager->IsRangeFullyCpuModified(page_offset, amount)) {
+                return false;
+            }
+            ++page_index;
+            page_offset = 0;
+            remaining -= amount;
+        }
+        return true;
+    }
+
+    /// True when an upload walk over the region (ForEachUploadRange) could find or change
+    /// anything: a page in it is CPU-dirty or unprotected, or part of it has no manager yet (the
+    /// walk would create one with every page dirty). Read only.
+    [[nodiscard]] bool IsRegionUploadDirty(VAddr query_cpu_addr, u64 query_size) const noexcept {
+        std::size_t page_index{query_cpu_addr >> HIGHER_PAGE_BITS};
+        u64 page_offset{query_cpu_addr & HIGHER_PAGE_MASK};
+        u64 remaining{query_size};
+        while (remaining > 0) {
+            const u64 amount = (std::min<u64>)(HIGHER_PAGE_SIZE - page_offset, remaining);
+            const Manager* const manager = top_tier[page_index];
+            if (manager == nullptr || manager->IsRangeUploadDirty(page_offset, amount)) {
+                return true;
+            }
+            ++page_index;
+            page_offset = 0;
+            remaining -= amount;
+        }
+        return false;
     }
 
     /// Returns true if a region has been marked as Preflushable

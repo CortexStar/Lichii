@@ -66,6 +66,21 @@ inline bool WaitLanding() {
     return enabled;
 }
 
+/// EDEN_NX2_REACTIVE_ASYNC_FLUSH (on unless 0): a guest read of GPU-written buffer data with no
+/// download on its way has the GPU thread queue that data for download at a fence it submits at
+/// once (RasterizerInterface::QueueFlushRegion), then waits for the copy to land as WaitLanding
+/// does, instead of the GPU thread copying it and waiting for the host GPU to go idle
+/// (Scheduler::Finish). The copy holds what the GPU wrote up to the GPU thread's position when it
+/// took the request, as the flush's did, and the read goes on only once guest memory has it (no
+/// stale data, unlike preflushing). Needs Prefetch and WaitLanding; image data still flushes.
+inline bool AsyncFlush() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_REACTIVE_ASYNC_FLUSH");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
 /// EDEN_NX2_REACTIVE_HOT_FRAMES (default 64, 0 never forgets): pages the guest CPU read GPU data
 /// from keep their later GPU writes copied back (Prefetch) while they are read at least once every
 /// 64 to 128 frames. A forgotten page's next read flushes as a first read does.
@@ -148,6 +163,8 @@ struct State {
     u64 landing_waits{};
     u64 landing_timeouts{};
     u64 landing_ns{};
+    u64 async_queued{};
+    u64 async_fallbacks{};
 };
 
 inline State& Get() {
@@ -178,13 +195,14 @@ inline void MaybeReportLocked(State& state) {
     LOG_INFO(HW_GPU,
              "Reactive diag {:.2f} s: {} lookups ({} buffer, {} image, {} clean), {} stalls "
              "({:.2f} ms waited), {} regions; prefetch {} writes {} KiB; preflush marks {}; "
-             "landing waits {} ({} timed out, {:.2f} ms)",
+             "landing waits {} ({} timed out, {:.2f} ms); async flushes {} ({} flushed after)",
              seconds, state.lookups, state.buffer_lookups, state.image_lookups,
              state.lookups - state.buffer_lookups - state.image_lookups, state.stalls,
              static_cast<double>(state.stall_ns) / 1e6, state.regions.size(),
              state.prefetch_writes, state.prefetch_bytes / 1024, state.preflush_marks,
              state.landing_waits, state.landing_timeouts,
-             static_cast<double>(state.landing_ns) / 1e6);
+             static_cast<double>(state.landing_ns) / 1e6, state.async_queued,
+             state.async_fallbacks);
     std::vector<std::pair<u64, Region>> sorted(state.regions.begin(), state.regions.end());
     std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
         if (a.second.stalls != b.second.stalls) {
@@ -210,6 +228,8 @@ inline void MaybeReportLocked(State& state) {
     state.landing_waits = 0;
     state.landing_timeouts = 0;
     state.landing_ns = 0;
+    state.async_queued = 0;
+    state.async_fallbacks = 0;
 }
 
 /// The caches answered a read of [start, end) with an area of `kind` (whether it stalls is
@@ -261,6 +281,17 @@ inline void NoteLandingWait(bool landed, u64 ns) {
     state.landing_timeouts += landed ? 0 : 1;
     state.landing_ns += ns;
     MaybeReportLocked(state);
+}
+
+/// A read's data was queued for download (AsyncFlush); `landed` false when it flushed after all.
+inline void NoteAsyncFlush(bool queued, bool landed) {
+    if (!queued) {
+        return;
+    }
+    auto& state = Get();
+    std::scoped_lock lock{state.mutex};
+    ++state.async_queued;
+    state.async_fallbacks += landed ? 0 : 1;
 }
 
 /// A read marked a page range Preflushable (EDEN_NX2_REACTIVE_PREFLUSH).

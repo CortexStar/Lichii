@@ -72,6 +72,16 @@ public:
         BitField<8, 24, u32> syncpoint_id;
     };
 
+    /// EDEN_NX2_FRONT_DEFER: the check of an acquire parked on the split's back, in the order of
+    /// the blocking check (ProcessSemaphoreTriggerMethod); Suspended once it is a real wait.
+    enum class DeferStage : u8 {
+        Suspended, ///< Not met after the full check: polled (CanResumeAcquire)
+        Poll,      ///< The recorded writes over the word (PollSemaphoreRead)
+        Narrow,    ///< The dispatches and unbounded writes before it (NarrowSemaphoreRead)
+        Full,      ///< All the work before it (the drained read)
+        Fences,    ///< The fence release sent after it (ReleaseFences)
+    };
+
     /// Switch 2: a semaphore acquire this channel is suspended on.
     struct PendingAcquire {
         GPUVAddr address;
@@ -79,12 +89,29 @@ public:
         u32 operation;
         std::chrono::steady_clock::time_point since;
         bool reported;
+        // EDEN_NX2_FRONT_DEFER: the stage and the back positions it waits for, taken when the
+        // acquire was reached (the blocking check's targets); `checked`: a suspended acquire was
+        // last read with the work before it run.
+        DeferStage stage = DeferStage::Suspended;
+        DeferStage parked = DeferStage::Suspended; ///< The stage last counted as a park (diag)
+        bool watched = false; ///< Registered with Nx2SemaphoreWaiters
+        bool met = false;     ///< The check ended met (CanResumeAcquire runs twice per resume)
+        u64 session = 0;
+        u64 poll_target = 0;
+        u64 narrow_target = 0;
+        u64 sent = 0;
+        u64 fence_target = 0;
+        u64 checked = 0;
 
         [[nodiscard]] bool Matches(u32 current) const;
     };
 
     [[nodiscard]] bool HasPendingAcquire() const {
         return pending_acquire.has_value();
+    }
+    /// EDEN_NX2_FRONT_DEFER: the pending acquire's check still waits for the back (no suspension).
+    [[nodiscard]] bool IsDeferred() const {
+        return pending_acquire.has_value() && pending_acquire->stage != DeferStage::Suspended;
     }
     [[nodiscard]] bool CanResumeAcquire(DmaPusher& dma_pusher);
     /// Clears the pending acquire once it is met; false while the channel has to keep waiting.
@@ -147,6 +174,18 @@ private:
     void ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher);
     void ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument);
     [[nodiscard]] bool ExecuteMethodOnEngine(DmaPusher& dma_pusher, u32 method);
+
+    enum class DeferResult : u8 {
+        Met,       ///< The acquire is met: the channel goes on
+        Waiting,   ///< Parked: the back hasn't reached the stage's position yet
+        Suspended, ///< Not met after the whole check: a real suspension
+    };
+    /// EDEN_NX2_FRONT_DEFER: runs the pending acquire's stages as far as the back has got.
+    DeferResult StepDeferred(DmaPusher& dma_pusher);
+    /// The pending acquire becomes a real suspension.
+    void BeginSuspension(DmaPusher& dma_pusher);
+    /// CanResumeAcquire for a suspended acquire without waiting for the back.
+    bool CanResumeSuspended(DmaPusher& dma_pusher);
 
     std::optional<PendingAcquire> pending_acquire;
 

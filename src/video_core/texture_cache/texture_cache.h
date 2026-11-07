@@ -14,6 +14,9 @@
 #include <vector>
 #include <optional>
 #include <bit>
+#if defined(_MSC_VER) && !defined(__clang__) && (defined(_M_X64) || defined(_M_IX86))
+#include <xmmintrin.h>
+#endif
 #include "common/container/unordered_map.h"
 #include <boost/container/small_vector.hpp>
 
@@ -198,11 +201,34 @@ void TextureCache<P>::RunGarbageCollector() {
         if constexpr (requires(const Image& image) { image.MemoryBlock(); }) {
             std::vector<ImageId> candidates;
             const size_t limit = num_iterations * 8;
+            candidates.reserve(limit);
             lru_cache.ForEachItemBelow(frame_tick - ticks_to_destroy, [&](ImageId image_id) {
                 candidates.push_back(image_id);
                 return candidates.size() >= limit;
             });
             if (candidates.empty()) {
+                return;
+            }
+            // EDEN_NX2_TC_GC_SKIP: when Cleanup would refuse every candidate under the current
+            // modes (decoding, costly or still to download, the old images steady gameplay
+            // leaves), the pass deletes nothing in any order: skip ranking them, the block
+            // recount and the sort, a pass every frame. Exact: Cleanup refusing changes nothing
+            // but its own iteration count, and the modes only change after a deletion.
+            static const bool gc_skip = [] {
+                const char* value = std::getenv("EDEN_NX2_TC_GC_SKIP");
+                return value == nullptr || value[0] != '0';
+            }();
+            if (gc_skip && std::none_of(candidates.begin(), candidates.end(), [&](ImageId image_id) {
+                    const auto& image = slot_images[image_id];
+                    if (True(image.flags & ImageFlagBits::IsDecoding)) {
+                        return false;
+                    }
+                    const bool must_download =
+                        IsDownloadable(image) && False(image.flags & ImageFlagBits::BadOverlap);
+                    return !((!aggressive_mode && !evict_old_costly &&
+                              True(image.flags & ImageFlagBits::CostlyLoad)) ||
+                             (!high_priority_mode && must_download));
+                })) {
                 return;
             }
             if (block_image_bytes_frame == ~0ULL || frame_tick - block_image_bytes_frame >= 60) {
@@ -676,9 +702,16 @@ constexpr size_t NUM_WAYS = 4;
     return static_cast<u32>(hash >> 32) | 1U;
 }
 
-/// Reads a TIC or TSC entry from guest memory.
+/// Reads a TIC or TSC entry from guest memory, through the draw's translated pages when given.
 template <typename T>
-void ReadGuest(const Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, T& out) noexcept {
+void ReadGuest(const Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, T& out,
+               GuestPageCache* pages = nullptr) noexcept {
+    if (pages != nullptr) {
+        if (const u8* const host = pages->Get(gpu_memory, gpu_addr, sizeof(T), false)) {
+            std::memcpy(&out, host, sizeof(T));
+            return;
+        }
+    }
     const bool one_page =
         (gpu_addr & Core::Memory::YUZU_PAGEMASK) + sizeof(T) <= Core::Memory::YUZU_PAGESIZE;
     if (const u8* const host = one_page ? gpu_memory.GetPointer(gpu_addr) : nullptr) {
@@ -686,6 +719,16 @@ void ReadGuest(const Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, T& out
         return;
     }
     gpu_memory.ReadBlockUnsafe(gpu_addr, &out, sizeof(T));
+}
+
+inline void PrefetchLine(const void* address) noexcept {
+#if defined(__clang__) || defined(__GNUC__)
+    __builtin_prefetch(address, 0, 3);
+#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+    _mm_prefetch(reinterpret_cast<const char*>(address), _MM_HINT_T0);
+#else
+    (void)address;
+#endif
 }
 } // namespace BindingMemoDetail
 
@@ -718,9 +761,73 @@ typename TextureCache<P>::BindingLookup TextureCache<P>::BeginBindingLookup(
 }
 
 template <class P>
+typename TextureCache<P>::BindingProbe TextureCache<P>::ProbeBinding(u32 tic_handle,
+                                                                      u32 tsc_index,
+                                                                      u32 kind) const noexcept {
+    using namespace BindingMemoDetail;
+    const u64 hash = KeyHash(tic_handle, tsc_index, kind);
+    const BindingProbe probe{.hash = hash, .first = FirstWay(hash), .tag = Tag(hash)};
+    if (!binding_tags.empty()) {
+        PrefetchLine(&binding_tags[probe.first]);
+    }
+    return probe;
+}
+
+template <class P>
+void TextureCache<P>::PrefetchBinding(const BindingLookup& lookup, const BindingProbe& probe,
+                                      u32 tic_handle, u32 tsc_index) const noexcept {
+    using namespace BindingMemoDetail;
+    if (binding_memos.empty()) {
+        return;
+    }
+    bool candidate = false;
+    for (size_t way = 0; way < NUM_WAYS; ++way) {
+        if (binding_tags[probe.first + way] != probe.tag) {
+            continue;
+        }
+        const auto* const memo = reinterpret_cast<const u8*>(&binding_memos[probe.first + way]);
+        for (size_t line = 0; line < sizeof(BindingMemo); line += 64) {
+            PrefetchLine(memo + line);
+        }
+        candidate = true;
+    }
+    if (!candidate || !Nx2BindMemo::TexPagesEnabled()) {
+        return;
+    }
+    // The entries RecordBinding took for this key: the handle's header index and the TSC index,
+    // when inside the pools. Only a guess for the lines; FindBinding reads what the memo names.
+    const u32 header_index =
+        Tegra::Texture::TextureHeaderIndex(tic_handle, lookup.tic_limit,
+                                           gpu_memory->UsesNativeTiling());
+    if (header_index <= lookup.tic_limit) {
+        if (const u8* const host = lookup.pages.Get(
+                *gpu_memory, lookup.tic_pool + u64{header_index} * sizeof(TICEntry),
+                sizeof(TICEntry), false)) {
+            PrefetchLine(host);
+        }
+    }
+    if (tsc_index != ~0U && tsc_index <= lookup.tsc_limit) {
+        if (const u8* const host = lookup.pages.Get(
+                *gpu_memory, lookup.tsc_pool + u64{tsc_index} * sizeof(TSCEntry),
+                sizeof(TSCEntry), false)) {
+            PrefetchLine(host);
+        }
+    }
+}
+
+template <class P>
 typename TextureCache<P>::BindingMemo* TextureCache<P>::FindBinding(const BindingLookup& lookup,
                                                                      u32 tic_handle,
                                                                      u32 tsc_index, u32 kind) {
+    return FindBinding(lookup, tic_handle, tsc_index, kind,
+                       ProbeBinding(tic_handle, tsc_index, kind));
+}
+
+template <class P>
+typename TextureCache<P>::BindingMemo* TextureCache<P>::FindBinding(const BindingLookup& lookup,
+                                                                     u32 tic_handle,
+                                                                     u32 tsc_index, u32 kind,
+                                                                     const BindingProbe& probe) {
     using Nx2BindMemo::Note;
     using Nx2BindMemo::Stat;
     using namespace BindingMemoDetail;
@@ -729,9 +836,9 @@ typename TextureCache<P>::BindingMemo* TextureCache<P>::FindBinding(const Bindin
         Note(Stat::MissNoEntry);
         return nullptr;
     }
-    const u64 hash = KeyHash(tic_handle, tsc_index, kind);
-    const size_t first = FirstWay(hash);
-    const u32 tag = Tag(hash);
+    const size_t first = probe.first;
+    const u32 tag = probe.tag;
+    GuestPageCache* const pages = Nx2BindMemo::TexPagesEnabled() ? &lookup.pages : nullptr;
     Stat miss = Stat::MissNoEntry;
     // Read once for every candidate of the key (EDEN_NX2_BINDMEMO_MULTI keeps one per contents).
     TICEntry guest_tic{};
@@ -777,7 +884,7 @@ typename TextureCache<P>::BindingMemo* TextureCache<P>::FindBinding(const Bindin
         if (memo.tic_entry != ~0U) {
             if (guest_tic_entry != memo.tic_entry) {
                 ReadGuest(*gpu_memory, lookup.tic_pool + u64{memo.tic_entry} * sizeof(TICEntry),
-                          guest_tic);
+                          guest_tic, pages);
                 guest_tic_entry = memo.tic_entry;
             }
             if (std::memcmp(&guest_tic, &memo.tic, sizeof(TICEntry)) != 0) {
@@ -788,7 +895,7 @@ typename TextureCache<P>::BindingMemo* TextureCache<P>::FindBinding(const Bindin
         if (tsc_index != ~0U && memo.tsc_entry != ~0U) {
             if (guest_tsc_entry != memo.tsc_entry) {
                 ReadGuest(*gpu_memory, lookup.tsc_pool + u64{memo.tsc_entry} * sizeof(TSCEntry),
-                          guest_tsc);
+                          guest_tsc, pages);
                 guest_tsc_entry = memo.tsc_entry;
             }
             if (std::memcmp(&guest_tsc, &memo.tsc, sizeof(TSCEntry)) != 0) {

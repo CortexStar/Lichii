@@ -62,11 +62,24 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         auto last_progress = std::chrono::steady_clock::now();
         namespace Profile = VideoCommon::Nx2Profile;
         auto& split = VideoCommon::GpuSplit::Get();
+        // A stop request wakes WaitForDeferred's sleep, whose stop check then sees it.
+        const std::stop_callback wake_on_stop{stop_token,
+                                              [&split] { split.WakeFrontForCommand(); }};
+        // EDEN_NX2_FRONT_DEFER: where WaitForDeferred pops a command that arrives meanwhile.
+        struct PopTarget {
+            SynchState::CommandQueue* queue;
+            CommandDataContainer* next;
+            const std::stop_token* stop;
+        } pop_target{&state.queue, &next, &stop_token};
         while (!stop_token.stop_requested()) {
             Profile::Report();
             split.MaybeStart(system);
             if (scheduler.HasPendingChannels()) {
                 // Suspended channels wait on semaphores the CPU releases: poll them meanwhile.
+                // EDEN_NX2_FRONT_DEFER: parked ones note the back position they wait for.
+                if (split.Active()) {
+                    split.BeginDeferRound();
+                }
                 {
                     Profile::Scope scope{Profile::Zone::ResumePending};
                     scheduler.ResumePending(system.GPU());
@@ -77,17 +90,35 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     if (split.Active()) {
                         split.PublishBeforeWait();
                     }
-                    // The CPU usually releases the semaphore soon after: poll for half a
-                    // millisecond before sleeping, or every wait also waits out a host sleep
-                    // (title 1 waits ~25 times a second).
-                    Profile::Scope scope{Profile::Zone::PendingSleep};
-                    if (std::chrono::steady_clock::now() - last_progress <
-                        std::chrono::microseconds{500}) {
-                        std::this_thread::yield();
+                    if (split.Active() && split.DeferredWaitTarget() != ~u64{0}) {
+                        // A parked channel goes on once the back reaches its position: wait for
+                        // that as the blocking wait did (woken by the back, no sleep), or until a
+                        // command arrives, which runs meanwhile.
+                        Profile::Scope scope{Profile::Zone::PendingSleep};
+                        const bool popped = split.WaitForDeferred(
+                            split.DeferredWaitTarget(),
+                            [](void* argument) {
+                                auto* const target = static_cast<PopTarget*>(argument);
+                                return target->stop->stop_requested() ||
+                                       target->queue->TryPop(*target->next);
+                            },
+                            &pop_target, !scheduler.HasPendingChannelsAnyThread());
+                        if (!popped) {
+                            continue;
+                        }
                     } else {
-                        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+                        // The CPU usually releases the semaphore soon after: poll for half a
+                        // millisecond before sleeping, or every wait also waits out a host sleep
+                        // (title 1 waits ~25 times a second).
+                        Profile::Scope scope{Profile::Zone::PendingSleep};
+                        if (std::chrono::steady_clock::now() - last_progress <
+                            std::chrono::microseconds{500}) {
+                            std::this_thread::yield();
+                        } else {
+                            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+                        }
+                        continue;
                     }
-                    continue;
                 }
             } else {
                 Profile::Scope scope{Profile::Zone::Idle};
@@ -205,6 +236,7 @@ u64 ThreadManager::PushCommand(CommandData&& command_data, bool block, bool is_a
     std::unique_lock lk(state.write_lock);
     const u64 fence{++state.last_fence};
     state.queue.EmplaceWait(std::move(command_data), fence, block);
+    GpuSplit::Get().WakeFrontForCommand();
 
     if (block) {
         state.cv.wait(lk, thread.get_stop_token(), [this, fence] {

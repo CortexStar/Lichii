@@ -173,12 +173,24 @@ public:
 
     void DispatchCalls();
 
-    /// Switch 2: true while the channel is suspended on a semaphore acquire.
+    /// Switch 2: true while the channel is suspended on a semaphore acquire, or parked
+    /// (EDEN_NX2_FRONT_DEFER) on a check or a command list fetch that waits for the split's back.
     [[nodiscard]] bool HasPendingAcquire() const {
-        return puller.HasPendingAcquire();
+        return puller.HasPendingAcquire() || list_park_target != 0;
     }
     [[nodiscard]] bool CanResumeAcquire() {
+        if (list_park_target != 0) {
+            return CheckListPark();
+        }
         return puller.CanResumeAcquire(*this);
+    }
+    /// EDEN_NX2_FRONT_DEFER: only parked, not suspended (the back gets there by itself).
+    [[nodiscard]] bool IsParked() const {
+        return list_park_target != 0 || puller.IsDeferred();
+    }
+    /// Suspended on a semaphore acquire (not merely parked): GPU::HasSuspendedChannels.
+    [[nodiscard]] bool IsSuspended() const {
+        return puller.HasPendingAcquire() && !puller.IsDeferred();
     }
 
     void BindSubchannel(Engines::EngineInterface* engine, u32 subchannel_id, Engines::EngineTypes engine_type) {
@@ -226,6 +238,24 @@ private:
     bool WaitForListFetch(GPUVAddr address, size_t size);
     /// Marks the list's pages as read from; whether all of them were before.
     bool MarkListPagesSeen(GPUVAddr address, size_t size);
+    /// MarkListPagesSeen without marking.
+    [[nodiscard]] bool ListPagesSeen(GPUVAddr address, size_t size) const;
+    /// EDEN_NX2_FRONT_DEFER: the position the waits before fetching the entry at `address` wait
+    /// for (WaitForListFetch, ReadGpuWrittenCommands), without waiting.
+    [[nodiscard]] u64 ListFetchTarget(bool gpu_written, GPUVAddr address, size_t size);
+    /// Whether the back got to the parked fetch's position (notes the wait if not).
+    bool CheckListPark();
+    // EDEN_NX2_FRONT_DEFER, a parked fetch: the position it waits for (0: not parked), the cap
+    // of its waits once resumed (the end of the work sent before it), the split session and
+    // whether Step comes back to it.
+    u64 list_park_target{};
+    u64 list_park_cap{};
+    u64 list_park_session{};
+    bool list_resume{};
+    // EDEN_NX2_FRONT_DEFER: the words of the entry an acquire parked inside, which the blocking
+    // check would have gone on with (a real suspension reads them again).
+    std::vector<CommandHeader> parked_words;
+    bool parked_words_valid{};
     void ReportUnboundSubchannel();
     void WatchArgument(u32 method, u32 argument) const;
 

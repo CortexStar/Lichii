@@ -72,6 +72,37 @@ namespace Detail {
     return enabled;
 }
 
+/// EDEN_NX2_TEX_PAGES: a draw or dispatch translates each guest page it reads texture handles,
+/// TIC and TSC entries from once (GuestPageCache), instead of once per word or entry.
+[[nodiscard]] inline bool TexPagesEnabled() noexcept {
+    static const bool enabled = Detail::SwitchOn("EDEN_NX2_TEX_PAGES");
+    return enabled;
+}
+
+/// EDEN_NX2_BINDMEMO_BATCH: a draw's bindings are looked up in three passes (hash and tag line,
+/// then the memo and guest entry lines, then the checks) so their cache misses overlap. Off: one
+/// binding after the other.
+[[nodiscard]] inline bool BatchEnabled() noexcept {
+    static const bool enabled = Detail::SwitchOn("EDEN_NX2_BINDMEMO_BATCH");
+    return enabled;
+}
+
+/// EDEN_NX2_PIPE_PATCH: when the only Refresh inputs that moved are the blend registers (no
+/// dynamic blend state) or the vertex attribute types (dynamic vertex input), the pipeline lookup
+/// redoes just that part of the key instead of a full Refresh.
+[[nodiscard]] inline bool PipePatchEnabled() noexcept {
+    static const bool enabled = Detail::SwitchOn("EDEN_NX2_PIPE_PATCH");
+    return enabled;
+}
+
+/// EDEN_NX2_PIPE_NEXT_PTR: a pipeline's transitions are tagged by the attribute types and blend
+/// attachments too (what Ocarina's transitions differ in), compared against the target pipeline's
+/// own key and reordered by pointer, without a copy of each key. Off: the wave-2 tags and keys.
+[[nodiscard]] inline bool PipeNextPointersEnabled() noexcept {
+    static const bool enabled = Detail::SwitchOn("EDEN_NX2_PIPE_NEXT_PTR");
+    return enabled;
+}
+
 enum class Stat : u32 {
     // Binding lookups (one per texture/image binding of a draw or dispatch)
     Lookups,
@@ -122,6 +153,12 @@ enum class Stat : u32 {
     PipeNextSame,     ///< after Refresh: the key is the current pipeline's
     PipeNextTransition,
     PipeSlowPath,
+    PipePatchBlend,       ///< EDEN_NX2_PIPE_PATCH: only the blend attachments were redone
+    PipePatchVertexInput, ///< EDEN_NX2_PIPE_PATCH: only the attribute types were redone
+    // Guest page translations (EDEN_NX2_TEX_PAGES)
+    HandleWords,      ///< texture handle words read from a translated page
+    HandleWordsSlow,  ///< read with MemoryManager::Read (page split, unmapped, shim, GPU-written)
+    PageTranslations, ///< pages translated for handles, TIC and TSC entries
     Count,
 };
 
@@ -198,6 +235,12 @@ inline void Report() {
              rate(Stat::PipeMissValues), rate(Stat::PipeMissSwizzles), rate(Stat::PipeMissXfb),
              rate(Stat::PipeMissKeyStale), rate(Stat::PipeNextSame),
              rate(Stat::PipeNextTransition), rate(Stat::PipeSlowPath));
+    LOG_INFO(HW_GPU,
+             "Texture lookup per second: pipeline keys patched: blending {:.0f}, vertex input "
+             "{:.0f} | handle words {:.0f} from pages, {:.0f} read slowly | pages translated "
+             "{:.0f}",
+             rate(Stat::PipePatchBlend), rate(Stat::PipePatchVertexInput),
+             rate(Stat::HandleWords), rate(Stat::HandleWordsSlow), rate(Stat::PageTranslations));
     g_stats_start = now;
 }
 

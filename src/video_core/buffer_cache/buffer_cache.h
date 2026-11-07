@@ -197,14 +197,23 @@ void BufferCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t size
 
 template <class P>
 void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu_data) {
+    Nx2BufCache::Note(Nx2BufCache::Stat::WriteMemoryCalls);
     Nx2NoteListHostWrite(device_addr, size);
     // The written range lies within its pages: when they hold no GPU-written data, both lookups
     // below find nothing, so one lookup answers them.
     if (keep_page_gpu_data) {
         const DAddr page_begin = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
         const DAddr page_end = Common::AlignUp(device_addr + size, DEVICE_PAGESIZE);
-        if (!gpu_modified_ranges.Intersects(page_begin, page_end - page_begin)) {
+        if (!IsRegionGpuModified(page_begin, page_end - page_begin)) {
             if (!Nx2Perf::Verify()) {
+                // Pages all CPU-dirty already: the mark below would change no tracker state, and
+                // no SYNC_SKIP entry that is still valid covers them (EDEN_NX2_DIRTY_WRITE_SKIP).
+                if (Nx2BufCache::g_dirty_write_skip &&
+                    memory_tracker.IsRegionFullyCpuModified(device_addr, size)) {
+                    Nx2BufCache::Note(Nx2BufCache::Stat::DirtyWriteSkip);
+                    MarkVertexBuffersStale(device_addr, size);
+                    return;
+                }
                 memory_tracker.MarkRegionAsCpuModified(device_addr, size);
                 NoteCpuDirty(device_addr, size);
                 MarkVertexBuffersStale(device_addr, size);
@@ -527,7 +536,9 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
     for (const auto& pair : tmp_intervals) {
         gpu_modified_ranges.Add(pair.first, pair.second);
         gpu_modified_serial.fetch_add(1, std::memory_order_relaxed);
-        if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
+        if (!Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
+            nx2_gpu_ranges_unmarked = true;
+        } else {
             Tegra::Nx2MarkGpuWritten(pair.first, pair.second);
             Nx2NoteListWrite(buffer_b, pair.first, pair.second);
         }
@@ -683,6 +694,7 @@ void BufferCache<P>::DisableGraphicsUniformBuffer(size_t stage, u32 index) {
 
 template <class P>
 void BufferCache<P>::UpdateGraphicsBuffers(bool is_indexed) {
+    Nx2BufCache::SubTimer sub_timer{Nx2BufCache::Sub::Resolve};
     do {
         channel_state->has_deleted_buffers = false;
         DoUpdateGraphicsBuffers(is_indexed);
@@ -720,9 +732,11 @@ template <class P>
 void BufferCache<P>::BindHostStageBuffers(size_t stage) {
     BindHostGraphicsUniformBuffers(stage);
     if (channel_state->enabled_storage_buffers[stage] != 0) {
+        Nx2BufCache::SubTimer sub_timer{Nx2BufCache::Sub::Storage};
         BindHostGraphicsStorageBuffers(stage);
     }
     if (channel_state->enabled_texture_buffers[stage] != 0) {
+        Nx2BufCache::SubTimer sub_timer{Nx2BufCache::Sub::TexBuffers};
         BindHostGraphicsTextureBuffers(stage);
     }
 }
@@ -1188,6 +1202,14 @@ void BufferCache<P>::PopAsyncBuffers() {
 
 template <class P>
 bool BufferCache<P>::IsRegionGpuModified(DAddr addr, size_t size) {
+    // Pages the GPU never wrote hold no gpu_modified_ranges data: the GPU-written page bitmap
+    // answers small ranges without the tree lookup (EDEN_NX2_WRITE_GPU_BITMAP). Every range
+    // added to the set marks its pages there in Switch 2 sessions; the bits never clear.
+    if (Nx2BufCache::g_write_gpu_bitmap && size <= 64_KiB && !nx2_gpu_ranges_unmarked &&
+        Tegra::g_nx2_ampere.load(std::memory_order_relaxed) &&
+        !Tegra::Nx2MayBeGpuWritten(addr, size)) {
+        return false;
+    }
     // One lookup instead of visiting every range inside (~4% of the GPU thread for title 1's
     // inline uploads once GPU-written ranges are no longer cleared by downloads).
     return gpu_modified_ranges.Intersects(addr, size);
@@ -1221,6 +1243,7 @@ bool BufferCache<P>::IsRegionCpuModified(DAddr addr, size_t size) {
 
 template <class P>
 void BufferCache<P>::BindHostIndexBuffer() {
+    Nx2BufCache::SubTimer sub_timer{Nx2BufCache::Sub::IndexBind};
     Buffer& buffer = slot_buffers[channel_state->index_buffer.buffer_id];
     TouchBuffer(buffer, channel_state->index_buffer.buffer_id);
     const u32 offset = buffer.Offset(channel_state->index_buffer.device_addr);
@@ -1341,6 +1364,7 @@ void BufferCache<P>::RefreshRepackedVertexBuffers() {
 
 template <class P>
 void BufferCache<P>::BindHostVertexBuffers() {
+    Nx2BufCache::SubTimer sub_timer{Nx2BufCache::Sub::VertexBind};
     RefreshRepackedVertexBuffers();
 
 #ifdef __ANDROID__
@@ -1463,6 +1487,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffers(size_t stage) {
 
 template <class P>
 void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 binding_index, bool needs_bind) {
+    Nx2BufCache::SubTimer sub_timer{Nx2BufCache::Sub::UboStream};
     ++channel_state->uniform_cache_shots[0];
     // Bank 24 (root table 0, NVN2's push constants) is read from bank 17, which such games do not
     // bind: stream the table's current words as that buffer.
@@ -1510,6 +1535,9 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     // the memory tracker, leaving stale host contents, so upload such a bank again once per frame.
     // A bind that streams the buffer copies guest memory itself: the upload waits for the frame's
     // first bind that reads the host buffer (EDEN_NX2_BUFCACHE_BANK).
+    if (!use_fast_buffer) {
+        sub_timer.sub = Nx2BufCache::Sub::UboClassic;
+    }
     const bool is_native_bank =
         has_host_buffer && (*channel_state->uniform_buffer_sizes)[stage][index] == 0x10000;
     const bool bank_streamed = use_fast_buffer && Nx2BufCache::g_bank_skip;
@@ -1582,13 +1610,20 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             // stream allocation again instead of allocating and copying (uniform_stream_reuse.h).
             // EDEN_NX2_UBOREUSE=0 turns it off.
             if (VideoCommon::UniformStreamReuseEnabled()) {
-                streamed = VideoCommon::BindSmallUniformReusing(
-                    runtime, device_memory, stage, index, binding_index, device_addr, size);
+                VideoCommon::UniformReuseResult reuse_result{};
+                streamed = VideoCommon::BindSmallUniformReusing(runtime, device_memory, stage,
+                                                                index, binding_index, device_addr,
+                                                                size, &reuse_result);
+                NoteUniformReuse(reuse_result, size);
             }
         }
         if (!streamed) {
             const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
             device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
+            if (size > DEFAULT_SKIP_CACHE_SIZE) {
+                Nx2BufCache::Note(Nx2BufCache::Stat::UboLarge);
+                Nx2BufCache::Note(Nx2BufCache::Stat::UboLargeBytes, size);
+            }
         }
         return;
     }
@@ -1622,6 +1657,31 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         runtime.BindUniformBuffer(buffer, offset, size);
     }
     channel_state->fast_bound_uniform_buffers[stage] &= ~(1u << binding_index);
+}
+
+template <class P>
+void BufferCache<P>::NoteUniformReuse(VideoCommon::UniformReuseResult result, u32 size) {
+    if (!Nx2Profile::Enabled()) [[likely]] {
+        return;
+    }
+    switch (result) {
+    case VideoCommon::UniformReuseResult::SlotHit:
+        Nx2BufCache::Note(Nx2BufCache::Stat::UboSlotHit);
+        break;
+    case VideoCommon::UniformReuseResult::RangeHit:
+        Nx2BufCache::Note(Nx2BufCache::Stat::UboRangeHit);
+        break;
+    case VideoCommon::UniformReuseResult::Recopied:
+        Nx2BufCache::Note(Nx2BufCache::Stat::UboRecopied);
+        Nx2BufCache::Note(Nx2BufCache::Stat::UboCopiedBytes, size);
+        break;
+    case VideoCommon::UniformReuseResult::Copied:
+        Nx2BufCache::Note(Nx2BufCache::Stat::UboCopied);
+        Nx2BufCache::Note(Nx2BufCache::Stat::UboCopiedBytes, size);
+        break;
+    case VideoCommon::UniformReuseResult::None:
+        break;
+    }
 }
 
 template <class P>
@@ -2424,6 +2484,8 @@ void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u3
     if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
         Tegra::Nx2MarkGpuWritten(device_addr, size);
         Nx2NoteListWrite(buffer_id, device_addr, size);
+    } else {
+        nx2_gpu_ranges_unmarked = true;
     }
 }
 
@@ -2871,6 +2933,7 @@ void BufferCache<P>::TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept {
 
 template <class P>
 bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size) {
+    Nx2BufCache::SubTimer sub_timer{Nx2BufCache::Sub::Sync};
     // An upload over a clean word of the tracker (word_manager.h) finds and changes nothing:
     // walk only the dirty ones. Verify walks every word and checks the clean words.
     const bool skip_clean = !Nx2Perf::Verify();
@@ -2910,6 +2973,27 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
                 return *synced;
             }
         }
+    }
+    // The entry is gone (a CPU-dirty mark fell in a region or the buffer), but the mark may lie
+    // outside this range: when no page of it is CPU-dirty or unprotected, the walk below finds
+    // nothing to upload and changes no tracker state, and the range is still clean
+    // (EDEN_NX2_SYNC_PRECHECK). Read only, page granular, against the walk's word granularity.
+    if (Nx2BufCache::g_sync_precheck && skip_clean &&
+        !memory_tracker.IsRegionUploadDirty(device_addr, size)) {
+        if (skip_entry != nullptr) {
+            *skip_entry = SyncSkip{
+                .buffer = &buffer,
+                .device_addr = device_addr,
+                .size = size,
+                .gen = buffer.cpu_dirty_gen,
+                .epoch = cpu_dirty_epoch,
+                .binding_epoch = binding_epoch,
+                .region_sum = by_regions ? SkipRegionSum(device_addr, size) : 0,
+                .hot_mask = 0,
+            };
+        }
+        Nx2BufCache::Note(Nx2BufCache::Stat::SyncPrecheckClean);
+        return true;
     }
     Nx2BufCache::Note(Nx2BufCache::Stat::SyncWalk);
     const auto for_each_upload_range = [&](auto&& func) {

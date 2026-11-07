@@ -47,6 +47,20 @@ std::mutex g_profile_end_mutex;
 /// Finish() per call site: calls and nanoseconds waited.
 std::map<std::string, std::pair<u64, u64>> g_profile_finish_sites;
 std::map<std::string, u64> g_profile_ends;
+/// Flush() per call site (deferred submissions by the site that submitted them).
+std::map<std::string, u64> g_profile_submit_sites;
+
+void CountSubmit(const char* file, u32 line) {
+    if (!VideoCommon::Nx2Profile::Enabled()) {
+        return;
+    }
+    std::string_view name{file};
+    if (const auto slash = name.find_last_of("/\\"); slash != std::string_view::npos) {
+        name.remove_prefix(slash + 1);
+    }
+    std::scoped_lock lock{g_profile_end_mutex};
+    ++g_profile_submit_sites[fmt::format("{}:{}", name, line)];
+}
 
 void CountRenderPassEnd(const char* file, u32 line) {
     if (!VideoCommon::Nx2Profile::Enabled()) {
@@ -106,6 +120,19 @@ void ReportSubmitCounts() {
     std::sort(finishes.rbegin(), finishes.rend());
     for (size_t i = 0; i < finishes.size() && i < 8; ++i) {
         LOG_INFO(Render_Vulkan, "Finishes {}", finishes[i].second);
+    }
+    std::vector<std::pair<u64, std::string>> submits;
+    {
+        std::scoped_lock lock{g_profile_end_mutex};
+        for (const auto& [site, count] : g_profile_submit_sites) {
+            submits.emplace_back(count, site);
+        }
+        g_profile_submit_sites.clear();
+    }
+    std::sort(submits.rbegin(), submits.rend());
+    for (size_t i = 0; i < submits.size() && i < 12; ++i) {
+        LOG_INFO(Render_Vulkan, "Submits {:.0f}/s at {}",
+                 static_cast<double>(submits[i].first) / seconds, submits[i].second);
     }
 }
 }
@@ -188,6 +215,7 @@ u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
     if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
         VideoCommon::GpuSplit::CheckOwner("Scheduler::Flush");
     }
+    CountSubmit(location.file_name(), location.line());
     // When flushing, we only send data to the worker thread; no waiting is necessary.
     const u64 signal_value = SubmitExecution(signal_semaphore, wait_semaphore);
     AllocateNewContext();
@@ -218,9 +246,9 @@ bool Scheduler::DeferFlush() {
     return true;
 }
 
-void Scheduler::FlushDeferred() {
+void Scheduler::FlushDeferred(std::source_location location) {
     if (flush_pending) {
-        Flush();
+        Flush({}, {}, location);
     }
 }
 

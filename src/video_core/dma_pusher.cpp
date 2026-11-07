@@ -65,10 +65,14 @@ void DmaPusher::DispatchCalls() {
         }
     }
     if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
-        split.Defer([gpu = &system.GPU()] {
-            gpu->FlushCommands();
-            gpu->OnCommandListEnd();
-        });
+        // EDEN_NX2_FRONT_DEFER: a parked channel's list isn't over; the blocking wait sent
+        // nothing here either (an extra flush per park would be a submission on the back).
+        if (!IsParked()) {
+            split.Defer([gpu = &system.GPU()] {
+                gpu->FlushCommands();
+                gpu->OnCommandListEnd();
+            });
+        }
         split.Publish();
         return;
     }
@@ -80,22 +84,36 @@ bool DmaPusher::Step() {
     if (!ib_enable || dma_pushbuffer.empty()) {
         return false;
     }
+    if (list_park_target != 0) {
+        // EDEN_NX2_FRONT_DEFER: a fetch parked until the back got to its writers.
+        if (!CheckListPark()) {
+            return false;
+        }
+        list_park_target = 0;
+        list_resume = true;
+        VideoCommon::GpuSplit::Get().NoteDeferResume(list_park_cap);
+    }
     const u64 suspensions_before = suspensions.load(std::memory_order_relaxed);
     if (!puller.ResumeAcquire(*this)) {
         return false;
     }
-    // Lists queued while the channel waited were read from memory, not as submitted: the game
-    // writes the commands a list runs before it releases the acquire, so the words at submit time
-    // could be older. Reading them as late as the parse is too late in Hyrule Warriors: Age of
-    // Imprisonment fights: a command ring the game had already refilled for a later frame, read
-    // as this frame's commands (methods on unbound subchannels, garbage QMDs, then a channel
-    // waiting forever on a release it never got). The acquire is released now, so the commands
-    // are written and the memory not yet reused: copy them here. EDEN_NX2_RESNAPSHOT=0: off.
-    if (ResnapshotEnabled() && suspensions.load(std::memory_order_relaxed) != suspensions_before) {
-        const u64 now = suspensions.load(std::memory_order_acquire);
-        for (CommandList& list : dma_pushbuffer) {
-            if (!list.submitted_offsets.empty()) {
-                RefreshSnapshot(list, now);
+    if (suspensions.load(std::memory_order_relaxed) != suspensions_before) {
+        // A real suspension ended: its entry is read again (below), not from a parked copy.
+        parked_words_valid = false;
+        // Lists queued while the channel waited were read from memory, not as submitted: the
+        // game writes the commands a list runs before it releases the acquire, so the words at
+        // submit time could be older. Reading them as late as the parse is too late in Hyrule
+        // Warriors: Age of Imprisonment fights: a command ring the game had already refilled
+        // for a later frame, read as this frame's commands (methods on unbound subchannels,
+        // garbage QMDs, then a channel waiting forever on a release it never got). The acquire
+        // is released now, so the commands are written and the memory not yet reused: copy them
+        // here. EDEN_NX2_RESNAPSHOT=0: off.
+        if (ResnapshotEnabled()) {
+            const u64 now = suspensions.load(std::memory_order_acquire);
+            for (CommandList& list : dma_pushbuffer) {
+                if (!list.submitted_offsets.empty()) {
+                    RefreshSnapshot(list, now);
+                }
             }
         }
     }
@@ -134,20 +152,69 @@ bool DmaPusher::Step() {
         synced = false;
     }
 
-    if (header.size > 0) {
-        if (header.sync && g_nx2_ampere.load(std::memory_order_relaxed)) {
-            VideoCommon::GpuSplit::Get().NoteSync(VideoCommon::UnboundedCause::GpSync);
-            VideoCommon::GpuSplit::Get().NoteUnboundedWrite(false,
-                                                            VideoCommon::UnboundedCause::GpSync);
+    if (header.size > 0 && parked_words_valid) {
+        // EDEN_NX2_FRONT_DEFER: an acquire parked inside this entry and is met now. The blocking
+        // check would have gone on with the words fetched before it, so these go on too (a real
+        // suspension reads the entry again instead, see above).
+        const std::span<const CommandHeader> commands{parked_words.data(), parked_words.size()};
+        command_resume_offset +=
+            ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
+        if (!puller.IsDeferred()) {
+            parked_words_valid = false;
+        }
+        if (puller.HasPendingAcquire()) {
+            return false;
+        }
+        command_resume_offset = 0;
+        if (dma_state.method_count != 0) {
+            split_method_end = header.addr + header.size * sizeof(u32);
+        }
+    } else if (header.size > 0) {
+        auto& split = VideoCommon::GpuSplit::Get();
+        // A fetch parked here already noted its entry's sync bit.
+        if (header.sync && g_nx2_ampere.load(std::memory_order_relaxed) && !list_resume) {
+            split.NoteSync(VideoCommon::UnboundedCause::GpSync);
+            split.NoteUnboundedWrite(false, VideoCommon::UnboundedCause::GpSync);
         }
         // EDEN_NX2_FETCH_DRAIN=1: wait for the back before every entry, as before the split
         // overlapped the two halves again.
         static const bool fetch_drain = std::getenv("EDEN_NX2_FETCH_DRAIN") != nullptr;
         if (fetch_drain && g_nx2_ampere.load(std::memory_order_relaxed)) {
-            VideoCommon::GpuSplit::Get().Drain(VideoCommon::DrainSite::FetchDrain);
+            split.Drain(VideoCommon::DrainSite::FetchDrain);
         }
         bool gpu_written = IsGpuWrittenCommands(dma_state.dma_get,
                                                  size_t{header.size} * sizeof(u32));
+        // EDEN_NX2_FRONT_DEFER: when the fetch below would wait for the back (its writers: the
+        // work before the GP entry's sync, the recorded writes over its pages), park the channel
+        // here and let the front run the other channels' work meanwhile. Resumed, the waits go
+        // no further than the work sent before the fetch first got here: what other channels
+        // sent since isn't ordered before it.
+        bool capped = false;
+        if (split.Active() && split.FrontDefer() && !VideoCommon::GpuSplit::NarrowVerify()) {
+            // Held-back work (a constant buffer run that may write the list) is sent first.
+            split.RunPendingFlush();
+            const u64 cap = list_resume && list_park_session == split.Session()
+                                ? list_park_cap
+                                : split.WritePosition();
+            split.SetWaitCap(cap);
+            const u64 target =
+                ListFetchTarget(gpu_written, dma_state.dma_get, size_t{header.size} * sizeof(u32));
+            if (!split.Reached(target)) {
+                split.ClearWaitCap();
+                list_park_target = target;
+                list_park_cap = cap;
+                list_park_session = split.Session();
+                list_resume = false;
+                split.NoteDeferredWait(target);
+                split.NoteDeferDiag(VideoCommon::DeferKind::List);
+                return false;
+            }
+            capped = list_resume;
+            if (!capped) {
+                split.ClearWaitCap();
+            }
+        }
+        list_resume = false;
         if (subchannels[dma_state.subchannel] && dma_state.method_count) {
             const auto engine = subchannel_type[dma_state.subchannel];
             const bool kepler_payload = engine == Engines::EngineTypes::KeplerCompute && dma_state.method == ComputeInline && dma_state.non_incrementing;
@@ -155,7 +222,7 @@ bool DmaPusher::Step() {
             if (kepler_payload || macro_payload) {
                 const size_t words = std::min<size_t>(dma_state.method_count, header.size);
                 auto* const engine_state = subchannels[dma_state.subchannel];
-                if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
+                if (split.Active()) {
                     // The caches behind IsMemoryDirty belong to the split's back thread.
                     split.Defer([engine_state, memory = &memory_manager, address = GPUVAddr{dma_state.dma_get},
                                  bytes = words * sizeof(u32)] {
@@ -199,13 +266,27 @@ bool DmaPusher::Step() {
         // A resumed entry is read again: the words after the acquire may be new by now.
         // A safe read flushes the caches, which belong to the split's back thread while it runs
         // (the split only starts with unsafe reads; the settings can change mid-game).
-        const bool use_safe = !VideoCommon::GpuSplit::Get().Active() &&
+        const bool use_safe = !split.Active() &&
                               (Settings::IsDMALevelDefault() ? Settings::IsGPULevelHigh() : Settings::IsDMALevelSafe());
-        if (!gpu_written && VideoCommon::GpuSplit::Get().Active() &&
+        if (!gpu_written && split.Active() &&
             WaitForListFetch(dma_state.dma_get, size_t{header.size} * sizeof(u32))) {
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
         }
+        // Runs the entry's words (the fetch's waits are done: the cap goes). An acquire that
+        // parked inside keeps them for the resume.
+        const auto run = [&](std::span<const CommandHeader> commands) {
+            if (capped) {
+                split.ClearWaitCap();
+                capped = false;
+            }
+            command_resume_offset +=
+                ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
+            if (puller.IsDeferred()) {
+                parked_words.assign(commands.begin(), commands.end());
+                parked_words_valid = true;
+            }
+        };
         // Resume and GPU-written entries need live words, even after a flush cleared dirty state.
         const bool submitted = (command_list.snapshot_suspensions & 1) == 0 &&
                                command_list.snapshot_suspensions ==
@@ -225,28 +306,29 @@ bool DmaPusher::Step() {
                 header.size};
             RecordParsedEntry(header, commands);
             Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Submitted);
-            command_resume_offset += ProcessCommands(commands, 0);
+            // Never resumed here (CanUseSubmittedCommands): the offset is 0.
+            run(commands);
         } else if (use_safe) {
             Tegra::Memory::GpuGuestMemory<Tegra::CommandHeader, Tegra::Memory::GuestMemoryFlags::SafeRead>headers(memory_manager, dma_state.dma_get, header.size, &command_headers);
             const std::span<const CommandHeader> commands{headers.data(), headers.size()};
             RecordParsedEntry(header, commands);
             Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Safe);
-            command_resume_offset +=
-                ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
+            run(commands);
         } else if (ReadGpuWrittenCommands(dma_state.dma_get, static_cast<u32>(header.size))) {
             const std::span<const CommandHeader> commands{command_headers.data(), header.size};
             RecordParsedEntry(header, commands);
             Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Copy);
-            command_resume_offset +=
-                ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
+            run(commands);
         } else {
             FlushGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
             Tegra::Memory::GpuGuestMemory<Tegra::CommandHeader, Tegra::Memory::GuestMemoryFlags::UnsafeRead>headers(memory_manager, dma_state.dma_get, header.size, &command_headers);
             const std::span<const CommandHeader> commands{headers.data(), headers.size()};
             RecordParsedEntry(header, commands);
             Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Slow);
-            command_resume_offset +=
-                ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
+            run(commands);
+        }
+        if (capped) {
+            split.ClearWaitCap();
         }
         if (puller.HasPendingAcquire()) {
             return false;
@@ -726,6 +808,64 @@ bool DmaPusher::MarkListPagesSeen(GPUVAddr address, size_t size) {
         }
     }
     return seen;
+}
+
+bool DmaPusher::ListPagesSeen(GPUVAddr address, size_t size) const {
+    if (g_seen_list_session != VideoCommon::GpuSplit::Get().Session()) {
+        return false;
+    }
+    for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < address + size; page += 0x1000) {
+        const auto device = memory_manager.GpuToCpuAddress(page);
+        if (!device) {
+            return false;
+        }
+        const u64 index = *device >> 12;
+        if (index / 64 >= g_seen_list_pages.size() ||
+            (g_seen_list_pages[index / 64] & (u64{1} << (index % 64))) == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+u64 DmaPusher::ListFetchTarget(bool gpu_written, GPUVAddr address, size_t size) {
+    auto& split = VideoCommon::GpuSplit::Get();
+    if (!split.NarrowDrains()) {
+        // EDEN_NX2_FRONT_DEFER needs the narrow drains' records.
+        return 0;
+    }
+    const GPUVAddr first = address & ~GPUVAddr{0xfff};
+    const GPUVAddr last = (address + size + 0xfff) & ~GPUVAddr{0xfff};
+    if (gpu_written) {
+        if (rasterizer == nullptr) {
+            return 0;
+        }
+        // ReadGpuWrittenCommands: WaitForListWriters, then WaitForSync for pages draws write.
+        return (std::max)(split.WritersToTarget(&memory_manager, first, last - first,
+                                                split.NarrowListSync()),
+                          split.SyncTarget());
+    }
+    // WaitForListFetch.
+    if (!split.ListExact()) {
+        return split.WritersToTarget(&memory_manager, first, last - first,
+                                     split.NarrowListSync());
+    }
+    if (!ListPagesSeen(address, size)) {
+        return split.WritersToTarget(&memory_manager, first, last - first, false);
+    }
+    return split.WritesToTarget(&memory_manager, first, last - first,
+                                VideoCommon::NarrowBase::Recorded);
+}
+
+bool DmaPusher::CheckListPark() {
+    auto& split = VideoCommon::GpuSplit::Get();
+    // The split stopped (or started again) meanwhile: it ran everything sent before.
+    if (!split.Active() || split.Session() != list_park_session ||
+        split.Reached(list_park_target)) {
+        return true;
+    }
+    split.NoteDeferredWait(list_park_target);
+    return false;
 }
 
 bool DmaPusher::WaitForListFetch(GPUVAddr address, size_t size) {

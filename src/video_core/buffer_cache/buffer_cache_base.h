@@ -39,6 +39,7 @@
 #include "video_core/buffer_cache/buffer_base.h"
 #include "video_core/buffer_cache/nx2_bufcache.h"
 #include "video_core/buffer_cache/read_trap_tracker.h"
+#include "video_core/buffer_cache/uniform_stream_reuse.h"
 #include "video_core/buffer_cache/virtual_range_cache.h"
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/delayed_destruction_ring.h"
@@ -460,8 +461,25 @@ public:
     /// Bumped whenever gpu_modified_ranges gains a range: a page found free of GPU-written data
     /// stays free while it is unchanged (the rasterizer's inline writes).
     std::atomic<u64> gpu_modified_serial{};
+    /// Set once a range went into gpu_modified_ranges without marking its pages in
+    /// Tegra::g_nx2_gpu_written_pages (outside Switch 2 sessions): the bitmap no longer bounds it.
+    bool nx2_gpu_ranges_unmarked = false;
     /// Indirectly read banks of native programs already uploaded this frame.
     Nx2BufCache::FrameAddressSet native_indirect_uniforms_this_frame;
+
+    /// EDEN_NX2_REACTIVE_ASYNC_FLUSH: queues the GPU-written parts of a range for download at the
+    /// next fence instead of flushing them now. Returns whether anything was queued.
+    bool Nx2QueueReadDownload(DAddr device_addr, u64 size) {
+        if (!memory_tracker.IsRegionGpuModified(device_addr, size)) {
+            return false; // nothing CommitAsyncFlushesHigh would copy: flush the old way
+        }
+        bool queued = false;
+        gpu_modified_ranges.ForEachInRange(device_addr, size, [&](DAddr lower, DAddr upper) {
+            uncommitted_gpu_modified_ranges.Add(lower, upper - lower);
+            queued = true;
+        });
+        return queued;
+    }
 
 private:
     template <typename Func>
@@ -507,6 +525,9 @@ private:
     void BindHostGraphicsUniformBuffers(size_t stage);
 
     void BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 binding_index, bool needs_bind);
+
+    /// Counts what a streamed uniform buffer bind did (EDEN_NX2_GPU_PROFILE).
+    void NoteUniformReuse(VideoCommon::UniformReuseResult result, u32 size);
 
     void BindHostGraphicsStorageBuffers(size_t stage);
 

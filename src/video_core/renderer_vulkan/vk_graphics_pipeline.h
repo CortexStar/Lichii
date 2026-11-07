@@ -144,7 +144,19 @@ public:
         u64 formats{};
         std::memcpy(&formats, k.state.color_formats.data(),
                     (std::min)(sizeof(formats), sizeof(k.state.color_formats)));
-        return tag ^ (u64{k.state.raw1} << 32 | k.state.raw2) ^ (formats * 0xC2B2AE3D27D4EB4FULL);
+        tag ^= (u64{k.state.raw1} << 32 | k.state.raw2) ^ (formats * 0xC2B2AE3D27D4EB4FULL);
+        if (VideoCommon::Nx2BindMemo::PipeNextPointersEnabled()) {
+            // Only bytes operator== compares: equal keys must tag alike.
+            u64 more = k.state.attribute_types;
+            if (offsetof(FixedPipelineState, attachments) + sizeof(k.state.attachments) <=
+                k.state.Size()) {
+                for (const auto& attachment : k.state.attachments) {
+                    more = (more ^ attachment.raw) * 0x9E3779B97F4A7C15ULL;
+                }
+            }
+            tag ^= more * 0xD6E8FEB86659FD93ULL;
+        }
+        return tag;
     }
 
     bool Configure(bool is_indexed) {
@@ -164,6 +176,21 @@ public:
         // EDEN_NX2_PIPE_TRANSITIONS: full keys are compared only where the tag matches, and a
         // transition taken moves one place toward the front.
         const u64 tag = TransitionTag(current_key);
+        if (VideoCommon::Nx2BindMemo::PipeNextPointersEnabled()) {
+            // A transition's key is its pipeline's own (AddTransition).
+            for (size_t index = 0; index < transition_tags.size(); ++index) {
+                GraphicsPipeline* const next = transitions[index];
+                if (transition_tags[index] != tag || next->key != current_key) {
+                    continue;
+                }
+                if (index != 0) {
+                    std::swap(transition_tags[index], transition_tags[index - 1]);
+                    std::swap(transitions[index], transitions[index - 1]);
+                }
+                return next;
+            }
+            return nullptr;
+        }
         for (size_t index = 0; index < transition_tags.size(); ++index) {
             if (transition_tags[index] != tag || transition_keys[index] != current_key) {
                 continue;

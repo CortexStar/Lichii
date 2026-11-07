@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <thread>
 
@@ -226,6 +227,13 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     qmd_predict = narrow_compute && sem_predict && qmd_predict_switch;
     acquire_sync_at = narrow && acquire_sync_at_switch;
     publish_waits = publish_waits_switch;
+    static const bool acquire_skip_barriers_switch =
+        Nx2Switch("EDEN_NX2_ACQUIRE_SKIP_BARRIERS", true);
+    static const bool front_defer_switch = Nx2Switch("EDEN_NX2_FRONT_DEFER", true);
+    acquire_skip_barriers = acquire_poll && acquire_skip_barriers_switch;
+    front_defer = narrow && front_defer_switch;
+    defer_round_target = ~u64{0};
+    wait_cap = ~u64{0};
     diag = narrow && Nx2Switch("EDEN_NX2_NARROW_DIAG", false);
     if (narrow) {
         page_slots = std::make_unique<PageSlot[]>(PageBuckets * 4);
@@ -241,10 +249,11 @@ void GpuSplit::MaybeStart(Core::System& system_) {
                  "GPU thread split narrow switches: compute {} render_enable {} dma_recorded {} "
                  "list_sync {} sem_predict {} sem_predict_landed {} acquire_poll {} list_exact {} "
                  "sync_gpu_semaphores {} qmd_predict {} acquire_sync_at {} publish_waits {} "
-                 "diag {}",
+                 "acquire_skip_barriers {} front_defer {} diag {}",
                  narrow_compute, narrow_render_enable, narrow_dma_recorded, narrow_list_sync,
                  sem_predict, sem_predict_landed, acquire_poll, list_exact, sync_gpu_semaphores,
-                 qmd_predict, acquire_sync_at, publish_waits, diag);
+                 qmd_predict, acquire_sync_at, publish_waits, acquire_skip_barriers, front_defer,
+                 diag);
     }
 }
 
@@ -287,6 +296,10 @@ void GpuSplit::Stop() {
     qmd_predict = false;
     acquire_sync_at = false;
     publish_waits = false;
+    acquire_skip_barriers = false;
+    front_defer = false;
+    defer_round_target = ~u64{0};
+    wait_cap = ~u64{0};
     for (auto& page : gpu_semaphore_pages) {
         page.store(0, std::memory_order_relaxed);
     }
@@ -387,12 +400,17 @@ void GpuSplit::Drain(DrainSite site) {
 bool GpuSplit::WaitForWriters() {
     // Held-back work goes first: a writer in it is noted before the target is taken.
     RunPendingFlush();
-    return WaitFor(std::min(last_writer_position, write_position), DrainSite::ListWriters);
+    return WaitFor((std::min)({last_writer_position, write_position, wait_cap}),
+                   DrainSite::ListWriters);
+}
+
+u64 GpuSplit::SyncTarget() {
+    RunPendingFlush();
+    return (std::min)({last_sync_position, write_position, wait_cap});
 }
 
 bool GpuSplit::WaitForSync() {
-    RunPendingFlush();
-    return WaitFor(std::min(last_sync_position, write_position), DrainSite::ListSync);
+    return WaitFor(SyncTarget(), DrainSite::ListSync);
 }
 
 void GpuSplit::NoteSyncAt(u64 position, UnboundedCause cause) {
@@ -730,8 +748,8 @@ bool GpuSplit::WrittenSince(const void* space, GPUVAddr address, u64 position) c
     return word == nullptr || word->position > position;
 }
 
-bool GpuSplit::WaitForWritesTo(const void* space, GPUVAddr address, u64 size, DrainSite site,
-                               NarrowBase base_kind) {
+std::pair<u64, UnboundedCause> GpuSplit::WritesToTargetCause(const void* space, GPUVAddr address,
+                                                             u64 size, NarrowBase base_kind) {
     // Held-back writes (constant buffer runs) are sent and recorded first.
     RunPendingFlush();
     consumed_cache = consumed.load(std::memory_order_acquire);
@@ -748,11 +766,13 @@ bool GpuSplit::WaitForWritesTo(const void* space, GPUVAddr address, u64 size, Dr
     if (target != base) {
         cause = target == write_floor ? UnboundedCause::Overflow : UnboundedCause::Record;
     }
-    return WaitForAttributed((std::min)(target, write_position), site, cause);
+    return {(std::min)({target, write_position, wait_cap}), cause};
 }
 
-bool GpuSplit::WaitForWritersTo(const void* space, GPUVAddr address, u64 size, bool sync_only) {
-    RunPendingFlush(); // As in WaitForWritesTo
+std::pair<u64, UnboundedCause> GpuSplit::WritersToTargetCause(const void* space,
+                                                              GPUVAddr address, u64 size,
+                                                              bool sync_only) {
+    RunPendingFlush(); // As in WritesToTargetCause
     consumed_cache = consumed.load(std::memory_order_acquire);
     u64 base = unbounded_writer_position;
     UnboundedCause cause = writer_cause;
@@ -764,8 +784,88 @@ bool GpuSplit::WaitForWritersTo(const void* space, GPUVAddr address, u64 size, b
     if (target != base) {
         cause = target == write_floor ? UnboundedCause::Overflow : UnboundedCause::Record;
     }
-    return WaitForAttributed((std::min)(target, write_position), DrainSite::NarrowListWriters,
-                             cause);
+    return {(std::min)({target, write_position, wait_cap}), cause};
+}
+
+u64 GpuSplit::WritesToTarget(const void* space, GPUVAddr address, u64 size, NarrowBase base) {
+    return WritesToTargetCause(space, address, size, base).first;
+}
+
+u64 GpuSplit::WritersToTarget(const void* space, GPUVAddr address, u64 size, bool sync_only) {
+    return WritersToTargetCause(space, address, size, sync_only).first;
+}
+
+bool GpuSplit::WaitForWritesTo(const void* space, GPUVAddr address, u64 size, DrainSite site,
+                               NarrowBase base_kind) {
+    const auto [target, cause] = WritesToTargetCause(space, address, size, base_kind);
+    return WaitForAttributed(target, site, cause);
+}
+
+bool GpuSplit::WaitForWritersTo(const void* space, GPUVAddr address, u64 size, bool sync_only) {
+    const auto [target, cause] = WritersToTargetCause(space, address, size, sync_only);
+    return WaitForAttributed(target, DrainSite::NarrowListWriters, cause);
+}
+
+bool GpuSplit::WaitForDeferred(u64 target, bool (*stop)(void*), void* argument,
+                               bool may_sleep) {
+    RunPendingFlush();
+    target = (std::min)(target, write_position);
+    Publish();
+    const u64 start = diag ? Nx2Profile::Ticks() : 0;
+    // The back stores `consumed` (and wakes a sleeping front) as soon as it passes the target.
+    wait_target.store(target, std::memory_order_seq_cst);
+    bool stopped = false;
+    std::chrono::steady_clock::time_point poll_start{};
+    for (u32 spins = 0;; ++spins) {
+        consumed_cache = consumed.load(std::memory_order_acquire);
+        if (consumed_cache >= target) {
+            break;
+        }
+        if ((spins & 63) == 0 && stop(argument)) {
+            stopped = true;
+            break;
+        }
+        if (spins < 16384) {
+            Pause();
+            continue;
+        }
+        if (!may_sleep) {
+            // A CPU semaphore release wakes nothing: hand back to the caller's poll.
+            if (spins == 16384) {
+                poll_start = std::chrono::steady_clock::now();
+            } else if (std::chrono::steady_clock::now() - poll_start >=
+                       std::chrono::microseconds{500}) {
+                break;
+            }
+            std::this_thread::yield();
+            continue;
+        }
+        if (!back_running.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+            continue;
+        }
+        // As Backoff: woken by each store of `consumed` and by each new command
+        // (WakeFrontForCommand), which is looked for after front_waiting is set.
+        front_waiting.store(true, std::memory_order_seq_cst);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        const u32 seen = front_wake.load(std::memory_order_seq_cst);
+        if (stop(argument)) {
+            front_waiting.store(false, std::memory_order_relaxed);
+            stopped = true;
+            break;
+        }
+        if (consumed.load(std::memory_order_seq_cst) < target) {
+            front_wake.wait(seen, std::memory_order_seq_cst);
+        }
+        front_waiting.store(false, std::memory_order_relaxed);
+    }
+    wait_target.store(~u64{0}, std::memory_order_relaxed);
+    if (diag) [[unlikely]] {
+        ++diag_defer_waits;
+        diag_defer_wait_ticks += Nx2Profile::Ticks() - start;
+        MaybeReportDiag();
+    }
+    return stopped;
 }
 
 bool GpuSplit::WaitForAttributed(u64 target, DrainSite site, UnboundedCause cause) {
@@ -835,6 +935,20 @@ void GpuSplit::MaybeReportDiag() {
         }
         LOG_INFO(HW_GPU, "Narrow diag: QMD prediction:{}", qmd);
     }
+    if (front_defer) {
+        std::string defers;
+        for (size_t i = 0; i < diag_defers.size(); ++i) {
+            defers += fmt::format(" {} {:.0f}/s,", defer_kind_names[i],
+                                  static_cast<double>(diag_defers[i]) / seconds);
+        }
+        LOG_INFO(HW_GPU,
+                 "Narrow diag: front defer: parks per second:{} resumes {:.0f}/s, words sent while "
+                 "parked {:.0f}/s; waits with only parked channels {:.0f}/s, {:.1f} ms",
+                 defers, static_cast<double>(diag_defer_resumes) / seconds,
+                 static_cast<double>(diag_defer_words) / seconds,
+                 static_cast<double>(diag_defer_waits) / seconds,
+                 static_cast<double>(diag_defer_wait_ticks) * 1000.0 / static_cast<double>(ticks));
+    }
     std::string dma;
     for (u32 pass = 0; pass < 12; ++pass) {
         size_t best = diag_macro_dma.size();
@@ -866,6 +980,11 @@ void GpuSplit::MaybeReportDiag() {
     diag_wait_ticks = {};
     diag_acquires = {};
     diag_qmd = {};
+    diag_defers = {};
+    diag_defer_resumes = 0;
+    diag_defer_words = 0;
+    diag_defer_waits = 0;
+    diag_defer_wait_ticks = 0;
     diag_window_start = now;
     diag_window_ticks = Nx2Profile::Ticks();
 }

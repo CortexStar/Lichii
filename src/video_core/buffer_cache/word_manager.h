@@ -7,8 +7,10 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
+#include <cstdlib>
 #include <limits>
 #include <span>
 #include <utility>
@@ -23,6 +25,38 @@
 #include "video_core/nx2_perf.h"
 
 namespace VideoCommon {
+
+/// Page protection changes the tracker asks for (EDEN_NX2_GPU_PROFILE), logged with the buffer
+/// cache counters: protects (pages tracked again by a sync) and unprotects (CPU-dirty marks).
+struct Nx2TrackerStats {
+    static inline const bool enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
+    /// Protect runs, protected bytes, unprotect runs, unprotected bytes.
+    static inline std::array<std::atomic<u64>, 4> counts{};
+
+    static void Note(std::span<const std::pair<VAddr, size_t>> ranges, int delta) noexcept {
+        if (!enabled) [[likely]] {
+            return;
+        }
+        u64 bytes = 0;
+        for (const auto& range : ranges) {
+            bytes += range.second;
+        }
+        const size_t base = delta > 0 ? 0 : 2;
+        counts[base].fetch_add(ranges.size(), std::memory_order_relaxed);
+        counts[base + 1].fetch_add(bytes, std::memory_order_relaxed);
+    }
+
+    /// Protect runs, protected pages, unprotect runs, unprotected pages since the last call.
+    static std::array<u64, 4> Take() noexcept {
+        std::array<u64, 4> taken{};
+        for (size_t i = 0; i < taken.size(); ++i) {
+            taken[i] = counts[i].exchange(0, std::memory_order_relaxed);
+        }
+        taken[1] /= Core::DEVICE_PAGESIZE;
+        taken[3] /= Core::DEVICE_PAGESIZE;
+        return taken;
+    }
+};
 
 constexpr u64 PAGES_PER_WORD = 64;
 constexpr u64 BYTES_PER_PAGE = Core::DEVICE_PAGESIZE;
@@ -352,6 +386,7 @@ struct WordManager {
         std::sort(ranges.begin(), ranges.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
         if (!Nx2Perf::Verify()) {
             CoalesceInPlace(ranges);
+            Nx2TrackerStats::Note(ranges, delta);
             tracker->UpdatePagesCachedBatch(
                 std::span<const std::pair<VAddr, size_t>>(ranges.data(), ranges.size()), delta);
             ranges.clear();
@@ -380,6 +415,7 @@ struct WordManager {
                       coalesced.front().first);
         }
         // Use batch API to reduce lock acquisitions and contention.
+        Nx2TrackerStats::Note(coalesced, delta);
         tracker->UpdatePagesCachedBatch(coalesced, delta);
         ranges.clear();
     }
@@ -423,6 +459,62 @@ struct WordManager {
     [[nodiscard]] u64 DirtyWords(size_t first_word, size_t last_word) const noexcept {
         const u64 mask = (~u64{0} >> (63 - (last_word - first_word))) << first_word;
         return mask & ~clean_words;
+    }
+
+    /// IsRegionModified(Type::GPU, ...) for the bytes [first, last] of one word.
+    [[nodiscard]] bool IsWordRangeGpuModified(u64 first, u64 last) const noexcept {
+        const size_t word = first / BYTES_PER_WORD;
+        const u64 first_page = (first % BYTES_PER_WORD) / BYTES_PER_PAGE;
+        const u64 last_page = (last % BYTES_PER_WORD) / BYTES_PER_PAGE;
+        const u64 mask = (~u64{0} >> (63 - (last_page - first_page))) << first_page;
+        return (heap[num_words * size_t(Type::GPU) + word] &
+                ~heap[num_words * size_t(Type::Untracked) + word] & mask) != 0;
+    }
+
+    /// Whether a page of [offset, offset + size) is CPU-dirty or unprotected (what an upload walk
+    /// finds or changes). Clean words are skipped through clean_words.
+    [[nodiscard]] bool IsRangeUploadDirty(u64 offset, u64 size) const noexcept {
+        if (size == 0) {
+            return false;
+        }
+        const u64 end = offset + size;
+        u64 dirty = DirtyWords(offset / BYTES_PER_WORD, (end - 1) / BYTES_PER_WORD);
+        while (dirty != 0) {
+            const size_t word = static_cast<size_t>(std::countr_zero(dirty));
+            dirty &= dirty - 1;
+            const u64 word_begin = word * BYTES_PER_WORD;
+            const u64 begin = (std::max)(offset, word_begin) - word_begin;
+            const u64 stop = (std::min)(end, word_begin + BYTES_PER_WORD) - word_begin;
+            const u64 first_page = begin / BYTES_PER_PAGE;
+            const u64 last_page = (stop - 1) / BYTES_PER_PAGE;
+            const u64 mask = (~u64{0} >> (63 - (last_page - first_page))) << first_page;
+            if (((heap[num_words * size_t(Type::CPU) + word] |
+                  heap[num_words * size_t(Type::Untracked) + word]) & mask) != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Whether every page of [offset, offset + size) is CPU-dirty (marking it again changes no
+    /// tracker state). False for an empty range.
+    [[nodiscard]] bool IsRangeFullyCpuModified(u64 offset, u64 size) const noexcept {
+        if (size == 0) {
+            return false;
+        }
+        const u64 end = offset + size;
+        for (u64 word = offset / BYTES_PER_WORD; word <= (end - 1) / BYTES_PER_WORD; ++word) {
+            const u64 word_begin = word * BYTES_PER_WORD;
+            const u64 begin = (std::max)(offset, word_begin) - word_begin;
+            const u64 stop = (std::min)(end, word_begin + BYTES_PER_WORD) - word_begin;
+            const u64 first_page = begin / BYTES_PER_PAGE;
+            const u64 last_page = (stop - 1) / BYTES_PER_PAGE;
+            const u64 mask = (~u64{0} >> (63 - (last_page - first_page))) << first_page;
+            if ((heap[num_words * size_t(Type::CPU) + word] & mask) != mask) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /// Recounts the clean words: true when clean_words matches the CPU and Untracked words.

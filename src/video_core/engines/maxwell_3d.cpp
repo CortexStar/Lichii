@@ -2152,6 +2152,10 @@ void Maxwell3D::FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& fs, u3
         split.NoteUnboundedWrite(false, VideoCommon::UnboundedCause::Wfi3D);
         return;
     case MAXWELL3D_REG_INDEX(invalidate_texture_data_cache):
+        // The back runs InvalidateGPUCache (the CPU's writes into the caches; GPU bytes next to
+        // them are downloaded, only on GPU-written pages) and a WFI. A barrier: it still holds
+        // reads after host waits, but releases no semaphore, so with EDEN_NX2_ACQUIRE_POLL it
+        // doesn't hold acquires (GpuSplit::NoteUnboundedWrite, EDEN_NX2_ACQUIRE_SKIP_BARRIERS).
         split.NoteUnboundedWrite(false, VideoCommon::UnboundedCause::TexInvalidate);
         return;
     case MAXWELL3D_REG_INDEX(render_enable.mode):

@@ -799,14 +799,20 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
     // with the same shaders too, so does the pipeline the last lookup found for it.
     const bool skip = PipelineSkipEnabled();
     bool state_same = false;
+    // EDEN_NX2_PIPE_PATCH: blending or attribute types alone moved: redo only those parts.
+    PipelineStateWatch::Patch patch{};
     if (skip) {
         if (graphics_key.state.xfb_enabled != 0) {
             Memo::Note(Stat::PipeMissXfb);
         } else {
-            state_same = state_watch.StateUnchanged(*maxwell3d, graphics_key.state);
+            state_same = state_watch.StateUnchanged(*maxwell3d, graphics_key.state,
+                                                    Memo::PipePatchEnabled() ? &patch : nullptr);
         }
     }
-    if (state_same && !shaders_dirty) {
+    if (state_same && patch.Any()) {
+        // The key's state changed in those parts only; Next() finds the pipeline for it.
+        PipelineStateWatch::ApplyPatch(*maxwell3d, graphics_key.state, patch);
+    } else if (state_same && !shaders_dirty) {
         if (key_pipeline != nullptr && key_pipeline == current_pipeline) {
             Memo::Note(Stat::PipeSkip);
             if (shaders_same) {

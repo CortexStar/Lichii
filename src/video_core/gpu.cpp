@@ -145,6 +145,24 @@ struct GPU::Impl {
             const char* value = std::getenv("EDEN_NX2_DIRTY_FASTPATH");
             return value == nullptr || value[0] != '0';
         }();
+        // EDEN_NX2_DIRTY_ANY: one shared flag instead of three atomics per core's manager, on
+        // lines the cores write (18 loads per fence, ~18,000 fences a second).
+        static const bool any_flag = [] {
+            const char* value = std::getenv("EDEN_NX2_DIRTY_ANY");
+            return value == nullptr || value[0] != '0';
+        }();
+        if (fast_path && any_flag) {
+            if (!Core::GPUDirtyMemoryManager::AnyWrites()) {
+                return;
+            }
+            Core::GPUDirtyMemoryManager::BeginGather();
+            std::function<void(PAddr, size_t)> callback_writes([this](PAddr address, size_t size) {
+                renderer->ReadRasterizer()->OnCacheInvalidation(address, size);
+            });
+            system.GatherGPUDirtyMemory(callback_writes);
+            Core::GPUDirtyMemoryManager::EndGather();
+            return;
+        }
         if (fast_path) {
             bool may_have_writes = false;
             for (auto& manager : system.GetGPUDirtyMemoryManager()) {
@@ -344,6 +362,45 @@ struct GPU::Impl {
         const auto stall_begin = VideoCommon::Nx2Reactive::g_diag
                                      ? std::chrono::steady_clock::now()
                                      : std::chrono::steady_clock::time_point{};
+        if (VideoCommon::Nx2Reactive::AsyncFlush()) {
+            // The GPU thread queues the data for a download it submits at once and goes on;
+            // this thread waits for the copy to land (EDEN_NX2_REACTIVE_ASYNC_FLUSH). Without a
+            // download queued it flushes right there, as below.
+            bool queued = false;
+            const u64 async_fence = RequestSyncOperation([this, raster_area, &queued]() {
+                InvalidateGPUCache();
+                VideoCore::RasterizerInterface* const rasterizer = renderer->ReadRasterizer();
+                const u64 area_size = raster_area.end_address - raster_area.start_address;
+                queued = rasterizer->QueueFlushRegion(raster_area.start_address, area_size);
+                if (!queued) {
+                    rasterizer->FlushRegion(raster_area.start_address, area_size);
+                }
+            });
+            gpu_thread.TickGPU(is_async);
+            WaitForSyncOperation(async_fence);
+            bool landed = !queued;
+            if (queued) {
+                VideoCore::RasterizerDownloadArea pending = raster_area;
+                pending.preemtive = false;
+                pending.wait_landing = true;
+                landed = WaitForLanding(addr, size, pending).preemtive;
+            }
+            if (VideoCommon::Nx2Reactive::g_diag) [[unlikely]] {
+                VideoCommon::Nx2Reactive::NoteAsyncFlush(queued, landed);
+                if (landed) {
+                    const auto waited = std::chrono::steady_clock::now() - stall_begin;
+                    VideoCommon::Nx2Reactive::NoteStall(
+                        raster_area.start_address, raster_area.end_address,
+                        static_cast<u64>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count()));
+                }
+            }
+            if (landed) {
+                return raster_area;
+            }
+            // Not landed (a newer write or a pending CPU write kept the page GPU-written, or no
+            // copy covered it): flush as before.
+        }
         const u64 fence = RequestSyncOperation([this, raster_area]() {
             // Apply collected guest writes before downloading GPU data over guest memory.
             InvalidateGPUCache();

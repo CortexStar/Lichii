@@ -48,7 +48,13 @@ void Scheduler::Push(GPU& gpu, s32 channel, CommandList&& entries) {
         std::find(pending_channels.begin(), pending_channels.end(), channel_state) ==
             pending_channels.end()) {
         pending_channels.push_back(channel_state);
-        any_pending.store(true, std::memory_order_release);
+        // Only real suspensions: channels parked on the split's back (EDEN_NX2_FRONT_DEFER) go
+        // on by themselves, and the present gives up its wait for a suspended one.
+        any_pending.store(std::ranges::any_of(pending_channels,
+                                              [](const auto& state) {
+                                                  return state->payload->dma_pusher.IsSuspended();
+                                              }),
+                          std::memory_order_release);
     }
     if (!pending_channels.empty()) {
         ResumePending(gpu);
@@ -78,7 +84,11 @@ void Scheduler::ResumePending(GPU& gpu) {
     std::erase_if(pending_channels, [](const auto& state) {
         return !state->payload->dma_pusher.HasPendingAcquire();
     });
-    any_pending.store(!pending_channels.empty(), std::memory_order_release);
+    any_pending.store(std::ranges::any_of(pending_channels,
+                                          [](const auto& state) {
+                                              return state->payload->dma_pusher.IsSuspended();
+                                          }),
+                      std::memory_order_release);
 }
 
 void Scheduler::DeclareChannel(std::shared_ptr<ChannelState> new_channel) {

@@ -245,19 +245,7 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
     }
     if (!extended_dynamic_state_3_blend) {
         if (maxwell3d.dirty.flags[Dirty::Blending]) {
-            maxwell3d.dirty.flags[Dirty::Blending] = false;
-            for (size_t index = 0; index < attachments.size(); ++index) {
-                attachments[index].Refresh(regs, index);
-                auto& attachment = attachments[index];
-                if (color_write_enable_dynamic && attachment.mask_r == 0 &&
-                    attachment.mask_g == 0 && attachment.mask_b == 0 &&
-                    attachment.mask_a == 0) {
-                    attachment.mask_r.Assign(1);
-                    attachment.mask_g.Assign(1);
-                    attachment.mask_b.Assign(1);
-                    attachment.mask_a.Assign(1);
-                }
-            }
+            RefreshBlending(maxwell3d);
         }
     }
     dynamic_state.Refresh3(regs, features);
@@ -274,6 +262,22 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
         for (u32 binding = 0; binding < vertex_strides.size(); ++binding) {
             vertex_strides[binding] = static_cast<u16>(RepackedVertexStride(
                 repack_mask, binding, regs.vertex_streams[binding].stride));
+        }
+    }
+}
+
+void FixedPipelineState::RefreshBlending(Tegra::Engines::Maxwell3D& maxwell3d) {
+    const Maxwell& regs = maxwell3d.regs;
+    maxwell3d.dirty.flags[Dirty::Blending] = false;
+    for (size_t index = 0; index < attachments.size(); ++index) {
+        attachments[index].Refresh(regs, index);
+        auto& attachment = attachments[index];
+        if (color_write_enable_dynamic && attachment.mask_r == 0 && attachment.mask_g == 0 &&
+            attachment.mask_b == 0 && attachment.mask_a == 0) {
+            attachment.mask_r.Assign(1);
+            attachment.mask_g.Assign(1);
+            attachment.mask_b.Assign(1);
+            attachment.mask_a.Assign(1);
         }
     }
 }
@@ -785,8 +789,8 @@ void PipelineStateWatch::Store(Maxwell3D& maxwell3d, const DynamicFeatures& feat
     valid = true;
 }
 
-bool PipelineStateWatch::StateUnchanged(Maxwell3D& maxwell3d,
-                                        const FixedPipelineState& state) noexcept {
+bool PipelineStateWatch::StateUnchanged(Maxwell3D& maxwell3d, const FixedPipelineState& state,
+                                        Patch* patch) noexcept {
     using VideoCommon::Nx2BindMemo::Note;
     using Stat = VideoCommon::Nx2BindMemo::Stat;
     if (!valid || engine != &maxwell3d) {
@@ -812,14 +816,26 @@ bool PipelineStateWatch::StateUnchanged(Maxwell3D& maxwell3d,
         flag_values_same = true;
     }
     if (blending_gated && flags[Dirty::Blending]) {
-        Note(Stat::PipeMissBlending);
-        return false;
+        if (patch == nullptr) {
+            Note(Stat::PipeMissBlending);
+            return false;
+        }
+        patch->blending = true;
     }
-    if (flags[Dirty::VertexInput] &&
-        (!dynamic_vertex_input ||
-         FixedPipelineState::DynamicAttributeTypes(maxwell3d.regs) != state.attribute_types)) {
-        Note(Stat::PipeMissVertexInput);
-        return false;
+    if (flags[Dirty::VertexInput]) {
+        if (!dynamic_vertex_input) {
+            Note(Stat::PipeMissVertexInput);
+            return false;
+        }
+        const u64 types = FixedPipelineState::DynamicAttributeTypes(maxwell3d.regs);
+        if (types != state.attribute_types) {
+            if (patch == nullptr) {
+                Note(Stat::PipeMissVertexInput);
+                return false;
+            }
+            patch->vertex_input = true;
+            patch->attribute_types = types;
+        }
     }
     if (maxwell3d.draw_manager.draw_state.topology != topology ||
         maxwell3d.engine_state != engine_state ||
@@ -849,6 +865,22 @@ bool PipelineStateWatch::StateUnchanged(Maxwell3D& maxwell3d,
         Note(Stat::PipeFlagValuesSame);
     }
     return true;
+}
+
+void PipelineStateWatch::ApplyPatch(Maxwell3D& maxwell3d, FixedPipelineState& state,
+                                    const Patch& patch) {
+    using VideoCommon::Nx2BindMemo::Note;
+    using Stat = VideoCommon::Nx2BindMemo::Stat;
+    if (patch.blending) {
+        // As Refresh without dynamic blend state under a raised Blending flag.
+        state.RefreshBlending(maxwell3d);
+        Note(Stat::PipePatchBlend);
+    }
+    if (patch.vertex_input) {
+        // As Refresh with dynamic vertex input; the flag stays for the command buffer update.
+        state.attribute_types = patch.attribute_types;
+        Note(Stat::PipePatchVertexInput);
+    }
 }
 
 } // namespace Vulkan

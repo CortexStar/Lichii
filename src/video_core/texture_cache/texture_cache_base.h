@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstring>
 #include <deque>
 #include <limits>
 #include <map>
@@ -40,6 +41,7 @@
 #include "video_core/delayed_destruction_ring.h"
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/game_dlss_status.h"
+#include "video_core/nx2_bindmemo_stats.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/descriptor_table.h"
 #include "video_core/texture_cache/image_base.h"
@@ -67,6 +69,67 @@ struct ImageViewInOut {
     u32 index{};
     bool blacklist{};
     ImageViewId id{};
+};
+
+/// EDEN_NX2_TEX_PAGES: the host pointers of the guest pages one draw or dispatch reads its
+/// texture handles and TIC/TSC entries from, each page translated once instead of once per read.
+/// The reads then all see the mappings as they were at the draw's first read: the guest can't
+/// remap memory a pending draw reads without racing the GPU itself, and a host pointer points
+/// into guest RAM, which is never freed. Only resolved pages are kept as pointers; a cache lives
+/// for one draw.
+struct GuestPageCache {
+    static constexpr size_t NUM_ENTRIES = 8;
+    static constexpr GPUVAddr PAGE_BYTES = GPUVAddr{1} << 12; ///< Core::Memory::YUZU_PAGESIZE
+    static constexpr GPUVAddr NO_PAGE = ~GPUVAddr{0};          ///< never a page base
+
+    std::array<GPUVAddr, NUM_ENTRIES> pages{NO_PAGE, NO_PAGE, NO_PAGE, NO_PAGE,
+                                            NO_PAGE, NO_PAGE, NO_PAGE, NO_PAGE};
+    std::array<const u8*, NUM_ENTRIES> hosts{};
+    u32 next{};
+
+    /// Host memory of [addr, addr + size) when it lies in one mapped page, as
+    /// MemoryManager::GetPointer(addr) gives it; nullptr otherwise. `words`: the caller stands in
+    /// for MemoryManager::Read<u32>, so a page the syncpoint shim (or anything else
+    /// Nx2ReadNeedsDrain names) overlaps is remembered as nullptr: read it the slow way.
+    template <class MemoryManager>
+    [[nodiscard]] const u8* Get(const MemoryManager& gpu_memory, GPUVAddr addr, size_t size,
+                                bool words) noexcept {
+        const GPUVAddr offset = addr & (PAGE_BYTES - 1);
+        if (offset + size > PAGE_BYTES) {
+            return nullptr;
+        }
+        const GPUVAddr page = addr - offset;
+        for (size_t index = 0; index < NUM_ENTRIES; ++index) {
+            if (pages[index] == page) {
+                return hosts[index] != nullptr ? hosts[index] + offset : nullptr;
+            }
+        }
+        Nx2BindMemo::Note(Nx2BindMemo::Stat::PageTranslations);
+        const u8* host = gpu_memory.GetPointer(page);
+        if (host == nullptr && !words) {
+            return nullptr;
+        }
+        if (words && host != nullptr && gpu_memory.Nx2ReadNeedsDrain(page, PAGE_BYTES)) {
+            host = nullptr;
+        }
+        const size_t slot = next++ % NUM_ENTRIES;
+        pages[slot] = page;
+        hosts[slot] = host;
+        return host != nullptr ? host + offset : nullptr;
+    }
+
+    /// MemoryManager::Read<u32>(addr), from the translated page when it can.
+    template <class MemoryManager>
+    [[nodiscard]] u32 ReadWord(const MemoryManager& gpu_memory, GPUVAddr addr) noexcept {
+        if (const u8* const host = Get(gpu_memory, addr, sizeof(u32), true)) {
+            Nx2BindMemo::Note(Nx2BindMemo::Stat::HandleWords);
+            u32 value;
+            std::memcpy(&value, host, sizeof(value));
+            return value;
+        }
+        Nx2BindMemo::Note(Nx2BindMemo::Stat::HandleWordsSlow);
+        return gpu_memory.template Read<u32>(addr);
+    }
 };
 
 struct AsyncDecodeContext {
@@ -333,16 +396,36 @@ public:
         u64 map_serial;
         u64 clock; ///< BindingClock() when the lookups began
         bool compute;
+        /// The TIC and TSC pages this draw's lookups translated (EDEN_NX2_TEX_PAGES).
+        mutable GuestPageCache pages{};
+    };
+
+    /// Where a binding key's memos are: computed once per binding of a draw
+    /// (EDEN_NX2_BINDMEMO_BATCH).
+    struct BindingProbe {
+        u64 hash;
+        size_t first; ///< the set's first way
+        u32 tag;
     };
 
     /// Taken after SynchronizeDescriptors, before the draw's or dispatch's first FindBinding.
     [[nodiscard]] BindingLookup BeginBindingLookup(bool compute) const noexcept;
+
+    /// The key's set, with its tag line asked for ahead of the lookup.
+    [[nodiscard]] BindingProbe ProbeBinding(u32 tic_handle, u32 tsc_index, u32 kind) const noexcept;
+
+    /// Asks ahead for the lines a lookup of this key will read: its candidate memos and the
+    /// guest TIC and TSC entries the handle names. Changes nothing a lookup decides on.
+    void PrefetchBinding(const BindingLookup& lookup, const BindingProbe& probe, u32 tic_handle,
+                         u32 tsc_index) const noexcept;
 
     /// The memo of this binding when resolving it again would give the same view, sampler and
     /// descriptor with nothing to prepare; nullptr otherwise. Touches the image in the LRU once
     /// per frame, as preparing the view would.
     [[nodiscard]] BindingMemo* FindBinding(const BindingLookup& lookup, u32 tic_handle,
                                            u32 tsc_index, u32 kind);
+    [[nodiscard]] BindingMemo* FindBinding(const BindingLookup& lookup, u32 tic_handle,
+                                           u32 tsc_index, u32 kind, const BindingProbe& probe);
 
     /// Changes with every event that can make a binding memo stale.
     [[nodiscard]] u64 BindingClock() const noexcept {

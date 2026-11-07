@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdlib>
@@ -12,6 +13,7 @@
 #include <optional>
 #include <thread>
 #include <type_traits>
+#include <utility>
 
 #include "common/common_types.h"
 
@@ -113,6 +115,22 @@ enum class QmdDiag : u8 {
 
 inline constexpr std::array<const char*, static_cast<size_t>(QmdDiag::Count)> qmd_diag_names{
     "clean", "overlay", "waited", "resync", "grids", "releases",
+};
+
+/// EDEN_NX2_FRONT_DEFER: why a channel parked instead of making the front wait for the back
+/// (EDEN_NX2_NARROW_DIAG counts each).
+enum class DeferKind : u8 {
+    AcquirePoll,   ///< A semaphore acquire: the recorded writes over the word
+    AcquireNarrow, ///< A semaphore acquire: the dispatches and unbounded writes before it
+    AcquireFull,   ///< A semaphore acquire: all the work before it
+    AcquireFences, ///< A semaphore acquire: the fence release after it
+    Suspended,     ///< A suspended acquire's poll: the work sent since its last check
+    List,          ///< A command list fetch: its writers (GP sync, recorded writes)
+    Count,
+};
+
+inline constexpr std::array<const char*, static_cast<size_t>(DeferKind::Count)> defer_kind_names{
+    "acquire poll", "acquire narrow", "acquire full", "acquire fences", "suspended poll", "list",
 };
 
 /// A queued release's value at a semaphore word (GpuSplit::PredictedRelease).
@@ -421,8 +439,16 @@ public:
                 guest_write_position = write_position;
             }
             unbounded_cause = cause;
-            acquire_position = write_position;
-            acquire_cause = cause;
+            // EDEN_NX2_ACQUIRE_SKIP_BARRIERS (with EDEN_NX2_ACQUIRE_POLL): barriers (WFIs, texture
+            // invalidates, MemOpB, GP sync) release no semaphore. They write guest memory only on
+            // GPU-written pages (InvalidateGPUCache downloads GPU bytes next to CPU writes), where
+            // the narrowed read drains instead. Behind a poll that wasn't met, a lower base only
+            // lets a word that is met already proceed sooner; one not met still drains.
+            if (!acquire_skip_barriers || !BarrierOnly(cause) ||
+                cause == UnboundedCause::ComputeLaunch) {
+                acquire_position = write_position;
+                acquire_cause = cause;
+            }
             if (writer) {
                 unbounded_writer_position = write_position;
                 writer_cause = cause;
@@ -611,6 +637,73 @@ public:
     /// (EDEN_NX2_NARROW_LIST_SYNC): the work before the last host-level wait instead of every
     /// dispatch and copy.
     bool WaitForWritersTo(const void* space, GPUVAddr address, u64 size, bool sync_only = false);
+    /// The positions those waits wait for, without waiting (held-back work is sent first).
+    [[nodiscard]] u64 WritesToTarget(const void* space, GPUVAddr address, u64 size,
+                                     NarrowBase base = NarrowBase::Read);
+    [[nodiscard]] u64 WritersToTarget(const void* space, GPUVAddr address, u64 size,
+                                      bool sync_only);
+    /// WaitForSync's target.
+    [[nodiscard]] u64 SyncTarget();
+
+    // EDEN_NX2_FRONT_DEFER: a channel whose next step waits for the back to reach a position
+    // parks there instead (the scheduler's pending channels), so the front goes on with the other
+    // channels' work and the back always has some queued. The channel resumes at the same method
+    // with the same check once the back got there: its own order is unchanged, and other channels'
+    // work was never ordered behind it but by semaphores, syncpoints and WFIs, which still are.
+    [[nodiscard]] bool FrontDefer() const {
+        return front_defer;
+    }
+    /// The GPU thread starts a pass over the pending channels.
+    void BeginDeferRound() {
+        defer_round_target = ~u64{0};
+    }
+    /// A parked channel waits for the back to consume `target`.
+    void NoteDeferredWait(u64 target) {
+        defer_round_target = (std::min)(defer_round_target, target);
+    }
+    /// The earliest target noted since BeginDeferRound (~0: none).
+    [[nodiscard]] u64 DeferredWaitTarget() const {
+        return defer_round_target;
+    }
+    /// Whether the back consumed `target` (loads it now).
+    [[nodiscard]] bool Reached(u64 target) {
+        return LoadConsumed() >= target;
+    }
+    /// With nothing else to run: waits for the back to consume `target` or for `stop(argument)`
+    /// (polled now and then: a new command for the front). Returns whether stop ended it.
+    /// Without `may_sleep` (a channel is suspended on a semaphore the CPU releases) it never
+    /// sleeps and returns false after about 500 us, so the caller polls the suspended channels.
+    bool WaitForDeferred(u64 target, bool (*stop)(void*), void* argument, bool may_sleep);
+    /// After a command is queued for the front (any thread): wakes a front sleeping on
+    /// `front_wake`, so WaitForDeferred sees the command at once.
+    void WakeFrontForCommand() {
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (front_waiting.load(std::memory_order_seq_cst)) {
+            front_wake.fetch_add(1, std::memory_order_seq_cst);
+            front_wake.notify_all();
+        }
+    }
+    /// The list waits of a resumed fetch go no further than `cap` (the end of the work sent
+    /// before the fetch when it parked): work other channels sent since is not ordered before it.
+    void SetWaitCap(u64 cap) {
+        wait_cap = cap;
+    }
+    void ClearWaitCap() {
+        wait_cap = ~u64{0};
+    }
+    /// EDEN_NX2_NARROW_DIAG: a channel parked.
+    void NoteDeferDiag(DeferKind kind) {
+        if (diag) [[unlikely]] {
+            ++diag_defers[static_cast<size_t>(kind)];
+        }
+    }
+    /// EDEN_NX2_NARROW_DIAG: a parked channel resumed; `parked_at` was the write position then.
+    void NoteDeferResume(u64 parked_at) {
+        if (diag) [[unlikely]] {
+            ++diag_defer_resumes;
+            diag_defer_words += write_position > parked_at ? write_position - parked_at : 0;
+        }
+    }
 
 private:
     friend struct GpuSplitTestAccess;
@@ -671,6 +764,11 @@ private:
     bool WaitFor(u64 target, DrainSite site);
     /// WaitFor, with EDEN_NX2_NARROW_DIAG attributing a real wait to `cause`.
     bool WaitForAttributed(u64 target, DrainSite site, UnboundedCause cause);
+    /// WritesToTarget / WritersToTarget with the cause a wait is attributed to.
+    std::pair<u64, UnboundedCause> WritesToTargetCause(const void* space, GPUVAddr address,
+                                                       u64 size, NarrowBase base_kind);
+    std::pair<u64, UnboundedCause> WritersToTargetCause(const void* space, GPUVAddr address,
+                                                        u64 size, bool sync_only);
     void MaybeReportDiag();
 
     /// One step of a front wait for the back to consume `target`.
@@ -759,7 +857,13 @@ private:
     bool qmd_predict{};
     bool acquire_sync_at{};
     bool publish_waits{};
+    bool acquire_skip_barriers{};
+    bool front_defer{};
     bool diag{};
+    /// EDEN_NX2_FRONT_DEFER (front only): the earliest target of a parked channel this pass, and
+    /// the cap of a resumed list fetch's waits.
+    u64 defer_round_target{~u64{0}};
+    u64 wait_cap{~u64{0}};
     /// NoteGpuSemaphore's pages (page + 1, open addressing); saturated: every page counts.
     static constexpr size_t GpuSemaphoreSlots = 1024;
     static inline std::array<std::atomic<u64>, GpuSemaphoreSlots> gpu_semaphore_pages{};
@@ -825,6 +929,13 @@ private:
         diag_wait_ticks{};
     std::array<u64, 4> diag_acquires{};
     std::array<u64, static_cast<size_t>(QmdDiag::Count)> diag_qmd{};
+    /// EDEN_NX2_FRONT_DEFER: parks by kind, resumes, the words sent while channels were parked,
+    /// and the front's waits with only parked channels left (count, ticks).
+    std::array<u64, static_cast<size_t>(DeferKind::Count)> diag_defers{};
+    u64 diag_defer_resumes{};
+    u64 diag_defer_words{};
+    u64 diag_defer_waits{};
+    u64 diag_defer_wait_ticks{};
     /// Per macro (by start method): DMA reads into data RAM, FIFOed, words.
     std::array<std::array<u64, 3>, 0x100> diag_macro_dma{};
     u64 diag_window_start{};
