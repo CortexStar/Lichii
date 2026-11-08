@@ -4,10 +4,18 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
+#include <thread>
 #if defined(_M_X64) || defined(__x86_64__)
-#include <immintrin.h>
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
+#include <x86intrin.h>
+#endif
+#include "common/x64/monitor_wait.h"
 #endif
 #include "common/settings.h"
 #include "core/arm/dynarmic/arm_dynarmic.h"
@@ -201,13 +209,7 @@ void DynarmicCallbacks64::ExceptionRaised(u64 pc, Dynarmic::A64::Exception excep
     switch (exception) {
     case Dynarmic::A64::Exception::WaitForEvent:
     case Dynarmic::A64::Exception::Yield:
-        // A guest spin-wait hint: give the SMT sibling the core for a moment, as GetCNTPCT does.
-#if defined(_M_X64) || defined(__x86_64__)
-        _mm_pause();
-        _mm_pause();
-#elif defined(__aarch64__)
-        asm volatile("yield");
-#endif
+        OnSpinHint(pc);
         return;
     case Dynarmic::A64::Exception::WaitForInterrupt:
     case Dynarmic::A64::Exception::SendEvent:
@@ -226,6 +228,66 @@ void DynarmicCallbacks64::ExceptionRaised(u64 pc, Dynarmic::A64::Exception excep
             LOG_CRITICAL(Core_ARM, "ExceptionRaised(exception = {}, pc = {:08X}, code = {:08X})", static_cast<std::size_t>(exception), pc, m_memory.Read32(pc));
         }
     }
+}
+
+void DynarmicCallbacks64::OnSpinHint(u64 pc) {
+#if defined(_M_X64) || defined(__x86_64__)
+    switch (m_spin_episode.OnYield(__rdtsc(), m_spin_gap_tsc)) {
+    case SpinAction::YieldGuestCore:
+        m_parent.m_jit->HaltExecution(GuestYield);
+        return;
+    case SpinAction::YieldHostCpu:
+        std::this_thread::yield();
+        return;
+    case SpinAction::Wait:
+        if (WaitForPolledWord(pc)) {
+            return;
+        }
+        break;
+    case SpinAction::Pause:
+        break;
+    }
+    // Give the SMT sibling the core for a moment, as GetCNTPCT does.
+    _mm_pause();
+    _mm_pause();
+#elif defined(__aarch64__)
+    asm volatile("yield");
+#endif
+}
+
+bool DynarmicCallbacks64::WaitForPolledWord(u64 pc) {
+#if defined(_M_X64) || defined(__x86_64__)
+    if (m_spin_wait_tsc == 0) {
+        return false;
+    }
+    auto& site = m_spin_sites[(pc >> 2) % m_spin_sites.size()];
+    if (site.pc != pc) {
+        std::array<u32, 4> after{};
+        for (size_t i = 0; i < after.size(); ++i) {
+            after[i] = MemoryReadCode(pc + 4 * (i + 1)).value_or(0);
+        }
+        site = {pc, DecodeSpinWatch(after)};
+    }
+    if (!site.watch) {
+        return false;
+    }
+    const auto& jit = *m_parent.m_jit;
+    const u64 base = site.watch->base == 31 ? jit.GetSP() : jit.GetRegister(site.watch->base);
+    const u64 address = (base + u64(site.watch->offset)) & ~u64(site.watch->size - 1);
+    const u8* const word = m_memory.GetPointerSilent(address);
+    if (word == nullptr) {
+        return false;
+    }
+    // The loop reads the word right after the YIELD: sleep until another core writes its line,
+    // or m_spin_wait_tsc passes (a write between the guest's last read and this one is noticed
+    // at the latest then).
+    const u64 seen = site.watch->size == 8 ? *reinterpret_cast<const volatile u64*>(word)
+                                            : *reinterpret_cast<const volatile u32*>(word);
+    Common::X64::MonitorWait(word, seen, site.watch->size, m_spin_wait_tsc);
+    return true;
+#else
+    return false;
+#endif
 }
 
 void DynarmicCallbacks64::CallSVC(u32 svc) {
@@ -360,6 +422,17 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
     // 31.25 MHz for Switch 2 titles (Common::WallClock::SetGuestCNTFRQ, set at boot).
     config.cntfrq_el0 = static_cast<u32>(Common::g_wall_clock.GetGuestCNTFRQ());
     m_cb->m_spin_ticks = config.cntfrq_el0 / 600'000;
+#if defined(_M_X64) || defined(__x86_64__)
+    // Spin-wait hints (TSC ticks): an episode ends after 8 us without a YIELD; one wait for the
+    // polled line lasts at most 2 us, so interrupts and lost wake-ups are noticed by then.
+    if (Common::g_wall_clock.IsNative()) {
+        m_cb->m_spin_gap_tsc = Common::g_wall_clock.NsToTicks(std::chrono::microseconds{8});
+        if (Common::X64::HasMonitorWait()) {
+            m_cb->m_spin_wait_tsc = static_cast<u32>(
+                Common::g_wall_clock.NsToTicks(std::chrono::microseconds{2}));
+        }
+    }
+#endif
 
     // Unpredictable instructions
     config.define_unpredictable_behaviour = true;

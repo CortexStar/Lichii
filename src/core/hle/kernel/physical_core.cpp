@@ -15,6 +15,7 @@
 #include "core/core.h"
 #include "core/debugger/debugger.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/k_scheduler.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/physical_core.h"
@@ -122,6 +123,7 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
         const bool breakpoint = !step_completed && True(hr & Core::HaltReason::InstructionBreakpoint);
         const bool data_abort = !step_completed && True(hr & Core::HaltReason::DataAbort);
         const bool interrupt = !step_completed && True(hr & Core::HaltReason::BreakLoop);
+        const bool guest_yield = !step_completed && True(hr & Core::HaltReason::GuestYield);
 
         // Since scheduling may occur here, we cannot use any cached
         // state after returning from calls we make.
@@ -159,6 +161,13 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
         if (supervisor_call) {
             // Perform call.
             Svc::Call(system, interface->GetSvcNumber());
+            return;
+        }
+
+        // A guest spin-wait went on long enough: let an equal-priority thread waiting for this
+        // core run, as svcSleepThread(0) does (a no-op when nothing else is ready).
+        if (guest_yield) {
+            KScheduler::YieldWithoutCoreMigration(kernel);
             return;
         }
 

@@ -7,6 +7,7 @@
 add_library(core STATIC
     arm/arm_interface.cpp
     arm/arm_interface.h
+    arm/spin_wait.h
     arm/debug.cpp
     arm/debug.h
     arm/exclusive_monitor.cpp
