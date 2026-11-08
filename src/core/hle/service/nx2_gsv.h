@@ -2129,6 +2129,7 @@ private:
     // shown_size: the present's word 7, ((height - 1) << 16) | (width - 1) of the area the game drew
     // into from the image's top-left corner (0 when it gives none).
     void Composite(u32 image_id, u32 fence_id, u32 fence_value, u32 shown_size) {
+        NotifyHdrChange();
         u64 address{};
         u32 parent{};
         u64 parent_offset{};
@@ -2359,18 +2360,28 @@ private:
     // The HDR output the guest is told about: the HDR settings combined with the state of the
     // monitor showing the game (on Windows: Windows HDR on, the EDID peak, the SDR content
     // brightness), so an SDR desktop gets an SDR frame and an HDR desktop the game's own HDR.
-    Common::HdrOutput HostHdrOutput() {
-        void* const window =
-            system.GPU().Renderer().GetRenderWindow().GetWindowInfo().render_surface;
-        const auto display = Common::QueryDisplayHdr(window);
+    Common::HdrOutput ResolveHostHdrOutput(std::optional<Common::DisplayHdrInfo>& display) {
+        auto& monitor = Common::DisplayHdrMonitor::Instance();
+        monitor.Watch(system.GPU().Renderer().GetRenderWindow().GetWindowInfo().render_surface);
+        display = monitor.Current();
         const bool vulkan =
             Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Vulkan;
-        const auto output = Common::ResolveHdrOutput(
+        return Common::ResolveHdrOutput(
             display, vulkan ? Settings::values.hdr_mode.GetValue() : Settings::HdrMode::Off,
             Settings::values.hdr_peak_luminance.GetValue(),
             Settings::values.hdr_reference_white.GetValue());
-        const u64 logged = (u64{output.enabled} << 32) | (u64{output.peak_luminance} << 16) |
-                           output.reference_white;
+    }
+
+    static u64 HdrOutputKey(const Common::HdrOutput& output) {
+        return (u64{output.enabled} << 32) | (u64{output.peak_luminance} << 16) |
+               output.reference_white;
+    }
+
+    // What the game is told; m_logged_hdr_output keeps the last answer.
+    Common::HdrOutput HostHdrOutput() {
+        std::optional<Common::DisplayHdrInfo> display;
+        const auto output = ResolveHostHdrOutput(display);
+        const u64 logged = HdrOutputKey(output);
         if (logged != m_logged_hdr_output) {
             m_logged_hdr_output = logged;
             LOG_INFO(Service,
@@ -2382,6 +2393,30 @@ private:
                              : std::string{"no host query"});
         }
         return output;
+    }
+
+    // Fires the slots bound to the HDR status and paper white events once the monitor's state
+    // changed what the game was last told (Windows HDR toggled, the window moved to another
+    // monitor, a new HDR calibration or SDR content brightness), so it queries again and switches
+    // between SDR and HDR images. Runs at every present; costs an atomic load while nothing
+    // changes.
+    void NotifyHdrChange() {
+        const u64 generation = Common::DisplayHdrMonitor::Instance().Generation();
+        if (generation == m_hdr_generation) {
+            return;
+        }
+        m_hdr_generation = generation;
+        std::optional<Common::DisplayHdrInfo> display;
+        if (m_hdr_change_slots == 0 || m_logged_hdr_output == ~u64{} ||
+            HdrOutputKey(ResolveHostHdrOutput(display)) == m_logged_hdr_output) {
+            return;
+        }
+        LOG_INFO(Service, "nx2:vi2 display HDR state changed, signalling the game");
+        for (u32 index = 0; index < m_native_events.size(); ++index) {
+            if ((m_hdr_change_slots >> index) & 1 && m_native_events[index]) {
+                m_native_events[index]->Signal(system.Kernel());
+            }
+        }
     }
 
     // nn::vi2::QueryDisplayHdrPaperWhite(display name): u16 reference white in nits.
@@ -2495,20 +2530,28 @@ private:
         LOG_INFO(Service, "nx2:vi2 261 native event {} -> vsync", index);
         if (index < m_native_events.size() && m_native_events[index]) {
             SetVsyncSlot(index, true);
+            m_hdr_change_slots &= ~(1U << index);
         }
         TipcReplyWords(ctx, {});
     }
 
     // 263/265/267/269/271(u64 display name, u32 index): fire the slot when the display's refresh
     // rate, HDR status, HDR paper white, buffer max resolution or mode capability changes, so the
-    // game re-queries it. None of them change here: fire once so the game reads the current
-    // state, then leave the slot quiet. Kirby Air Riders re-queried its HDR status on every
-    // present while this slot fired with vsync.
+    // game re-queries it. Fire once so the game reads the current state, then leave the slot
+    // quiet; HDR status and paper white fire again when the host monitor changes
+    // (NotifyHdrChange). Kirby Air Riders re-queried its HDR status on every present while this
+    // slot fired with vsync.
     void BindChange(HLERequestContext& ctx) {
         const u32 index = ctx.CommandBuffer()[4];
         LOG_INFO(Service, "nx2:vi2 {} native event {} -> change notification", ctx.GetCommand(), index);
         if (index < m_native_events.size() && m_native_events[index]) {
             SetVsyncSlot(index, false);
+            const u32 command = ctx.GetCommand();
+            if (command == 265 || command == 267) {
+                m_hdr_change_slots |= 1U << index;
+            } else {
+                m_hdr_change_slots &= ~(1U << index);
+            }
             m_native_events[index]->Signal(system.Kernel());
         }
         TipcReplyWords(ctx, {});
@@ -2520,6 +2563,7 @@ private:
         LOG_INFO(Service, "nx2:vi2 {} native event {} unbound", ctx.GetCommand(), index);
         if (index < m_native_events.size() && m_native_events[index]) {
             SetVsyncSlot(index, false);
+            m_hdr_change_slots &= ~(1U << index);
         }
         TipcReplyWords(ctx, {});
     }
@@ -2623,6 +2667,8 @@ private:
     u64 m_presents{};
     u64 m_shown_layout{}; // image and crop size last logged
     u64 m_logged_hdr_output{~u64{}}; // HDR status last logged
+    u64 m_hdr_generation{};           // DisplayHdrMonitor generation NotifyHdrChange last saw
+    u32 m_hdr_change_slots{};         // native event slots bound to HDR status / paper white
     std::shared_ptr<std::atomic<bool>> m_capture_pending = std::make_shared<std::atomic<bool>>(false);
 };
 

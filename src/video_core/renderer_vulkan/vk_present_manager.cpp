@@ -371,19 +371,24 @@ void PresentManager::PresentThread(std::stop_token token) {
     }
 }
 
+void PresentManager::UpdateHdrMetadata() {
+    // The values the guest was told it renders for (nx2:vi2 QueryDisplayHdrStatus).
+    auto& monitor = Common::DisplayHdrMonitor::Instance();
+    monitor.Watch(render_window.GetWindowInfo().render_surface);
+    hdr_metadata_generation = monitor.Generation();
+    const auto output = Common::ResolveHdrOutput(monitor.Current(), Settings::HdrMode::On,
+                                                 Settings::values.hdr_peak_luminance.GetValue(),
+                                                 Settings::values.hdr_reference_white.GetValue());
+    swapchain.SetHdrMetadata(output.peak_luminance, output.reference_white);
+}
+
 // Returns false after discarding a deferred or incompatible frame; creation exceptions propagate.
 bool PresentManager::RecreateSwapchain(Frame* frame) {
     if (swapchain.Create(*surface, frame->width, frame->height, frame->format,
                          frame->color_space)) {
         SetImageCount();
         if (frame->color_space == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
-            // The values the guest was told it renders for (nx2:vi2 QueryDisplayHdrStatus).
-            const auto output = Common::ResolveHdrOutput(
-                Common::QueryDisplayHdr(render_window.GetWindowInfo().render_surface),
-                Settings::HdrMode::On,
-                Settings::values.hdr_peak_luminance.GetValue(),
-                Settings::values.hdr_reference_white.GetValue());
-            swapchain.SetHdrMetadata(output.peak_luminance, output.reference_white);
+            UpdateHdrMetadata();
         }
         ConfigureTransfer(frame);
         if (transfer_mode != TransferMode::Unsupported) {
@@ -487,6 +492,10 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         if (!RecreateSwapchain(frame)) {
             return;
         }
+    } else if (frame->color_space == VK_COLOR_SPACE_HDR10_ST2084_EXT &&
+               Common::DisplayHdrMonitor::Instance().Generation() != hdr_metadata_generation) {
+        // A new calibration or peak while HDR stays on: the game tone maps to the new peak.
+        UpdateHdrMetadata();
     }
 
     // Queued SDR frames can retain an older underlying format after surface recreation.
