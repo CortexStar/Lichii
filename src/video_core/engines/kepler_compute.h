@@ -277,6 +277,8 @@ private:
     MacroEngine& FrontMacroEngine(FrontState& state);
     std::span<u32> FrontMacroPositions(FrontState& state);
     void FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split, FrontState& state);
+    /// Narrow drains (GpuSplit::NarrowDrains): notes what the method just sent writes.
+    void FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& state, u32 method);
     std::unique_ptr<FrontState> front;
     bool front_macros{}; ///< The front owns the macro code and bindings (the back skips them)
 
