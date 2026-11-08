@@ -44,6 +44,18 @@ constexpr u32 ComputeInline = 0x6D;
 
 namespace {
 
+/// The split's position after the last copy engine method that may write memory (the front's).
+u64 g_last_copy_writer{};
+
+/// Whether copy engine work sent so far may still be queued on the split's back. A new session
+/// starts the split's positions over: a position past the current one is from an older session.
+[[nodiscard]] bool CopyWritersPending(const VideoCommon::GpuSplit& split) {
+    if (g_last_copy_writer > split.Position()) {
+        g_last_copy_writer = 0;
+    }
+    return !split.Ran(g_last_copy_writer);
+}
+
 /// EDEN_NX2_LIST_STATS and _VERIFY: the front read `words` of a command list at `address`
 /// (`device`) on a GPU-written page, as `where` tells; see Nx2ListStats::NoteRead.
 void NoteListRead(MemoryManager& memory, s32 channel, GPUVAddr address, u64 device,
@@ -269,7 +281,17 @@ bool DmaPusher::Step() {
         // queued before it. The GPU fetches the list after that work only past a host-level wait
         // (NoteSync): later work is not ordered before the fetch, and the list does not wait for
         // it (nor for draws, which write memory too; draw-written lists wait for the last sync).
-        if (!gpu_written && VideoCommon::GpuSplit::Get().Active() &&
+        // Lists that begin between methods don't wait for compute work either: they are command
+        // buffers the CPU writes. The words GPU work writes for the front to fetch are the
+        // parameters of a method begun in the entry before (an indirect dispatch's or draw's,
+        // as in Ocarina of Time and title 1), which begin inside its data. An entry resumed after
+        // an acquire resumes after a puller method, which no parameter list holds. The copy
+        // engine can copy GPU-written words anywhere: while its work is queued, every list waits.
+        // The lists that did not wait are checked on the back (EDEN_NX2_DRAIN_CHECK).
+        const bool command_entry = dma_state.method_count == 0;
+        const bool waits_for_writers =
+            !command_entry || CopyWritersPending(VideoCommon::GpuSplit::Get());
+        if (!gpu_written && VideoCommon::GpuSplit::Get().Active() && waits_for_writers &&
             VideoCommon::GpuSplit::Get().WaitForSyncedWriters()) {
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
@@ -540,6 +562,9 @@ void DmaPusher::CallMethod(u32 argument) {
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
+                if (engine_type == Engines::EngineTypes::MaxwellDMA) {
+                    g_last_copy_writer = split.Position();
+                }
             }
         };
         if (split.Active()) {
@@ -601,6 +626,9 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
+                if (engine_type == Engines::EngineTypes::MaxwellDMA) {
+                    g_last_copy_writer = split.Position();
+                }
             }
         };
         if (split.Active()) {
