@@ -64,10 +64,13 @@ NVIDIA DLSS takes precedence because it replaces the same output pass.
 
 ## Settings and comparison runs
 
-"Use NVIDIA DLSS in place of a game's DLSS" defaults to off and takes effect when the game
-starts. Disabled means no NVIDIA runtime is loaded; an explicitly selected temporal
-replacement uses FSR 3.1. Missing DLLs and unsupported GPUs fall back to FSR. Recording is
-asynchronous. A failed DLSS recording clears that frame's output, restores input layouts,
+In **Graphics → Game Upscaling**, enable **Use the game's built-in DLSS** to use the game's
+own network where supported. **NVIDIA DLSS Super Resolution (experimental)** takes priority
+when it can run. It is off by default and takes effect when the game starts.
+
+When NVIDIA DLSS is unavailable, supported games can use their own DLSS network if enabled.
+An explicitly selected temporal replacement can use FSR 3.1. Ocarina uses its game path.
+Recording is asynchronous. A failed DLSS recording clears that frame's output, restores input layouts,
 and makes later evaluations fall back; it does not wait for the scheduler worker.
 
 `EDEN_NX2_DLSS_REPLACEMENT=fsr` selects temporal replacement and forces FSR for comparison.
