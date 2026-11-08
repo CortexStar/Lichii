@@ -134,6 +134,11 @@ public:
     /// Called with the constant buffer words the next texture handle query's handle is made of
     /// ((word(index, offset) << shift_left) | (word(secondary) << secondary_shift_left)): the
     /// precompile records them so the answers can be checked against live descriptors.
+    /// The live 3D/compute environments (video_core GraphicsEnvironment, ComputeEnvironment):
+    /// their translations can be stored as per-stage cache records (no RTTI to ask otherwise).
+    [[nodiscard]] virtual bool IsLiveEnvironment() const {
+        return false;
+    }
     virtual void NoteTextureHandleSource([[maybe_unused]] u32 index, [[maybe_unused]] u32 offset,
                                          [[maybe_unused]] u32 shift_left,
                                          [[maybe_unused]] u32 secondary_index,

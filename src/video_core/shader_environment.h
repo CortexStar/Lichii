@@ -240,6 +240,9 @@ protected:
 
 class GraphicsEnvironment final : public GenericEnvironment {
 public:
+    [[nodiscard]] bool IsLiveEnvironment() const override {
+        return true;
+    }
     explicit GraphicsEnvironment() = default;
     explicit GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
                                  Tegra::MemoryManager& gpu_memory_,
@@ -268,6 +271,9 @@ private:
 
 class ComputeEnvironment final : public GenericEnvironment {
 public:
+    [[nodiscard]] bool IsLiveEnvironment() const override {
+        return true;
+    }
     explicit ComputeEnvironment() = default;
     explicit ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_compute_,
                                 Tegra::MemoryManager& gpu_memory_, GPUVAddr program_base_,

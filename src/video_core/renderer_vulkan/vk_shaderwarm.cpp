@@ -1477,20 +1477,19 @@ bool PipelineCache::Nx2LearnArm(Shader::Environment& env) const {
         stage != Shader::Stage::Compute && !(mesh_stage && TaskMeshIrCacheEnabled())) {
         return false;
     }
-    auto* const generic{dynamic_cast<VideoCommon::GenericEnvironment*>(&env)};
-    if (generic == nullptr) {
+    if (!env.IsLiveEnvironment()) {
         return false;
     }
-    generic->BeginQueryLog();
+    static_cast<VideoCommon::GenericEnvironment&>(env).BeginQueryLog();
     return true;
 }
 
 void PipelineCache::Nx2LearnTranslation(u64 record_hash, Shader::Environment& env,
                                         const Shader::IR::Program& program) {
-    auto* const generic{dynamic_cast<VideoCommon::GenericEnvironment*>(&env)};
-    if (generic == nullptr) {
+    if (!env.IsLiveEnvironment()) {
         return;
     }
+    auto* const generic{static_cast<VideoCommon::GenericEnvironment*>(&env)};
     generic->EndQueryLog();
     if (!IrLearnEnabled() || !ir_cache.IsOpen() || !generic->QueryLogComplete() ||
         generic->HasConstantReplacements()) {
