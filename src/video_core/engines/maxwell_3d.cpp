@@ -650,7 +650,23 @@ void Maxwell3D::CallConstBufferWords(Core::System& system, const u32* methods,
     for (u32 i = 0; i < count; ++i) {
         ProcessDirtyRegisters(methods[i], ProcessShadowRam(methods[i], arguments[i]));
     }
-    memory_manager.WriteWordsCached(address + offset, values.data(), count);
+    const GPUVAddr destination = address + offset;
+    // What WriteWordsCached does for words within one device page outside Switch 2 sparse
+    // memory, with one translation (as MemoryManager::Write) instead of the page walk: the words,
+    // then the invalidation accumulated word by word. Unmapped: the walk.
+    u8* const pointer =
+        destination + bytes <= Tegra::g_nx2_sparse_low.load(std::memory_order_relaxed) ||
+                destination >= Tegra::g_nx2_sparse_high.load(std::memory_order_relaxed)
+            ? memory_manager.GetPointer(destination)
+            : nullptr;
+    if (pointer != nullptr) [[likely]] {
+        std::memcpy(pointer, values.data(), bytes);
+        for (u32 i = 0; i < count; ++i) {
+            memory_manager.AccumulateInvalidation(destination + u64{i} * sizeof(u32), sizeof(u32));
+        }
+    } else {
+        memory_manager.WriteWordsCached(destination, values.data(), count);
+    }
     regs.const_buffer.offset += static_cast<u32>(bytes);
 }
 
