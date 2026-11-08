@@ -109,13 +109,17 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         operand(32);
         break;
     case 0xb6c:
-    case 0xf6c: // TXD: results in Rd/Rd+1 and the second pair, coordinates in Ra (Ra+2 is the layer
-                // of ARRAY_2D), gradients in Rb..Rb+3.
-        operand(16, 2);
+    case 0xf6c: { // TXD: results in Rd/Rd+1 and the second destination, coordinates in Ra (Ra+2
+                  // is the layer of ARRAY_2D), gradients in Rb..Rb+3.
+        const u32 channels = static_cast<u32>(std::popcount(input.Bits(72, 4)));
+        operand(16, (std::min)((std::max)(channels, 1U), 2U));
         operand(24, input.Bits(61, 3) == 5 ? 3 : 2);
         operand(32, 4);
-        operand(64, 2);
+        if (channels > 2) {
+            operand(64, channels - 2);
+        }
         break;
+    }
     case 0x224:
     case 0x223:
         operand(16);
