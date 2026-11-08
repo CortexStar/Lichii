@@ -10,6 +10,7 @@
 #include "dynarmic/backend/x64/a64_emit_x64.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <exception>
 #include <bit>
 #include <fmt/format.h>
@@ -102,6 +103,8 @@ A64EmitX64::BlockDescriptor A64EmitX64::Emit(IR::Block& block) noexcept {
     try {
         return EmitBlock(block);
     } catch (const Xbyak::Error& e) {
+        std::fprintf(stderr, "dynarmic: emitting the A64 block at %#llx failed: Xbyak error %d (%s)\n",
+                     static_cast<unsigned long long>(A64::LocationDescriptor{block.Location()}.PC()), int(e), e.what());
         UNREACHABLE_MSG("dynarmic: emitting the A64 block at {:#x} (location {:#x}) failed: Xbyak error {} ({})",
                         A64::LocationDescriptor{block.Location()}.PC(), block.Location().Value(), int(e), e.what());
     } catch (const std::exception& e) {
