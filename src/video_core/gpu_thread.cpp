@@ -75,6 +75,12 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         namespace Profile = VideoCommon::Nx2Profile;
         auto& split = VideoCommon::GpuSplit::Get();
         while (!stop_token.stop_requested()) {
+            if (commands_held.load(std::memory_order_acquire)) {
+                std::unique_lock lock{hold_mutex};
+                hold_cv.wait(lock, stop_token,
+                             [this] { return !commands_held.load(std::memory_order_relaxed); });
+                continue;
+            }
             Profile::Report();
             split.MaybeStart(system);
             if (scheduler.HasPendingChannels()) {
@@ -177,6 +183,18 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
             last_progress = std::chrono::steady_clock::now();
         }
     });
+}
+
+void ThreadManager::HoldCommands() {
+    commands_held.store(true, std::memory_order_release);
+}
+
+void ThreadManager::ReleaseCommands() {
+    {
+        std::scoped_lock lock{hold_mutex};
+        commands_held.store(false, std::memory_order_release);
+    }
+    hold_cv.notify_all();
 }
 
 void ThreadManager::SubmitList(s32 channel, Tegra::CommandList&& entries, bool is_async) {

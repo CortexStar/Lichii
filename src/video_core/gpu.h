@@ -244,6 +244,11 @@ public:
     /// Performs any additional necessary steps to shutdown GPU emulation.
     void NotifyShutdown();
 
+    /// The GPU thread takes no commands from HoldCommands until ReleaseCommands (the disk
+    /// pipeline cache loading while the guest boots).
+    void HoldCommands();
+    void ReleaseCommands();
+
     /// Obtain the CPU Context
     void ObtainContext();
 

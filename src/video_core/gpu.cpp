@@ -191,6 +191,14 @@ struct GPU::Impl {
         gpu_thread.StartThread(*renderer, renderer->Context(), scheduler);
     }
 
+    void HoldCommands() {
+        gpu_thread.HoldCommands();
+    }
+
+    void ReleaseCommands() {
+        gpu_thread.ReleaseCommands();
+    }
+
     void NotifyShutdown() {
         gpu_thread.NotifyShutdown();
         std::unique_lock lk{sync_mutex};
@@ -565,6 +573,14 @@ void GPU::Start() {
 
 void GPU::NotifyShutdown() {
     impl->NotifyShutdown();
+}
+
+void GPU::HoldCommands() {
+    impl->HoldCommands();
+}
+
+void GPU::ReleaseCommands() {
+    impl->ReleaseCommands();
 }
 
 void GPU::WaitForIdle() {
