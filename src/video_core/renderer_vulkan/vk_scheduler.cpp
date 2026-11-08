@@ -300,10 +300,17 @@ void Scheduler::DispatchWork() {
 }
 
 void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass renderpass,
-                                    const VkClearValue* clear_values, u32 clear_value_count) {
+                                    const VkClearValue* clear_values, u32 clear_value_count,
+                                    bool tracked) {
     if (VideoCommon::Nx2Profile::Enabled()) {
         g_profile_renderpasses.fetch_add(1, std::memory_order_relaxed);
     }
+    if (pass_barriers.Pending() &&
+        (!tracked || pass_barriers.BeginNeedsBarrier(std::span(framebuffer->Images().data(),
+                                                               framebuffer->NumImages())))) {
+        RecordRenderPassBarrier();
+    }
+    pass_reads_known = tracked;
     const VkFramebuffer framebuffer_handle = framebuffer->Handle();
     const VkExtent2D render_area = framebuffer->RenderArea();
     state.renderpass = renderpass;
@@ -357,7 +364,7 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
     framebuffer->MarkResolveShadowsUpToDate();
 }
 
-void Scheduler::RealizeDeferredClear() {
+void Scheduler::RealizeDeferredClear(bool tracked) {
     if (deferred_clear.framebuffer == nullptr) {
         return;
     }
@@ -383,7 +390,8 @@ void Scheduler::RealizeDeferredClear() {
     const VkRenderPass renderpass = dc.framebuffer->RenderPassVariant(
         dc.color_clear_mask, dc.depth_stencil, color_discard_mask, depth_stencil_discard);
     EndRenderPass();
-    BeginRenderPassImpl(dc.framebuffer, renderpass, clear_values.data(), count);
+    // The pass only clears until the draws of the caller follow.
+    BeginRenderPassImpl(dc.framebuffer, renderpass, clear_values.data(), count, tracked);
 }
 
 bool Scheduler::DeferColorClear(const Framebuffer* framebuffer, u32 rt_slot,
@@ -423,9 +431,20 @@ void Scheduler::FlushDeferredClear() {
     EndRenderPass();
 }
 
-void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_location location) {
+void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, bool tracked,
+                                  std::source_location location) {
+    if (!tracked && pass_barriers.Pending()) {
+        // The draws that follow report no images: order everything before them.
+        if (state.renderpass) {
+            CountRenderPassEnd(location.file_name(), location.line());
+        }
+        EndRenderPass();
+        if (pass_barriers.Pending()) {
+            RecordRenderPassBarrier();
+        }
+    }
     if (deferred_clear.framebuffer == framebuffer) {
-        RealizeDeferredClear();
+        RealizeDeferredClear(tracked);
         return;
     }
     const VkRenderPass renderpass = framebuffer->RenderPass();
@@ -441,6 +460,7 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_lo
     if (state.renderpass && framebuffer_handle == state.framebuffer &&
         render_area.width == state.render_area.width &&
         render_area.height == state.render_area.height) {
+        pass_reads_known &= tracked;
         return;
     }
     if (state.renderpass) {
@@ -448,7 +468,40 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_lo
     }
     // Ends any active pass and realizes a deferred clear
     EndRenderPass();
-    BeginRenderPassImpl(framebuffer, renderpass, nullptr, 0);
+    BeginRenderPassImpl(framebuffer, renderpass, nullptr, 0, tracked);
+}
+
+void Scheduler::PrepareDrawImages(std::span<const VkImage> images, bool other_writes) {
+    if (pass_barriers.DrawNeedsBarrier(images, other_writes)) {
+        RequestOutsideRenderPassOperationContext();
+        if (pass_barriers.Pending()) {
+            RecordRenderPassBarrier();
+        }
+    }
+    pass_barriers.NoteDraw(images);
+}
+
+void Scheduler::RecordRenderPassBarrier() {
+    pass_barriers.Clear();
+    // One global barrier for every pending pass: the attachments stay in GENERAL, so there is no
+    // layout transition an image barrier would carry.
+    Record([](vk::CommandBuffer cmdbuf) {
+        static constexpr VkMemoryBarrier ATTACHMENT_WRITES{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask =
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                             VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                             VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                             VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                   VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                               vk::PIPELINE_STAGE_GRAPHICS_COMPUTE, 0, ATTACHMENT_WRITES);
+    });
 }
 
 void Scheduler::RequestOutsideRenderPassOperationContext(std::source_location location) {
@@ -873,6 +926,9 @@ void Scheduler::EndPendingOperations() {
     // and resetting here would drop the samples counted so far (the report then reads too low).
     query_cache->CounterClose(VideoCommon::QueryType::ZPassPixelCount64);
     EndRenderPass();
+    if (pass_barriers.Pending()) {
+        RecordRenderPassBarrier();
+    }
 }
 
 void Scheduler::EndRenderPass()
@@ -896,50 +952,9 @@ void Scheduler::EndRenderPass()
         query_cache->CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, false);
         query_cache->NotifySegment(false);
 
-        Record([num_images = num_renderpass_images,
-                       images = renderpass_images,
-                       ranges = renderpass_image_ranges,
-                       has_transform_feedback = device.IsExtTransformFeedbackSupported()](
-                          vk::CommandBuffer cmdbuf) {
-            std::array<VkImageMemoryBarrier, 9> barriers;
-            for (size_t i = 0; i < num_images; ++i) {
-                const VkImageSubresourceRange& range = ranges[i];
-                const bool is_color = (range.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) != 0;
-                const bool is_depth_stencil = (range.aspectMask
-                                              & (VK_IMAGE_ASPECT_DEPTH_BIT
-                                                 | VK_IMAGE_ASPECT_STENCIL_BIT)) !=0;
-
-                VkAccessFlags src_access = 0;
-
-                if (is_color)
-                    src_access |= VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-                else if (is_depth_stencil)
-                    src_access |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-                else
-                    src_access |= VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                                  | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-
-                barriers[i] = VkImageMemoryBarrier{
-                        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                        .pNext = nullptr,
-                        .srcAccessMask = src_access,
-                        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
-                                         | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT
-                                         | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                                         | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
-                                         | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-                        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                        .image = images[i],
-                        .subresourceRange = range,
-                };
-            }
+        Record([has_transform_feedback = device.IsExtTransformFeedbackSupported()](
+                   vk::CommandBuffer cmdbuf) {
             cmdbuf.EndRenderPass();
-            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
-                                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
-                                   0, nullptr, nullptr, vk::Span(barriers.data(), num_images));
             if (has_transform_feedback) {
                 static constexpr VkMemoryBarrier XFB_OUTPUT_BARRIER{
                     .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
@@ -952,6 +967,10 @@ void Scheduler::EndRenderPass()
                                        0, XFB_OUTPUT_BARRIER);
             }
         });
+        if (pass_barriers.EndPass(std::span(renderpass_images.data(), num_renderpass_images),
+                                  pass_reads_known)) {
+            RecordRenderPassBarrier();
+        }
 
         state.renderpass = VkRenderPass{};
         num_renderpass_images = 0;

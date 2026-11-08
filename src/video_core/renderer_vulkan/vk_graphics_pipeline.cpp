@@ -838,6 +838,13 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             (scheduler.RenderPassHasStores() || texture_cache.SamplesRenderTarget(view_span))) {
             scheduler.RequestOutsideRenderPassOperationContext();
         }
+        boost::container::small_vector<VkImage, 32> images;
+        for (const auto& view : view_span) {
+            if (view.id) {
+                images.push_back(texture_cache.GetImageView(view.id).ImageHandle());
+            }
+        }
+        scheduler.PrepareDrawImages(images, writes_storage || regs.transform_feedback_enabled != 0);
     }
     if (IsBuilt() && (!pipeline || build->Failed())) {
         return false;
@@ -1017,7 +1024,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
         });
     }
-    scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
+    scheduler.RequestDrawRenderpass(texture_cache.GetFramebuffer());
     if (writes_storage) {
         scheduler.NoteRenderPassStores();
     }

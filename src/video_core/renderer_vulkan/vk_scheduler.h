@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <span>
 #include <thread>
 #include <utility>
 #include <queue>
@@ -26,6 +27,7 @@
 #include "common/settings.h"
 #include "video_core/gpu_split.h"
 #include "video_core/renderer_vulkan/fragment_barrier_state.h"
+#include "video_core/renderer_vulkan/render_pass_barrier_tracker.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -101,9 +103,25 @@ public:
     /// Sends currently recorded work to the worker thread.
     void DispatchWork();
 
-    /// Requests to begin a renderpass.
+    /// Requests to begin a renderpass. Everything recorded before it is ordered before its draws.
     void RequestRenderpass(const Framebuffer* framebuffer,
-                           std::source_location location = std::source_location::current());
+                           std::source_location location = std::source_location::current()) {
+        RequestRenderpass(framebuffer, false, location);
+    }
+
+    /// Requests to begin a renderpass for draws that report their images with PrepareDrawImages.
+    /// Earlier render passes are ordered before it only where their images meet.
+    void RequestDrawRenderpass(const Framebuffer* framebuffer,
+                               std::source_location location = std::source_location::current()) {
+        RequestRenderpass(framebuffer, true, location);
+    }
+
+    /**
+     * Reports the images the next draw samples or uses as storage images, before its
+     * RequestDrawRenderpass. Records the deferred render pass barrier first when the draw needs it.
+     * @param other_writes The draw writes storage memory or transform feedback buffers.
+     */
+    void PrepareDrawImages(std::span<const VkImage> images, bool other_writes);
 
     /// Defers a full-attachment color clear so it becomes the next render pass.
     bool DeferColorClear(const Framebuffer* framebuffer, u32 rt_slot, const VkClearValue& value);
@@ -182,6 +200,10 @@ public:
     void RecordWithUploadBuffer(T&& command) {
         if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
             VideoCommon::GpuSplit::CheckOwner("Scheduler::Record");
+        }
+        if (pass_barriers.Pending() && state.renderpass == VK_NULL_HANDLE) {
+            // Anything recorded outside a render pass may use what the deferred passes wrote.
+            RecordRenderPassBarrier();
         }
         if (chunk->Record(command)) {
             return;
@@ -418,11 +440,19 @@ private:
     };
 
     /// Begins a render pass for the given framebuffer, optionally with clear values.
+    /// @param tracked The pass's draws report their images (RequestDrawRenderpass).
     void BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass renderpass,
-                             const VkClearValue* clear_values, u32 clear_value_count);
+                             const VkClearValue* clear_values, u32 clear_value_count,
+                             bool tracked);
 
     /// If a deferred clear is pending.
-    void RealizeDeferredClear();
+    void RealizeDeferredClear(bool tracked = true);
+
+    void RequestRenderpass(const Framebuffer* framebuffer, bool tracked,
+                           std::source_location location);
+
+    /// Records the barrier that orders the render passes ended so far before later work.
+    void RecordRenderPassBarrier();
 
     void WorkerThread(std::stop_token stop_token);
 
@@ -447,6 +477,8 @@ private:
 
     std::unique_ptr<MasterSemaphore> master_semaphore;
     FragmentBarrierState fragment_barrier;
+    RenderPassBarrierTracker pass_barriers;
+    bool pass_reads_known{}; ///< Every draw of the active render pass reported its images.
     bool render_pass_has_stores{};
     bool compute_writes_pending{};
     bool graphics_pipeline_missing{};
