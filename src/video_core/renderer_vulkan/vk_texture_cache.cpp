@@ -37,6 +37,7 @@
 #include "video_core/dlss_contract.h"
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/renderer_vulkan/blit_image.h"
+#include "video_core/renderer_vulkan/depth_write_policy.h"
 #include "video_core/renderer_vulkan/framebuffer_limits.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
@@ -485,6 +486,21 @@ constexpr std::array<VkFormat, 2> Bc7AstcViewFormats{VK_FORMAT_BC7_UNORM_BLOCK,
            info.size.width == info.size.height && !device.HasBrokenCubeImageCompatibility();
 }
 
+[[nodiscard]] bool DepthWrittenByShader(const Device& device, const ImageInfo& info,
+                                        bool attachable) {
+    const auto type = VideoCore::Surface::GetFormatType(info.format);
+    return Vulkan::DepthWrittenByShader(
+        device.GetDriverID(), device.IsExtShaderStencilExportSupported(), attachable,
+        static_cast<u32>(info.num_samples),
+        type == VideoCore::Surface::SurfaceType::Depth ||
+            type == VideoCore::Surface::SurfaceType::DepthStencil);
+}
+
+/// Whether transfer commands may write the image (see DepthWrittenByShader).
+[[nodiscard]] bool TransferWritable(const Image& image) {
+    return (image.UsageFlags() & VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0;
+}
+
 [[nodiscard]] VkImageCreateInfo MakeImageCreateInfo(const Device& device, const ImageInfo& info,
                                                     std::optional<VkFormat> format_override = {}) {
     auto format_info =
@@ -528,7 +544,10 @@ constexpr std::array<VkFormat, 2> Bc7AstcViewFormats{VK_FORMAT_BC7_UNORM_BLOCK,
         .arrayLayers = static_cast<u32>(info.resources.layers),
         .samples = ConvertSampleCount(info.num_samples),
         .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = ImageUsageFlags(format_info, info.format, allow_storage),
+        .usage = ImageUsageFlags(format_info, info.format, allow_storage) &
+                 ~(DepthWrittenByShader(device, info, format_info.attachable)
+                       ? VkImageUsageFlags{VK_IMAGE_USAGE_TRANSFER_DST_BIT}
+                       : VkImageUsageFlags{0}),
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 0,
         .pQueueFamilyIndices = nullptr,
@@ -1728,11 +1747,21 @@ void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,
         total_size += copy.extent.width * copy.extent.height * copy.extent.depth * img_bpp;
     }
     const VkBuffer copy_buffer = GetTemporaryBuffer(total_size);
-    const VkImage dst_image = dst.Handle();
+    // A depth image transfers cannot write gets the copy in a scratch image of its format; a
+    // shader copies the regions over below. The scratch image's earlier contents are discarded.
+    const bool via_scratch = !TransferWritable(dst);
+    const VkImage scratch_image =
+        via_scratch ? AcquireMsaaScratchImage(MakeMsaaScratchImageCreateInfo(
+                          device, dst.info,
+                          VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))
+                    : VK_NULL_HANDLE;
+    const VkImage dst_image = via_scratch ? scratch_image : dst.Handle();
+    const VkImageLayout dst_old_layout =
+        via_scratch ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
     const VkImage src_image = src.Handle();
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([dst_image, src_image, copy_buffer, src_aspect_mask, dst_aspect_mask,
-                      vk_in_copies, vk_out_copies](vk::CommandBuffer cmdbuf) {
+                      dst_old_layout, vk_in_copies, vk_out_copies](vk::CommandBuffer cmdbuf) {
         RangedBarrierRange dst_range;
         RangedBarrierRange src_range;
         for (const VkBufferImageCopy& copy : vk_in_copies) {
@@ -1791,7 +1820,7 @@ void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,
                                  VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
                                  VK_ACCESS_TRANSFER_WRITE_BIT,
                 .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-                .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .oldLayout = dst_old_layout,
                 .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -1835,6 +1864,12 @@ void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,
         cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
                        0, {}, {}, post_barriers);
     });
+    if (via_scratch) {
+        // Only the depth aspect was reinterpreted (see copy_aspect): stencil stays as it is.
+        blit_image_helper.CopyMSAADepth(render_pass_cache, dst.Handle(), dst.info.format,
+                                        scratch_image, dst.info.format, 1, copies, false, false);
+        ReleaseMsaaScratchImage(scratch_image);
+    }
 }
 
 bool TextureCacheRuntime::WantsTemporalUpscaleDepth() const {
@@ -2361,6 +2396,16 @@ void TextureCacheRuntime::BlitImage(Framebuffer* dst_framebuffer, ImageView& dst
             return;
         }
     }
+    if (const Image* const dst_image = dst.BackingImage();
+        dst_image != nullptr && !TransferWritable(*dst_image) && !is_src_msaa) {
+        if ((aspect_mask & VK_IMAGE_ASPECT_STENCIL_BIT) != 0) {
+            blit_image_helper.BlitDepthStencil(dst_framebuffer, src, dst_region, src_region,
+                                               filter, operation);
+        } else {
+            blit_image_helper.BlitDepth(dst_framebuffer, src, dst_region, src_region);
+        }
+        return;
+    }
     ASSERT(!(is_dst_msaa && !is_src_msaa));
     ASSERT(operation == Fermi2D::Operation::SrcCopy);
 
@@ -2602,6 +2647,13 @@ void TextureCacheRuntime::CopyImage(Image& dst, Image& src,
     copies = HostImageCopies(dst, src, copies, host_copies);
     if (copies.empty())
         return;
+    if (!TransferWritable(dst)) {
+        const bool copies_stencil = (dst.AspectMask() & VK_IMAGE_ASPECT_STENCIL_BIT) != 0;
+        blit_image_helper.CopyMSAADepth(render_pass_cache, dst.Handle(), dst.info.format,
+                                        src.Handle(), src.info.format, 1, copies, copies_stencil,
+                                        false);
+        return;
+    }
 
     if (ENABLE_MSAA_RESOLVE_CONSUME) {
         InvalidateResolveShadow(dst.Handle());
@@ -2726,7 +2778,7 @@ void TextureCacheRuntime::CopyImageMSAA(Image& dst, Image& src,
     const bool msaa_to_non_msaa = src.info.num_samples > 1 && dst.info.num_samples == 1;
     const u32 num_samples = msaa_to_non_msaa ? src.info.num_samples : dst.info.num_samples;
     if (ENABLE_MSAA_RESOLVE_CONSUME && msaa_to_non_msaa && copies.size() == 1 &&
-        src.info.format == dst.info.format) {
+        src.info.format == dst.info.format && TransferWritable(dst)) {
         const VideoCommon::ImageCopy& copy = copies.front();
         const ResolveShadow* const shadow = GetValidResolveShadow(src.Handle());
         if (shadow != nullptr && shadow->aspect_mask == dst.AspectMask() &&
@@ -3179,8 +3231,12 @@ void Image::UploadMemory(VkBuffer buffer, VkDeviceSize offset,
     }
 
     const bool msaa_upload_is_depth = (aspect_mask & VK_IMAGE_ASPECT_DEPTH_BIT) != 0;
-    const bool wants_msaa_upload = info.num_samples > 1
-        && ((aspect_mask & VK_IMAGE_ASPECT_COLOR_BIT) != 0 || msaa_upload_is_depth);
+    // Depth without TRANSFER_DST takes the same path: the upload lands in a scratch image and a
+    // shader copies it (one sample: a plain texel copy).
+    const bool wants_msaa_upload =
+        (info.num_samples > 1 &&
+         ((aspect_mask & VK_IMAGE_ASPECT_COLOR_BIT) != 0 || msaa_upload_is_depth)) ||
+        (msaa_upload_is_depth && !TransferWritable(*this));
 
     if (wants_msaa_upload) {
         const bool msaa_upload_copies_stencil =
@@ -4331,7 +4387,7 @@ bool Image::BlitScaleHelper(bool scale_up) {
 
 bool Image::NeedsScaleHelper() const {
     const auto& device = runtime->device;
-    if (info.num_samples > 1) {
+    if (info.num_samples > 1 || !TransferWritable(*this)) {
         return true;
     }
     static constexpr auto OPTIMAL_FORMAT = FormatType::Optimal;
