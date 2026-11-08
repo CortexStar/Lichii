@@ -113,13 +113,13 @@ bool TaskMeshIrCacheEnabled() {
     return enabled;
 }
 
-// EDEN_NX2_PRECOMPILE_POINTER_VARIANTS=0: no second record with unmapped storage pointers (on by
-// default: games first use many programs while a pointer is still null, the runtime then rebuilds
-// with it mapped, and a record only serves the answers it was made with).
+// EDEN_NX2_PRECOMPILE_POINTER_VARIANTS=1: also a record with every storage pointer unmapped. Off by
+// default: on OoT's check route it added 32,988 records (file 0.75 -> 1.4 GB) and matched none of
+// the rejected stages, whose live pointers are a mix of mapped and null.
 bool PointerVariantsEnabled() {
     static const bool enabled = [] {
         const char* value = std::getenv("EDEN_NX2_PRECOMPILE_POINTER_VARIANTS");
-        return value == nullptr || value[0] != '0';
+        return value != nullptr && value[0] == '1';
     }();
     return enabled;
 }
