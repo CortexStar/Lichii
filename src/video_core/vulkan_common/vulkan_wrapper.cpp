@@ -151,6 +151,16 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
     X(vkCmdSetConservativeRasterizationModeEXT);
     X(vkCmdSetLineRasterizationModeEXT);
     X(vkCmdSetLineStippleEnableEXT);
+    X(vkCmdSetLineStippleEXT);
+    X(vkCmdSetViewportWithCountEXT);
+    X(vkCmdSetScissorWithCountEXT);
+    X(vkCmdSetPolygonModeEXT);
+    X(vkCmdSetRasterizationSamplesEXT);
+    X(vkCmdSetSampleMaskEXT);
+    X(vkCmdSetTessellationDomainOriginEXT);
+    X(vkCmdSetDepthClipEnableEXT);
+    X(vkCmdSetDepthClipNegativeOneToOneEXT);
+    X(vkCmdSetProvokingVertexModeEXT);
     X(vkCmdSetDepthBiasEnableEXT);
     X(vkCmdSetLogicOpEnableEXT);
     X(vkCmdSetDepthClampEnableEXT);
