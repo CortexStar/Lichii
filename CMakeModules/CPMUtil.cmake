@@ -795,7 +795,8 @@ function(AddPackage)
 
     cpm_utils_message(DEBUG "${PKG_ARGS_NAME} download URL is ${PKG_ARGS_URL}")
 
-    if(NOT DEFINED PKG_ARGS_HASH)
+    # The hash checks a download; a custom directory is not downloaded.
+    if(NOT DEFINED PKG_ARGS_HASH AND "${${PKG_ARGS_NAME}_CUSTOM_DIR}" STREQUAL "")
         cpm_utils_message(FATAL_ERROR "${PKG_ARGS_NAME}: No hash defined")
     endif()
 
@@ -1051,9 +1052,13 @@ function(AddCIPackage)
         get_cache_path(${ARTIFACT_PACKAGE} ${ARTIFACT_KEY} artifact_cache_path)
         set(cached_sha512_file "${artifact_cache_path}/.cpm_archive_sha512")
 
+        # A <package>_CUSTOM_DIR (docs/CPMUtil.md) is used as is: AddPackage takes the directory
+        # and downloads nothing, so neither is the hash fetched.
+        set(sha512sum_hash "")
+        if (NOT "${${ARTIFACT_PACKAGE}_CUSTOM_DIR}" STREQUAL "")
         # A package already in the cache was verified against its sha512sum when it was
         # downloaded; reuse that hash so configuring works while the host is unreachable
-        if(EXISTS "${cached_sha512_file}")
+        elseif(EXISTS "${cached_sha512_file}")
             file(READ "${cached_sha512_file}" sha512sum_hash)
             string(STRIP "${sha512sum_hash}" sha512sum_hash)
         else()
