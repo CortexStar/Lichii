@@ -129,7 +129,69 @@ public:
         return storage_pointer_types;
     }
 
+    /// nx2 shaderwarm, learning (EDEN_NX2_IR_LEARN): while armed, the texture queries a live
+    /// translation makes are logged with the constant buffer words of their handle, so the
+    /// translation can be stored as a per-stage cache record that the runtime re-checks the same
+    /// way as a precompiled one (nx2_ir_cache.h TextureCheck: kind 0 type, 1 integer format,
+    /// 2 exact pixel format).
+    struct LoggedTextureQuery {
+        std::array<u32, 6> source;
+        u32 kind;
+        u32 answer;
+    };
+    void BeginQueryLog() {
+        query_log_active = true;
+        query_log_complete = true;
+        has_query_source = false;
+        viewport_read = false;
+        logged_queries.clear();
+    }
+    void EndQueryLog() {
+        query_log_active = false;
+    }
+    /// False when a texture query came without a known handle source (then don't store it).
+    [[nodiscard]] bool QueryLogComplete() const noexcept {
+        return query_log_complete;
+    }
+    [[nodiscard]] const std::vector<LoggedTextureQuery>& LoggedTextureQueries() const noexcept {
+        return logged_queries;
+    }
+    [[nodiscard]] bool ViewportTransformRead() const noexcept {
+        return viewport_read;
+    }
+    [[nodiscard]] u32 ViewportTransformAnswer() const noexcept {
+        return viewport_transform_state;
+    }
+    [[nodiscard]] bool HasConstantReplacements() const noexcept {
+        return !cbuf_replacements.empty();
+    }
+    void NoteTextureHandleSource(u32 index, u32 offset, u32 shift_left, u32 secondary_index,
+                                 u32 secondary_offset, u32 secondary_shift_left) override {
+        query_source = {index, offset, shift_left, secondary_index, secondary_offset,
+                        secondary_shift_left};
+        has_query_source = true;
+    }
+
 protected:
+    void LogTextureQuery(u32 kind, u32 answer) {
+        if (!query_log_active) {
+            return;
+        }
+        if (!has_query_source) {
+            query_log_complete = false;
+            return;
+        }
+        logged_queries.push_back({query_source, kind, answer});
+    }
+    bool query_log_active = false;
+    bool query_log_complete = true;
+    bool has_query_source = false;
+    bool viewport_read = false;
+    /// Set while IsTexturePixelFormatInteger reads the format (logged as kind 1, not 2).
+    bool integer_query = false;
+    std::array<u32, 6> query_source{};
+    std::vector<LoggedTextureQuery> logged_queries;
+
     std::optional<u64> TryFindSize();
     virtual std::optional<u32> ReadTrapGuardConstant(u32, u32) { return std::nullopt; }
 

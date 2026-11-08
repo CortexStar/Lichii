@@ -81,6 +81,7 @@ struct State {
     std::atomic<u64> ir_stage_hits{};       ///< runtime stages from the translation cache
     std::atomic<u64> ir_stage_misses{};     ///< runtime native stages translated
     std::atomic<u64> ir_env_mismatches{};   ///< cached but the environment inputs differ
+    std::atomic<u64> ir_learned{};          ///< live translations stored (EDEN_NX2_IR_LEARN)
     std::atomic<u64> gpl_pipelines{};       ///< library pipelines linked
     std::atomic<u64> gpl_stage_reused{};    ///< stage libraries this session had already
     std::atomic<u64> gpl_stage_fast{};      ///< stage libraries created in < 1 ms (driver cache)
@@ -250,13 +251,14 @@ inline void MaybeReport() {
     }
     LOG_INFO(Render_Vulkan,
              "NX2STATS window:{} | frames: {} | so far: stages cached {} translated {} env-mismatch "
-             "{}, async-skipped draws {}, gpl pipelines {} (monolithic {}) stage libraries reused "
+             "{} learned {}, async-skipped draws {}, gpl pipelines {} (monolithic {}) stage libraries reused "
              "{} fast {} slow {} | draws {} (library {}, optimized {}) | compute so far: {} new "
              "(prebuilt {}, cached translation {}, translated {}, prebuilt mismatch {})",
              PhaseSummary(s.window, true), FrameSummary(from), s.ir_stage_hits.load(),
-             s.ir_stage_misses.load(), s.ir_env_mismatches.load(), s.async_skipped_draws.load(),
-             s.gpl_pipelines.load(), s.gpl_monolithic.load(), s.gpl_stage_reused.load(),
-             s.gpl_stage_fast.load(), s.gpl_stage_slow.load(), s.draws.exchange(0),
+             s.ir_stage_misses.load(), s.ir_env_mismatches.load(), s.ir_learned.load(),
+             s.async_skipped_draws.load(), s.gpl_pipelines.load(), s.gpl_monolithic.load(),
+             s.gpl_stage_reused.load(), s.gpl_stage_fast.load(), s.gpl_stage_slow.load(),
+             s.draws.exchange(0),
              s.gpl_draws.exchange(0), s.lto_draws.exchange(0), s.cs_runtime.load(),
              s.cs_prebuilt.load(), s.cs_ir.load(), s.cs_translated.load(),
              s.cs_prebuilt_mismatch.load());
@@ -272,8 +274,9 @@ inline void FinalReport() {
              s.driver_cache_hits.load(), s.async_skipped_draws.load(), s.boot_pipelines.load(),
              s.boot_ns.load() / 1e6);
     LOG_INFO(Render_Vulkan, "NX2STATS runtime stages: {} from the translation cache, {} translated "
-             "({} cached with other environment inputs)",
-             s.ir_stage_hits.load(), s.ir_stage_misses.load(), s.ir_env_mismatches.load());
+             "({} cached with other environment inputs, {} stored for the next session)",
+             s.ir_stage_hits.load(), s.ir_stage_misses.load(), s.ir_env_mismatches.load(),
+             s.ir_learned.load());
     LOG_INFO(Render_Vulkan, "NX2STATS gpl: {} library pipelines, {} native VS+PS monolithic; stage "
              "libraries: {} reused, {} created fast (< 1 ms), {} created slow",
              s.gpl_pipelines.load(), s.gpl_monolithic.load(), s.gpl_stage_reused.load(),

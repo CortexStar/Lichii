@@ -627,9 +627,13 @@ const char* RecordMismatch(const VideoCommon::Nx2IrCache::Record& record, Shader
                            (env.ReadCbufValue(source[3], source[4]) << source[5]);
         const u32 live = check.kind == 0
                              ? static_cast<u32>(env.ReadTextureType(handle))
-                             : static_cast<u32>(env.IsTexturePixelFormatInteger(handle));
+                         : check.kind == 1
+                             ? static_cast<u32>(env.IsTexturePixelFormatInteger(handle))
+                             : static_cast<u32>(env.ReadTexturePixelFormat(handle));
         if (live != check.answer) {
-            return check.kind == 0 ? "texture type" : "texture integer format";
+            return check.kind == 0   ? "texture type"
+                   : check.kind == 1 ? "texture integer format"
+                                     : "texture pixel format";
         }
     }
     return nullptr;
@@ -1441,6 +1445,132 @@ void PipelineCache::RunPrecompile(std::filesystem::path pack_path, std::stop_tok
     std::ranges::sort(sorted, std::greater{});
     for (size_t i = 0; i < std::min<size_t>(sorted.size(), 15); ++i) {
         LOG_INFO(Render_Vulkan, "NX2PC   {} x {}", sorted[i].first, sorted[i].second);
+    }
+}
+
+namespace {
+// EDEN_NX2_IR_LEARN=1: live translations of native vertex, pixel and compute stages are stored as
+// per-stage cache records (with the answers and checks the precompile's records carry), so a stage
+// the precompile missed or guessed wrong is translated once, not in every session.
+bool IrLearnEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_IR_LEARN");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+} // Anonymous namespace
+
+bool PipelineCache::Nx2LearnArm(Shader::Environment& env) const {
+    if (!IrLearnEnabled() || !ir_cache.IsOpen() || !env.IsNativeProgram() ||
+        env.HasHLEMacroState()) {
+        return false;
+    }
+    // Task/mesh records hold the program before the live mesh state is applied; a live
+    // translation has it applied, so those aren't stored (yet).
+    const Shader::Stage stage{env.ShaderStage()};
+    if (stage != Shader::Stage::VertexB && stage != Shader::Stage::Fragment &&
+        stage != Shader::Stage::Compute) {
+        return false;
+    }
+    auto* const generic{dynamic_cast<VideoCommon::GenericEnvironment*>(&env)};
+    if (generic == nullptr) {
+        return false;
+    }
+    generic->BeginQueryLog();
+    return true;
+}
+
+void PipelineCache::Nx2LearnTranslation(u64 record_hash, Shader::Environment& env,
+                                        const Shader::IR::Program& program) {
+    auto* const generic{dynamic_cast<VideoCommon::GenericEnvironment*>(&env)};
+    if (generic == nullptr) {
+        return;
+    }
+    generic->EndQueryLog();
+    if (!IrLearnEnabled() || !ir_cache.IsOpen() || !generic->QueryLogComplete() ||
+        generic->HasConstantReplacements()) {
+        return;
+    }
+    // The same exclusions as the precompile's records.
+    const bool compute{program.stage == Shader::Stage::Compute};
+    if (!compute && device.GetDriverID() != VK_DRIVER_ID_NVIDIA_PROPRIETARY &&
+        Shader::Optimization::HasBrokenPattern(program)) {
+        return;
+    }
+    if (compute && ((program.shared_memory_size == 0 && UsesSharedMemory(program)) ||
+                    (program.local_memory_size == 0 && program.info.uses_local_memory))) {
+        return;
+    }
+    try {
+        VideoCommon::Nx2IrCache::Record record;
+        record.unique_hash = record_hash;
+        record.stage = env.ShaderStage();
+        // The texture bound buffer is checked whether or not the translation read it (stricter
+        // than needed: a record may miss where it would have fit, never the other way round).
+        record.texture_bound_used = true;
+        record.texture_bound = env.TextureBoundBuffer();
+        record.viewport_used = generic->ViewportTransformRead();
+        record.viewport_transform_state = generic->ViewportTransformAnswer();
+        record.local_memory_used = program.info.uses_local_memory;
+        record.local_memory_size = env.LocalMemorySize();
+        for (const auto& [key, mapped] : generic->StoragePointerAnswers()) {
+            record.storage_pointers.emplace_back(key, mapped);
+        }
+        std::ranges::sort(record.storage_pointers);
+        for (const auto& query : generic->LoggedTextureQueries()) {
+            record.texture_checks.push_back({query.source, query.kind, query.answer});
+        }
+        // One record per set of checks: several pipelines can translate the stage before the
+        // stored record is found.
+        std::vector<u8> identity;
+        const auto put = [&identity](const void* data, size_t size) {
+            const auto* bytes = static_cast<const u8*>(data);
+            identity.insert(identity.end(), bytes, bytes + size);
+        };
+        put(&record.unique_hash, sizeof(record.unique_hash));
+        put(&record.stage, sizeof(record.stage));
+        put(&record.texture_bound, sizeof(record.texture_bound));
+        const u32 viewport{record.viewport_used ? record.viewport_transform_state : ~0U};
+        put(&viewport, sizeof(viewport));
+        put(&record.local_memory_size, sizeof(record.local_memory_size));
+        for (const auto& [key, mapped] : record.storage_pointers) {
+            put(&key, sizeof(key));
+            put(&mapped, sizeof(mapped));
+        }
+        for (const auto& check : record.texture_checks) {
+            put(&check, sizeof(check));
+        }
+        const u64 id{Common::CityHash64(reinterpret_cast<const char*>(identity.data()),
+                                        identity.size())};
+        {
+            std::scoped_lock lock{learned_mutex};
+            if (!learned_records.insert(id).second) {
+                return;
+            }
+        }
+        generic->SerializeAnswers(record.answers);
+        record.program = VideoCommon::Nx2IrCache::SerializeProgram(program);
+        Nx2Stats::Get().ir_learned.fetch_add(1, std::memory_order_relaxed);
+        static const bool log_learn = [] {
+            const char* value = std::getenv("EDEN_NX2_IR_MISMATCH_LOG");
+            return value != nullptr && value[0] == '1';
+        }();
+        if (log_learn) {
+            LOG_INFO(Render_Vulkan,
+                     "NX2PC learned {:016x} (stage {}): {} pointers, {} texture checks",
+                     record_hash, static_cast<int>(record.stage), record.storage_pointers.size(),
+                     record.texture_checks.size());
+        }
+        // Compressing and writing off the pipeline's thread.
+        serialization_thread.QueueWork(
+            [this, record = std::move(record)] { ir_cache.Append(record); });
+    } catch (const std::exception& exception) {
+        static std::atomic<u32> logged{};
+        if (logged++ < 20) {
+            LOG_ERROR(Render_Vulkan, "NX2PC translation of {:016x} not stored: {}", record_hash,
+                      exception.what());
+        }
     }
 }
 

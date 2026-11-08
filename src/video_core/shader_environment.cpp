@@ -1029,6 +1029,7 @@ Shader::TextureType GraphicsEnvironment::ReadTextureType(u32 handle) {
         ReadTextureInfo(regs.tex_header.Address(), regs.tex_header.limit, via_header_index, handle);
     const Shader::TextureType result{ConvertTextureType(entry)};
     texture_types.emplace(handle, result);
+    LogTextureQuery(0, static_cast<u32>(result));
     return result;
 }
 
@@ -1039,17 +1040,27 @@ Shader::TexturePixelFormat GraphicsEnvironment::ReadTexturePixelFormat(u32 handl
         ReadTextureInfo(regs.tex_header.Address(), regs.tex_header.limit, via_header_index, handle);
     const Shader::TexturePixelFormat result(ConvertTexturePixelFormat(entry));
     texture_pixel_formats.emplace(handle, result);
+    if (!integer_query) {
+        LogTextureQuery(2, static_cast<u32>(result));
+    }
     return result;
 }
 
 bool GraphicsEnvironment::IsTexturePixelFormatInteger(u32 handle) {
-    return VideoCore::Surface::IsPixelFormatInteger(
+    integer_query = true;
+    const bool result = VideoCore::Surface::IsPixelFormatInteger(
         static_cast<VideoCore::Surface::PixelFormat>(ReadTexturePixelFormat(handle)));
+    integer_query = false;
+    LogTextureQuery(1, result ? 1U : 0U);
+    return result;
 }
 
 u32 GraphicsEnvironment::ReadViewportTransformState() {
     const auto& regs{maxwell3d->regs};
     viewport_transform_state = regs.viewport_scale_offset_enabled;
+    if (query_log_active) {
+        viewport_read = true;
+    }
     return viewport_transform_state;
 }
 
@@ -1112,6 +1123,7 @@ Shader::TextureType ComputeEnvironment::ReadTextureType(u32 handle) {
     auto entry = ReadTextureInfo(regs.tic.Address(), regs.tic.limit, qmd.linked_tsc != 0, handle);
     const Shader::TextureType result{ConvertTextureType(entry)};
     texture_types.emplace(handle, result);
+    LogTextureQuery(0, static_cast<u32>(result));
     return result;
 }
 
@@ -1121,6 +1133,9 @@ Shader::TexturePixelFormat ComputeEnvironment::ReadTexturePixelFormat(u32 handle
     auto entry = ReadTextureInfo(regs.tic.Address(), regs.tic.limit, qmd.linked_tsc != 0, handle);
     const Shader::TexturePixelFormat result(ConvertTexturePixelFormat(entry));
     const bool inserted{texture_pixel_formats.emplace(handle, result).second};
+    if (!integer_query) {
+        LogTextureQuery(2, static_cast<u32>(result));
+    }
     if (inserted && result == Shader::TexturePixelFormat::R16_FLOAT &&
         kepler_compute->IsNativeMode() && std::getenv("EDEN_NATIVE_DRAW_DIAGNOSTICS")) {
         const auto pair{Tegra::Texture::TexturePair(handle, qmd.linked_tsc != 0)};
@@ -1162,11 +1177,18 @@ Shader::TexturePixelFormat ComputeEnvironment::ReadTexturePixelFormat(u32 handle
 }
 
 bool ComputeEnvironment::IsTexturePixelFormatInteger(u32 handle) {
-    return VideoCore::Surface::IsPixelFormatInteger(
+    integer_query = true;
+    const bool result = VideoCore::Surface::IsPixelFormatInteger(
         static_cast<VideoCore::Surface::PixelFormat>(ReadTexturePixelFormat(handle)));
+    integer_query = false;
+    LogTextureQuery(1, result ? 1U : 0U);
+    return result;
 }
 
 u32 ComputeEnvironment::ReadViewportTransformState() {
+    if (query_log_active) {
+        viewport_read = true;
+    }
     return viewport_transform_state;
 }
 

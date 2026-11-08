@@ -207,6 +207,13 @@ private:
     /// inputs match env (and adopts its answers into env). False: translate it.
     bool TryCachedTranslation(ShaderPools& pools, u64 unique_hash, Shader::Environment& env,
                               Shader::IR::Program& out);
+    /// EDEN_NX2_IR_LEARN=1: whether live translations are stored as per-stage cache records, and
+    /// arming env's query log before such a translation (no-op when off or env can't be stored).
+    [[nodiscard]] bool Nx2LearnArm(Shader::Environment& env) const;
+    /// Stores a live translation (made with the query log armed, right after TranslateProgram) as
+    /// a record under record_hash, so the next session uses it instead of translating again.
+    void Nx2LearnTranslation(u64 record_hash, Shader::Environment& env,
+                             const Shader::IR::Program& program);
     /// EDEN_NX2_PRECOMPILE=<pack>: translates every stage program of the pack into the per-stage
     /// cache on background threads.
     void RunPrecompile(std::filesystem::path pack_path, std::stop_token stop);
@@ -245,6 +252,10 @@ private:
                                                 const GraphicsPipelineCacheKey& key) const;
 
     VideoCommon::Nx2IrCache::StageCache ir_cache;
+    /// Learned records stored this session (hash of the record's checks), so one translation is
+    /// stored once even when several pipelines translate the stage before the record is found.
+    std::mutex learned_mutex;
+    std::unordered_set<u64> learned_records;
     std::jthread precompile_thread;
     /// Graphics pipeline libraries (EDEN_NX2_GPL=1, vk_gpl.h); outlives the pipelines.
     GplLibraryCache gpl_libraries;

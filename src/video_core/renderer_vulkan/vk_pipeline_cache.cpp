@@ -1927,9 +1927,13 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             ++times.cached_stages;
         } else if (!uses_vertex_a || index != 1) {
             // Normal path
+            const bool learn{cacheable_stage && Nx2LearnArm(env)}; // nx2 shaderwarm
             const u32 cfg_offset{static_cast<u32>(env.StartAddress() + sizeof(Shader::ProgramHeader))};
             Shader::Maxwell::Flow::CFG cfg(env, pools.flow_block, cfg_offset, index == 0);
             programs[index] = TranslateProgram(pools.inst, pools.block, env, cfg, host_info);
+            if (learn) {
+                Nx2LearnTranslation(key.unique_hashes[index], env, programs[index]);
+            }
             if (cacheable_stage) {
                 ++times.translated_stages;
             }
@@ -2494,8 +2498,14 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     }
     if (!from_ir) {
         const auto translate_begin = Nx2Stats::Clock::now();
+        // nx2 shaderwarm: stored for the next session (EDEN_NX2_IR_LEARN).
+        const bool learn = ir_cache.IsOpen() && env.IsNativeProgram() &&
+                           Nx2::ComputeIrCacheEnabled() && Nx2LearnArm(env);
         Shader::Maxwell::Flow::CFG cfg{env, pools.flow_block, env.StartAddress()};
         program = TranslateProgram(pools.inst, pools.block, env, cfg, host_info);
+        if (learn) {
+            Nx2LearnTranslation(key.unique_hash, env, program);
+        }
         if (build_in_parallel && Nx2Stats::Enabled()) {
             Nx2Stats::Add(Nx2Stats::Phase::CsTranslate, Nx2Stats::Clock::now() - translate_begin);
         }
