@@ -3215,6 +3215,18 @@ public:
                          u32 argument, bool is_last_call);
     void FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
                               const u32* base_start, u32 amount, u32 methods_pending);
+    /// GpuSplit's back (Kind::StateDelta): state register writes the front coalesced, `count`
+    /// words of method | value << 32 (shadow RAM already applied).
+    void ApplyFrontDelta(Core::System& system, const u64* entries, u32 count);
+    /// GpuSplit's back (Kind::DrawBatch): an instance loop's begin..end writes, then
+    /// `repeats - 1` more identical instances.
+    void RunDrawBatch(Core::System& system, const u64* methods, u32 count, u32 repeats);
+    /// GpuSplit's back (Kind::CbWrite): `count` (1-4) constant buffer data words (`first`, then
+    /// the others two per u64 of `rest`, low half first), to const_buffer.buffer + nibble i of
+    /// `nibbles`, as the single writes would.
+    void BackCbWrite(Core::System& system, u32 nibbles, u32 first, const u64* rest, u32 count);
+    /// GpuSplit's back (Kind::CbBind): a write of bind group `stage`'s raw_config.
+    void BackCbBind(Core::System& system, u32 stage, u32 argument);
 
     bool ShouldExecute() const {
         return execute_on;
@@ -3408,9 +3420,13 @@ private:
     void ReleaseFront();
     void FrontWrite(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 argument,
                     bool is_last_call, bool from_macro);
+    /// FrontWrite for the methods that aren't plain state registers (FrontState::plain).
+    void FrontWriteFull(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 argument,
+                        bool is_last_call, bool from_macro);
+    /// FrontWrite for a plain state register: into the registers and the delta.
+    void FrontStateWrite(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 argument);
     void FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split, FrontState& state);
     void FrontTrackInstanceLoop(FrontState& state, u32 method, u32 value);
-    bool FrontSkipsLoopWrite(FrontState& state, u32 method, u32 value, bool shadow_kept);
     void FrontNoteMemoryWrite(VideoCommon::GpuSplit& split, FrontState& state, u32 method,
                               const u32* words, u32 count);
     /// Whether [address, address + size) maps to [device, device + size) on every page.
@@ -3422,6 +3438,20 @@ private:
                       u32 count);
     void FrontVerify(VideoCommon::GpuSplit& split, FrontState& state);
     void FinishFrontMacro(Core::System& system);
+    // Front-owned state: state writes held back as a delta, instance loops as a draw batch.
+    void FrontMarkDelta(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 value);
+    /// Sends an executable write, or holds it back in a draw batch.
+    void FrontSend(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 argument,
+                   u32 value, bool is_last_call, bool from_macro);
+    void FrontEmitBatch(VideoCommon::GpuSplit& split, FrontState& state);
+    void FrontEmitCapture(VideoCommon::GpuSplit& split, FrontState& state);
+    /// Holds a constant buffer data write in the current run.
+    void FrontCbWord(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 argument);
+    /// Sends the held constant buffer run (Kind::CbWrite).
+    void FrontEmitCb(VideoCommon::GpuSplit& split, FrontState& state);
+    /// GpuSplit::PendingFlush: sends the constant buffer run, the batch, the partial capture and
+    /// the delta.
+    static void FrontFlushPending(void* maxwell3d);
     std::unique_ptr<FrontState> front;
     bool front_macros{};
     // EDEN_NX2_SPLIT_VERIFY: the last SET_SHADOW_RAM_CONTROL writes each side saw (argument,

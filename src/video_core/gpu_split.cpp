@@ -163,6 +163,8 @@ void GpuSplit::Stop() {
     consumed_cache = 0;
     publish_every = PublishEvery;
     front_engine = nullptr;
+    pending_flush = nullptr;
+    pending_flush_argument = nullptr;
     back_engine = nullptr;
     front_macros = false;
     published.store(0, std::memory_order_relaxed);
@@ -221,6 +223,7 @@ void GpuSplit::Publish() {
 }
 
 void GpuSplit::Drain(DrainSite site) {
+    RunPendingFlush();
     consumed_cache = consumed.load(std::memory_order_acquire);
     if (consumed_cache == write_position) {
         return;
@@ -240,6 +243,8 @@ void GpuSplit::Drain(DrainSite site) {
 }
 
 bool GpuSplit::WaitForWriters(DrainSite site) {
+    // Held-back work goes first: a writer in it is noted before the target is taken.
+    RunPendingFlush();
     return WaitFor(std::min(last_writer_position, write_position), site);
 }
 
@@ -307,6 +312,7 @@ bool GpuSplit::OverlayQueuedWrites(u64 since, u64 begin, u32* out, u32 words) {
 }
 
 bool GpuSplit::WaitForSync() {
+    RunPendingFlush();
     return WaitFor(std::min(last_sync_position, write_position), DrainSite::ListSync);
 }
 
@@ -315,6 +321,9 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
     if (consumed_cache >= target) {
         return false;
     }
+    // The back gets the held-back work too, so it has that to run once it reaches the target
+    // instead of waiting for the front.
+    RunPendingFlush();
     Nx2Profile::Scope scope{Nx2Profile::Zone::WriterWait};
     wait_target.store(target, std::memory_order_seq_cst);
     Publish();
@@ -350,6 +359,8 @@ void GpuSplit::Backoff(u32 spins, u64 target) {
 }
 
 void GpuSplit::SwitchEngine(Tegra::Engines::EngineInterface* engine) {
+    // Before front_engine changes: the held-back work selects its own engine.
+    RunPendingFlush();
     front_engine = engine;
     u64* const entry = Reserve(2);
     entry[0] = static_cast<u64>(Kind::Engine);
@@ -484,6 +495,52 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
         const size_t payload = static_cast<size_t>((head >> 8) & 0xffffff);
         reinterpret_cast<void (*)(const u64*)>(entry[1])(entry + 2);
         return 2 + payload;
+    }
+    case Kind::StateDelta: {
+        // Only Maxwell3D sends these (FrontState).
+        const u32 count = static_cast<u32>(head >> 32);
+        {
+            Nx2Profile::Scope delta_scope{Nx2Profile::Zone::DeltaApply};
+            static_cast<Tegra::Engines::Maxwell3D*>(back_engine)
+                ->ApplyFrontDelta(*system, entry + 1, count);
+        }
+        const size_t size = 1 + size_t{count};
+        // The front sends a delta right before the entry that made it go (FrontFlushPending,
+        // from Reserve): run that entry now when it is published too, as BackLoop would next.
+        // Only kinds that never return 0 (Wrap) or chain again.
+        if (size < words) {
+            const Kind next = static_cast<Kind>(entry[size] & 0xf);
+            if (next == Kind::Method || next == Kind::CbWrite || next == Kind::CbBind ||
+                next == Kind::DrawBatch) {
+                return size + Execute(entry + size, words - size);
+            }
+        }
+        return size;
+    }
+    case Kind::DrawBatch: {
+        const u32 count = static_cast<u32>((head >> 8) & 0xff);
+        const u32 repeats = static_cast<u32>(head >> 32);
+        Nx2Profile::Scope batch_scope{Nx2Profile::Zone::DrawBatch};
+        static_cast<Tegra::Engines::Maxwell3D*>(back_engine)
+            ->RunDrawBatch(*system, entry + 1, count, repeats);
+        return 1 + size_t{count};
+    }
+    case Kind::CbWrite: {
+        const u32 count = static_cast<u32>((head >> 8) & 7);
+        Nx2Profile::Scope cb_scope{Nx2Profile::Zone::CbWrite};
+        // The words after the first (at most 3, see GpuSplit::CbWrite) stay in the ring words
+        // after the head.
+        static_cast<Tegra::Engines::Maxwell3D*>(back_engine)
+            ->BackCbWrite(*system, static_cast<u32>((head >> 12) & 0xffff),
+                          static_cast<u32>(head >> 32), entry + 1, count);
+        return 1 + size_t{count} / 2;
+    }
+    case Kind::CbBind: {
+        Nx2Profile::Scope bind_scope{Nx2Profile::Zone::CbBind};
+        static_cast<Tegra::Engines::Maxwell3D*>(back_engine)
+            ->BackCbBind(*system, static_cast<u32>((head >> 8) & 0xff),
+                         static_cast<u32>(head >> 32));
+        return 1;
     }
     }
     return 1;
