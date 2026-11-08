@@ -3291,7 +3291,8 @@ void BufferCache<P>::UpdateIndexBuffer() {
     const bool memo_hit = memo.channel == channel_state && memo.memory == gpu_memory &&
                           memo.begin == gpu_addr_begin && memo.end == gpu_addr_end &&
                           memo.map_serial == map_serial && memo.deletions == buffer_deletions &&
-                          size != 0 && size <= memo.found_size;
+                          size != 0 && size <= memo.found_size &&
+                          !Settings::IsGPUFenceBehaviorAccurate(); // FindBuffer waits for writes
     if (memo_hit && !Nx2Perf::Verify()) {
         channel_state->index_buffer = Binding{
             .device_addr = memo.device_addr,
