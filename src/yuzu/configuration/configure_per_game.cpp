@@ -736,7 +736,7 @@ void ConfigurePerGame::OnDetectNupIcon() {
                         }
                         const auto url = fmt::format(
                             "https://raw.githubusercontent.com/zortos293/Lichii/"
-                            "refs/heads/nx2/img/{}.png",
+                            "refs/heads/nx2/img/{}.jpg",
                             s);
                         if (const auto body = HttpGetUrl(url, budget);
                             body && try_decode_bytes(*body)) {
