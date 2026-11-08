@@ -10,6 +10,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <xmmintrin.h>
 
 #include <boost/icl/interval_set.hpp>
@@ -33,6 +34,30 @@
 namespace Dynarmic::A64 {
 
 using namespace Backend::X64;
+
+namespace {
+// DIAGNOSTIC: which JITs compiled each location before.
+std::mutex seen_mutex;
+std::unordered_map<u64, u32> seen_locations;
+
+void NoteCompile(u64 location, std::size_t core) {
+    const u32 bit = 1u << (core & 31);
+    std::scoped_lock lock{seen_mutex};
+    u32& mask = seen_locations[location];
+    if (mask & bit) {
+        compile_diagnostics.same_core_repeats.fetch_add(1, std::memory_order_relaxed);
+    } else if (mask != 0) {
+        compile_diagnostics.other_core_repeats.fetch_add(1, std::memory_order_relaxed);
+    }
+    mask |= bit;
+}
+
+u64 NsSince(std::chrono::steady_clock::time_point start) {
+    return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now() - start)
+                                .count());
+}
+} // namespace
 
 static RunCodeCallbacks GenRunCodeCallbacks(A64::UserCallbacks* cb, CodePtr (*LookupBlock)(void* lookup_block_arg), void* arg, const A64::UserConfig& conf) {
     return RunCodeCallbacks{
@@ -149,6 +174,8 @@ public:
         const auto end_address = static_cast<u64>(start_address + length - 1);
         const auto range = boost::icl::discrete_interval<u64>::closed(start_address, end_address);
         invalid_cache_ranges.add(range);
+        compile_diagnostics.range_invalidations.fetch_add(1, std::memory_order_relaxed);
+        compile_diagnostics.invalidated_bytes.fetch_add(length, std::memory_order_relaxed);
         HaltExecution(HaltReason::CacheInvalidation);
     }
 
@@ -310,8 +337,26 @@ private:
         ir_block.Reset(arch_descriptor);
         const auto get_host_function = [this](u64 vaddr) { return conf.callbacks->GetHostFunction(vaddr); };
         A64::Translate(ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct, true, conf.elide_ld_st_barriers, conf.native_lse_atomics}, get_host_function);
+        const u64 translate_ns = NsSince(compile_start);
+        const auto optimize_start = std::chrono::steady_clock::now();
         Optimization::Optimize(ir_block, conf, polyfill_options);
+        const u64 optimize_ns = NsSince(optimize_start);
+        const auto emit_start = std::chrono::steady_clock::now();
         const CodePtr entrypoint = emitter.Emit(ir_block).entrypoint;
+        const u64 emit_ns = NsSince(emit_start);
+        {
+            auto& d = compile_diagnostics;
+            const std::size_t core = conf.processor_id % CompileDiagnostics::MaxCores;
+            d.core_blocks[core].fetch_add(1, std::memory_order_relaxed);
+            d.core_ns[core].fetch_add(NsSince(compile_start), std::memory_order_relaxed);
+            d.translate_ns.fetch_add(translate_ns, std::memory_order_relaxed);
+            d.optimize_ns.fetch_add(optimize_ns, std::memory_order_relaxed);
+            d.emit_ns.fetch_add(emit_ns, std::memory_order_relaxed);
+            d.guest_instructions.fetch_add(
+                (A64::LocationDescriptor{ir_block.EndLocation()}.PC() - arch_descriptor.PC()) / 4,
+                std::memory_order_relaxed);
+            NoteCompile(descriptor.Value(), conf.processor_id);
+        }
         compile_statistics.blocks.fetch_add(1, std::memory_order_relaxed);
         compile_statistics.nanoseconds.fetch_add(
             static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
