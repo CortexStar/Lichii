@@ -966,7 +966,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     size_t deferred_pipelines = 0;
     size_t queued_graphics = 0;
     size_t dropped_dynamic_state = 0;
-    size_t normalized_provoking = 0;
+    size_t unsupported_provoking = 0;
     size_t dropped_duplicate = 0;
 
     if (use_vulkan_pipeline_cache) {
@@ -1047,15 +1047,10 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             return;
         }
 
-        // A last-vertex key the device can't honour is built with the first vertex anyway (and
-        // Refresh no longer produces it there), so load it under the key a draw now looks up
-        // instead of dropping it. MoltenVK has no last-vertex mode.
-        const bool key_uses_transform_feedback = key.state.xfb_enabled != 0;
-        if (key.state.provoking_vertex_last != 0 &&
-            (!dynamic_features.has_provoking_vertex_last_mode ||
-             (key_uses_transform_feedback && !dynamic_features.has_provoking_vertex_tf_preserve))) {
-            key.state.provoking_vertex_last.Assign(0);
-            ++normalized_provoking;
+        // Keys asking for a last-vertex mode the device lacks are loaded as they are: draws look
+        // them up with the same bit, and the pipeline falls back to the first vertex when built.
+        if (key.state.provoking_vertex_last != 0 && !dynamic_features.has_provoking_vertex_last_mode) {
+            ++unsupported_provoking;
         }
 
         const u64 hash = key.Hash();
@@ -1124,8 +1119,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     LOG_INFO(Render_Vulkan, "Total Pipeline Count: {}", state.total);
     LOG_INFO(Render_Vulkan,
              "Cached graphics pipelines at load: {} dropped for dynamic state, {} duplicates, {} "
-             "loaded without an unsupported last-vertex mode",
-             dropped_dynamic_state, dropped_duplicate, normalized_provoking);
+             "with a last-vertex mode the device lacks",
+             dropped_dynamic_state, dropped_duplicate, unsupported_provoking);
     if (skipped_pipelines != 0) {
         LOG_INFO(
             Render_Vulkan,
