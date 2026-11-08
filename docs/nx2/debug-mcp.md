@@ -343,6 +343,14 @@ so a step changes at the first npad update after its end: the npad updates every
 
 The result gives the totals (`frames`, `ms`), `first_present`, `last_present` and `elapsed_s`.
 
+Evidence that the input reached the guest: `pad_changes` counts the npad updates whose buttons or
+sticks differed from the controller's previous update during the call
+(`Service::HID::PublishedPadChanges`, counted where `NPad::OnUpdate` writes the state the guest
+reads), and `started` lists each step's start with its present count and the changes so far. Each
+start is also logged ("Debug server input: step N of M started at present P, C npad changes"), so
+the game log's clock places it. `status` reports the running `pad_changes` count too, for an
+input call that outlasts the measurement (a camera pan released by disconnecting).
+
 Release: the injector returns nothing from the end of the last step on, so the input ends on its
 exact frame even before the handler removes it. The handler removes it on every exit path
 (`SCOPE_EXIT`): when the steps are done; on timeout, when frames stop for `timeout_s` (default

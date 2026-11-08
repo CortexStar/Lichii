@@ -18,11 +18,11 @@
 #include <thread>
 
 #include "common/fs/path_util.h"
-#include "common/scope_exit.h"
 #include "common/input_latency.h"
 #include "common/logging.h"
 #include "common/nx2_sampler.h"
 #include "common/scm_rev.h"
+#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/stb.h"
 #include "core/core.h"
@@ -32,6 +32,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/memory.h"
 #include "hid_core/hid_core.h"
+#include "hid_core/resources/npad/npad.h"
 #include "video_core/gpu.h"
 #include "video_core/guest_frame_timing.h"
 #include "video_core/nx2_debug_control.h"
@@ -209,18 +210,20 @@ json Status(ToolState& state, const json& params) {
         {"powered_on", state.system.IsPoweredOn()},
         {"paused", state.system.IsPaused()},
         {"presents", after},
+        {"pad_changes", ::Service::HID::PublishedPadChanges()},
         {"fps", seconds > 0.0 ? static_cast<double>(after - before) / seconds : 0.0},
-        {"uptime_s", std::chrono::duration<double>(std::chrono::steady_clock::now() - state.start)
-                         .count()},
+        {"uptime_s",
+         std::chrono::duration<double>(std::chrono::steady_clock::now() - state.start).count()},
         {"dump_dir", state.dump_directory.generic_string()},
         {"log_filter", state.log_filter},
         {"rejected", HexList(VideoCore::Nx2Debug::RejectedHashes())},
         // Button change to the host present of the first frame that sampled it.
-        {"input_to_present", {{"samples", input.samples},
-                              {"mean_ms", input.mean_ms},
-                              {"p50_ms", input.p50_ms},
-                              {"p99_ms", input.p99_ms},
-                              {"max_ms", input.max_ms}}},
+        {"input_to_present",
+         {{"samples", input.samples},
+          {"mean_ms", input.mean_ms},
+          {"p50_ms", input.p50_ms},
+          {"p99_ms", input.p99_ms},
+          {"max_ms", input.max_ms}}},
     };
 }
 
@@ -685,9 +688,23 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
     };
     const auto begin = std::chrono::steady_clock::now();
     const auto deadline = begin + std::chrono::seconds{timeout};
+    // Evidence that the steps reached the guest: each step's start is logged (the log line's time
+    // is on the game log's clock) with the present count and how many times the npad state the
+    // guest reads had changed by then (Service::HID::PublishedPadChanges).
+    const u64 pad_changes_before = ::Service::HID::PublishedPadChanges();
+    json started = json::array();
+    size_t logged = 0;
     for (;;) {
-        const size_t step =
-            script->Step(g_nx2_present_count.load(std::memory_order_relaxed), SteadyNs());
+        const u64 present = g_nx2_present_count.load(std::memory_order_relaxed);
+        const size_t step = script->Step(present, SteadyNs());
+        for (; logged < (std::min)(step + 1, steps.size()) && present >= start; ++logged) {
+            const u64 pad_changes = ::Service::HID::PublishedPadChanges() - pad_changes_before;
+            LOG_INFO(Debug,
+                     "Debug server input: step {} of {} started at present {}, {} npad changes",
+                     logged, steps.size(), present, pad_changes);
+            started.push_back(
+                {{"step", logged}, {"present", present}, {"pad_changes", pad_changes}});
+        }
         if (step >= steps.size()) {
             break;
         }
@@ -712,6 +729,8 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         {"ms", total_ms},
         {"first_present", start},
         {"last_present", g_nx2_present_count.load(std::memory_order_relaxed)},
+        {"pad_changes", ::Service::HID::PublishedPadChanges() - pad_changes_before},
+        {"started", std::move(started)},
         {"elapsed_s",
          std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count()},
     };

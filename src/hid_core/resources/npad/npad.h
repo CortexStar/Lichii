@@ -45,6 +45,13 @@ class ISystemSettingsServer;
 union Result;
 
 namespace Service::HID {
+
+/// Npad updates whose published buttons or sticks differ from the same controller's previous
+/// update, over all controllers: evidence for the debug server that an input reached the guest.
+[[nodiscard]] u64 PublishedPadChanges() noexcept;
+
+/// The buttons and sticks of a pad state as one hash; equal states hash equal, an idle pad is 0.
+[[nodiscard]] u64 PadFingerprint(const NPadGenericState& state) noexcept;
 class AppletResource;
 struct HandheldConfig;
 struct NpadInternalState;
@@ -177,6 +184,8 @@ private:
         NPadGenericState npad_libnx_state{};
         NpadGcTriggerState npad_trigger_state{};
         int callback_key{};
+        /// Buttons and sticks of the last update, as a hash (PublishedPadChanges).
+        u64 published_fingerprint{};
     };
 
     void ControllerUpdate(Kernel::KernelCore& kernel, Core::HID::ControllerTriggerType type, std::size_t controller_idx);

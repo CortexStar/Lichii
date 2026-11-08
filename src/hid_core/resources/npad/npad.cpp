@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 
 #include "common/assert.h"
@@ -29,6 +30,22 @@
 #include "hid_core/resources/shared_memory_format.h"
 
 namespace Service::HID {
+
+namespace {
+std::atomic<u64> published_pad_changes{};
+} // Anonymous namespace
+
+u64 PadFingerprint(const NPadGenericState& state) noexcept {
+    u64 hash = static_cast<u64>(state.npad_buttons.raw);
+    for (const s32 value : {state.l_stick.x, state.l_stick.y, state.r_stick.x, state.r_stick.y}) {
+        hash = (hash * 0x100000001b3ULL) ^ static_cast<u32>(value);
+    }
+    return hash;
+}
+
+u64 PublishedPadChanges() noexcept {
+    return published_pad_changes.load(std::memory_order_relaxed);
+}
 
 NPad::NPad(Core::HID::HIDCore& hid_core_, KernelHelpers::ServiceContext& service_context_)
     : hid_core{hid_core_}
@@ -555,6 +572,11 @@ void NPad::OnUpdate(Kernel::KernelCore& kernel, const Core::Timing::CoreTiming& 
             auto& pad_state = controller.npad_pad_state;
             auto& libnx_state = controller.npad_libnx_state;
             auto& trigger_state = controller.npad_trigger_state;
+            if (const u64 fingerprint = PadFingerprint(pad_state);
+                fingerprint != controller.published_fingerprint) {
+                controller.published_fingerprint = fingerprint;
+                published_pad_changes.fetch_add(1, std::memory_order_relaxed);
+            }
 
             // LibNX exclusively uses this section, so we always update it since LibNX doesn't
             // activate any controllers.
