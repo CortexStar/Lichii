@@ -194,6 +194,7 @@ if ("x86_64" IN_LIST ARCHITECTURE)
         # A64
         backend/x64/a64_emit_x64.cpp
         backend/x64/a64_emit_x64.h
+        backend/x64/atomic_fallback.h
         backend/x64/a64_emit_x64_memory.cpp
         backend/x64/a64_interface.cpp
         backend/x64/a64_jitstate.cpp

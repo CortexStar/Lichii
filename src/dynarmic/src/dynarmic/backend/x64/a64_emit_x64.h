@@ -9,6 +9,7 @@
 #pragma once
 
 #include <array>
+#include <initializer_list>
 #include <map>
 #include <optional>
 #include <tuple>
@@ -18,6 +19,7 @@
 
 #include "dynarmic/backend/block_range_information.h"
 #include "dynarmic/backend/x64/a64_jitstate.h"
+#include "dynarmic/backend/x64/atomic_fallback.h"
 #include "dynarmic/backend/x64/emit_x64.h"
 #include "dynarmic/backend/x64/reg_alloc.h"
 #include "dynarmic/frontend/A64/a64_location_descriptor.h"
@@ -111,6 +113,13 @@ public:
     void EmitExclusiveReadMemoryInline(A64EmitContext& ctx, IR::Inst* inst);
     template<std::size_t bitsize, auto callback>
     void EmitExclusiveWriteMemoryInline(A64EmitContext& ctx, IR::Inst* inst);
+    template<std::size_t bitsize>
+    void EmitAtomicRmwMemory(A64EmitContext& ctx, IR::Inst* inst);
+    template<std::size_t bitsize>
+    void EmitAtomicCasMemory(A64EmitContext& ctx, IR::Inst* inst);
+    using AtomicFallbackContext = X64::AtomicFallbackContext;
+    using AtomicFallbackFn = u64 (*)(const AtomicFallbackContext& context, u64 vaddr, u64 a, u64 b);
+    void EmitAtomicFallbackStub(Xbyak::Reg64 result, std::initializer_list<Xbyak::Reg64> sources, std::optional<u32> param4, AtomicFallbackFn fallback);
 
     // Terminal instruction emitters
     bool EmitLeafTerminal(IR::Term::LeafTerminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) noexcept override;
@@ -123,8 +132,14 @@ public:
     void EmitPatchJmp(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr = nullptr) override;
     void EmitPatchMovRcx(CodePtr target_code_ptr = nullptr) override;
 
+    /// The JIT state's halt reasons, for the atomics' callback paths (AtomicFallbackContext).
+    void SetAtomicFallbackHaltReason(const volatile u32* halt_reason) {
+        atomic_fallback.halt_reason = halt_reason;
+    }
+
 //data
     const A64::UserConfig conf;
+    AtomicFallbackContext atomic_fallback{&conf, nullptr};
     RegAlloc reg_alloc; //reusable reg alloc
     BlockRangeInformation<u64> block_ranges;
     std::vector<FastDispatchEntry> fast_dispatch_table;

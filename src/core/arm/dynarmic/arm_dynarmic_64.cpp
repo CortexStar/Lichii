@@ -492,6 +492,11 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
         // Branches, CSEL and CBZ/TBZ read the host flags left by the instruction before them
         // instead of reloading NZCV from the guest state.
         config.reuse_host_flags = !config.enable_cycle_counting;
+        // LSE atomics as host atomics (fastmem exclusives with the global monitor ignored only).
+        config.native_lse_atomics = config.fastmem_exclusive_access &&
+            config.HasOptimization(Dynarmic::OptimizationFlag::Unsafe_IgnoreGlobalMonitor);
+        // CheckMemoryAccess halts with these when it refuses an access.
+        config.memory_abort_halt_reasons = DataAbort | PrefetchAbort;
         // Halt checks on links to lower PCs and on indirect branches instead of every linked
         // branch (multicore only: dynarmic counts no cycles there).
         config.halt_check_on_back_edges = !config.enable_cycle_counting;
