@@ -83,6 +83,7 @@ add_executable(tests
     video_core/present_mode_policy.cpp
     video_core/render_pass_barrier_tracker.cpp
     video_core/hazard_tracker.cpp
+    video_core/depth_write_policy.cpp
     video_core/tessellation_stages.cpp
     video_core/native_pending_policy.cpp
     video_core/framebuffer_clear_layers.cpp
