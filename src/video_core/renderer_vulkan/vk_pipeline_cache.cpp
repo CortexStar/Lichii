@@ -393,9 +393,14 @@ vk::ShaderModule EmitShaderModule(const Device& device, const Shader::Profile& p
                                   const Shader::RuntimeInfo& runtime_info,
                                   Shader::IR::Program& program, Shader::Backend::Bindings& binding,
                                   u64 shader_hash, size_t stage_index,
-                                  std::span<const u32> reference = {}, u128* spirv_hash = nullptr) {
+                                  std::span<const u32> reference = {}, u128* spirv_hash = nullptr,
+                                  std::vector<u32>* code_out = nullptr) {
     const auto code =
         EmitPipelineShader(profile, runtime_info, program, binding, shader_hash, reference);
+    if (code_out) {
+        // Shader objects are created from the code itself.
+        code_out->assign(code.begin(), code.end());
+    }
     if (spirv_hash) {
         // Graphics pipeline libraries are keyed by the SPIR-V the stage was emitted to.
         *spirv_hash = Common::CityHash128(reinterpret_cast<const char*>(code.data()),
@@ -540,6 +545,9 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
       serialization_thread(1, "VkPipelineSerialization", {}, Common::ThreadPlacement::Background),
       background_pipelines{std::numeric_limits<size_t>::max(), BackgroundCaptureLimit,
                            device.HasBrokenParallelShaderCompiling()} {
+    use_shader_objects = device.IsExtShaderObjectSupported();
+    LOG_INFO(Render_Vulkan, "Graphics pipelines: {}",
+             use_shader_objects ? "shader objects (VK_EXT_shader_object)" : "pipelines");
     const auto& float_control{device.FloatControlProperties()};
     const VkDriverId driver_id{device.GetDriverID()};
     const VkShaderStageFlags subgroup_stages{device.GetSubgroupSupportedStages()};
@@ -768,10 +776,12 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     // (xgl pipeline_compiler.cpp: enableUberFetchShader whenever VertexInput is dynamic). With
     // static vertex input, monolithic pipelines and link-time-optimized links of the pipeline
     // libraries fetch with the pipeline's own formats.
+    // Shader objects take their vertex input only dynamically (vkCmdSetVertexInputEXT), on AMD
+    // with the uber fetch that comes with it.
     dynamic_features.has_dynamic_vertex_input =
         device.IsExtVertexInputDynamicStateSupported() &&
-        Settings::values.vertex_input_dynamic_state.GetValue() &&
-        device.GetDriverID() != VK_DRIVER_ID_AMD_PROPRIETARY;
+        (use_shader_objects || Settings::values.vertex_input_dynamic_state.GetValue()) &&
+        (device.GetDriverID() != VK_DRIVER_ID_AMD_PROPRIETARY || use_shader_objects);
     dynamic_features.has_static_vertex_repack =
         StaticVertexRepackEnabled(device.GetMinVertexInputBindingStrideAlignment());
 
@@ -2503,9 +2513,12 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     // Left on the monolithic route as well: task and mesh pipelines, transform feedback, a static
     // rasterizer discard, and stages whose texture or image counts do not fit the split rescaling
     // bits.
+    // Shader objects replace the libraries (and the monolithic pipelines) where the device has
+    // them; the mesh emulation keeps its pipelines.
+    const bool shader_objects = use_shader_objects && !mesh_emulation;
     const bool use_libraries = [&] {
-        if (!build_in_parallel || !device.IsExtGraphicsPipelineLibrarySupported() ||
-            key.state.xfb_enabled != 0) {
+        if (shader_objects || !build_in_parallel ||
+            !device.IsExtGraphicsPipelineLibrarySupported() || key.state.xfb_enabled != 0) {
             return false;
         }
         if (key.state.extended_dynamic_state_2 == 0 &&
@@ -2532,6 +2545,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                                         fragment_images);
     }();
     std::array<u128, Maxwell::MaxShaderStage> spirv_hashes{};
+    std::array<std::vector<u32>, Maxwell::MaxShaderStage> stage_code;
+    const bool hash_spirv = use_libraries || shader_objects;
 
     std::array<const Shader::Info*, Maxwell::MaxShaderStage> infos{};
     std::array<vk::ShaderModule, Maxwell::MaxShaderStage> modules;
@@ -2594,7 +2609,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             const auto begin = std::chrono::steady_clock::now();
             modules[stage_index] = EmitShaderModule(
                 device, profile, runtime_info, program, binding, key.unique_hashes[index],
-                stage_index, {}, use_libraries ? &spirv_hashes[stage_index] : nullptr);
+                stage_index, {}, hash_spirv ? &spirv_hashes[stage_index] : nullptr,
+                shader_objects ? &stage_code[stage_index] : nullptr);
             if (build_in_parallel) {
                 AddRuntimeSpirvTime(0, begin);
             }
@@ -2614,43 +2630,47 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                 infos[stage] = &job->programs[stage + 1].info;
             }
         }
-        emit_stages = [this, job = std::move(job), hashes = key.unique_hashes, use_libraries](
-                          std::array<u128, Maxwell::MaxShaderStage>& stage_hashes) mutable {
-            const auto begin = std::chrono::steady_clock::now();
-            std::array<vk::ShaderModule, Maxwell::MaxShaderStage> stage_modules;
-            Shader::Backend::Bindings stage_binding;
-            for (size_t stage = 0; stage < stage_modules.size(); ++stage) {
-                if (job->runtime_infos[stage]) {
-                    PrepareStageBindings(stage_binding, stage, use_libraries);
-                    stage_modules[stage] = EmitShaderModule(
-                        device, profile, *job->runtime_infos[stage], job->programs[stage + 1],
-                        stage_binding, hashes[stage + 1], stage, job->reference_spirv[stage],
-                        use_libraries ? &stage_hashes[stage] : nullptr);
+        emit_stages =
+            [this, job = std::move(job), hashes = key.unique_hashes, use_libraries, hash_spirv,
+             shader_objects](std::array<u128, Maxwell::MaxShaderStage>& stage_hashes,
+                             std::array<std::vector<u32>, Maxwell::MaxShaderStage>& code) mutable {
+                const auto begin = std::chrono::steady_clock::now();
+                std::array<vk::ShaderModule, Maxwell::MaxShaderStage> stage_modules;
+                Shader::Backend::Bindings stage_binding;
+                for (size_t stage = 0; stage < stage_modules.size(); ++stage) {
+                    if (job->runtime_infos[stage]) {
+                        PrepareStageBindings(stage_binding, stage, use_libraries);
+                        stage_modules[stage] = EmitShaderModule(
+                            device, profile, *job->runtime_infos[stage], job->programs[stage + 1],
+                            stage_binding, hashes[stage + 1], stage, job->reference_spirv[stage],
+                            hash_spirv ? &stage_hashes[stage] : nullptr,
+                            shader_objects ? &code[stage] : nullptr);
+                    }
                 }
-            }
-            auto completed_pools = std::move(job->pools);
-            job.reset();
-            completed_pools->ReleaseContents();
-            {
-                std::scoped_lock lock{spare_pools_mutex};
-                if (spare_pools.size() < 4) {
-                    spare_pools.push_back(std::move(completed_pools));
+                auto completed_pools = std::move(job->pools);
+                job.reset();
+                completed_pools->ReleaseContents();
+                {
+                    std::scoped_lock lock{spare_pools_mutex};
+                    if (spare_pools.size() < 4) {
+                        spare_pools.push_back(std::move(completed_pools));
+                    }
                 }
-            }
-            AddRuntimeSpirvTime(1, begin);
-            return stage_modules;
-        };
+                AddRuntimeSpirvTime(1, begin);
+                return stage_modules;
+            };
     }
     Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};
     const GraphicsPipeline::LibraryParams library_params{
         .library_cache = use_libraries && !mesh_emulation ? &graphics_libraries : nullptr,
         .spirv_hashes = spirv_hashes,
+        .shader_objects = shader_objects ? &shader_objects_cache : nullptr,
     };
     return std::make_unique<GraphicsPipeline>(
         scheduler, buffer_cache, texture_cache, vulkan_pipeline_cache, &shader_notify, device,
         descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring, thread_worker, statistics,
         render_pass_cache, key, std::move(modules), infos, std::move(emit_stages),
-        std::move(mesh_emulation), library_params, &binary_cache);
+        std::move(mesh_emulation), library_params, &binary_cache, std::move(stage_code));
 
 } catch (const Shader::Exception& exception) {
     auto hash = key.Hash();

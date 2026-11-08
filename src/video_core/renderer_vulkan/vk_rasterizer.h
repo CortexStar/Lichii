@@ -379,6 +379,18 @@ private:
     u32 last_color_output_mask{};
     /// The pipeline alpha to coverage/one were last staged with
     const GraphicsPipeline* last_dyn_pipeline{};
+    /// Shader objects: the pipeline whose key state was last staged
+    const GraphicsPipeline* last_so_pipeline{};
+    /// Shader objects: the state slots a pipeline holds statically, staged from its key.
+    static constexpr u64 SHADER_OBJECT_SLOTS = [] {
+        using DynamicStateDelta::Bit;
+        using DynamicStateDelta::Slot;
+        return Bit(Slot::PolygonMode) | Bit(Slot::RasterizationSamples) | Bit(Slot::SampleMask) |
+               Bit(Slot::TessellationDomainOrigin) | Bit(Slot::PatchControlPoints) |
+               Bit(Slot::DepthClipNegativeOneToOne) | Bit(Slot::ProvokingVertexMode) |
+               Bit(Slot::LineStipple) | Bit(Slot::ExtraPrimitiveOverestimationSize) |
+               Bit(Slot::RasterizationStream) | Bit(Slot::ColorWriteEnable);
+    }();
     /// Render target formats the blend enables were last staged with
     std::array<Tegra::RenderTargetFormat, Tegra::Engines::Maxwell3D::Regs::NumRenderTargets>
         last_rt_formats{};

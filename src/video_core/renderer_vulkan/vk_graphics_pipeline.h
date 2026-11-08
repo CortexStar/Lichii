@@ -33,6 +33,7 @@
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_pipeline_binary.h"
 #include "video_core/renderer_vulkan/vk_pipeline_library.h"
+#include "video_core/renderer_vulkan/vk_shader_object.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -111,16 +112,20 @@ struct MeshEmulationSetup {
 struct GraphicsPipelineLibraryParams {
     GraphicsPipelineLibraryCache* library_cache{};
     std::array<u128, Tegra::Engines::Maxwell3D::Regs::MaxShaderStage> spirv_hashes{};
+    /// Non-null: the stages are built as shader objects (VK_EXT_shader_object), shared through
+    /// this cache, instead of a pipeline.
+    ShaderObject::Cache* shader_objects{};
 };
 
 class GraphicsPipeline {
     static constexpr size_t NUM_STAGES = Tegra::Engines::Maxwell3D::Regs::MaxShaderStage;
 
 public:
-    /// Emits the stages' SPIR-V on a worker; with libraries it also returns each stage's SPIR-V
-    /// hash (zero for absent stages).
+    /// Emits the stages' SPIR-V on a worker; with libraries or shader objects it also returns
+    /// each stage's SPIR-V hash (zero for absent stages), with shader objects the code too.
     using EmitStagesFunc = std::function<std::array<vk::ShaderModule, NUM_STAGES>(
-        std::array<u128, NUM_STAGES>& spirv_hashes)>;
+        std::array<u128, NUM_STAGES>& spirv_hashes,
+        std::array<std::vector<u32>, NUM_STAGES>& spirv_code)>;
 
     // Declared outside the class: GCC rejects a default argument `= {}` of a nested struct
     // with member initializers inside its enclosing class.
@@ -136,11 +141,23 @@ public:
         std::array<vk::ShaderModule, NUM_STAGES> stages,
         const std::array<const Shader::Info*, NUM_STAGES>& infos, EmitStagesFunc emit_stages = {},
         std::optional<MeshEmulationSetup> mesh_emulation = std::nullopt,
-        LibraryParams library_params = {}, PipelineBinaryCache* binary_cache = nullptr);
+        LibraryParams library_params = {}, PipelineBinaryCache* binary_cache = nullptr,
+        std::array<std::vector<u32>, NUM_STAGES> spirv_code = {});
 
     static std::chrono::nanoseconds TakeHoldTime() noexcept;
 
     bool HasDynamicVertexInput() const noexcept { return key.state.dynamic_vertex_input; }
+
+    /// Drawn with shader objects: every state the key holds is set dynamically, in a dynamic
+    /// rendering instance.
+    [[nodiscard]] bool UsesShaderObjects() const noexcept {
+        return shader_object_cache != nullptr;
+    }
+
+    /// The fixed-function state of the key (shader objects set it dynamically).
+    [[nodiscard]] const FixedPipelineState& State() const noexcept {
+        return key.state;
+    }
     const std::array<u64, 6>& ShaderHashes() const noexcept {
         return key.unique_hashes;
     }
@@ -400,6 +417,20 @@ private:
 
     vk::Pipeline MakePipeline(VkRenderPass render_pass);
 
+    /// Gets the stages' linked shader objects from the cache, building them where no pipeline
+    /// with the same shaders did.
+    void MakeShaderObjects();
+
+    /// The pipeline or shader objects exist (or failed: false).
+    [[nodiscard]] bool Bindable() const noexcept {
+        return !build->Failed() &&
+               (shader_object_cache ? shader_set != nullptr : static_cast<bool>(pipeline));
+    }
+
+    /// Records the bind of the pipeline (the optimized link when `optimized` and built) or the
+    /// shader objects. False when there is nothing to bind.
+    bool RecordBind(vk::CommandBuffer cmdbuf, bool optimized) const;
+
     /// Library build: gets or builds the two shader libraries, then links them with this
     /// pipeline's vertex input and fragment output parts.
     /// False when a library failed; the caller then builds the pipeline the monolithic way.
@@ -496,6 +527,12 @@ private:
     std::shared_ptr<OptimizedLink> optimized_link;
     vk::Pipeline optimized_pipeline;
     std::atomic<VkPipeline> optimized_handle{VK_NULL_HANDLE};
+
+    /// VK_EXT_shader_object: the shared sets and this pipeline's, and the SPIR-V it is made of
+    /// until then.
+    ShaderObject::Cache* const shader_object_cache;
+    std::shared_ptr<const ShaderObject::Set> shader_set;
+    std::array<std::vector<u32>, NUM_STAGES> spirv_code;
 
     vk::DescriptorSetLayout descriptor_set_layout;
     DescriptorAllocator descriptor_allocator;

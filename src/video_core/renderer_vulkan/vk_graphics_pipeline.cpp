@@ -364,13 +364,14 @@ GraphicsPipeline::GraphicsPipeline(
     std::array<vk::ShaderModule, NUM_STAGES> stages,
     const std::array<const Shader::Info*, NUM_STAGES>& infos, EmitStagesFunc emit_stages,
     std::optional<MeshEmulationSetup> mesh_emulation_, LibraryParams library_params,
-    PipelineBinaryCache* binary_cache_)
+    PipelineBinaryCache* binary_cache_, std::array<std::vector<u32>, NUM_STAGES> spirv_code_)
     : key{key_}, device{device_}, texture_cache{texture_cache_}, buffer_cache{buffer_cache_},
       pipeline_cache(pipeline_cache_), scheduler{scheduler_},
       guest_descriptor_queue{guest_descriptor_queue_},
       descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)},
       library_cache{library_params.library_cache}, binary_cache{binary_cache_},
-      spirv_hashes{library_params.spirv_hashes},
+      spirv_hashes{library_params.spirv_hashes}, shader_object_cache{library_params.shader_objects},
+      spirv_code{std::move(spirv_code_)},
       worker_only_build{worker_thread && static_cast<bool>(emit_stages)},
       mesh_emulation{std::move(mesh_emulation_)} {
     if (shader_notify) {
@@ -552,11 +553,15 @@ GraphicsPipeline::GraphicsPipeline(
         };
         try {
             if (emit_stages) {
-                spv_modules = emit_stages(spirv_hashes);
+                spv_modules = emit_stages(spirv_hashes, spirv_code);
             }
-            const VkRenderPass render_pass{render_pass_cache.Get(MakeRenderPassKey(key.state, device))};
             Validate();
-            if (library_cache) {
+            const VkRenderPass render_pass{
+                shader_object_cache ? VkRenderPass{}
+                                    : render_pass_cache.Get(MakeRenderPassKey(key.state, device))};
+            if (shader_object_cache) {
+                MakeShaderObjects();
+            } else if (library_cache) {
                 bool made{};
                 try {
                     made = MakeLibraryPipeline(render_pass);
@@ -583,7 +588,7 @@ GraphicsPipeline::GraphicsPipeline(
                          device.GetMaxTessellationPatchSize());
             throw;
         }
-        if (pipeline_statistics) {
+        if (pipeline_statistics && pipeline) {
             pipeline_statistics->Collect(device, *pipeline);
         }
         // Nothing reads the shader modules once the pipeline exists, and the driver keeps a copy
@@ -1085,7 +1090,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         }
         scheduler.PrepareDrawImages(images, writes_storage || regs.transform_feedback_enabled != 0);
     }
-    if (IsBuilt() && (!pipeline || build->Failed())) {
+    if (IsBuilt() && !Bindable()) {
         return false;
     }
     Profile::Scope scope{Profile::Zone::ConfigureDraw};
@@ -1222,7 +1227,7 @@ bool GraphicsPipeline::ConfigureHeapDraw(const RescalingPushConstant& rescaling,
                   Shader::Backend::SPIRV::PUSH_CONSTANT_LAYOUT_SIZE);
     // Binding the heaps invalidates descriptor buffer bindings.
     scheduler.InvalidateDescriptorBuffer();
-    scheduler.RequestDrawRenderpass(texture_cache.GetFramebuffer());
+    scheduler.RequestDrawRenderpass(texture_cache.GetFramebuffer(), UsesShaderObjects());
     if (writes_storage) {
         scheduler.NoteRenderPassStores();
     }
@@ -1267,11 +1272,11 @@ bool GraphicsPipeline::ConfigureHeapDraw(const RescalingPushConstant& rescaling,
     scheduler.Record(
         [this, push, resource_heap, sampler_heap, bind_pipeline](vk::CommandBuffer cmdbuf) {
             if (bind_pipeline) {
-                scheduler.SetGraphicsPipelineMissing(!pipeline || build->Failed());
-                if (!pipeline || build->Failed()) {
+                const bool bound = RecordBind(cmdbuf, false);
+                scheduler.SetGraphicsPipelineMissing(!bound);
+                if (!bound) {
                     return;
                 }
-                cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline);
             }
             cmdbuf.BindResourceHeapEXT(resource_heap);
             cmdbuf.BindSamplerHeapEXT(sampler_heap);
@@ -1460,7 +1465,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
         });
     }
-    scheduler.RequestDrawRenderpass(texture_cache.GetFramebuffer());
+    scheduler.RequestDrawRenderpass(texture_cache.GetFramebuffer(), UsesShaderObjects());
     if (writes_storage) {
         scheduler.NoteRenderPassStores();
     }
@@ -1518,13 +1523,11 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             cmdbuf.BindDescriptorBuffersEXT(binding_info);
         }
         if (bind_pipeline) {
-            scheduler.SetGraphicsPipelineMissing(!pipeline || build->Failed());
-            if (!pipeline || build->Failed()) {
+            const bool bound = RecordBind(cmdbuf, true);
+            scheduler.SetGraphicsPipelineMissing(!bound);
+            if (!bound) {
                 return;
             }
-            const VkPipeline optimized = optimized_handle.load(std::memory_order_acquire);
-            cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                optimized != VK_NULL_HANDLE ? optimized : *pipeline);
         }
         const VkShaderStageFlags push_stages =
             mesh_emulation ? VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT
@@ -2225,6 +2228,120 @@ VkPipelineCreateFlags2CreateInfo GraphicsPipeline::HeapFlags(VkPipelineCreateFla
         .pNext = next,
         .flags = VkPipelineCreateFlags2{flags} | VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT,
     };
+}
+
+void GraphicsPipeline::MakeShaderObjects() {
+    ShaderObject::Key so_key{};
+    std::array<VkShaderStageFlagBits, NUM_STAGES> stage_flags{};
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        if (!spv_modules[stage]) {
+            continue;
+        }
+        stage_flags[stage] =
+            StageFlag(stage_infos[stage], MaxwellToVK::ShaderStage(Shader::StageFromIndex(stage)));
+        so_key.spirv_hashes[stage] = spirv_hashes[stage];
+        so_key.stage_flags[stage] = static_cast<u32>(stage_flags[stage]);
+    }
+    // Pipelines with the same SPIR-V have the same descriptors; what else the shaders were made
+    // with is how those reach them.
+    so_key.interface_hash = (heap_mode ? 1U : 0U) | (uses_push_descriptor ? 2U : 0U) |
+                            (uses_descriptor_buffer ? 4U : 0U);
+    shader_set =
+        shader_object_cache->Get(so_key, [&]() -> std::shared_ptr<const ShaderObject::Set> {
+            const ShaderObject::StageChain chain = ShaderObject::ChainStages(stage_flags);
+            const bool has_task =
+                std::ranges::find(stage_flags, VK_SHADER_STAGE_TASK_BIT_EXT) != stage_flags.end();
+            const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT subgroup_size_ci{
+                .sType =
+                    VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT,
+                .pNext = nullptr,
+                .requiredSubgroupSize = GuestWarpSize,
+            };
+            std::array<VkShaderDescriptorSetAndBindingMappingInfoEXT, NUM_STAGES>
+                heap_mapping_infos{};
+            const VkPushConstantRange push_range{
+                DescriptorLayoutBuilder{device}.PushConstantRange()};
+            const VkDescriptorSetLayout set_layout{descriptor_set_layout ? *descriptor_set_layout
+                                                                         : VkDescriptorSetLayout{}};
+            std::array<VkShaderCreateInfoEXT, NUM_STAGES> infos{};
+            u32 count = 0;
+            for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+                if (stage_flags[stage] == 0) {
+                    continue;
+                }
+                const VkShaderStageFlagBits stage_flag = stage_flags[stage];
+                const Shader::Info& info{stage_infos[stage]};
+                // Votes, ballots and shuffles span the guest's 32-thread warp (MakePipeline).
+                const bool uses_warp_ops = info.uses_subgroup_vote ||
+                                           info.uses_subgroup_invocation_id ||
+                                           info.uses_subgroup_shuffles || info.uses_subgroup_mask;
+                const bool force_warp_size = uses_warp_ops &&
+                                             device.IsExtSubgroupSizeControlSupported() &&
+                                             device.IsGuestWarpSizeSupported(stage_flag);
+                VkShaderCreateFlagsEXT flags{};
+                if (chain.count > 1) {
+                    // AMD optimizes linked stages across their interface, as a pipeline would.
+                    flags |= VK_SHADER_CREATE_LINK_STAGE_BIT_EXT;
+                }
+                if (heap_mode) {
+                    flags |= VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT;
+                }
+                if (stage_flag == VK_SHADER_STAGE_MESH_BIT_EXT && !has_task) {
+                    flags |= VK_SHADER_CREATE_NO_TASK_SHADER_BIT_EXT;
+                }
+                const std::vector<u32>& code = spirv_code[stage];
+                ASSERT(!code.empty());
+                infos[count] = VkShaderCreateInfoEXT{
+                    .sType = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
+                    .pNext = ChainHeapMappings(stage,
+                                               force_warp_size
+                                                   ? &subgroup_size_ci
+                                                   : ExperimentFragmentWave(device, stage_flag),
+                                               heap_mapping_infos),
+                    .flags = flags,
+                    .stage = stage_flag,
+                    .nextStage = chain.next[count],
+                    .codeType = VK_SHADER_CODE_TYPE_SPIRV_EXT,
+                    .codeSize = code.size() * sizeof(u32),
+                    .pCode = code.data(),
+                    .pName = "main",
+                    .setLayoutCount = heap_mode || !set_layout ? 0U : 1U,
+                    .pSetLayouts = heap_mode || !set_layout ? nullptr : &set_layout,
+                    .pushConstantRangeCount = heap_mode ? 0U : 1U,
+                    .pPushConstantRanges = heap_mode ? nullptr : &push_range,
+                    .pSpecializationInfo = nullptr,
+                };
+                ++count;
+            }
+            auto set = std::make_shared<ShaderObject::Set>();
+            set->shaders = device.GetLogical().CreateShadersEXT(std::span(infos.data(), count));
+            set->num_bind = ShaderObject::NumBindStages(device.IsExtMeshShaderSupported());
+            for (u32 index = 0; index < count; ++index) {
+                set->bind[ShaderObject::BindIndex(chain.stages[index])] = *set->shaders[index];
+            }
+            return set;
+        });
+    // The driver holds its copy of the code (or the shared set already existed).
+    for (std::vector<u32>& code : spirv_code) {
+        code = {};
+    }
+}
+
+bool GraphicsPipeline::RecordBind(vk::CommandBuffer cmdbuf, bool optimized) const {
+    if (!Bindable()) {
+        return false;
+    }
+    if (shader_set) {
+        cmdbuf.BindShadersEXT(shader_set->num_bind, ShaderObject::BIND_STAGES.data(),
+                              shader_set->bind.data());
+        return true;
+    }
+    const VkPipeline optimized_pipeline_handle =
+        optimized ? optimized_handle.load(std::memory_order_acquire) : VK_NULL_HANDLE;
+    cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, optimized_pipeline_handle != VK_NULL_HANDLE
+                                                             ? optimized_pipeline_handle
+                                                             : *pipeline);
+    return true;
 }
 
 const void* GraphicsPipeline::ChainHeapMappings(

@@ -1930,7 +1930,7 @@ void RasterizerVulkan::Clear(u32 layer_count) {
         (!use_color || color_full_channels) && ds_deferrable;
     if (!can_defer_clear) {
         // A clear only writes the attachments.
-        scheduler.RequestDrawRenderpass(framebuffer);
+        scheduler.RequestDrawRenderpass(framebuffer, pipeline_cache.UsesShaderObjects());
     } else if (other_pass_open) {
         scheduler.RequestOutsideRenderPassOperationContext();
     }
@@ -3440,9 +3440,13 @@ void RasterizerVulkan::BuildDynamicStateMask() {
         set({Dirty::VertexInput, VideoCommon::Dirty::VertexBuffers});
         slots |= Bit(Slot::VertexInput);
     }
+    if (pipeline_cache.UsesShaderObjects()) {
+        // A pipeline's static state, set per draw from the bound pipeline's key.
+        slots |= SHADER_OBJECT_SLOTS;
+    }
     dyn_state_slots = slots;
     dyn_apply_options = {
-        .with_count = false,
+        .with_count = pipeline_cache.UsesShaderObjects(),
         .depth_bias_force_unorm = device.IsExtDepthBiasControlSupported(),
     };
 }
@@ -3465,6 +3469,9 @@ u32 RasterizerVulkan::ComputeDynamicState(DynamicStateDelta::Slot slot,
         return pipeline != nullptr ? pipeline : pipeline_cache.CurrentGraphicsPipeline();
     };
     const u32 num_viewports = std::min<u32>(device.GetMaxViewports(), Maxwell::NumViewports);
+    // Shader objects: the state a pipeline would hold, from the bound pipeline's key.
+    const FixedPipelineState* const so_state =
+        pipeline != nullptr && pipeline->UsesShaderObjects() ? &pipeline->State() : nullptr;
     switch (slot) {
     case Slot::Viewports: {
         const float scale =
@@ -3751,7 +3758,9 @@ u32 RasterizerVulkan::ComputeDynamicState(DynamicStateDelta::Slot slot,
                        : 0U);
     }
     case Slot::AlphaToOneEnable: {
-        if (!device.SupportsDynamicState3AlphaToOneEnable()) {
+        // Shader objects set it whenever the device has alpha to one at all.
+        if (!device.SupportsDynamicState3AlphaToOneEnable() &&
+            !(so_state != nullptr && device.SupportsAlphaToOne())) {
             static std::once_flag warn_alpha_to_one;
             std::call_once(warn_alpha_to_one, [] {
                 LOG_WARNING(Render_Vulkan,
@@ -3830,6 +3839,14 @@ u32 RasterizerVulkan::ComputeDynamicState(DynamicStateDelta::Slot slot,
         return Maxwell::NumRenderTargets;
     }
     case Slot::ColorWriteEnable: {
+        if (device.IsExtExtendedDynamicState3BlendingSupported()) {
+            // Shader objects with the blend state dynamic: every target writes, as in the
+            // pipelines (no color write state); the write mask masks.
+            if (!so_state || !device.IsExtColorWriteEnableSupported()) {
+                return 0;
+            }
+            return one(0xFFU);
+        }
         u32 enables = 0;
         for (size_t index = 0; index < Maxwell::NumRenderTargets; index++) {
             const auto& mask = regs.color_mask[regs.color_mask_common ? 0 : index];
@@ -3846,16 +3863,73 @@ u32 RasterizerVulkan::ComputeDynamicState(DynamicStateDelta::Slot slot,
         return two(words[0], words[1]);
     }
     case Slot::PolygonMode:
+        if (!so_state) {
+            return 0;
+        }
+        return one(static_cast<u32>(MaxwellToVK::PolygonMode(
+            FixedPipelineState::UnpackPolygonMode(so_state->polygon_mode))));
     case Slot::RasterizationSamples:
+        if (!so_state) {
+            return 0;
+        }
+        return one(static_cast<u32>(MaxwellToVK::MsaaMode(so_state->msaa_mode)));
     case Slot::SampleMask:
+        // Pipelines have no sample mask: every sample.
+        if (!so_state) {
+            return 0;
+        }
+        return two(static_cast<u32>(MaxwellToVK::MsaaMode(so_state->msaa_mode)), ~0U);
     case Slot::TessellationDomainOrigin:
+        // Pipelines take the default (no domain origin state).
+        if (!so_state) {
+            return 0;
+        }
+        return one(static_cast<u32>(VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT));
     case Slot::PatchControlPoints:
+        if (!so_state) {
+            return 0;
+        }
+        return one(std::min(so_state->patch_control_points_minus_one.Value() + 1,
+                            device.GetMaxTessellationPatchSize()));
     case Slot::DepthClipEnable:
-    case Slot::DepthClipNegativeOneToOne:
-    case Slot::ProvokingVertexMode:
-    case Slot::LineStipple:
-        // Static in the pipelines.
+        // VK_EXT_depth_clip_enable is not enabled: depth clip follows depth clamp.
         return 0;
+    case Slot::DepthClipNegativeOneToOne:
+        if (!so_state || !device.IsExtDepthClipControlSupported()) {
+            return 0;
+        }
+        return one(so_state->ndc_minus_one_to_one.Value() != 0 ? 1U : 0U);
+    case Slot::ProvokingVertexMode: {
+        if (!so_state || !device.IsExtProvokingVertexSupported()) {
+            return 0;
+        }
+        // As GraphicsPipeline::FillStates picks it.
+        const bool last = so_state->provoking_vertex_last != 0;
+        const VkProvokingVertexModeEXT mode =
+            last ? (device.SupportsProvokingVertexLastMode()
+                        ? VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT
+                        : VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT)
+                 : (device.SupportsProvokingVertexFirstMode()
+                        ? VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT
+                        : VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT);
+        return one(static_cast<u32>(mode));
+    }
+    case Slot::LineStipple:
+        if (!so_state || !device.IsExtLineRasterizationSupported()) {
+            return 0;
+        }
+        return two(so_state->line_stipple_factor, so_state->line_stipple_pattern);
+    case Slot::ExtraPrimitiveOverestimationSize:
+        if (!so_state || !device.IsExtConservativeRasterizationSupported()) {
+            return 0;
+        }
+        return one(FloatWord(0.0f));
+    case Slot::RasterizationStream:
+        if (!so_state || !device.IsExtTransformFeedbackSupported() ||
+            !device.AreTransformFeedbackGeometryStreamsSupported()) {
+            return 0;
+        }
+        return one(0);
     case Slot::Count:
         break;
     }
@@ -3985,6 +4059,11 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
             rt_formats_changed |= regs.rt[index].format != last_rt_formats[index];
         }
     }
+    // Shader objects: the state of the bound pipeline's key, again when the pipeline changes or
+    // the command buffer no longer holds it.
+    const bool so_changed =
+        pipeline != nullptr && pipeline->UsesShaderObjects() &&
+        (pipeline != last_so_pipeline || dyn_state.Held(Slot::RasterizationSamples).empty());
     const bool verify =
         VideoCommon::NativeVerify::Enabled(VideoCommon::NativeVerify::Layer::DynState);
     // Ocarina of Time's sub-pixel jitter moves the viewports with no register written (a new
@@ -3992,7 +4071,8 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
     const bool oot_jitter_changed = OotDlssViewportJitter(regs) != applied_viewport_jitter;
     // Nothing dirty: every slot below holds its value already.
     if (!topology_changed && !logic_op_changed && !color_output_changed && !pipeline_changed &&
-        !rt_formats_changed && !oot_jitter_changed && !(flags & dyn_state_mask).any()) {
+        !rt_formats_changed && !oot_jitter_changed && !so_changed &&
+        !(flags & dyn_state_mask).any()) {
         if (verify) {
             VerifyDynamicState(regs, pipeline, emulated_mesh);
         }
@@ -4004,6 +4084,12 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
     }
     last_dyn_pipeline = pipeline;
     const auto stage = [&](Slot slot) { StageDynamicState(slot, regs, pipeline); };
+    if (so_changed) {
+        last_so_pipeline = pipeline;
+        for (u64 rest = SHADER_OBJECT_SLOTS; rest != 0; rest &= rest - 1) {
+            stage(static_cast<Slot>(std::countr_zero(rest)));
+        }
+    }
 
     if (state_tracker.TouchViewports() || oot_jitter_changed) {
         flags[Dirty::Scissors] = true;
