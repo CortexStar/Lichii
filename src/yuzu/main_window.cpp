@@ -5540,19 +5540,25 @@ void MainWindow::UpdateUITheme() {
 void MainWindow::LoadTranslation() {
     bool loaded;
 
-    if (UISettings::values.language.GetValue().empty()) {
+    const std::string language = UISettings::values.language.GetValue();
+    if (language.empty()) {
         // If the selected language is empty, use system locale
         loaded = translator.load(QLocale(), {}, {}, QStringLiteral(":/languages/"));
     } else {
         // Otherwise load from the specified file
-        loaded = translator.load(QString::fromStdString(UISettings::values.language.GetValue()),
-                                 QStringLiteral(":/languages/"));
+        loaded = translator.load(QString::fromStdString(language), QStringLiteral(":/languages/"));
     }
 
-    if (loaded)
+    if (loaded) {
         qApp->installTranslator(&translator);
-    else
+    } else if (!language.empty()) {
+        // A language this build has no translation for: show English, which the language list
+        // then selects. <System> stays selected when the system's language has no translation,
+        // so the UI follows the system again once it changes to a translated one.
+        LOG_WARNING(Frontend, "No UI translation for \"{}\" in this build, using English",
+                    language);
         UISettings::values.language = std::string("en");
+    }
 }
 
 void MainWindow::OnLanguageChanged(const QString& locale) {
