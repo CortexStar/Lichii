@@ -667,12 +667,12 @@ void A64EmitX64::EmitA64InstructionCacheOperationRaised(A64EmitContext& ctx, IR:
 }
 
 void A64EmitX64::EmitA64DataSynchronizationBarrier(A64EmitContext&, IR::Inst*) {
-    code.mfence();
+    code.FullBarrier();
     code.lfence();
 }
 
 void A64EmitX64::EmitA64DataMemoryBarrier(A64EmitContext&, IR::Inst*) {
-    code.mfence();
+    code.FullBarrier();
 }
 
 void A64EmitX64::EmitA64InstructionSynchronizationBarrier(A64EmitContext& ctx, IR::Inst*) {

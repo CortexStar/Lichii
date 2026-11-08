@@ -2856,3 +2856,77 @@ TEST_CASE("A64: Rounding", "[a64]") {
     CHECK(jit.GetVector(5) == Vector{0x4000000040000000, 0x4000000040000000});
     CHECK(jit.GetVector(6) == Vector{0x4000000040000000, 0x4000000040000000});
 }
+
+namespace {
+class A64HaltOnSvcTestEnv final : public A64TestEnv {
+public:
+    A64::Jit* jit = nullptr;
+    void CallSVC(std::uint32_t) override { jit->HaltExecution(); }
+};
+
+/// Without cycle counting and with the code generation options Lichii uses on x86-64.
+void UseLichiiCodegen(A64::UserConfig& conf) {
+    conf.enable_cycle_counting = false;
+    conf.tso_ordered_loads = true;
+    conf.elide_ld_st_barriers = true;
+    conf.omit_block_frame = true;
+    conf.reuse_host_flags = true;
+}
+}  // namespace
+
+TEST_CASE("A64: DMB and DSB keep program results and flags", "[a64]") {
+    for (const bool lichii_codegen : {false, true}) {
+        A64HaltOnSvcTestEnv env;
+        A64::UserConfig conf{};
+        conf.callbacks = &env;
+        if (lichii_codegen) {
+            UseLichiiCodegen(conf);
+        }
+        A64::Jit jit{conf};
+        env.jit = &jit;
+
+        env.code_mem = {
+            0xd2800540,  // MOV X0, #42
+            0xd2802001,  // MOV X1, #0x100
+            0xf9000020,  // STR X0, [X1]
+            0xd5033bbf,  // DMB ISH
+            0xf9400022,  // LDR X2, [X1]
+            0x91000443,  // ADD X3, X2, #1
+            0xd5033f9f,  // DSB SY
+            0xd50339bf,  // DMB ISHLD
+            0xd5033abf,  // DMB ISHST
+            0xf9000423,  // STR X3, [X1, #8]
+            0xd5033fbf,  // DMB SY
+            0xf9400424,  // LDR X4, [X1, #8]
+            // The barrier sits between each flag-setting op and the condition that reads it.
+            0xeb000005,  // SUBS X5, X0, X0
+            0xd5033bbf,  // DMB ISH
+            0x9a9f17e6,  // CSET X6, EQ
+            0xeb010007,  // SUBS X7, X0, X1
+            0xd5033b9f,  // DSB ISH
+            0x9a9f07e8,  // CSET X8, NE
+            0xf100041f,  // CMP X0, #1
+            0xd5033bbf,  // DMB ISH
+            0x9a9f97e9,  // CSET X9, HI
+            0xd4000001,  // SVC #0
+        };
+
+        jit.SetPC(0);
+        env.ticks_left = 1000;
+        CheckedRun([&]() { jit.Run(); });
+
+        INFO("lichii_codegen " << lichii_codegen);
+        CHECK(jit.GetRegister(0) == 42);
+        CHECK(jit.GetRegister(1) == 0x100);
+        CHECK(jit.GetRegister(2) == 42);
+        CHECK(jit.GetRegister(3) == 43);
+        CHECK(jit.GetRegister(4) == 43);
+        CHECK(jit.GetRegister(5) == 0);
+        CHECK(jit.GetRegister(6) == 1);
+        CHECK(jit.GetRegister(7) == u64(42 - 0x100));
+        CHECK(jit.GetRegister(8) == 1);
+        CHECK(jit.GetRegister(9) == 1);
+        CHECK((jit.GetPstate() >> 28) == 0b0010);  // CMP X0, #1: C
+        CHECK(jit.GetPC() == 22 * 4);
+    }
+}
