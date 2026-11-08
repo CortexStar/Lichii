@@ -1273,6 +1273,11 @@ bool Device::GetSuitability(bool requires_swapchain) {
     }
 
     FOR_EACH_VK_RECOMMENDED_EXTENSION(LOG_EXTENSION);
+    // Loaded as VK_KHR_robustness2 where the driver has it, otherwise as the EXT.
+    if (!extensions.robustness_2) {
+        LOG_INFO(Render_Vulkan, "Device doesn't support extension {} or {}",
+                 VK_KHR_ROBUSTNESS_2_EXTENSION_NAME, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+    }
     FOR_EACH_VK_MANDATORY_EXTENSION(CHECK_EXTENSION);
 
     if (requires_swapchain) {
