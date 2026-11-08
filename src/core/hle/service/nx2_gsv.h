@@ -2882,7 +2882,9 @@ private:
             m_codec = std::move(codec);
             m_width = w[5];
             m_height = w[6];
+            LogRate(m_rate_meter.Finish(HostTimeUs())); // the previous stream, at its rate
             m_rate = w[7];
+            ++m_stream_index;
             m_clock.Reset();
             m_stream_start.reset();
         }
@@ -3051,6 +3053,7 @@ private:
             std::scoped_lock lk{m_mutex};
             if (ctx.GetCommand() == 207) {
                 SetMovieRate(0);
+                LogRate(m_rate_meter.Finish(HostTimeUs()));
             }
             if (Nx2VideoTraceEnabled()) {
                 LOG_INFO(Service,
@@ -3112,6 +3115,24 @@ private:
         return m_frame_interval / 2;
     }
 
+    // Always on, every 10 s of a playing movie and when it stops: how fast it plays as the client
+    // sees it, against the stream's rate (m_mutex held).
+    void LogRate(const std::optional<Nx2MovieRateMeter::Report>& report) {
+        if (!report || report->wall_us <= 0) {
+            return;
+        }
+        const double seconds = static_cast<double>(report->wall_us) / 1e6;
+        const double rate = m_rate != 0 ? static_cast<double>(m_rate)
+                                        : 1e6 / static_cast<double>(std::max<u64>(m_frame_interval, 1));
+        LOG_INFO(Service,
+                 "movie {}:{}: {} frames shown in {:.2f} s = {:.2f} fps (stream rate {:.2f} fps), "
+                 "movie time {:.2f} s = {:.3f}x real time",
+                 m_syncpoint, m_stream_index, report->frames, seconds,
+                 static_cast<double>(report->frames) / seconds, rate,
+                 static_cast<double>(report->movie_us) / 1e6,
+                 static_cast<double>(report->movie_us) / static_cast<double>(report->wall_us));
+    }
+
     // Games such as Ocarina of Time show one decoded frame per frame they draw and never skip
     // one, while the movie's audio plays in real time: below the movie's frame rate the picture
     // falls further behind the sound. Drop decoded frames a later frame has already overtaken
@@ -3167,7 +3188,9 @@ private:
             if (!m_outputs.empty()) {
                 output = m_outputs.front();
                 m_outputs.pop_front();
-                m_clock.Acquired(HostTimeUs(), output->pts, PauseEndUs());
+                const s64 now = HostTimeUs();
+                m_clock.Acquired(now, output->pts, PauseEndUs());
+                LogRate(m_rate_meter.Shown(now, output->pts));
             }
         }
         if (!output) {
@@ -3666,6 +3689,8 @@ private:
     u64 m_frames_dropped{};
     u64 m_frames_held{};   ///< Times the next frame was held back because it was early
     Nx2MovieClock m_clock; ///< Host time of the frames the client shows (us)
+    Nx2MovieRateMeter m_rate_meter;
+    u32 m_stream_index{}; ///< Streams configured on this session, for the rate log
     u64 m_frame_interval{16667}; ///< us, from consecutive decoded frames
     u64 m_last_decoded_pts{};
     u32 m_dropped_in_a_row{};

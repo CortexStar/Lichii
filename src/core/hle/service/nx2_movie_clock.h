@@ -68,4 +68,57 @@ private:
     u64 last_acquired_pts{};
 };
 
+/// Measures how fast a movie plays as the client sees it: frames handed out and how far the
+/// movie's timestamps advanced, per window of host time (us), so a run can be checked against
+/// the stream's rate from the log.
+class Nx2MovieRateMeter {
+public:
+    static constexpr s64 Window = 10'000'000;
+
+    struct Report {
+        u64 frames;    ///< Handed out in the window
+        s64 wall_us;   ///< Host time the window covers
+        u64 movie_us;  ///< How far the timestamps advanced
+    };
+
+    /// The client was handed the frame at `pts` at host time `now`. Returns a report when the
+    /// window is full, or when the timestamps went back (the stream restarted).
+    std::optional<Report> Shown(s64 now, u64 pts) {
+        std::optional<Report> report;
+        if (m_start && pts < m_last_pts) {
+            report = Finish(now);
+        }
+        if (!m_start) {
+            m_start = now;
+            m_first_pts = pts;
+            m_frames = 0;
+        }
+        ++m_frames;
+        m_last_pts = pts;
+        if (now - *m_start >= Window) {
+            report = Report{m_frames, now - *m_start, m_last_pts - m_first_pts};
+            m_start = now;
+            m_first_pts = pts;
+            m_frames = 0;
+        }
+        return report;
+    }
+
+    /// The stream stopped: a report of the window so far, if it covers a second or more.
+    std::optional<Report> Finish(s64 now) {
+        std::optional<Report> report;
+        if (m_start && now - *m_start >= 1'000'000 && m_frames > 0) {
+            report = Report{m_frames, now - *m_start, m_last_pts - m_first_pts};
+        }
+        m_start.reset();
+        return report;
+    }
+
+private:
+    std::optional<s64> m_start;
+    u64 m_first_pts{};
+    u64 m_last_pts{};
+    u64 m_frames{};
+};
+
 } // namespace Service
