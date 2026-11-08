@@ -107,6 +107,7 @@ public:
                      VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
     void FlushRegionForRead(DAddr addr, u64 size) override;
     void FinishRead(DAddr addr, u64 size) override;
+    void TraceRead(VideoCommon::ReadTrace::Read& read, VideoCommon::ReadTrace::Step step) override;
     GpuWrittenList ReadGpuWrittenCommandList(DAddr addr, std::span<u8> out,
                                              bool past_sync) override;
     void NoteGpuWrittenCommandListSynced(DAddr page) override;

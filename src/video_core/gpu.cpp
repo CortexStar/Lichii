@@ -41,6 +41,7 @@
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_read_trace.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 
@@ -285,6 +286,16 @@ struct GPU::Impl {
         }
         // Filled on the GPU thread while this thread waits for it.
         Stats::FlushTiming timing{};
+        // TEST (EDEN_NX2_READ_TRACE): this read on the host GPU's timeline.
+        namespace ReadTrace = VideoCommon::ReadTrace;
+        const bool traced = ReadTrace::Enabled();
+        ReadTrace::Read trace{};
+        if (traced) [[unlikely]] {
+            trace.area = raster_area.start_address;
+            trace.in_flight = raster_area.in_flight;
+            trace.request = request;
+            renderer->ReadRasterizer()->TraceRead(trace, ReadTrace::Step::Request);
+        }
         // In flight: an earlier read's downloads cover the area, only FinishRead is left.
         if (!raster_area.in_flight) {
             const u64 fence = RequestSyncOperation([this, raster_area, &timing]() {
@@ -305,14 +316,28 @@ struct GPU::Impl {
             // thread's queue still runs it without the split.
             VideoCommon::GpuSplit::Get().RequestTick();
             gpu_thread.TickGPU(is_async);
+            if (traced) [[unlikely]] {
+                // While the GPU thread runs the flush.
+                renderer->ReadRasterizer()->TraceRead(trace, ReadTrace::Step::Calibrate);
+            }
             WaitForSyncOperation(fence);
+        } else if (traced) [[unlikely]] {
+            renderer->ReadRasterizer()->TraceRead(trace, ReadTrace::Step::Calibrate);
         }
         // The GPU thread submitted the downloads without waiting for the host GPU: this thread
         // waits for them and writes them to guest memory, while the GPU thread goes on.
         const u64 finish_start = Stats::Now();
+        if (traced) [[unlikely]] {
+            ReadTrace::t_read = &trace;
+        }
         renderer->ReadRasterizer()->FinishRead(raster_area.start_address,
                                                raster_area.end_address - raster_area.start_address);
         const u64 woke = Stats::Now();
+        if (traced) [[unlikely]] {
+            ReadTrace::t_read = nullptr;
+            trace.landed = woke;
+            renderer->ReadRasterizer()->TraceRead(trace, ReadTrace::Step::Done);
+        }
         timing.finish_ns = woke - finish_start;
         timing.in_flight = raster_area.in_flight;
         Stats::RecordReactive(raster_area, core, request, timing, woke);

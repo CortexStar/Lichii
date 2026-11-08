@@ -4,10 +4,13 @@
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <memory>
 #include <algorithm>
+#include <optional>
 #include <vector>
 #include <string_view>
 #include <string>
@@ -147,6 +150,9 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
                      trace_timestamp_bits, trace_timestamp_period);
         }
     }
+    if (VideoCommon::ReadTrace::Enabled()) {
+        CreateReadTrace();
+    }
 
     AcquireNewChunk();
     AllocateWorkerCommandBuffer();
@@ -154,14 +160,235 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
 }
 
 Scheduler::~Scheduler() {
-    if (trace_query_pool) {
+    if (trace_query_pool || read_trace) {
         WaitWorker();
         worker_thread.request_stop();
         worker_thread.join();
         if (trace_gpu_tick != 0) {
             master_semaphore->Wait(trace_gpu_tick);
         }
+        // The read trace's query pools are in every submission.
+        if (read_trace && CurrentTick() > 1) {
+            master_semaphore->Wait(CurrentTick() - 1);
+        }
     }
+}
+
+/// TEST (EDEN_NX2_READ_TRACE): device timestamps that place guest reads on the GPU's timeline.
+struct Scheduler::ReadTraceState {
+    /// Submissions timed at their start and end (two queries a slot), by tick.
+    static constexpr u32 TickSlots = 4096;
+    /// TraceMark timestamps, by handle.
+    static constexpr u32 MarkSlots = 4096;
+
+    vk::QueryPool ticks;
+    vk::QueryPool marks;
+    /// vkGetCalibratedTimestamps{KHR,EXT}; null without them.
+    PFN_vkGetCalibratedTimestampsKHR calibrate{};
+    double ns_per_tick{};
+    u64 next_tick{1}; ///< Worker: the submission its command buffers go in
+    u64 next_mark{1}; ///< Recording thread
+    std::atomic<u64> issued_marks{};
+    std::atomic<u64> submitted{}; ///< The last tick vkQueueSubmit returned for
+    /// When vkQueueSubmit returned (Now()) for the tick in submit_ticks
+    std::array<std::atomic<u64>, TickSlots> submit_ticks{};
+    std::array<std::atomic<u64>, TickSlots> submit_times{};
+};
+
+void Scheduler::CreateReadTrace() {
+    const auto physical = device.GetPhysical();
+    const u32 valid_bits =
+        physical.GetQueueFamilyProperties()[device.GetGraphicsFamily()].timestampValidBits;
+    const float period = physical.GetProperties().limits.timestampPeriod;
+    if (valid_bits == 0 || period <= 0.0f) {
+        LOG_WARNING(Render_Vulkan, "Read trace: the graphics queue has no timestamps");
+        return;
+    }
+    auto created = std::make_unique<ReadTraceState>();
+    created->ns_per_tick = static_cast<double>(period);
+    const auto create_pool = [this](u32 count) {
+        return device.GetLogical().CreateQueryPool({
+            .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .queryType = VK_QUERY_TYPE_TIMESTAMP,
+            .queryCount = count,
+            .pipelineStatistics = 0,
+        });
+    };
+    try {
+        created->ticks = create_pool(ReadTraceState::TickSlots * 2);
+        created->marks = create_pool(ReadTraceState::MarkSlots);
+    } catch (const vk::Exception& error) {
+        LOG_WARNING(Render_Vulkan, "Read trace: no query pools: {}", error.what());
+        return;
+    }
+    // The device enables either extension with EDEN_NX2_READ_TRACE (vulkan_device.cpp).
+    const auto& dld = device.GetDispatchLoader();
+    const auto& extensions = device.GetAvailableExtensions();
+    const bool khr = extensions.contains(VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+    if (khr || extensions.contains(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME)) {
+        const auto get_domains =
+            reinterpret_cast<PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR>(
+                dld.vkGetInstanceProcAddr(device.GetInstance(),
+                                          khr ? "vkGetPhysicalDeviceCalibrateableTimeDomainsKHR"
+                                              : "vkGetPhysicalDeviceCalibrateableTimeDomainsEXT"));
+        const auto calibrate = reinterpret_cast<PFN_vkGetCalibratedTimestampsKHR>(
+            dld.vkGetDeviceProcAddr(*device.GetLogical(), khr ? "vkGetCalibratedTimestampsKHR"
+                                                              : "vkGetCalibratedTimestampsEXT"));
+        std::array<VkTimeDomainKHR, 8> domains{};
+        u32 count = static_cast<u32>(domains.size());
+        if (get_domains != nullptr && calibrate != nullptr &&
+            get_domains(physical, &count, domains.data()) >= VK_SUCCESS &&
+            std::ranges::find(domains.begin(), domains.begin() + (std::min)(count, 8u),
+                              VK_TIME_DOMAIN_DEVICE_KHR) !=
+                domains.begin() + (std::min)(count, 8u)) {
+            created->calibrate = calibrate;
+        }
+    }
+    LOG_INFO(Render_Vulkan, "Read trace: device timestamps every {} ns, {} bits, {}", period,
+             valid_bits,
+             created->calibrate ? "device clock readable (calibrated timestamps)"
+                                : "no calibrated timestamps: reads stay unplaced");
+    read_trace = std::move(created);
+}
+
+u64 Scheduler::TraceMark() {
+    if (!read_trace) {
+        return 0;
+    }
+    const u64 handle = read_trace->next_mark++;
+    read_trace->issued_marks.store(handle, std::memory_order_release);
+    RecordWithUploadBuffer(
+        [pool = *read_trace->marks, slot = static_cast<u32>(handle % ReadTraceState::MarkSlots)](
+            vk::CommandBuffer cmdbuf, vk::CommandBuffer upload_cmdbuf) {
+            // The upload buffer runs first in the same submission.
+            upload_cmdbuf.ResetQueryPool(pool, slot, 1);
+            cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pool, slot);
+        });
+    return handle;
+}
+
+void Scheduler::TraceRead(VideoCommon::ReadTrace::Read& read, VideoCommon::ReadTrace::Step step) {
+    namespace ReadTrace = VideoCommon::ReadTrace;
+    if (!read_trace) {
+        return;
+    }
+    switch (step) {
+    case ReadTrace::Step::Request:
+        master_semaphore->Refresh();
+        read.completed = master_semaphore->KnownGpuTick();
+        read.submitted = read_trace->submitted.load(std::memory_order_acquire);
+        read.recording = master_semaphore->CurrentTick();
+        return;
+    case ReadTrace::Step::Calibrate:
+        if (read_trace->calibrate != nullptr) {
+            const VkCalibratedTimestampInfoKHR info{
+                .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR,
+                .pNext = nullptr,
+                .timeDomain = VK_TIME_DOMAIN_DEVICE_KHR,
+            };
+            u64 value{};
+            u64 deviation{};
+            const u64 before = ReadTrace::Now();
+            if (read_trace->calibrate(*device.GetLogical(), 1, &info, &value, &deviation) ==
+                VK_SUCCESS) {
+                const u64 after = ReadTrace::Now();
+                read.device = value;
+                read.host = before + (after - before) / 2;
+                read.uncertainty = after - before;
+            }
+        }
+        return;
+    case ReadTrace::Step::Done:
+        ReadTrace::Record(read, PlaceRead(read));
+        return;
+    }
+}
+
+VideoCommon::ReadTrace::Timeline Scheduler::PlaceRead(
+    const VideoCommon::ReadTrace::Read& read) const {
+    namespace ReadTrace = VideoCommon::ReadTrace;
+    if (!read.has_copy) {
+        return {};
+    }
+    const ReadTraceState& trace = *read_trace;
+    const u64 copy_tick = read.copy.tick;
+    struct Result {
+        u64 value;
+        u64 available;
+    };
+    const auto& logical = device.GetLogical();
+    const auto mark = [&](u64 handle) -> std::optional<u64> {
+        const auto reused = [&] {
+            return trace.issued_marks.load(std::memory_order_acquire) - handle >=
+                   ReadTraceState::MarkSlots;
+        };
+        Result result{};
+        if (handle == 0 || reused() ||
+            logical.GetQueryResults(
+                *trace.marks, static_cast<u32>(handle % ReadTraceState::MarkSlots), 1,
+                sizeof(result), &result, sizeof(result),
+                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) != VK_SUCCESS ||
+            result.available == 0 || reused()) {
+            return std::nullopt;
+        }
+        return result.value;
+    };
+    // The submissions after the last one done at the request, up to the copy's: all done now.
+    const auto place = [&]() -> ReadTrace::Timeline {
+        const u64 first_tick = read.completed + 1;
+        if (read.device == 0 || !read.has_write || copy_tick < first_tick ||
+            copy_tick - first_tick >= ReadTraceState::TickSlots / 2) {
+            return {};
+        }
+        const auto write_end = mark(read.write.mark);
+        const auto copy_start = mark(read.copy.start);
+        const auto copy_end = mark(read.copy.end);
+        if (!write_end || !copy_start || !copy_end) {
+            return {};
+        }
+        const u32 tick_count = static_cast<u32>(copy_tick - first_tick + 1);
+        std::vector<Result> results(size_t{tick_count} * 2);
+        for (u32 done = 0; done < tick_count;) {
+            const u32 slot = static_cast<u32>((first_tick + done) % ReadTraceState::TickSlots);
+            const u32 count = (std::min)(tick_count - done, ReadTraceState::TickSlots - slot);
+            if (logical.GetQueryResults(
+                    *trace.ticks, slot * 2, count * 2, size_t{count} * 2 * sizeof(Result),
+                    &results[size_t{done} * 2], sizeof(Result),
+                    VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) != VK_SUCCESS) {
+                return {};
+            }
+            done += count;
+        }
+        std::vector<std::pair<u64, u64>> submissions;
+        submissions.reserve(tick_count);
+        for (u32 i = 0; i < tick_count; ++i) {
+            const Result& start = results[size_t{i} * 2];
+            const Result& end = results[size_t{i} * 2 + 1];
+            if (start.available == 0 || end.available == 0) {
+                return {};
+            }
+            submissions.emplace_back(start.value, end.value);
+        }
+        return ReadTrace::Place(read, ReadTrace::DeviceTimes{
+                                          .ns_per_tick = trace.ns_per_tick,
+                                          .write_end = *write_end,
+                                          .copy_start = *copy_start,
+                                          .copy_end = *copy_end,
+                                          .submissions = submissions,
+                                      });
+    };
+    ReadTrace::Timeline timeline = place();
+    const u32 copy_slot = static_cast<u32>(copy_tick % ReadTraceState::TickSlots);
+    if (trace.submit_ticks[copy_slot].load(std::memory_order_acquire) == copy_tick) {
+        const u64 submitted_at = trace.submit_times[copy_slot].load(std::memory_order_relaxed);
+        if (submitted_at >= read.copy.flushed) {
+            timeline.has_submit = true;
+            timeline.submit = submitted_at - read.copy.flushed;
+        }
+    }
+    return timeline;
 }
 
 u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
@@ -307,6 +534,7 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
     if (VideoCommon::Nx2Profile::Enabled()) {
         g_profile_renderpasses.fetch_add(1, std::memory_order_relaxed);
     }
+    ++trace_counts.render_passes;
     const VkFramebuffer framebuffer_handle = framebuffer->Handle();
     const VkExtent2D render_area = framebuffer->RenderArea();
     state.renderpass = renderpass;
@@ -575,6 +803,13 @@ void Scheduler::AllocateWorkerCommandBuffer() {
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         .pInheritanceInfo = nullptr,
     });
+    if (read_trace) {
+        // When the host GPU starts the submission these go in (its end: SubmitExecution).
+        const u32 query = static_cast<u32>(read_trace->next_tick % ReadTraceState::TickSlots) * 2;
+        current_upload_cmdbuf.ResetQueryPool(*read_trace->ticks, query, 2);
+        current_upload_cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, *read_trace->ticks,
+                                             query);
+    }
     if (trace_query_pool && !trace_gpu_failed) {
         TraceGpuSubmission();
     }
@@ -640,6 +875,17 @@ void Scheduler::ReportWorkTimes() {
         sizeof(Result), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
     if (result != VK_SUCCESS) {
         return;
+    }
+    if (read_trace && count < TraceMaxWork) {
+        // Every draw and dispatch of the frame was timed: the reads placed in it split by them.
+        std::vector<std::pair<u64, u64>> work;
+        work.reserve(count);
+        for (u32 i = 0; i < count; ++i) {
+            if (results[i * 2].available != 0 && results[i * 2 + 1].available != 0) {
+                work.emplace_back(results[i * 2].timestamp, results[i * 2 + 1].timestamp);
+            }
+        }
+        VideoCommon::ReadTrace::NoteTimedWork(work, read_trace->ns_per_tick);
     }
     struct Totals {
         double total_ms{};
@@ -810,6 +1056,10 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
         if (trace_query_pool) {
             trace_work = {};
         }
+        if (read_trace) {
+            const u32 query = static_cast<u32>(signal_value % ReadTraceState::TickSlots) * 2 + 1;
+            cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *read_trace->ticks, query);
+        }
         cmdbuf.End();
 
         if (on_submit) {
@@ -833,6 +1083,14 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
         default:
             vk::Check(result);
             break;
+        }
+        if (read_trace) {
+            const u32 slot = static_cast<u32>(signal_value % ReadTraceState::TickSlots);
+            read_trace->submit_times[slot].store(VideoCommon::ReadTrace::Now(),
+                                                 std::memory_order_relaxed);
+            read_trace->submit_ticks[slot].store(signal_value, std::memory_order_release);
+            read_trace->submitted.store(signal_value, std::memory_order_release);
+            read_trace->next_tick = signal_value + 1;
         }
         if (trace_frame_end != 0) {
             if (trace_gpu_sampling) {

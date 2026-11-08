@@ -2037,6 +2037,11 @@ void RasterizerVulkan::FinishRead(DAddr addr, u64 size) {
     buffer_cache.FinishReadDownloads(addr, size);
 }
 
+void RasterizerVulkan::TraceRead(VideoCommon::ReadTrace::Read& read,
+                                 VideoCommon::ReadTrace::Step step) {
+    scheduler.TraceRead(read, step);
+}
+
 bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
     // The split's front asks this before each macro DMA read, and the back holds the buffer
     // cache's lock through each draw: pages the GPU never wrote need no look under it.

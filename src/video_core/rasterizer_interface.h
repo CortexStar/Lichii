@@ -38,6 +38,11 @@ namespace VideoCommon::OotNetwork {
 struct BypassState;
 }
 
+namespace VideoCommon::ReadTrace {
+struct Read;
+enum class Step : u8;
+} // namespace VideoCommon::ReadTrace
+
 namespace VideoCore {
 
 enum class LoadCallbackStage {
@@ -117,6 +122,11 @@ public:
     /// submitted before it), waiting for the host GPU if it must. Any thread: the reading one
     /// before it reads, and the GPU's side before it writes guest memory there.
     virtual void FinishRead([[maybe_unused]] DAddr addr, [[maybe_unused]] u64 size) {}
+
+    /// TEST (EDEN_NX2_READ_TRACE, nx2_read_trace.h): a step of a guest read that waits, on the
+    /// reading thread (GPU::OnCPURead).
+    virtual void TraceRead([[maybe_unused]] VideoCommon::ReadTrace::Read& read,
+                           [[maybe_unused]] VideoCommon::ReadTrace::Step step) {}
 
     /// Switch 2, from the GPU thread's front: where a GPU-written command list's words are.
     enum class GpuWrittenList {

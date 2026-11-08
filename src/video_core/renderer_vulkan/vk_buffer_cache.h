@@ -148,6 +148,11 @@ public:
     /// to be done.
     [[nodiscard]] bool IsFreeNow(u64 tick);
 
+    /// TEST (EDEN_NX2_READ_TRACE): Scheduler::TraceMark, TraceCounts and TraceCountWork.
+    u64 TraceMark();
+    VideoCommon::ReadTrace::Counts TraceCounts() const;
+    void TraceCountWork(bool dispatch);
+
     u64 GetDeviceLocalMemory() const;
 
     u64 GetDeviceMemoryUsage() const;

@@ -25,6 +25,7 @@
 #include "common/polyfill_thread.h"
 #include "common/settings.h"
 #include "video_core/gpu_split.h"
+#include "video_core/nx2_read_trace.h"
 #include "video_core/renderer_vulkan/fragment_barrier_state.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -97,6 +98,19 @@ public:
         work();
         cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *trace_work_pool, query + 1);
     }
+
+    /// TEST (EDEN_NX2_READ_TRACE, nx2_read_trace.h), recording thread: a device timestamp written
+    /// once the work recorded so far is done. Returns its handle for TraceRead, 0 when off.
+    u64 TraceMark();
+    /// Recording thread: the draws, dispatches and render passes recorded so far.
+    [[nodiscard]] VideoCommon::ReadTrace::Counts TraceCounts() const noexcept {
+        return trace_counts;
+    }
+    void TraceCountWork(bool dispatch) noexcept {
+        ++(dispatch ? trace_counts.dispatches : trace_counts.draws);
+    }
+    /// A reading thread's step of a guest read that waits.
+    void TraceRead(VideoCommon::ReadTrace::Read& read, VideoCommon::ReadTrace::Step step);
 
     /// Sends currently recorded work to the worker thread.
     void DispatchWork();
@@ -432,6 +446,11 @@ private:
     void ReportWorkTimes();
     void TraceShader(u64 hash, u32 stage);
 
+    struct ReadTraceState;
+    void CreateReadTrace();
+    [[nodiscard]] VideoCommon::ReadTrace::Timeline PlaceRead(
+        const VideoCommon::ReadTrace::Read& read) const;
+
     u64 SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore);
 
     void AllocateNewContext();
@@ -490,6 +509,10 @@ private:
     bool trace_gpu_sampling{};
     bool trace_gpu_pending{};
     bool trace_gpu_failed{};
+
+    /// TEST: EDEN_NX2_READ_TRACE
+    std::unique_ptr<ReadTraceState> read_trace;
+    VideoCommon::ReadTrace::Counts trace_counts{};
 
     VideoCommon::QueryCacheBase<QueryCacheParams>* query_cache = nullptr;
 

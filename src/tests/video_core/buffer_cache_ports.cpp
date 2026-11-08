@@ -1289,3 +1289,67 @@ TEST_CASE("Early downloads stop at 1 MiB a frame", "[buffer_ports]") {
     REQUIRE(f.bytes[0x10010] == 0xab);
     REQUIRE(f.bytes[0x10fff] == 0xab);
 }
+
+TEST_CASE("Read download check compares what early downloads brought with a synchronous flush",
+          "[buffer_ports]") {
+    Fixture f;
+    const Nx2TitleScope nx2_title;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    Access::CheckEveryRead(*f.cache);
+    for (u8 frame = 1; frame <= 2; ++frame) {
+        WriteByDispatch(f, id, 0x20000, 0x100, frame);
+        ReadWord(f, 0x20010);
+    }
+    const auto& checks = Access::ReadChecks(*f.cache);
+    const u64 compared = checks.compared;
+    // In guest memory before the read: the read flushes, and compares them as they landed.
+    WriteByDispatch(f, id, 0x20000, 0x100, 3);
+    f.runtime.Complete(f.runtime.submitted_tick);
+    f.cache->NoteWorkRecorded(true);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 0);
+    REQUIRE(f.bytes[0x10010] == 3);
+    REQUIRE_FALSE(ReadWord(f, 0x20010).preemtive);
+    // The early download's own check and the read's.
+    REQUIRE(checks.compared - compared == 0x200);
+    // On its way at the read: compared as it lands.
+    WriteByDispatch(f, id, 0x20000, 0x100, 4);
+    REQUIRE_FALSE(ReadWord(f, 0x20010).preemtive);
+    REQUIRE(f.bytes[0x10010] == 4);
+    REQUIRE(checks.compared - compared == 0x400);
+    REQUIRE(checks.mismatched == 0);
+    REQUIRE(checks.uncovered == 0);
+    REQUIRE(checks.rewritten == 0);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 0);
+    REQUIRE_FALSE(Access::Pending(*f.cache, 0x20000, 0x1000));
+}
+
+TEST_CASE("Read download check finds early downloaded bytes the GPU changed unrecorded",
+          "[buffer_ports]") {
+    Fixture f;
+    const Nx2TitleScope nx2_title;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    auto& buffer = Access::Get(*f.cache, id);
+    Access::CheckEveryRead(*f.cache);
+    for (u8 frame = 1; frame <= 2; ++frame) {
+        WriteByDispatch(f, id, 0x20000, 0x100, frame);
+        ReadWord(f, 0x20010);
+    }
+    WriteByDispatch(f, id, 0x20000, 0x100, 3);
+    f.runtime.Complete(f.runtime.submitted_tick);
+    f.cache->NoteWorkRecorded(true);
+    // A GPU write into the landed bytes that nothing records: a synchronous flush at the read
+    // would bring it.
+    f.runtime.pending.push_back(
+        [&buffer] { std::fill_n(buffer.bytes.begin() + 0x40, 0x10, u8{0x56}); });
+    // The guest writes others: newer values, not compared.
+    std::memset(f.bytes + 0x10080, 0xee, 0x8);
+    ReadWord(f, 0x20010);
+    REQUIRE(f.bytes[0x10040] == 3);
+    REQUIRE(Access::ReadChecks(*f.cache).mismatched == 0x10);
+    REQUIRE(Access::ReadChecks(*f.cache).rewritten == 0x8);
+    REQUIRE(Access::ReadChecks(*f.cache).uncovered == 0);
+    // Compared once: a later read finds nothing an early download brought since.
+    const u64 compared = Access::ReadChecks(*f.cache).compared;
+    REQUIRE(ReadWord(f, 0x20010).preemtive);
+    REQUIRE(Access::ReadChecks(*f.cache).compared == compared);
+}

@@ -555,6 +555,18 @@ bool BufferCacheRuntime::IsFreeNow(u64 tick) {
     return scheduler.IsFree(tick);
 }
 
+u64 BufferCacheRuntime::TraceMark() {
+    return scheduler.TraceMark();
+}
+
+VideoCommon::ReadTrace::Counts BufferCacheRuntime::TraceCounts() const {
+    return scheduler.TraceCounts();
+}
+
+void BufferCacheRuntime::TraceCountWork(bool dispatch) {
+    scheduler.TraceCountWork(dispatch);
+}
+
 bool BufferCacheRuntime::CanReorderUpload(const Buffer& buffer,
                                           std::span<const VideoCommon::BufferCopy> copies) {
     if (Settings::values.disable_buffer_reorder) {

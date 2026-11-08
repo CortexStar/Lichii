@@ -184,6 +184,9 @@ void BufferCache<P>::TickFrame() {
         runtime.FreeDeferredStagingBuffer(buffer);
     }
     async_buffers_death_ring.clear();
+    if constexpr (HAS_READ_TRACE) {
+        ReadTrace::Tick();
+    }
 }
 
 template <class P>
@@ -302,17 +305,37 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
     area->preemtive = !IsRegionGpuModified(device_addr_start_aligned,
                                            device_addr_end_aligned - device_addr_start_aligned);
     NoteReadBack(device_addr_start_aligned, device_addr_end_aligned, !area->preemtive);
-    if (!area->preemtive && !read_downloads.empty() &&
+    // TEST (EDEN_NX2_READ_CHECK): a read an early download serves takes a flush, which compares
+    // what it finds with the GPU's bytes now.
+    const bool check_early =
+        ReadChecks() && EarlyDownloadServes(device_addr_start_aligned,
+                                            device_addr_end_aligned - device_addr_start_aligned);
+    if (!area->preemtive && !check_early && !read_downloads.empty() &&
         ReadDownloadsCover(device_addr_start_aligned,
                            device_addr_end_aligned - device_addr_start_aligned)) {
         // All of it on its way, for an earlier read or right behind its GPU write: no new copies.
         // The core took the trap, as below.
         read_trapped_ranges.Subtract(device_addr_start_aligned,
                                      device_addr_end_aligned - device_addr_start_aligned);
+        // TEST (EDEN_NX2_READ_TRACE): served by an early download.
+        bool early_cover = false;
+        if (ReadTrace::Enabled()) [[unlikely]] {
+            early_cover = std::ranges::any_of(read_downloads, [&](const ReadDownload& download) {
+                return download.early && download.write_ranges.Intersects(
+                                             device_addr_start_aligned,
+                                             device_addr_end_aligned - device_addr_start_aligned);
+            });
+        }
         if (!WriteFinishedReadDownloads(device_addr_start_aligned,
                                         device_addr_end_aligned - device_addr_start_aligned)) {
+            if (early_cover) [[unlikely]] {
+                ReadTrace::Count(ReadTrace::g_early.served_in_flight);
+            }
             area->in_flight = true;
             return area;
+        }
+        if (early_cover) [[unlikely]] {
+            ReadTrace::Count(ReadTrace::g_early.served_at_read);
         }
         // The host GPU had run them: in guest memory now, nothing is left to wait for.
         area->preemtive = !IsRegionGpuModified(device_addr_start_aligned,
@@ -320,6 +343,9 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
         if (area->preemtive) {
             return area;
         }
+    }
+    if (check_early) [[unlikely]] {
+        area->preemtive = false;
     }
     // A preflushable mark persists and downloads later GPU writes at every fence. Native titles
     // instead keep read traps and flush on demand.
@@ -620,25 +646,77 @@ void BufferCache<P>::RecordReadDownload(std::span<const std::pair<DAddr, u64>> r
                 });
             }
         }
-        if (copies.empty()) {
+        // TEST (EDEN_NX2_READ_CHECK): what early downloads brought to the read's pages before it
+        // came. No longer GPU-modified, they are compared as they landed.
+        struct LandedCopy {
+            u64 offset; ///< In the check's staging, past its own offset
+            std::vector<u8> as_landed;
+        };
+        boost::container::small_vector<LandedCopy, 4> landed_copies;
+        if (check && !early && !early_landed.empty()) [[unlikely]] {
+            const auto add_landed = [&](DAddr lower, DAddr upper, const u8* as_landed) {
+                ForEachBufferInRange(lower, upper - lower, [&](BufferId buffer_id, Buffer& buffer) {
+                    const DAddr buffer_addr = buffer.CpuAddr();
+                    const DAddr begin = (std::max)(lower, buffer_addr);
+                    const DAddr end = (std::min)(upper, buffer_addr + buffer.SizeBytes());
+                    if (begin >= end) {
+                        return;
+                    }
+                    const u8* const bytes = as_landed + (begin - lower);
+                    landed_copies.push_back(
+                        {check_size, std::vector<u8>(bytes, bytes + (end - begin))});
+                    check_copies.push_back({buffer_id, BufferCopy{
+                                                           .src_offset = begin - buffer_addr,
+                                                           .dst_offset = check_size,
+                                                           .size = end - begin,
+                                                       }});
+                    check_size += Common::AlignUp(end - begin, 64);
+                    check->kept.Add(begin, end - begin);
+                    check->landed.Add(begin, end - begin);
+                });
+            };
+            for (const auto& [own_addr, own_size] : own) {
+                TakeEarlyLanded(own_addr, own_size, add_landed);
+            }
+        }
+        // TEST: a check whose read's bytes other downloads bring is a download of its own.
+        const bool check_only = !early && copies.empty() && check && !check_copies.empty();
+        if (copies.empty() && !check_only) {
             return;
         }
         for (const Copy& entry : copies) {
             GpuWaitStats::AddDownloadBytes(entry.copy.size);
         }
-        auto staging = runtime.DownloadStagingBuffer(total_size_bytes, true);
-        for (Copy& entry : copies) {
-            Buffer& buffer = slot_buffers[entry.buffer_id];
-            entry.copy.dst_offset += staging.offset;
-            buffer.MarkUsage(entry.copy.src_offset, entry.copy.size);
-            // Mapped buffers too: the GPU thread's later work may write them before the copy is
-            // read.
-            runtime.CopyBuffer(staging.buffer, buffer, std::span{&entry.copy, 1}, true);
-            download.copies.push_back(BufferCopy{
-                .src_offset = buffer.CpuAddr() + entry.copy.src_offset,
-                .dst_offset = entry.copy.dst_offset,
-                .size = entry.copy.size,
-            });
+        if constexpr (HAS_READ_TRACE) {
+            if (ReadTrace::Enabled()) [[unlikely]] {
+                // Writes noted without a draw or dispatch after them end here at the latest.
+                TraceFlushWriteMarks();
+                download.trace.start = runtime.TraceMark();
+            }
+        }
+        if (!copies.empty()) {
+            auto staging = runtime.DownloadStagingBuffer(total_size_bytes, true);
+            for (Copy& entry : copies) {
+                Buffer& buffer = slot_buffers[entry.buffer_id];
+                entry.copy.dst_offset += staging.offset;
+                buffer.MarkUsage(entry.copy.src_offset, entry.copy.size);
+                // Mapped buffers too: the GPU thread's later work may write them before the copy
+                // is read.
+                runtime.CopyBuffer(staging.buffer, buffer, std::span{&entry.copy, 1}, true);
+                download.copies.push_back(BufferCopy{
+                    .src_offset = buffer.CpuAddr() + entry.copy.src_offset,
+                    .dst_offset = entry.copy.dst_offset,
+                    .size = entry.copy.size,
+                });
+            }
+            download.staging = staging;
+        }
+        if constexpr (HAS_READ_TRACE) {
+            if (ReadTrace::Enabled()) [[unlikely]] {
+                download.trace.end = runtime.TraceMark();
+                download.trace.sequence = ++trace_sequence;
+                download.trace.counts = runtime.TraceCounts();
+            }
         }
         if (check && !check_copies.empty()) [[unlikely]] {
             // The same bytes again, from the same point of the GPU's work: what a synchronous
@@ -653,15 +731,31 @@ void BufferCache<P>::RecordReadDownload(std::span<const std::pair<DAddr, u64>> r
                     .dst_offset = entry.copy.dst_offset,
                     .size = entry.copy.size,
                 });
+                if (check_only) {
+                    check->own.Add(buffer.CpuAddr() + entry.copy.src_offset, entry.copy.size);
+                }
             }
             if (!check->kept.Empty()) {
                 check->landed_bytes.resize(check_size);
+            }
+            for (const LandedCopy& landed : landed_copies) {
+                std::ranges::copy(landed.as_landed, check->landed_bytes.data() + landed.offset);
             }
             download.check = std::move(check);
         }
         // A read waits for its copies; an early download's go with the next submission.
         download.tick = early ? runtime.QueueForHostRead() : runtime.SubmitForHostRead();
-        download.staging = staging;
+        if constexpr (HAS_READ_TRACE) {
+            if (ReadTrace::Enabled()) [[unlikely]] {
+                download.trace.tick = download.tick;
+                download.trace.flushed = ReadTrace::Now();
+                download.trace.early = early;
+                if (early) {
+                    ReadTrace::Count(ReadTrace::g_early.recorded);
+                    ReadTrace::Count(ReadTrace::g_early.bytes, total_size_bytes);
+                }
+            }
+        }
         if (early) {
             ++pending_early_downloads;
             early_bytes_this_frame += total_size_bytes;
@@ -677,19 +771,56 @@ void BufferCache<P>::FinishReadDownloads(DAddr device_addr, u64 size) {
         std::unique_lock lock{mutex};
         // The newest one over the range: those before it are written first.
         std::optional<u64> tick;
+        const ReadDownload* newest = nullptr;
         for (const ReadDownload& download : read_downloads) {
-            if (download.write_ranges.Intersects(device_addr, size)) {
+            // TEST (EDEN_NX2_READ_CHECK): a check alone is waited for too, as its read's download.
+            if (download.write_ranges.Intersects(device_addr, size) ||
+                (download.check && download.check->own.Intersects(device_addr, size))) {
                 tick = download.tick;
+                newest = &download;
+            }
+        }
+        // TEST (EDEN_NX2_READ_TRACE): the reading thread's read, when this is one.
+        ReadTrace::Read* trace = nullptr;
+        const auto trace_now = [&trace](u64 ReadTrace::Read::*field) {
+            if (trace != nullptr) [[unlikely]] {
+                if constexpr (HAS_READ_TRACE) {
+                    trace->*field = ReadTrace::Now();
+                }
+            }
+        };
+        if constexpr (HAS_READ_TRACE) {
+            trace = ReadTrace::t_read;
+            if (trace != nullptr && newest != nullptr) [[unlikely]] {
+                TraceReadCopy(*trace, *newest, device_addr, size);
             }
         }
         if (!tick) {
             return;
         }
         if (!runtime.IsFree(*tick)) {
+            // TEST: a write from the GPU's side waits for an early download.
+            bool gpu_side = false;
+            u64 wait_start = 0;
+            if constexpr (HAS_READ_TRACE) {
+                gpu_side = ReadTrace::Enabled() && trace == nullptr && newest->early;
+                wait_start = gpu_side ? ReadTrace::Now() : 0;
+            }
             lock.unlock();
             runtime.WaitForHostRead(*tick);
+            trace_now(&ReadTrace::Read::woke);
+            if constexpr (HAS_READ_TRACE) {
+                if (gpu_side) [[unlikely]] {
+                    ReadTrace::Count(ReadTrace::g_early.gpu_side_waits);
+                    ReadTrace::Count(ReadTrace::g_early.gpu_side_wait_ns,
+                                     ReadTrace::Now() - wait_start);
+                }
+            }
             lock.lock();
+        } else {
+            trace_now(&ReadTrace::Read::woke);
         }
+        trace_now(&ReadTrace::Read::locked);
         WriteReadDownloads(*tick);
     }
 }
@@ -727,6 +858,11 @@ bool BufferCache<P>::WriteFinishedReadDownloads(DAddr device_addr, u64 size) {
 template <class P>
 void BufferCache<P>::NoteWorkRecorded(bool dispatch) {
     if constexpr (!IS_OPENGL && USE_MEMORY_MAPS) {
+        if constexpr (HAS_READ_TRACE) {
+            if (ReadTrace::Enabled()) [[unlikely]] {
+                TraceWorkRecorded(dispatch);
+            }
+        }
         if (dispatch) {
             // Outside any render pass: the copies go right behind the dispatch.
             RecordEarlyDownloads();
@@ -765,6 +901,11 @@ void BufferCache<P>::NoteReadBack(DAddr begin, DAddr end, bool gpu_modified) {
                 // Nothing new since its last read.
                 continue;
             }
+            // TEST (EDEN_NX2_READ_TRACE): the bytes in guest memory before the read came.
+            if (it->landed_early && !gpu_modified && ReadTrace::Enabled()) [[unlikely]] {
+                ReadTrace::Count(ReadTrace::g_early.served_landed);
+            }
+            it->landed_early = false;
             it->written = false;
             it->unread_writes = 0;
             it->reads = (std::min)(static_cast<u16>(it->reads + 1), EarlyAfterReads);
@@ -785,6 +926,7 @@ void BufferCache<P>::NoteReadBackWrite(DAddr device_addr, u64 size) {
                                                 &ReadBackPage::page);
              it != read_back_pages.end() && it->page < end; ++it) {
             it->written = true;
+            it->landed_early = false;
             if (it->unread_writes < MaxUnreadWrites) {
                 ++it->unread_writes;
             } else {
@@ -820,6 +962,163 @@ void BufferCache<P>::RecordEarlyDownloads() {
 }
 
 template <class P>
+void BufferCache<P>::TraceWorkRecorded(bool dispatch) {
+    if constexpr (HAS_READ_TRACE) {
+        runtime.TraceCountWork(dispatch);
+        TraceFlushWriteMarks();
+    }
+}
+
+template <class P>
+void BufferCache<P>::TraceWriteRange(DAddr device_addr, u64 size) {
+    if constexpr (HAS_READ_TRACE) {
+        if (!cpu_read_ranges.Intersects(device_addr, size)) {
+            return;
+        }
+        trace_writes[trace_write_count++ % trace_writes.size()] = TraceWrite{
+            .start = device_addr,
+            .end = device_addr + size,
+            .sequence = ++trace_sequence,
+        };
+        trace_marks_pending = true;
+    }
+}
+
+template <class P>
+void BufferCache<P>::TraceFlushWriteMarks() {
+    if constexpr (HAS_READ_TRACE) {
+        if (!trace_marks_pending) {
+            return;
+        }
+        trace_marks_pending = false;
+        const ReadTrace::Write write{
+            .tick = runtime.CurrentTick(),
+            .recorded = ReadTrace::Now(),
+            .mark = runtime.TraceMark(),
+            .counts = runtime.TraceCounts(),
+        };
+        // The newest entries without one: those noted since the last mark.
+        const size_t count = (std::min)(trace_write_count, trace_writes.size());
+        for (size_t i = 0; i < count; ++i) {
+            TraceWrite& entry = trace_writes[(trace_write_count - 1 - i) % trace_writes.size()];
+            if (entry.write.recorded != 0) {
+                break;
+            }
+            entry.write = write;
+        }
+    }
+}
+
+template <class P>
+void BufferCache<P>::TraceReadCopy(ReadTrace::Read& read, const ReadDownload& download,
+                                   DAddr device_addr, u64 size) const {
+    if (download.trace.tick == 0) {
+        return;
+    }
+    read.has_copy = true;
+    read.copy = download.trace;
+    // The area's last GPU write before the copy.
+    const size_t count = (std::min)(trace_write_count, trace_writes.size());
+    for (size_t i = 0; i < count; ++i) {
+        const TraceWrite& entry = trace_writes[(trace_write_count - 1 - i) % trace_writes.size()];
+        if (entry.sequence > download.trace.sequence || entry.write.recorded == 0 ||
+            entry.end <= device_addr || entry.start >= device_addr + size) {
+            continue;
+        }
+        read.has_write = true;
+        read.write = entry.write;
+        return;
+    }
+}
+
+template <class P>
+bool BufferCache<P>::EarlyDownloadServes(DAddr device_addr, u64 size) const {
+    if (std::ranges::any_of(read_downloads, [&](const ReadDownload& download) {
+            return download.early && download.write_ranges.Intersects(device_addr, size);
+        })) {
+        return true;
+    }
+    for (DAddr page = Common::AlignDown(device_addr, DEVICE_PAGESIZE); page < device_addr + size;
+         page += DEVICE_PAGESIZE) {
+        const auto it = early_landed.find(page);
+        if (it != early_landed.end() && it->second.bytes.Intersects(device_addr, size)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+template <class P>
+void BufferCache<P>::NoteEarlyLanded(const ReadDownload& download,
+                                     const Common::RangeSet<DAddr>& cpu_written) {
+    // Pages no read came for since keep theirs until a download lands there. Bounded: past it,
+    // their reads are not compared.
+    if (early_landed.size() >= 4 * MaxReadBackPages) {
+        early_landed.clear();
+    }
+    download.clean_ranges.ForEach([&](DAddr start, DAddr end) {
+        Common::RangeSet<DAddr> landed;
+        landed.Add(start, end - start);
+        cpu_written.ForEachInRange(start, end - start, [&](DAddr lower, DAddr upper) {
+            landed.Subtract(lower, upper - lower);
+        });
+        landed.ForEach([&](DAddr lower, DAddr upper) {
+            for (DAddr page = Common::AlignDown(lower, DEVICE_PAGESIZE); page < upper;
+                 page += DEVICE_PAGESIZE) {
+                const DAddr from = (std::max)(lower, page);
+                const DAddr to = (std::min)(upper, page + DEVICE_PAGESIZE);
+                EarlyLanded& entry = early_landed[page];
+                entry.as_landed.resize(DEVICE_PAGESIZE);
+                device_memory.ReadBlockUnsafe(from, entry.as_landed.data() + (from - page),
+                                              to - from);
+                entry.bytes.Add(from, to - from);
+            }
+        });
+    });
+}
+
+template <class P>
+template <typename Func>
+void BufferCache<P>::TakeEarlyLanded(DAddr device_addr, u64 size, Func&& func) {
+    for (DAddr page = Common::AlignDown(device_addr, DEVICE_PAGESIZE); page < device_addr + size;
+         page += DEVICE_PAGESIZE) {
+        const auto it = early_landed.find(page);
+        if (it == early_landed.end()) {
+            continue;
+        }
+        Common::RangeSet<DAddr> taken;
+        it->second.bytes.ForEachInRange(
+            device_addr, size, [&](DAddr lower, DAddr upper) { taken.Add(lower, upper - lower); });
+        // A newer GPU write's bytes are the read's own again.
+        gpu_modified_ranges.ForEachInRange(page, DEVICE_PAGESIZE, [&](DAddr lower, DAddr upper) {
+            taken.Subtract(lower, upper - lower);
+        });
+        taken.ForEach([&](DAddr lower, DAddr upper) {
+            func(lower, upper, it->second.as_landed.data() + (lower - page));
+            it->second.bytes.Subtract(lower, upper - lower);
+        });
+        if (it->second.bytes.Empty()) {
+            early_landed.erase(it);
+        }
+    }
+}
+
+template <class P>
+void BufferCache<P>::ForgetEarlyLanded(DAddr device_addr, u64 size) {
+    for (DAddr page = Common::AlignDown(device_addr, DEVICE_PAGESIZE); page < device_addr + size;
+         page += DEVICE_PAGESIZE) {
+        const auto it = early_landed.find(page);
+        if (it == early_landed.end()) {
+            continue;
+        }
+        it->second.bytes.Subtract(device_addr, size);
+        if (it->second.bytes.Empty()) {
+            early_landed.erase(it);
+        }
+    }
+}
+
+template <class P>
 void BufferCache<P>::WriteReadDownloads(u64 tick) {
     if constexpr (!IS_OPENGL) {
         while (!read_downloads.empty() && read_downloads.front().tick <= tick) {
@@ -837,6 +1136,22 @@ void BufferCache<P>::WriteReadDownloads(u64 tick) {
                         WriteDownloadedMemory(cpu_written, start, data + (start - copy_addr),
                                               end - start);
                     });
+            }
+            // TEST: what early downloads brought, for the reads they serve.
+            if (download.early) {
+                if (ReadTrace::Enabled()) [[unlikely]] {
+                    download.clean_ranges.ForEach([&](DAddr start, DAddr end) {
+                        for (auto it = std::ranges::lower_bound(
+                                 read_back_pages, Common::AlignDown(start, DEVICE_PAGESIZE), {},
+                                 &ReadBackPage::page);
+                             it != read_back_pages.end() && it->page < end; ++it) {
+                            it->landed_early = true;
+                        }
+                    });
+                }
+                if (ReadChecks()) [[unlikely]] {
+                    NoteEarlyLanded(download, cpu_written);
+                }
             }
             // TEST: what later reads' checks find of an earlier download where they kept its bytes.
             for (size_t later = 1; later < read_downloads.size(); ++later) {
@@ -863,8 +1178,10 @@ void BufferCache<P>::WriteReadDownloads(u64 tick) {
                     }
                 }
             });
-            // Freed by the GPU thread (TickFrame).
-            async_buffers_death_ring.push_back(download.staging);
+            // Freed by the GPU thread (TickFrame). TEST: a check alone has none.
+            if (!download.copies.empty()) {
+                async_buffers_death_ring.push_back(download.staging);
+            }
             if (download.early) {
                 --pending_early_downloads;
             }
@@ -1045,6 +1362,10 @@ void BufferCache<P>::NoteLandedBytes(ReadCheck& check, const Common::RangeSet<DA
 template <class P>
 void BufferCache<P>::ClearDownload(DAddr device_addr, u64 size) {
     ClearFenceDownloads(device_addr, size);
+    // TEST (EDEN_NX2_READ_CHECK): a newer value there, as without early downloads.
+    if (!early_landed.empty()) [[unlikely]] {
+        ForgetEarlyLanded(device_addr, size);
+    }
     if (!read_downloads.empty()) [[unlikely]] {
         for (ReadDownload& download : read_downloads) {
             download.write_ranges.Subtract(device_addr, size);
@@ -1117,6 +1438,9 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
         gpu_modified_ranges.Add(pair.first, pair.second);
         GpuWaitStats::NoteGpuWrite(pair.first, pair.second, GpuWaitStats::WriteSite::DmaCopy);
         NoteReadBackWrite(pair.first, pair.second);
+        if (ReadTrace::Enabled()) [[unlikely]] {
+            TraceWriteRange(pair.first, pair.second);
+        }
         if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
             Tegra::Nx2MarkGpuWritten(pair.first, pair.second);
             Nx2NoteListWrite(buffer_b, pair.first, pair.second);
@@ -1126,6 +1450,9 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
     src_buffer.MarkUsage(copy.src_offset, copy.size);
     dest_buffer.MarkUsage(copy.dst_offset, copy.size);
     runtime.CopyBuffer(dest_buffer, src_buffer, copies, true);
+    if (ReadTrace::Enabled()) [[unlikely]] {
+        TraceFlushWriteMarks();
+    }
     if (has_new_downloads) {
         memory_tracker.MarkRegionAsGpuModified(*cpu_dest_address, amount);
         const bool should_sync = Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
@@ -1669,6 +1996,10 @@ Common::RangeSet<DAddr> BufferCache<P>::PendingCpuWriteRanges() {
 template <class P>
 void BufferCache<P>::WriteDownloadedMemory(const Common::RangeSet<DAddr>& cpu_written,
                                            DAddr device_addr, const u8* data, u64 size) {
+    // TEST (EDEN_NX2_READ_CHECK): newer GPU bytes than an early download brought before.
+    if (!early_landed.empty()) [[unlikely]] {
+        ForgetEarlyLanded(device_addr, size);
+    }
     if (!cpu_written.Intersects(device_addr, size)) {
         device_memory.WriteBlockUnsafe(device_addr, data, size);
         return;
@@ -2692,6 +3023,9 @@ template <class P>
 void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size,
                                        bool needs_sync, GpuWaitStats::WriteSite site) {
     GpuWaitStats::NoteGpuWrite(device_addr, size, site);
+    if (ReadTrace::Enabled()) [[unlikely]] {
+        TraceWriteRange(device_addr, size);
+    }
     if constexpr (!IS_OPENGL) {
         if (needs_sync) {
             Buffer& buffer = slot_buffers[buffer_id];

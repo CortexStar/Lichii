@@ -46,6 +46,7 @@
 #include "video_core/gpu_wait_stats.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_download_trace.h"
+#include "video_core/nx2_read_trace.h"
 #include "video_core/rasterizer_download_area.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/types.h"
@@ -204,6 +205,8 @@ class BufferCache : public VideoCommon::ChannelSetupCaches<BufferCacheChannelInf
     static constexpr bool USE_MEMORY_MAPS = P::USE_MEMORY_MAPS;
     static constexpr bool SEPARATE_IMAGE_BUFFERS_BINDINGS = P::SEPARATE_IMAGE_BUFFER_BINDINGS;
     static constexpr bool USE_MEMORY_MAPS_FOR_UPLOADS = P::USE_MEMORY_MAPS_FOR_UPLOADS;
+    /// TEST (EDEN_NX2_READ_TRACE): the runtime dates work with device timestamps (Vulkan).
+    static constexpr bool HAS_READ_TRACE = requires(typename P::Runtime& r) { r.TraceMark(); };
 
 #ifdef YUZU_LEGACY
     static constexpr s64 TARGET_THRESHOLD = 3_GiB;
@@ -828,6 +831,9 @@ private:
         /// the offsets the copies have in `staging`.
         std::vector<u8> landed_bytes;
         Common::RangeSet<DAddr> landed;
+        /// A check alone, its read's bytes all brought by other downloads: the bytes it compares,
+        /// which its read waits for as for a download of its own.
+        Common::RangeSet<DAddr> own;
     };
     struct ReadCheckTotals {
         u64 every{};      ///< Tests: check 1 in `every` read downloads, over EDEN_NX2_READ_CHECK
@@ -853,6 +859,9 @@ private:
         return every;
     }
     void CheckReadDownload(const ReadCheck& check, const Common::RangeSet<DAddr>& cpu_written);
+    [[nodiscard]] bool ReadChecks() const {
+        return read_check.every != 0 || ReadCheckEvery() != 0;
+    }
     /// A download landed `written`: what guest memory holds now over a later check's `kept`.
     void NoteLandedBytes(ReadCheck& check, const Common::RangeSet<DAddr>& written);
 
@@ -873,12 +882,53 @@ private:
         std::unique_ptr<ReadCheck> check; ///< TEST: EDEN_NX2_READ_CHECK
         /// Recorded right after a GPU write, before any read (RecordEarlyDownloads)
         bool early{};
+        ReadTrace::Copy trace{}; ///< TEST: EDEN_NX2_READ_TRACE
     };
     /// Oldest first, and written to guest memory in that order: none lands over newer bytes.
     std::deque<ReadDownload> read_downloads;
     /// All the read downloads' clean_ranges (they don't overlap): GPU-modified bytes already on
     /// their way, which later reads wait for rather than download again.
     Common::RangeSet<DAddr> read_download_ranges;
+
+    /// TEST (EDEN_NX2_READ_CHECK): the bytes early downloads brought to a page's guest memory, and
+    /// what guest memory held there as they landed, until newer downloaded bytes or values replace
+    /// them. The read they serve compares them with the GPU's bytes then: a GPU write in between
+    /// that took nothing out of them shows.
+    struct EarlyLanded {
+        Common::RangeSet<DAddr> bytes;
+        std::vector<u8> as_landed; ///< The page, DEVICE_PAGESIZE bytes
+    };
+    std::unordered_map<DAddr, EarlyLanded> early_landed;
+    /// Whether an early download serves this read: in check mode it flushes (and is compared).
+    [[nodiscard]] bool EarlyDownloadServes(DAddr device_addr, u64 size) const;
+    void NoteEarlyLanded(const ReadDownload& download, const Common::RangeSet<DAddr>& cpu_written);
+    /// Calls func(begin, end, the bytes as they landed) for what early downloads brought to
+    /// [device_addr, device_addr + size) that no GPU write changed since, which a read takes:
+    /// a later read compares only what lands after it.
+    template <typename Func>
+    void TakeEarlyLanded(DAddr device_addr, u64 size, Func&& func);
+    void ForgetEarlyLanded(DAddr device_addr, u64 size);
+
+    /// TEST (EDEN_NX2_READ_TRACE): the latest GPU writes over pages the guest read back before
+    /// (cpu_read_ranges), newest last; those without a mark yet get the next one.
+    struct TraceWrite {
+        DAddr start{};
+        DAddr end{};
+        u64 sequence{}; ///< 0: unused
+        ReadTrace::Write write{};
+    };
+    std::array<TraceWrite, 256> trace_writes{};
+    size_t trace_write_count{};
+    u64 trace_sequence{};
+    bool trace_marks_pending{};
+    /// The GPU thread recorded a draw or dispatch: a device timestamp after it dates its writes
+    /// to pages the guest reads back.
+    void TraceWorkRecorded(bool dispatch);
+    void TraceWriteRange(DAddr device_addr, u64 size);
+    void TraceFlushWriteMarks();
+    /// The reading thread's read waits for `download` (`mutex` held).
+    void TraceReadCopy(ReadTrace::Read& read, const ReadDownload& download, DAddr device_addr,
+                       u64 size) const;
 
     /// A page the guest CPU read GPU writes from. Switch 2 titles read compute results back every
     /// frame, milliseconds after the dispatch that wrote them: a download recorded at the read
@@ -891,6 +941,7 @@ private:
         u16 reads{};         ///< Writes in a row the guest read, up to EarlyAfterReads
         u16 unread_writes{}; ///< GPU writes since its last read
         bool written{};      ///< A GPU write since its last read
+        bool landed_early{}; ///< TEST (EDEN_NX2_READ_TRACE): an early download landed since
     };
     /// Reads of a page's writes in a row before its writes get early downloads.
     static constexpr u16 EarlyAfterReads = 2;
