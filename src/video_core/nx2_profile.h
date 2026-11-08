@@ -91,6 +91,11 @@ enum class Zone : u32 {
     Method2D,      ///< Fermi2D method entries
     MethodInline,  ///< KeplerMemory method entries (inline uploads)
     ComputeWrites, ///< Kind::Writes entries (KeplerCompute::BackWrites)
+    // Inside "update buffers" and "bind stage buffers": graphics uniform and storage buffers.
+    UpdateStorage, ///< BufferCache::UpdateStorageBuffers (storage pointer resolve), per stage
+    BindUniforms,  ///< BufferCache::BindHostGraphicsUniformBuffers, per stage
+    BindStorage,   ///< BufferCache::BindHostGraphicsStorageBuffers, per stage with storage
+    StoragePointer, ///< BufferCache::BindGraphicsStorageBuffer (pointer read), per graphics binding
     Count,
 };
 
@@ -107,6 +112,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "draw manager", "method 3D", "call", "finish macro", "query report", "counter reset",
     "render enable", "syncpoint", "wait for idle", "cache barrier", "idle hook",
     "method compute", "method DMA", "method 2D", "method inline", "compute writes",
+    "update storage", "bind uniforms", "bind storage", "storage pointer",
 };
 static_assert(zone_names[static_cast<size_t>(Zone::Count) - 1] != nullptr,
               "every zone needs a name");

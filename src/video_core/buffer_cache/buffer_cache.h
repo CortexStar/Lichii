@@ -753,8 +753,12 @@ void BufferCache<P>::BindHostGeometryBuffers(bool is_indexed) {
 
 template <class P>
 void BufferCache<P>::BindHostStageBuffers(size_t stage) {
-    BindHostGraphicsUniformBuffers(stage);
+    {
+        Nx2Profile::Scope scope{Nx2Profile::Zone::BindUniforms};
+        BindHostGraphicsUniformBuffers(stage);
+    }
     if (channel_state->enabled_storage_buffers[stage] != 0) {
+        Nx2Profile::Scope scope{Nx2Profile::Zone::BindStorage};
         BindHostGraphicsStorageBuffers(stage);
     }
     if (channel_state->enabled_texture_buffers[stage] != 0) {
@@ -821,6 +825,7 @@ template <class P>
 bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, u32 cbuf_index,
                                                u32 cbuf_offset, bool is_written,
                                                u32 indirect_offset) {
+    Nx2Profile::Scope scope{Nx2Profile::Zone::StoragePointer};
     if (stage >= NUM_STAGES || ssbo_index >= NUM_STORAGE_BUFFERS) {
         LOG_ERROR(HW_GPU, "Invalid graphics storage buffer binding: stage {}, index {}",
                   stage, ssbo_index);
@@ -2108,7 +2113,10 @@ void BufferCache<P>::DoUpdateGraphicsBuffers(bool is_indexed) {
         UpdateTransformFeedbackBuffers();
         for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
             UpdateUniformBuffers(stage);
-            UpdateStorageBuffers(stage);
+            if (channel_state->enabled_storage_buffers[stage] != 0) {
+                Nx2Profile::Scope scope{Nx2Profile::Zone::UpdateStorage};
+                UpdateStorageBuffers(stage);
+            }
             UpdateTextureBuffers(stage);
         }
         if (current_draw_indirect) {
