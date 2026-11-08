@@ -93,12 +93,14 @@ void SinkStream::AppendBuffer(SinkBuffer& buffer, std::span<s16> samples) {
 
 /// Blocks a sysmix stream may queue: enough for the host's largest callback plus one block.
 /// A host that asks for more than the queue holds (PipeWire's default 1024 frames against three
-/// 240-frame blocks) gets silence for the rest of every callback.
+/// 240-frame blocks) gets silence for the rest of every callback. The sample ring must hold the
+/// queued blocks and the one playing, at the device's channel count.
 u32 SinkStream::SysmixQueueLimit() const {
-    constexpr u32 MinimumBlocks = 3;
+    constexpr u64 MinimumBlocks = 3;
+    const u64 ring_blocks = SampleRingCapacity / (u64{TargetSampleCount} * device_channels) - 1;
     const u64 request = largest_request_frames.load(std::memory_order_relaxed);
     const u64 blocks = (request + TargetSampleCount - 1) / TargetSampleCount + 1;
-    return static_cast<u32>(std::clamp<u64>(blocks, MinimumBlocks, 64));
+    return static_cast<u32>(std::clamp<u64>(blocks, MinimumBlocks, (std::min<u64>)(ring_blocks, 64)));
 }
 
 bool SinkStream::TryAppendOutputBlock(SinkBuffer& buffer, std::span<s16> samples) {

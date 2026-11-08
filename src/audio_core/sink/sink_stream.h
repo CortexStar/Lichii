@@ -276,7 +276,9 @@ protected:
 
 private:
     /// Ring buffer of the samples waiting to be played or consumed
-    Common::RingBuffer<s16, 0x10000> samples_buffer;
+    /// Samples the ring below holds, across all channels
+    static constexpr std::size_t SampleRingCapacity = 0x10000;
+    Common::RingBuffer<s16, SampleRingCapacity> samples_buffer;
     bool input_preview{};
     std::atomic<float> input_preview_gain{1.0f};
     std::atomic<u32> input_peak{};
