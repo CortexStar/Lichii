@@ -647,7 +647,7 @@ std::pair<std::span<u8>, u64> BufferCacheRuntime::AllocateBankTable(u32 size) {
     return {ref.mapped_span.first(size), ref.device_address + ref.offset};
 }
 
-u64 BufferCacheRuntime::SyncPageTable(size_t id, VideoCommon::GpuPageTable& table) {
+u64 BufferCacheRuntime::SyncPageTable(size_t id, VideoCommon::GpuPageTable& table, bool upload) {
     if (page_tables.size() <= id) {
         page_tables.resize(id + 1);
     }
@@ -659,7 +659,7 @@ u64 BufferCacheRuntime::SyncPageTable(size_t id, VideoCommon::GpuPageTable& tabl
         // A new buffer holds nothing: the model resends its whole image.
         table.MarkAllDirty();
     }
-    if (!table.HasUpdates()) {
+    if (!table.HasUpdates() || !upload) {
         return device_table.address;
     }
     table.TakeUpdates(page_table_updates);
@@ -667,6 +667,8 @@ u64 BufferCacheRuntime::SyncPageTable(size_t id, VideoCommon::GpuPageTable& tabl
     for (const auto& update : page_table_updates) {
         total += update.size;
     }
+    ++page_table_uploads;
+    page_table_upload_bytes += total;
     const StagingBufferRef staging = UploadStagingBuffer(total);
     boost::container::small_vector<VideoCommon::BufferCopy, 8> copies;
     u64 staging_offset = 0;

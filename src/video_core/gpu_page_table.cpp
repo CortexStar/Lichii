@@ -158,6 +158,7 @@ bool GpuPageTable::Map(u64 gpu_addr, u64 size, u64 device_address) {
         }
         entry = page_address;
         MarkBlock(block);
+        map_changed = true;
     }
     extents.emplace(begin_address, Extent{.end = end_address, .device = first_page_address});
     return true;
@@ -269,6 +270,7 @@ void GpuPageTable::TakeUpdates(std::vector<Update>& out) {
     dirty_blocks.clear();
     l1_dirty_begin = 0;
     l1_dirty_end = 0;
+    map_changed = false;
 }
 
 } // namespace VideoCommon

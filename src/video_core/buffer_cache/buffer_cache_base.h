@@ -7,11 +7,12 @@
 #pragma once
 
 #include <algorithm>
-#include <cstdlib>
 #include <array>
 #include <atomic>
 #include <bit>
 #include <bitset>
+#include <chrono>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <memory>
@@ -1196,6 +1197,12 @@ private:
     bool compute_storage_by_address{};
     std::array<std::array<Residency, NUM_STORAGE_BUFFERS>, NUM_STAGES + 1> residencies{};
     bool page_table_full_logged{};
+    u64 page_table_upload_frame{}; ///< frame_tick of the last page table upload
+    /// EDEN_NX2_GPU_PROFILE: page table uploads every 10 s.
+    void ReportPageTables();
+    std::chrono::steady_clock::time_point page_table_report_time{};
+    u64 page_table_reported_uploads{};
+    u64 page_table_reported_bytes{};
     std::array<StorageResolveCache, NUM_STAGES> graphics_storage_resolve{};
     StorageResolveCache compute_storage_resolve{};
 

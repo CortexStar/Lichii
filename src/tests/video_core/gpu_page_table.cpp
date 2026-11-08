@@ -222,3 +222,24 @@ TEST_CASE("GPU page table finds a host buffer's pages after maps over parts of a
     REQUIRE(table.UnmapDevice(0xd000'0000, 0xd000'4000) == 2);
     REQUIRE(table.Translate(0x1f'fff000) == NULL_PAGE);
 }
+
+TEST_CASE("GPU page table tells map changes from unmaps", "[gpu_page_table]") {
+    GpuPageTable table{8};
+    table.SetNullPage(NULL_PAGE);
+    std::vector<GpuPageTable::Update> updates;
+    table.TakeUpdates(updates);
+    REQUIRE_FALSE(table.HasMapChanges());
+    REQUIRE(table.Map(0x10000, 0x2000, 0xa000'0000));
+    REQUIRE(table.HasMapChanges());
+    table.TakeUpdates(updates);
+    REQUIRE_FALSE(table.HasMapChanges());
+    // The same mapping again writes nothing.
+    REQUIRE(table.Map(0x10000, 0x2000, 0xa000'0000));
+    REQUIRE_FALSE(table.HasUpdates());
+    // An unmap alone is an update, not a map change.
+    REQUIRE(table.UnmapDevice(0xa000'0000, 0xa000'1000) == 1);
+    REQUIRE(table.HasUpdates());
+    REQUIRE_FALSE(table.HasMapChanges());
+    REQUIRE(table.Map(0x10000, 0x1000, 0xb000'0000));
+    REQUIRE(table.HasMapChanges());
+}

@@ -180,7 +180,10 @@ struct Runtime {
     u64 NullPageAddress() const {
         return NULL_PAGE;
     }
-    u64 SyncPageTable(size_t, VideoCommon::GpuPageTable& table) {
+    u64 SyncPageTable(size_t, VideoCommon::GpuPageTable& table, bool upload = true) {
+        if (!upload) {
+            return 0x5000'0000;
+        }
         table.TakeUpdates(page_table_updates);
         ++page_table_syncs;
         return 0x5000'0000;

@@ -336,8 +336,14 @@ public:
     [[nodiscard]] u64 NullPageAddress();
 
     /// Brings the device copy of page table `id` up to `table`, with copies recorded in command
-    /// order (a draw recorded before never reads a new entry). Returns its device address.
-    u64 SyncPageTable(size_t id, VideoCommon::GpuPageTable& table);
+    /// order (a draw recorded before never reads a new entry), unless `upload` is false and the
+    /// copy exists. Returns its device address.
+    u64 SyncPageTable(size_t id, VideoCommon::GpuPageTable& table, bool upload = true);
+
+    /// Page table uploads so far: copies recorded and their bytes (statistics).
+    [[nodiscard]] std::pair<u64, u64> PageTableUploads() const noexcept {
+        return {page_table_uploads, page_table_upload_bytes};
+    }
 
 private:
     /// EDEN_NX2_UPLOAD_REORDER_CHECK: work recorded now uses these bytes.
@@ -401,6 +407,8 @@ private:
     };
     std::vector<PageTableBuffer> page_tables;
     std::vector<VideoCommon::GpuPageTable::Update> page_table_updates;
+    u64 page_table_uploads{};
+    u64 page_table_upload_bytes{};
     vk::Buffer null_page;
     u64 null_page_address{};
     Shader::Backend::SPIRV::BankTableEntry* bank_entry{};

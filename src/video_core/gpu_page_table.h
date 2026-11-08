@@ -88,6 +88,13 @@ public:
         return l1_dirty_begin < l1_dirty_end || !dirty_blocks.empty();
     }
 
+    /// Whether a Map changed an entry since the last TakeUpdates: a draw about to read the new
+    /// mapping needs the upload. Unmaps alone point entries at the null page; the host memory
+    /// they pointed at stays alive for a while (delayed destruction), so their upload can wait.
+    [[nodiscard]] bool HasMapChanges() const noexcept {
+        return map_changed;
+    }
+
     /// The table's image: L1, then the L2 blocks.
     [[nodiscard]] std::span<const u8> Image() const noexcept {
         return {image.get(), TotalBytes()};
@@ -136,6 +143,7 @@ private:
     u64 l1_dirty_begin = 0;
     u64 l1_dirty_end = 0;
     u64 null_page = 0;
+    bool map_changed = false;
 
     /// Every mapped page, as runs by first guest byte (page aligned) with the host address of
     /// their first page. A Map inside one with the same device offset changes nothing and skips

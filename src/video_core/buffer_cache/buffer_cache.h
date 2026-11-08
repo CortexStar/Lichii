@@ -114,6 +114,11 @@ void BufferCache<P>::TickFrame() {
         // Every 10 s, also when no draw ran a check (a layer that never runs shows 0 checks).
         NativeVerify::Report();
     }
+    if constexpr (requires { runtime.PageTableUploads(); }) {
+        if (Nx2Profile::Enabled() && !page_tables.empty()) {
+            ReportPageTables();
+        }
+    }
     // Homebrew console apps don't create or bind any channels, so this will be nullptr.
     if (!channel_state) {
         return;
@@ -2502,6 +2507,27 @@ GpuPageTable* BufferCache<P>::CurrentPageTable() {
 }
 
 template <class P>
+void BufferCache<P>::ReportPageTables() {
+    if constexpr (requires { runtime.PageTableUploads(); }) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - page_table_report_time < std::chrono::seconds{10}) {
+            return;
+        }
+        page_table_report_time = now;
+        const auto [uploads, bytes] = runtime.PageTableUploads();
+        u32 blocks = 0;
+        for (const auto& [as_id, table] : page_tables) {
+            blocks += table->UsedBlocks();
+        }
+        LOG_INFO(HW_GPU, "GPU page table (10 s): {} uploads, {} KiB, {} L2 blocks in use",
+                 uploads - page_table_reported_uploads, (bytes - page_table_reported_bytes) / 1024,
+                 blocks);
+        page_table_reported_uploads = uploads;
+        page_table_reported_bytes = bytes;
+    }
+}
+
+template <class P>
 u64 BufferCache<P>::PageTableAddress() {
     if constexpr (requires { runtime.SyncPageTable(size_t{}, std::declval<GpuPageTable&>()); }) {
         GpuPageTable* const table = CurrentPageTable();
@@ -2511,7 +2537,16 @@ u64 BufferCache<P>::PageTableAddress() {
         if (NativeVerify::Enabled(NativeVerify::Layer::Storage)) {
             NativeVerify::Report();
         }
-        return runtime.SyncPageTable(gpu_memory->GetID(), *table);
+        // An upload is a copy outside the render pass with barriers before and after. Entries a
+        // draw is about to read (Map) go up now; entries that only went back to the null page
+        // (a buffer joined into a new one, a guest unmap) wait for the next frame's first upload:
+        // the memory they pointed at is destroyed only TICKS_TO_DESTROY frames later, and no draw
+        // reads them meanwhile, since its own ranges were mapped again.
+        const bool upload = table->HasMapChanges() || page_table_upload_frame != frame_tick;
+        if (upload && table->HasUpdates()) {
+            page_table_upload_frame = frame_tick;
+        }
+        return runtime.SyncPageTable(gpu_memory->GetID(), *table, upload);
     } else {
         return 0;
     }
