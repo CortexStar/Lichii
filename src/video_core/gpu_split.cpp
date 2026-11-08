@@ -1052,7 +1052,7 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
         if (size < words) {
             const Kind next = static_cast<Kind>(entry[size] & 0xf);
             if (next == Kind::Method || next == Kind::CbWrite || next == Kind::CbBind ||
-                next == Kind::DrawBatch) {
+                next == Kind::DrawBatch || next == Kind::DrawRun) {
                 return size + Execute(entry + size, words - size);
             }
         }
@@ -1064,6 +1064,12 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
         Nx2Profile::Scope batch_scope{Nx2Profile::Zone::DrawBatch};
         static_cast<Tegra::Engines::Maxwell3D*>(back_engine)
             ->RunDrawBatch(*system, entry + 1, count, repeats);
+        return 1 + size_t{count};
+    }
+    case Kind::DrawRun: {
+        const u32 count = static_cast<u32>(head >> 32);
+        Nx2Profile::Scope run_scope{Nx2Profile::Zone::DrawRun};
+        static_cast<Tegra::Engines::Maxwell3D*>(back_engine)->RunDrawRun(*system, entry + 1, count);
         return 1 + size_t{count};
     }
     case Kind::CbWrite: {

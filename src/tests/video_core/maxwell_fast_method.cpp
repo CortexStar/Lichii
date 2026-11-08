@@ -927,3 +927,62 @@ TEST_CASE("GpuSplit narrow drains wait only for the recorded writes that may ove
     Access::SetPositions(split, 30, 25);
     REQUIRE(Access::Target(split, &space_a, 0x10'0800, 4) <= 25);
 }
+
+TEST_CASE("Maxwell3D's split front sends plain draw runs as one entry the back replays",
+          "[video_core][gpu_split_dispatch]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    Fixture f;
+    VideoCommon::GpuSplit split;
+    Access::Initialize(split, f.system);
+    constexpr u32 IndexAddressLow = MAXWELL3D_REG_INDEX(index_buffer.start_addr_low);
+    constexpr u32 IndexFirst = MAXWELL3D_REG_INDEX(index_buffer.first);
+    constexpr u32 IndexCount = MAXWELL3D_REG_INDEX(index_buffer.count);
+    constexpr u32 BaseVertex = MAXWELL3D_REG_INDEX(global_base_vertex_index);
+    constexpr u32 DepthWrite = MAXWELL3D_REG_INDEX(depth_write_enabled);
+    struct Write {
+        u32 method;
+        u32 value;
+    };
+    // Six indexed draws with new draw parameters and constant buffer data before each; a depth
+    // write (pipeline state) after the fourth ends its run.
+    std::vector<Write> stream;
+    for (u32 draw = 0; draw < 6; ++draw) {
+        stream.push_back({BaseVertex, 7 + draw * 3});
+        stream.push_back({IndexAddressLow, 0x1000 + draw * 0x100});
+        stream.push_back({CbOffset, 0x40});
+        stream.push_back({CbData, 0x100 + draw});
+        stream.push_back({CbData + 1, 0x200 + draw});
+        stream.push_back({DrawBegin, 4}); // Triangles, instance id First
+        stream.push_back({IndexFirst, 1 + draw});
+        stream.push_back({IndexCount, 3 + draw});
+        stream.push_back({DrawEnd, 0});
+        if (draw == 3) {
+            stream.push_back({DepthWrite, 1});
+        }
+    }
+    for (const Write& write : stream) {
+        f.fast.FrontCallMethod(f.system, split, write.method, write.value, true);
+        f.slow.CallMethod(f.system, write.method, write.value, true);
+    }
+    split.RunPendingFlush();
+    const u64 end = Access::End(split);
+    u64 position = 0;
+    u32 entries = 0;
+    while (position < end) {
+        position = Access::Execute(split, position, end);
+        ++entries;
+    }
+    REQUIRE(position == end);
+    // One entry per method would be 9 per draw. With the runs: the engine, the first draw's
+    // held state and data, a run of four draws, the state after it, the data and a run of two.
+    CHECK(entries <= 8);
+    REQUIRE(f.fast.regs.reg_array == f.slow.regs.reg_array);
+    REQUIRE(f.fast.shadow_state.reg_array == f.slow.shadow_state.reg_array);
+    const auto& a = f.fast.draw_manager.draw_state;
+    const auto& b = f.slow.draw_manager.draw_state;
+    CHECK(a.draw_mode == b.draw_mode);
+    CHECK(a.draw_indexed == b.draw_indexed);
+    CHECK(a.base_index == b.base_index);
+    CHECK(a.base_instance == b.base_instance);
+    CHECK(std::memcmp(&a.index_buffer, &b.index_buffer, sizeof(a.index_buffer)) == 0);
+}

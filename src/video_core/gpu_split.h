@@ -213,6 +213,19 @@ public:
         std::memcpy(entry + 1, methods, size_t{count} * sizeof(u64));
         Commit(1 + size_t{count});
     }
+    /// `count` words (Maxwell3D::RunDrawRun's format) run in order: plain draws with what was
+    /// written around them, held by the front while nothing else was sent.
+    void DrawRun(Tegra::Engines::EngineInterface* engine, const u64* words, u32 count) {
+        SelectEngine(engine);
+        u64* const entry = Reserve(1 + size_t{count});
+        entry[0] = static_cast<u64>(Kind::DrawRun) | (u64{count} << 32);
+        std::memcpy(entry + 1, words, size_t{count} * sizeof(u64));
+        Commit(1 + size_t{count});
+    }
+    /// The back ran out of work and waits for the next entry.
+    [[nodiscard]] bool BackIdle() const {
+        return back_idle.load(std::memory_order_relaxed);
+    }
     /// `count` (1-4) words written to the constant buffer data registers, register i being
     /// const_buffer.buffer + nibble i of `nibbles` (Maxwell3D::BackCbWrite). Never more words
     /// than the single method entries it stands for.
@@ -574,6 +587,7 @@ private:
         CbBind,     ///< Bits 8-15 stage, 32-63 argument (Maxwell3D bind group raw_config)
         Writes,     ///< Bits 32-63 count; flag HasSegment (word 1); then count run words
                     ///< (KeplerCompute)
+        DrawRun,    ///< Bits 32-63 count; then count words (Maxwell3D::RunDrawRun)
     };
     static constexpr u64 IsLast = 1 << 4;
     static constexpr u64 HasSegment = 1 << 5;
