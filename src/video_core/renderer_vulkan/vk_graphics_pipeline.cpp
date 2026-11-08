@@ -2561,8 +2561,10 @@ bool GraphicsPipeline::MakeLibraryPipeline(VkRenderPass render_pass) {
         stage_infos[NUM_STAGES - 1].uses_quad_after_demote);
     pipeline = LinkLibraries(render_pass, optimized);
     linked = true;
-    if (GraphicsLibraryRelinksOptimized(device.GetDriverID(), optimized,
-                                        device.KeepsGraphicsLibraryLinkInfo())) {
+    // EXPERIMENT (do not merge): EDEN_NX2_EXP_NO_GPL_RELINK=1 keeps the fast links for the A/B.
+    static const bool no_relink = std::getenv("EDEN_NX2_EXP_NO_GPL_RELINK") != nullptr;
+    if (!no_relink && GraphicsLibraryRelinksOptimized(device.GetDriverID(), optimized,
+                                                      device.KeepsGraphicsLibraryLinkInfo())) {
         QueueOptimizedLink(render_pass);
     }
     return true;
