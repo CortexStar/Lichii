@@ -2087,6 +2087,11 @@ bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheT
         return false;
     }
     if (True(which & VideoCommon::CacheType::TextureCache)) {
+        // The texture cache only flushes or reports GPU-modified images: pages no image was ever
+        // GPU-modified on skip its lock.
+        if (!texture_cache.MayHaveGpuModifiedImages(addr, size)) {
+            return false;
+        }
         std::scoped_lock lock{texture_cache.mutex};
         return texture_cache.IsRegionGpuModified(addr, size);
     }
@@ -2099,7 +2104,9 @@ bool RasterizerVulkan::HasPendingQueries(DAddr addr, u64 size) {
 
 VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64 size) {
     std::optional<VideoCore::RasterizerDownloadArea> texture_area;
-    {
+    // Guest cores ask this on reads of GPU-cached pages, and the back thread holds the texture
+    // cache's lock through each draw: where no image was ever GPU-modified it has no area.
+    if (texture_cache.MayHaveGpuModifiedImages(addr, size)) {
         std::scoped_lock lock{texture_cache.mutex};
         texture_area = texture_cache.GetFlushArea(addr, size);
     }

@@ -369,6 +369,7 @@ GraphicsPipeline::GraphicsPipeline(
         num_image_elements += Shader::NumDescriptors(info->texture_descriptors);
         num_image_elements += Shader::NumDescriptors(info->image_descriptors);
         num_descriptor_entries += NumDescriptorEntries(*info);
+        AppendBindingKinds(*info, false, binding_kinds);
     }
     fragment_has_color0_output = stage_infos[NUM_STAGES - 1].stores_frag_color[0];
     // The guest leaves render target components the fragment shader doesn't output untouched,
@@ -582,6 +583,9 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     boost::container::small_vector<VideoCommon::SamplerId, 96> samplers;
     views.reserve(num_image_elements);
     samplers.reserve(num_textures);
+    // The sampler handles are kept to look the bindings up in the texture cache's memo.
+    const bool use_bind_memo = num_image_elements != 0;
+    boost::container::small_vector<u32, 96> sampler_handles;
 
     namespace Profile = VideoCommon::Nx2Profile;
     {
@@ -593,6 +597,10 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
 
     const auto& regs{maxwell3d->regs};
     const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
+    // Each constant buffer page holding handles is translated once a draw.
+    VideoCommon::GuestPageCache handle_pages;
+    const auto read_word{
+        [&](GPUVAddr addr) LAMBDA_FORCEINLINE { return handle_pages.ReadWord(*gpu_memory, addr); }};
     const auto config_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         const Shader::Info& info{stage_infos[stage]};
         buffer_cache.UnbindGraphicsStorageBuffers(stage);
@@ -629,14 +637,13 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                     const u32 second_offset{desc.secondary_cbuf_offset};
                     const GPUVAddr separate_addr{cbufs[desc.secondary_cbuf_index].address +
                                                  second_offset};
-                    const u32 lhs_raw{gpu_memory->Read<u32>(addr) << desc.shift_left};
-                    const u32 rhs_raw{gpu_memory->Read<u32>(separate_addr)
-                                      << desc.secondary_shift_left};
+                    const u32 lhs_raw{read_word(addr) << desc.shift_left};
+                    const u32 rhs_raw{read_word(separate_addr) << desc.secondary_shift_left};
                     const u32 raw{lhs_raw | rhs_raw};
                     return TexturePair(raw, via_header_index);
                 }
             }
-            return TexturePair(gpu_memory->Read<u32>(addr), via_header_index);
+            return TexturePair(read_word(addr), via_header_index);
         }};
         const auto add_image{[&](const auto& desc, bool blacklist) LAMBDA_FORCEINLINE {
             for (u32 index = 0; index < desc.count; ++index) {
@@ -671,6 +678,12 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                     device.GetStorageBufferAlignment(), desc.count, [&](u32, u32 raw) {
                         const auto handle{TexturePair(raw, via_header_index)};
                         views.push_back({handle.first});
+                        if (use_bind_memo) {
+                            // The memo resolves samplers from the handles, as for the other
+                            // textures: a sampler pushed here would leave the two lists unequal.
+                            sampler_handles.push_back(handle.second);
+                            return;
+                        }
                         if (handle.second != last_sampler_index) {
                             sampler = texture_cache.GetSamplerId(handle.second, false);
                             last_sampler_index = handle.second;
@@ -694,6 +707,10 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                                       : read_handle(desc, index)};
                 views.push_back({handle.first});
 
+                if (use_bind_memo) {
+                    sampler_handles.push_back(handle.second);
+                    continue;
+                }
                 VideoCommon::SamplerId sampler{texture_cache.GetSamplerId(handle.second, false)};
                 samplers.push_back(sampler);
             }
@@ -725,12 +742,53 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             config_stage(4);
         }
     }
-    ASSERT(views.size() == num_image_elements);
-    ASSERT(samplers.size() == num_textures);
-    {
+    // The bindings in the memo are taken from it, the others are resolved and recorded once
+    // their descriptors are pushed.
+    boost::container::small_vector<TextureCache::BindingMemo*, 160> memos;
+    BindingMisses misses;
+    TextureCache::BindingLookup lookup{};
+    bool aliased_hit = false;
+    const bool memo_usable = use_bind_memo && binding_kinds.size() == views.size() &&
+                             sampler_handles.size() == num_textures;
+    if (memo_usable) {
+        Profile::Scope scope{Profile::Zone::FillImageViews};
+        memos.resize(views.size());
+        samplers.resize(sampler_handles.size());
+        lookup = texture_cache.BeginBindingLookup(false);
+        FindImageBindings(texture_cache, lookup, binding_kinds,
+                          std::span(views.data(), views.size()),
+                          std::span(sampler_handles.data(), sampler_handles.size()),
+                          samplers.data(), memos.data(), misses, aliased_hit);
+        ResolveMissedBindings(texture_cache, lookup, std::span(views.data(), views.size()),
+                              std::span(sampler_handles.data(), sampler_handles.size()),
+                              std::span(samplers.data(), samplers.size()), memos.data(),
+                              std::span(misses.data(), misses.size()), aliased_hit,
+                              Spec::has_images);
+    } else {
+        if (use_bind_memo) {
+            samplers.clear();
+            for (const u32 handle : sampler_handles) {
+                samplers.push_back(texture_cache.GetSamplerId(handle, false));
+            }
+        }
         Profile::Scope scope{Profile::Zone::FillImageViews};
         texture_cache.FillImageViews(std::span(views.data(), views.size()), false,
                                      Spec::has_images);
+    }
+    ASSERT(views.size() == num_image_elements);
+    ASSERT(samplers.size() == num_textures);
+    // Resolved bindings leave their descriptors here to be remembered.
+    boost::container::small_vector<DescriptorUpdateEntry, 32> record_descriptors;
+    boost::container::small_vector<u8, 32> record_rescaled;
+    std::optional<ImageBindingRecord> record;
+    if (memo_usable) {
+        if (!misses.empty()) {
+            record_descriptors.resize(views.size());
+            record_rescaled.resize(views.size());
+        }
+        record = ImageBindingRecord{views.data(), memos.data(),
+                                    misses.empty() ? nullptr : record_descriptors.data(),
+                                    misses.empty() ? nullptr : record_rescaled.data()};
     }
     if (RecordingSampledTextures()) {
         sampled_images.clear();
@@ -866,7 +924,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                 rescaling.Seek(GPL_FRAGMENT_TEXTURE_SCALING_BASE, GPL_FRAGMENT_IMAGE_SCALING_BASE);
             }
             PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
-                                 rescaling, samplers_it, views_it);
+                                 rescaling, samplers_it, views_it, record ? &*record : nullptr);
         }
         const auto& info{stage_infos[stage]};
         if (info.uses_render_area) {
@@ -908,6 +966,13 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                                                  task_buffer.size);
             }
         }
+    }
+    if (record && !misses.empty()) {
+        RecordImageBindings(texture_cache, lookup, binding_kinds,
+                            std::span(views.data(), views.size()),
+                            std::span(sampler_handles.data(), sampler_handles.size()),
+                            std::span(samplers.data(), samplers.size()), memos.data(),
+                            record_descriptors.data(), record_rescaled.data());
     }
     if (buffer_cache.any_buffer_uploaded) {
         buffer_cache.runtime.PostCopyBarrier();
