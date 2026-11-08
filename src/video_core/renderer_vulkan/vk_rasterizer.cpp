@@ -3472,12 +3472,11 @@ void RasterizerVulkan::BuildDynamicStateMask() {
             set({Dirty::LineRasterizationMode});
         }
         // The AMD logic op workaround (HostLogicOpEnable) follows the vertex formats, which have
-        // no dirty flag of their own here: UpdateLogicOpEnable looks at it every draw.
+        // no dirty flag of their own here: UpdateDynamicStates compares its value instead.
         const auto driver = device.GetDriverID();
         logic_op_float_workaround =
             device.SupportsDynamicState3LogicOpEnable() &&
             (driver == VK_DRIVER_ID_AMD_OPEN_SOURCE || driver == VK_DRIVER_ID_AMD_PROPRIETARY);
-        dyn_state_never_skip = logic_op_float_workaround;
     }
     if (device.IsExtExtendedDynamicState3BlendingSupported()) {
         set({Dirty::Blending});
@@ -3507,8 +3506,10 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
     const bool color_output_changed =
         device.IsExtExtendedDynamicState3BlendingSupported() &&
         (pipeline ? pipeline->ColorOutputMask() : ~0U) != last_color_output_mask;
+    // The AMD logic op workaround's value moves with the vertex formats, without a flag.
+    const bool logic_op_changed = logic_op_float_workaround && LogicOpEnableChanged(regs);
     // Nothing dirty: every Update* below would return at its dirty check.
-    if (!topology_changed && !dyn_state_never_skip && !color_output_changed &&
+    if (!topology_changed && !logic_op_changed && !color_output_changed &&
         !(flags & dyn_state_mask).any()) {
         return;
     }
@@ -4158,6 +4159,15 @@ void RasterizerVulkan::UpdateDepthBiasEnable(Tegra::Engines::Maxwell3D::Regs& re
         return;
     }
     scheduler.Record([enable](vk::CommandBuffer cmdbuf) { cmdbuf.SetDepthBiasEnableEXT(enable != 0); });
+}
+
+bool RasterizerVulkan::LogicOpEnableChanged(const Tegra::Engines::Maxwell3D::Regs& regs) const {
+    const u64 bit = u64{1} << static_cast<u32>(DynSlot::LogicOpEnable);
+    if (dyn_cache.epoch != state_tracker.CommandBufferEpoch() || (dyn_cache.valid & bit) == 0) {
+        return true;
+    }
+    const u32 enable = VideoCommon::HostLogicOpEnable(regs, logic_op_float_workaround) ? 1U : 0U;
+    return enable != dyn_cache.logic_op_enable;
 }
 
 void RasterizerVulkan::UpdateLogicOpEnable(Tegra::Engines::Maxwell3D::Regs& regs) {

@@ -236,6 +236,8 @@ private:
     void UpdateLineRasterizationMode(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateDepthBiasEnable(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateLogicOpEnable(Tegra::Engines::Maxwell3D::Regs& regs);
+    /// Whether HostLogicOpEnable differs from what the command buffer holds (or it holds none).
+    [[nodiscard]] bool LogicOpEnableChanged(const Tegra::Engines::Maxwell3D::Regs& regs) const;
     void UpdateDepthClampEnable(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateAlphaToCoverageEnable(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateAlphaToOneEnable(Tegra::Engines::Maxwell3D::Regs& regs);
@@ -460,7 +462,6 @@ private:
     /// The dirty flags UpdateDynamicStates consumes on this device: none set, nothing to record.
     Tegra::Engines::Maxwell3D::DirtyState::Flags dyn_state_mask{};
     bool dyn_state_mask_built{};
-    bool dyn_state_never_skip{};
     /// AMD with a dynamic logic op enable: VideoCommon::HostLogicOpEnable's float workaround.
     bool logic_op_float_workaround{};
 
