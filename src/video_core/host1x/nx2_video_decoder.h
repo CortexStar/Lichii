@@ -37,11 +37,12 @@ bool IsH264Stream(std::span<const u8> data);
 
 /// The decoder behind the Switch 2 video decoder service (nn::codec::video): FFmpeg decodes the
 /// elementary stream the game demuxed, in software or on the host GPU (NVDEC emulation setting).
-/// Used from one thread at a time.
+/// A stream the host GPU can't decode falls back to software. Used from one thread at a time.
 class Nx2VideoDecoder {
 public:
-    /// mime: the codec name nn::codec sends with Configure ("video/vp9", "video/vp8", ...).
-    explicit Nx2VideoDecoder(std::string_view mime);
+    /// mime: the codec name nn::codec sends with Configure ("video/vp9", "video/vp8", ...), with
+    /// the stream's size and frame rate (0 when not given).
+    explicit Nx2VideoDecoder(std::string_view mime, u32 width = 0, u32 height = 0, u32 rate = 0);
     ~Nx2VideoDecoder();
 
     bool IsOpen() const;

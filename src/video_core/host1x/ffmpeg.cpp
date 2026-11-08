@@ -4,7 +4,12 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
 #include <cstring>
+#include <map>
+#include <mutex>
+#include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -29,8 +34,6 @@ namespace FFmpeg {
 
 namespace {
 
-constexpr AVPixelFormat PreferredGpuFormat = AV_PIX_FMT_NV12;
-constexpr AVPixelFormat PreferredCpuFormat = AV_PIX_FMT_YUV420P;
 constexpr std::array PreferredGpuDecoders = {
 #if defined(_WIN32)
     AV_HWDEVICE_TYPE_CUDA,
@@ -53,39 +56,135 @@ constexpr std::array PreferredGpuDecoders = {
     AV_HWDEVICE_TYPE_VULKAN,
 };
 
+// AV1 (Switch 2 movies) decodes on Vulkan Video first: FFmpeg opens the GPU Lichii renders on
+// (vulkan_device), where D3D and VA-API take the system's default adapter.
+constexpr std::array PreferredAv1GpuDecoders = {
+    AV_HWDEVICE_TYPE_VULKAN,
+#if defined(_WIN32)
+    AV_HWDEVICE_TYPE_D3D12VA,
+    AV_HWDEVICE_TYPE_D3D11VA,
+    AV_HWDEVICE_TYPE_CUDA,
+#elif defined(__APPLE__)
+    AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+#elif defined(__unix__) && !defined(__ANDROID__)
+    AV_HWDEVICE_TYPE_VAAPI,
+    AV_HWDEVICE_TYPE_CUDA,
+#endif
+};
+
+std::span<const AVHWDeviceType> PreferredDevices(const AVCodec* codec) {
+    if (codec->id == AV_CODEC_ID_AV1) {
+        return PreferredAv1GpuDecoders;
+    }
+    return PreferredGpuDecoders;
+}
+
+// The hardware pixel format of the device attached to the context, falling back to a software
+// one (the hardware-only AV1 decoder then fails, and the caller decodes on the CPU instead).
 AVPixelFormat GetGpuFormat(AVCodecContext* codec_context, const AVPixelFormat* pix_fmts) {
-    const auto desc = av_pix_fmt_desc_get(codec_context->pix_fmt);
-    if (desc && !(desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
+    if (codec_context->hw_device_ctx) {
+        const auto* device =
+            reinterpret_cast<const AVHWDeviceContext*>(codec_context->hw_device_ctx->data);
         for (int i = 0;; i++) {
             const AVCodecHWConfig* config = avcodec_get_hw_config(codec_context->codec, i);
             if (!config) {
                 break;
             }
-
-            for (const auto type : PreferredGpuDecoders) {
-                if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX && config->device_type == type) {
-                    codec_context->pix_fmt = config->pix_fmt;
+            if (!(config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) ||
+                config->device_type != device->type) {
+                continue;
+            }
+            for (const AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; ++p) {
+                if (*p == config->pix_fmt) {
+                    return *p;
                 }
             }
         }
     }
 
+    LOG_INFO(HW_GPU, "Could not find supported GPU pixel format, falling back to CPU decoder");
+    static_cast<DecoderContext*>(codec_context->opaque)->MarkHardwareFailed();
+    av_buffer_unref(&codec_context->hw_device_ctx);
     for (const AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; ++p) {
-        if (*p == codec_context->pix_fmt) {
-            return codec_context->pix_fmt;
+        const auto desc = av_pix_fmt_desc_get(*p);
+        if (desc && !(desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
+            return *p;
         }
     }
-
-    LOG_INFO(HW_GPU, "Could not find supported GPU pixel format, falling back to CPU decoder");
-    av_buffer_unref(&codec_context->hw_device_ctx);
-    codec_context->pix_fmt = PreferredCpuFormat;
-    return codec_context->pix_fmt;
+    return AV_PIX_FMT_NONE;
 }
 
 std::string AVError(int errnum) {
     char errbuf[AV_ERROR_MAX_STRING_SIZE] = {};
     av_make_error_string(errbuf, sizeof(errbuf) - 1, errnum);
     return errbuf;
+}
+
+bool CreateDevice(AVBufferRef** device, AVHWDeviceType type) {
+    // Vulkan: the physical device Lichii renders on (same index, same loader order).
+    const std::string vulkan_index = std::to_string(Settings::values.vulkan_device.GetValue());
+    const char* name = type == AV_HWDEVICE_TYPE_VULKAN ? vulkan_index.c_str() : nullptr;
+    const auto start = std::chrono::steady_clock::now();
+    if (const int ret = av_hwdevice_ctx_create(device, type, name, nullptr, 0); ret < 0) {
+        LOG_INFO(HW_GPU, "av_hwdevice_ctx_create({}) failed: {}", av_hwdevice_get_type_name(type),
+                 AVError(ret));
+        return false;
+    }
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start).count();
+    LOG_INFO(HW_GPU, "Created {} decode device in {} ms", av_hwdevice_get_type_name(type), ms);
+
+#ifdef LIBVA_FOUND
+    if (type == AV_HWDEVICE_TYPE_VAAPI) {
+        // We need to determine if this is an impersonated VAAPI driver.
+        auto* hwctx = reinterpret_cast<AVHWDeviceContext*>((*device)->data);
+        auto* vactx = static_cast<AVVAAPIDeviceContext*>(hwctx->hwctx);
+        const char* vendor_name = vaQueryVendorString(vactx->display);
+        if (strstr(vendor_name, "VDPAU backend")) {
+            // VDPAU impersonated VAAPI impls are super buggy, we need to skip them.
+            LOG_DEBUG(HW_GPU, "Skipping VDPAU impersonated VAAPI driver");
+            av_buffer_unref(device);
+            return false;
+        } else {
+            // According to some user testing, certain VAAPI drivers (Intel?) could be buggy.
+            // Log the driver name just in case.
+            LOG_DEBUG(HW_GPU, "Using VAAPI driver: {}", vendor_name);
+        }
+    }
+#endif
+
+    return true;
+}
+
+// Host decode devices, created at most once per type: creating one takes long enough to delay a
+// movie's first frame (a Vulkan instance and device, a D3D device), and games open a decoder for
+// every movie. A type that failed is not tried again.
+class DeviceCache {
+public:
+    ~DeviceCache() {
+        for (auto& [type, device] : m_devices) {
+            av_buffer_unref(&device);
+        }
+    }
+
+    /// A new reference to the device of `type`, or null.
+    AVBufferRef* Get(AVHWDeviceType type) {
+        std::scoped_lock lk{m_mutex};
+        auto [it, inserted] = m_devices.try_emplace(type, nullptr);
+        if (inserted && !CreateDevice(&it->second, type)) {
+            it->second = nullptr;
+        }
+        return it->second ? av_buffer_ref(it->second) : nullptr;
+    }
+
+private:
+    std::mutex m_mutex;
+    std::map<AVHWDeviceType, AVBufferRef*> m_devices;
+};
+
+DeviceCache& Devices() {
+    static DeviceCache cache;
+    return cache;
 }
 
 #if defined(__ANDROID__)
@@ -154,7 +253,7 @@ Frame::~Frame() {
     av_frame_free(&m_frame);
 }
 
-Decoder::Decoder(Tegra::Host1x::NvdecCommon::VideoCodec codec) {
+Decoder::Decoder(Tegra::Host1x::NvdecCommon::VideoCodec codec, bool hardware_only) {
     const AVCodecID av_codec = [&] {
         switch (codec) {
         case Tegra::Host1x::NvdecCommon::VideoCodec::H264:
@@ -186,6 +285,11 @@ Decoder::Decoder(Tegra::Host1x::NvdecCommon::VideoCodec codec) {
         }
     }
 #endif
+    if (hardware_only && av_codec == AV_CODEC_ID_AV1) {
+        // FFmpeg lists libdav1d first; its own AV1 decoder only runs hardware accelerators.
+        m_codec = avcodec_find_decoder_by_name("av1");
+        return;
+    }
     if (!m_codec) {
         m_codec = avcodec_find_decoder(av_codec);
     }
@@ -200,7 +304,6 @@ bool Decoder::SupportsDecodingOnDevice(AVPixelFormat* out_pix_fmt, AVHWDeviceTyp
         }
 
         if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX && config->device_type == type) {
-            LOG_INFO(HW_GPU, "Using {} GPU decoder", av_hwdevice_get_type_name(type));
             *out_pix_fmt = config->pix_fmt;
             return true;
         }
@@ -229,54 +332,28 @@ HardwareContext::~HardwareContext() {
 
 bool HardwareContext::InitializeForDecoder(DecoderContext& decoder_context, const Decoder& decoder) {
     const auto supported_types = GetSupportedDeviceTypes();
-    for (const auto type : PreferredGpuDecoders) {
+    for (const auto type : PreferredDevices(decoder.GetCodec())) {
         AVPixelFormat hw_pix_fmt;
 
         if (std::ranges::find(supported_types, type) == supported_types.end()) {
             LOG_DEBUG(HW_GPU, "{} explicitly unsupported", av_hwdevice_get_type_name(type));
             continue;
         }
-
-        if (!this->InitializeWithType(type)) {
+        // Only open devices the decoder can use.
+        if (!decoder.SupportsDecodingOnDevice(&hw_pix_fmt, type)) {
             continue;
         }
 
-        if (decoder.SupportsDecodingOnDevice(&hw_pix_fmt, type)) {
-            decoder_context.InitializeHardwareDecoder(*this, hw_pix_fmt);
+        av_buffer_unref(&m_gpu_decoder);
+        m_gpu_decoder = Devices().Get(type);
+        if (m_gpu_decoder) {
+            LOG_INFO(HW_GPU, "Using {} GPU decoder", av_hwdevice_get_type_name(type));
+            decoder_context.InitializeHardwareDecoder(*this);
             return true;
         }
     }
 
     return false;
-}
-
-bool HardwareContext::InitializeWithType(AVHWDeviceType type) {
-    av_buffer_unref(&m_gpu_decoder);
-
-    if (const int ret = av_hwdevice_ctx_create(&m_gpu_decoder, type, nullptr, nullptr, 0); ret < 0) {
-        LOG_DEBUG(HW_GPU, "av_hwdevice_ctx_create({}) failed: {}", av_hwdevice_get_type_name(type), AVError(ret));
-        return false;
-    }
-
-#ifdef LIBVA_FOUND
-    if (type == AV_HWDEVICE_TYPE_VAAPI) {
-        // We need to determine if this is an impersonated VAAPI driver.
-        auto* hwctx = reinterpret_cast<AVHWDeviceContext*>(m_gpu_decoder->data);
-        auto* vactx = static_cast<AVVAAPIDeviceContext*>(hwctx->hwctx);
-        const char* vendor_name = vaQueryVendorString(vactx->display);
-        if (strstr(vendor_name, "VDPAU backend")) {
-            // VDPAU impersonated VAAPI impls are super buggy, we need to skip them.
-            LOG_DEBUG(HW_GPU, "Skipping VDPAU impersonated VAAPI driver");
-            return false;
-        } else {
-            // According to some user testing, certain VAAPI drivers (Intel?) could be buggy.
-            // Log the driver name just in case.
-            LOG_DEBUG(HW_GPU, "Using VAAPI driver: {}", vendor_name);
-        }
-    }
-#endif
-
-    return true;
 }
 
 DecoderContext::DecoderContext(const Decoder& decoder) : m_decoder{decoder} {
@@ -295,10 +372,15 @@ DecoderContext::~DecoderContext() {
     avcodec_free_context(&m_codec_context);
 }
 
-void DecoderContext::InitializeHardwareDecoder(const HardwareContext& context, AVPixelFormat hw_pix_fmt) {
+void DecoderContext::InitializeHardwareDecoder(const HardwareContext& context) {
     m_codec_context->hw_device_ctx = av_buffer_ref(context.GetBufferRef());
     m_codec_context->get_format = GetGpuFormat;
-    m_codec_context->pix_fmt = hw_pix_fmt;
+    m_codec_context->opaque = this;
+    m_hardware = true;
+}
+
+void DecoderContext::SetThreadCount(int count) {
+    m_codec_context->thread_count = count;
 }
 
 bool DecoderContext::OpenContext(const Decoder& decoder, std::span<const u8> extradata) {
@@ -327,6 +409,7 @@ bool DecoderContext::OpenContext(const Decoder& decoder, std::span<const u8> ext
 bool DecoderContext::SendPacket(const Packet& packet) {
     if (const int ret = avcodec_send_packet(m_codec_context, packet.GetPacket()); ret < 0 && ret != AVERROR_EOF && ret != AVERROR(EAGAIN)) {
         LOG_ERROR(HW_GPU, "avcodec_send_packet error: {}", AVError(ret));
+        MarkHardwareFailed();
         return false;
     }
 
@@ -338,6 +421,7 @@ std::shared_ptr<Frame> DecoderContext::ReceiveFrame() {
         const int ret = avcodec_receive_frame(m_codec_context, frame);
         if (ret < 0 && ret != AVERROR_EOF && ret != AVERROR(EAGAIN)) {
             LOG_ERROR(HW_GPU, "avcodec_receive_frame error: {}", AVError(ret));
+            MarkHardwareFailed();
         }
         return ret;
     };
@@ -348,12 +432,18 @@ std::shared_ptr<Frame> DecoderContext::ReceiveFrame() {
     }
 
     m_final_frame = std::make_shared<Frame>();
-    if (m_codec_context->hw_device_ctx) {
-        m_final_frame->SetFormat(PreferredGpuFormat);
+    if (intermediate_frame->IsHardwareDecoded()) {
+        // To the frames' software format (NV12 for 8-bit streams), with the timestamp and colour
+        // properties, which the copy leaves out.
+        const auto* frames = reinterpret_cast<const AVHWFramesContext*>(
+            intermediate_frame->GetFrame()->hw_frames_ctx->data);
+        m_final_frame->SetFormat(frames->sw_format);
         if (const int ret = av_hwframe_transfer_data(m_final_frame->GetFrame(), intermediate_frame->GetFrame(), 0); ret < 0) {
             LOG_ERROR(HW_GPU, "av_hwframe_transfer_data error: {}", AVError(ret));
+            MarkHardwareFailed();
             return {};
         }
+        av_frame_copy_props(m_final_frame->GetFrame(), intermediate_frame->GetFrame());
     } else {
         m_final_frame = std::move(intermediate_frame);
     }
