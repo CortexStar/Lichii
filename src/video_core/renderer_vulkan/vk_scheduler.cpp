@@ -752,19 +752,22 @@ void Scheduler::ReportSiteTimes(const std::vector<u64>& submission_begin,
         double max_ms{};
         u32 count{};
     };
-    std::map<std::string, Totals> by_site;
-    const auto add = [&by_site](std::string site, double ms) {
-        Totals& totals = by_site[std::move(site)];
+    // Keyed by file name and line: file_name() is static storage, but one header compiled in
+    // several translation units has a pointer per unit. Line 0 is the submission start entry.
+    using SiteKey = std::pair<std::string_view, u32>;
+    std::map<SiteKey, Totals> by_site;
+    const auto add = [&by_site](const SiteKey& site, double ms) {
+        Totals& totals = by_site[site];
         totals.ms += ms;
         totals.max_ms = std::max(totals.max_ms, ms);
         ++totals.count;
     };
-    const auto site_name = [](const SiteTrace& site) {
+    const auto site_key = [](const SiteTrace& site) {
         std::string_view file{site.file};
         if (const auto slash = file.find_last_of("/\\"); slash != std::string_view::npos) {
             file.remove_prefix(slash + 1);
         }
-        return fmt::format("{}:{}", file, site.line);
+        return SiteKey{file, site.line};
     };
     double total_ms{};
     u32 previous_submission = ~0U;
@@ -776,7 +779,7 @@ void Scheduler::ReportSiteTimes(const std::vector<u64>& submission_begin,
         if (site.submission != previous_submission) {
             // Upload command buffer and anything before the first marker of the submission.
             const double ms = to_ms(submission_begin[site.submission], results[i].timestamp);
-            add("(submission start/uploads)", ms);
+            add(SiteKey{"(submission start/uploads)", 0}, ms);
             total_ms += ms;
             previous_submission = site.submission;
         }
@@ -786,10 +789,10 @@ void Scheduler::ReportSiteTimes(const std::vector<u64>& submission_begin,
         const u64 end = next_in_submission ? results[i + 1].timestamp
                                            : submission_end[site.submission];
         const double ms = to_ms(results[i].timestamp, end);
-        add(site_name(site), ms);
+        add(site_key(site), ms);
         total_ms += ms;
     }
-    std::vector<std::pair<std::string, Totals>> sorted(by_site.begin(), by_site.end());
+    std::vector<std::pair<SiteKey, Totals>> sorted(by_site.begin(), by_site.end());
     std::ranges::sort(sorted, std::greater<>{},
                       [](const auto& entry) { return entry.second.ms; });
     LOG_INFO(Render_Vulkan,
@@ -798,8 +801,10 @@ void Scheduler::ReportSiteTimes(const std::vector<u64>& submission_begin,
              sorted.size());
     for (size_t i = 0; i < sorted.size() && i < 25; ++i) {
         const auto& [site, totals] = sorted[i];
+        const auto& [file, line] = site;
         LOG_INFO(Render_Vulkan, "DKB gpu_site {:.3f}ms {}x max {:.3f}ms {}", totals.ms,
-                 totals.count, totals.max_ms, site);
+                 totals.count, totals.max_ms,
+                 line == 0 ? std::string{file} : fmt::format("{}:{}", file, line));
     }
 }
 
