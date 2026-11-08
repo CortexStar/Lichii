@@ -351,10 +351,14 @@ public:
                         cmdbuf.FillBuffer(buffer, base_offset + (gap_begin - span_start) * query_size,
                                           (gap_end - gap_begin) * query_size, 0);
                         if (resolve_availability) {
-                            // Resolved as visible like any unavailable slot; nothing reads them.
-                            cmdbuf.FillBuffer(availability_buffer,
-                                              availability_offset + (gap_begin - span_start) * 16,
-                                              (gap_end - gap_begin) * 16, 0);
+                            // Available with a zero count, so the resolve keeps them at zero: the
+                            // prefix scan of multi-slot queries sums every slot, gaps included.
+                            for (size_t slot = gap_begin; slot < gap_end; ++slot) {
+                                const VkDeviceSize offset =
+                                    availability_offset + (slot - span_start) * 16;
+                                cmdbuf.FillBuffer(availability_buffer, offset, 8, 0);
+                                cmdbuf.FillBuffer(availability_buffer, offset + 8, 8, 1);
+                            }
                         }
                     }
                     for (const auto& [start, end] : merged) {
