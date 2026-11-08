@@ -39,6 +39,24 @@ TEST_CASE("Graphics library links are optimized only where AMD's fast links leak
     REQUIRE_FALSE(GraphicsLibrariesKeepLinkInfo(VK_DRIVER_ID_NVIDIA_PROPRIETARY, true));
 }
 
+TEST_CASE("AMD's fast-linked pipelines are linked again optimized in the background",
+          "[video_core][vulkan][gpl]") {
+    using Vulkan::GraphicsLibrariesKeepLinkInfo;
+    using Vulkan::GraphicsLibraryLinksOptimized;
+    using Vulkan::GraphicsLibraryRelinksOptimized;
+    constexpr auto Amd = VK_DRIVER_ID_AMD_PROPRIETARY;
+    const bool keeps = GraphicsLibrariesKeepLinkInfo(Amd, true);
+    REQUIRE(GraphicsLibraryRelinksOptimized(Amd, GraphicsLibraryLinksOptimized(Amd, true, false),
+                                            keeps));
+    // Already optimized (a demote followed by quad reads): nothing to redo.
+    REQUIRE_FALSE(GraphicsLibraryRelinksOptimized(
+        Amd, GraphicsLibraryLinksOptimized(Amd, true, true), keeps));
+    // An optimized link needs the libraries' link time optimization info.
+    REQUIRE_FALSE(GraphicsLibraryRelinksOptimized(Amd, false, false));
+    REQUIRE_FALSE(GraphicsLibraryRelinksOptimized(VK_DRIVER_ID_NVIDIA_PROPRIETARY, false, true));
+    REQUIRE_FALSE(GraphicsLibraryRelinksOptimized(VK_DRIVER_ID_MESA_RADV, false, true));
+}
+
 namespace {
 namespace IR = Shader::IR;
 

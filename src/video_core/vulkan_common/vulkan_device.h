@@ -268,6 +268,18 @@ enum class NvidiaArchitecture {
     return driver_id == VK_DRIVER_ID_AMD_PROPRIETARY && fragment_quad_after_demote;
 }
 
+/**
+ * Whether a fast-linked pipeline is linked again with link time optimization in the background,
+ * the draws switching to it once built. On AMD's driver a fast link keeps the vertex shader's uber
+ * fetch and every vertex output the fragment shader doesn't read; an optimized link drops both.
+ */
+[[nodiscard]] constexpr bool GraphicsLibraryRelinksOptimized(VkDriverId driver_id,
+                                                             bool linked_optimized,
+                                                             bool libraries_keep_link_info) {
+    return driver_id == VK_DRIVER_ID_AMD_PROPRIETARY && !linked_optimized &&
+           libraries_keep_link_info;
+}
+
 /// Whether graphics pipeline libraries keep link time optimization info, as every library an
 /// optimized link takes must: where some pipeline may be linked optimized
 /// (GraphicsLibraryLinksOptimized). Shader libraries are shared between pipelines that are and
