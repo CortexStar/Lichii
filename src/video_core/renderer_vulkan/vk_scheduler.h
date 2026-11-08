@@ -204,6 +204,7 @@ public:
         (void)chunk->Record(command);
     }
 
+    /// Send work to a separate thread; `location` labels it in EDEN_DKB_FRAME_TRACE's gpu_site log.
     template <typename T>
         requires std::is_invocable_v<T, vk::CommandBuffer>
     void Record(T&& c, std::source_location location = std::source_location::current()) {
