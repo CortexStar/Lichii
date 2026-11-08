@@ -89,7 +89,6 @@ public:
     void InvalidateCommandBufferState() {
         (*flags) |= invalidation_flags;
         current_topology = INVALID_TOPOLOGY;
-        stencil_reset = true;
         ++command_buffer_epoch;
     }
 
@@ -108,8 +107,6 @@ public:
             (*flags)[index] = true;
         }
         current_topology = INVALID_TOPOLOGY;
-        // The mesh emulation pipeline's static state replaced what was recorded.
-        ++command_buffer_epoch;
     }
 
     void InvalidateViewports() {
@@ -120,8 +117,11 @@ public:
         (*flags)[Dirty::Scissors] = true;
     }
 
+    /// A pipeline without extended dynamic state was bound: its static state replaced every
+    /// dynamic state a draw records, so all of it is recorded again.
     void InvalidateStateEnableFlag() {
-        (*flags)[Dirty::StateEnable] = true;
+        (*flags) |= invalidation_flags;
+        current_topology = INVALID_TOPOLOGY;
         ++command_buffer_epoch;
     }
 
@@ -166,45 +166,6 @@ public:
 
     bool TouchStencilCompare() {
         return Exchange(Dirty::StencilCompare, false);
-    }
-
-    template <typename T>
-    bool ExchangeCheck(T& old_value, T new_value) {
-        bool result = old_value != new_value;
-        old_value = new_value;
-        return result;
-    }
-
-    bool TouchStencilSide(bool two_sided_stencil_new) {
-        return ExchangeCheck(two_sided_stencil, two_sided_stencil_new) || stencil_reset;
-    }
-
-    bool CheckStencilReferenceFront(u32 new_value) {
-        return ExchangeCheck(front.ref, new_value) || stencil_reset;
-    }
-
-    bool CheckStencilReferenceBack(u32 new_value) {
-        return ExchangeCheck(back.ref, new_value) || stencil_reset;
-    }
-
-    bool CheckStencilWriteMaskFront(u32 new_value) {
-        return ExchangeCheck(front.write_mask, new_value) || stencil_reset;
-    }
-
-    bool CheckStencilWriteMaskBack(u32 new_value) {
-        return ExchangeCheck(back.write_mask, new_value) || stencil_reset;
-    }
-
-    bool CheckStencilCompareMaskFront(u32 new_value) {
-        return ExchangeCheck(front.compare_mask, new_value) || stencil_reset;
-    }
-
-    bool CheckStencilCompareMaskBack(u32 new_value) {
-        return ExchangeCheck(back.compare_mask, new_value) || stencil_reset;
-    }
-
-    void ClearStencilReset() {
-        stencil_reset = false;
     }
 
     bool TouchLineWidth() const {
@@ -327,20 +288,10 @@ private:
         return is_dirty;
     }
 
-    struct StencilProperties {
-        u32 ref = 0;
-        u32 write_mask = 0;
-        u32 compare_mask = 0;
-    };
-
     Tegra::Engines::Maxwell3D::DirtyState::Flags* flags;
     Tegra::Engines::Maxwell3D::DirtyState::Flags default_flags;
     Tegra::Engines::Maxwell3D::DirtyState::Flags invalidation_flags;
     Maxwell::PrimitiveTopology current_topology = INVALID_TOPOLOGY;
-    bool two_sided_stencil = false;
-    StencilProperties front{};
-    StencilProperties back{};
-    bool stencil_reset = false;
     u64 command_buffer_epoch = 1;
 };
 
