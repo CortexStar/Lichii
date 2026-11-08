@@ -14,6 +14,8 @@
 #include "tests/core/system_test_context.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
+#include "video_core/texture_cache/util.h"
+#include "video_core/textures/texture.h"
 
 namespace {
 
@@ -256,4 +258,34 @@ TEST_CASE("Reads of GPU pages over unmapped device memory return zeros", "[memor
     std::ranges::fill(bytes, u8{0xcd});
     memory.ReadBlock(window, bytes.data(), size);
     REQUIRE(std::ranges::all_of(bytes, [](u8 value) { return value == 0; }));
+}
+
+TEST_CASE("A texture header with format 0 is not a valid entry", "[memory_manager]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    Core::DeviceMemory physical;
+    Tegra::MaxwellDeviceMemoryManager device_memory{physical};
+    NullRasterizer rasterizer;
+    Tegra::MemoryManager memory{system, device_memory, 32, 1ULL << 31, 16};
+    memory.BindRasterizer(&rasterizer);
+
+    constexpr GPUVAddr gpu = 0x4000'0000;
+    memory.Map(gpu, 0x1000'0000, 0x10000, Tegra::PTEKind::PITCH, false);
+
+    // Ocarina of Time's header: format 0 with four UNORM components, over mapped memory.
+    Tegra::Texture::TICEntry entry{};
+    entry.raw.fill(0);
+    entry.address_low = static_cast<u32>(gpu);
+    entry.r_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    entry.g_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    entry.b_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    entry.a_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    entry.header_version.Assign(Tegra::Texture::TICHeaderVersion::BlockLinear);
+    entry.texture_type.Assign(Tegra::Texture::TextureType::Texture2D);
+    REQUIRE(entry.HasNoFormat());
+    REQUIRE_FALSE(VideoCommon::IsValidEntry(memory, entry));
+
+    entry.format.Assign(Tegra::Texture::TextureFormat::A8B8G8R8);
+    REQUIRE_FALSE(entry.HasNoFormat());
+    REQUIRE(VideoCommon::IsValidEntry(memory, entry));
 }
