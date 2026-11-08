@@ -400,13 +400,19 @@ constexpr std::string_view Ultrawide = "Ultrawide 21:9 (built-in)";
 constexpr size_t UltrawideSizeOffset = sizeof(Loader::NSOHeader) + 0x3F58568;
 constexpr size_t UltrawideIndexOffset = sizeof(Loader::NSOHeader) + 0x1087FC0;
 constexpr size_t UltrawideListIndexOffset = sizeof(Loader::NSOHeader) + 0x1087EE0;
-constexpr size_t UltrawideAspectOffset = sizeof(Loader::NSOHeader) + 0x3EF5DCC;
-constexpr size_t UltrawideCtorOffset = sizeof(Loader::NSOHeader) + 0xEF3834;
+constexpr size_t UltrawidePictureOffset = sizeof(Loader::NSOHeader) + 0x31F39F4;
+constexpr size_t UltrawideCanvasOffset = sizeof(Loader::NSOHeader) + 0x774368;
+constexpr size_t UltrawideHookCaveOffset = sizeof(Loader::NSOHeader) + 0x3C46400;
 constexpr size_t UltrawideCapOffset = sizeof(Loader::NSOHeader) + 0x6505EC;
 constexpr size_t UltrawideCaveOffset = sizeof(Loader::NSOHeader) + 0x3C46700;
 constexpr u32 BneInstruction = 0x54000061;
-constexpr u32 AspectSixteenNine = 0x3FE38E3B;
-constexpr u32 AspectFortyThreeEighteen = 0x4018E38E;
+// The originals at the picture and scene sizes and at Ivan0xFF's eight hook sites.
+constexpr std::array<std::pair<u32, u32>, 11> UltrawideOriginals{{
+    {0x1202EE0, 0xD2814008}, {0x31F39F4, 0xD2814008}, {0x31F3A00, 0xD280F008},
+    {0x3485CC0, 0x2D558400}, {0x4F1E8, 0x2D558EA0},  {0x23B9A8, 0x2D558C00},
+    {0x33B82C, 0x2D558440},  {0x25D76C, 0x1E2202A1}, {0x774368, 0xAD401041},
+    {0x3B5C758, 0xA941A269}, {0x20C2B0, 0x52A89E08},
+}};
 
 void PutWord(std::vector<u8>& nso, size_t offset, u32 word) {
     std::memcpy(nso.data() + offset, &word, sizeof(word));
@@ -430,9 +436,9 @@ std::vector<u8> MakeUltrawideMain() {
     PutWord(nso, UltrawideSizeOffset + 4, 1440);
     PutWord(nso, UltrawideIndexOffset, BneInstruction);
     PutWord(nso, UltrawideListIndexOffset, BneInstruction);
-    PutWord(nso, UltrawideAspectOffset, AspectSixteenNine);
-    PutWord(nso, UltrawideCtorOffset, 0xD291C768);     // mov x8, #0x8e3b
-    PutWord(nso, UltrawideCtorOffset + 8, 0xF2A7FC68); // movk x8, #0x3fe3, lsl #16
+    for (const auto& [offset, word] : UltrawideOriginals) {
+        PutWord(nso, sizeof(Loader::NSOHeader) + offset, word);
+    }
     return nso;
 }
 
@@ -463,16 +469,17 @@ TEST_CASE("Built-in Ultrawide applies only docked with the 21:9 aspect ratio", "
     Settings::values.disabled_addons[OcarinaTitleId] = {std::string{MaxResolution}};
     const auto nso = MakeUltrawideMain();
 
-    SECTION("Docked at 21:9 renders 3440x1440 with a 43:18 camera") {
+    SECTION("Docked at 21:9 renders 3440x1440 with the 21:9 hooks") {
         UltrawideSettings settings{Settings::AspectRatio::R21_9, Settings::ConsoleMode::Docked};
         const auto patched = context.Manager().PatchNSO(nso, "main");
         REQUIRE(WordAt(patched, UltrawideSizeOffset) == 3440);
         REQUIRE(WordAt(patched, UltrawideSizeOffset + 4) == 1440);
         REQUIRE(WordAt(patched, UltrawideIndexOffset) == NopInstruction);
         REQUIRE(WordAt(patched, UltrawideListIndexOffset) == NopInstruction);
-        REQUIRE(WordAt(patched, UltrawideAspectOffset) == AspectFortyThreeEighteen);
-        REQUIRE(WordAt(patched, UltrawideCtorOffset) == 0xD29C71C8);     // mov x8, #0xe38e
-        REQUIRE(WordAt(patched, UltrawideCtorOffset + 8) == 0xF2A80308); // movk x8, #0x4018
+        REQUIRE(WordAt(patched, UltrawidePictureOffset) == 0xD281AE08); // mov x8, #3440
+        REQUIRE(WordAt(patched, UltrawideCanvasOffset) == 0x14D34876);  // b main+0x3C46540
+        // The first routine reruns sead's ldp s0, s1, [x0, #172].
+        REQUIRE(WordAt(patched, UltrawideHookCaveOffset) == 0x2D558400);
         REQUIRE(WordAt(patched, UltrawideCapOffset) == 0x14D7D845);       // b main+0x3C46700
         REQUIRE(WordAt(patched, UltrawideCaveOffset) == 0x6B0902DF);      // cmp w22, w9
         REQUIRE(WordAt(patched, UltrawideCaveOffset + 24) == 0x172827B9); // b main+0x6505FC
@@ -498,7 +505,7 @@ TEST_CASE("Built-in Ultrawide applies only docked with the 21:9 aspect ratio", "
     SECTION("One unexpected original skips every record") {
         UltrawideSettings settings{Settings::AspectRatio::R21_9, Settings::ConsoleMode::Docked};
         auto other = nso;
-        PutWord(other, UltrawideAspectOffset, 0x3FE38E39);
+        PutWord(other, UltrawideCanvasOffset, 0xAD401042);
         REQUIRE(context.Manager().PatchNSO(other, "main") == other);
     }
 
