@@ -28,6 +28,10 @@ namespace {
 
 constexpr size_t MAX_FRAMES_IN_FLIGHT = 7;
 constexpr u32 MAX_PRESENT_ATTEMPTS = 3;
+
+// Wakes from an OS timer wait end up to ~0.5 ms late on Windows (maximum timer resolution); the
+// last stretch before a present tick is waited for precisely.
+constexpr auto PreciseWaitGuard = std::chrono::microseconds{700};
 #ifdef HAS_LSFG
 static_assert(MAX_FRAMES_IN_FLIGHT <= LSFG_MAX_TARGETS);
 #endif
@@ -144,9 +148,12 @@ PresentManager::PresentManager(const vk::Instance& instance_,
             VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
         .queueFamilyIndex = device.GetGraphicsFamily(),
     });
-    auto cmdbuffers = cmdpool.Allocate(image_count);
+    // One more than the swapchain needs: the present cadence keeps the last presented frame to
+    // present it again, and the renderer still gets as many as before.
+    const size_t frame_count = image_count + 1;
+    auto cmdbuffers = cmdpool.Allocate(frame_count);
 
-    frames.resize(image_count);
+    frames.resize(frame_count);
     for (u32 i = 0; i < frames.size(); i++) {
         Frame& frame = frames[i];
         frame.index = i;
@@ -170,7 +177,13 @@ PresentManager::PresentManager(const vk::Instance& instance_,
     }
 }
 
-PresentManager::~PresentManager() = default;
+PresentManager::~PresentManager() {
+    // The present thread uses members declared after it: stop it before they are destroyed.
+    if (present_thread.joinable()) {
+        present_thread.request_stop();
+        present_thread.join();
+    }
+}
 
 Frame* PresentManager::GetRenderFrame() {
 
@@ -350,7 +363,17 @@ void PresentManager::PresentThread(std::stop_token token) {
     // Each present is a short burst with a deadline; under background load a normal-class
     // TIME_CRITICAL thread (GPU, GPUBack, guest cores) could otherwise delay it.
     Common::SetCurrentThreadToGamesMmcss();
+    std::stop_callback wake_on_stop{token, [this] { cadence_wake.Set(); }};
     while (!token.stop_requested()) {
+        const u32 rate = PresentCadenceRate(swapchain.GetFrameCap(),
+                                            guest_present_rate.load(std::memory_order_relaxed));
+        if (rate != 0) {
+            PresentOnTick(token, rate);
+            continue;
+        }
+        // Without a variable refresh display every frame goes out as soon as it is queued.
+        ReleaseHeldFrame();
+        cadence.Reset();
         std::unique_lock lock{queue_mutex};
         // Wait for presentation frames
         frame_cv.wait(lock, token, [this] { return !present_queue.empty(); });
@@ -372,6 +395,102 @@ void PresentManager::PresentThread(std::stop_token token) {
             free_cv.notify_one();
         }
     }
+    ReleaseHeldFrame();
+}
+
+void PresentManager::PresentOnTick(std::stop_token token, u32 rate) {
+    using Clock = PresentCadence::Clock;
+    auto& master_semaphore = scheduler.GetMasterSemaphore();
+    if (held_frame == nullptr) {
+        // Nothing to present again yet: the first frame goes out once the GPU has rendered it, and
+        // the ticks start from there.
+        Frame* frame;
+        {
+            std::unique_lock lock{queue_mutex};
+            frame_cv.wait(lock, token, [this] { return !present_queue.empty(); });
+            if (token.stop_requested()) {
+                return;
+            }
+            frame = present_queue.front();
+        }
+        master_semaphore.Wait(frame->ready_tick);
+        cadence.Reset();
+        void(cadence.Next(Clock::now(), rate));
+    } else {
+        const auto tick = cadence.Next(Clock::now(), rate);
+        if (const auto ahead = tick - Clock::now(); ahead > PreciseWaitGuard) {
+            void(cadence_wake.BlockFor(ahead - PreciseWaitGuard));
+        }
+        if (const auto ahead = tick - Clock::now(); ahead > Clock::duration::zero()) {
+            void(cadence_wake.WaitFor(ahead));
+        }
+        if (token.stop_requested()) {
+            return;
+        }
+        const s64 late_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - tick).count();
+        cadence_stats.max_late_us = (std::max)(cadence_stats.max_late_us, late_us);
+        cadence_stats.late_frames += late_us > 200 ? 1 : 0;
+    }
+
+    master_semaphore.Refresh();
+    Frame* frame = nullptr;
+    std::unique_lock lock{queue_mutex};
+    u32 ready = 0;
+    for (const Frame* queued : present_queue) {
+        if (!master_semaphore.IsFree(queued->ready_tick)) {
+            break;
+        }
+        ++ready;
+    }
+    cadence_stats.max_queued = (std::max)(cadence_stats.max_queued, ready);
+    if (ready != 0) {
+        frame = present_queue.front();
+        present_queue.pop_front();
+        frame_cv.notify_one();
+    }
+    // Swapchain lock before the queue lock is released, as in PresentThread (WaitPresent).
+    std::unique_lock swapchain_lock{swapchain_mutex};
+    lock.unlock();
+    if (frame != nullptr) {
+        CopyToSwapchain(frame);
+        ReleaseHeldFrame();
+        held_frame = frame;
+        ++cadence_stats.frames;
+    } else {
+        presenting_repeat = true;
+        CopyToSwapchain(held_frame);
+        presenting_repeat = false;
+        ++cadence_stats.repeats;
+    }
+    swapchain_lock.unlock();
+    ReportCadence(Clock::now(), rate);
+}
+
+void PresentManager::ReleaseHeldFrame() {
+    if (held_frame == nullptr) {
+        return;
+    }
+    std::scoped_lock fl{free_mutex};
+    free_queue.push_back(std::exchange(held_frame, nullptr));
+    free_cv.notify_one();
+}
+
+void PresentManager::ReportCadence(PresentCadence::Clock::time_point now, u32 rate) {
+    auto& stats = cadence_stats;
+    if (stats.since == PresentCadence::Clock::time_point{}) {
+        stats.since = now;
+        return;
+    }
+    if (now - stats.since < std::chrono::seconds{10}) {
+        return;
+    }
+    LOG_INFO(Render_Vulkan,
+             "Present cadence {} Hz (interval {} us): {} new frames, {} presented again, at most "
+             "{} ready at a tick, {} ticks woke over 200 us late (max {} us)",
+             rate, cadence.Interval().count() / 1000, stats.frames, stats.repeats, stats.max_queued,
+             stats.late_frames, stats.max_late_us);
+    stats = {.since = now};
 }
 
 void PresentManager::UpdateHdrMetadata() {
@@ -434,6 +553,10 @@ void PresentManager::SetImageCount() {
 }
 
 void PresentManager::DiscardFrame(Frame* frame) {
+    if (presenting_repeat) {
+        // Its render semaphore was waited for by its first present; nothing is pending.
+        return;
+    }
     static constexpr VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
     const VkSemaphore render_ready = *frame->render_ready;
     const VkSubmitInfo submit_info{
@@ -520,6 +643,10 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         }
     }
 
+    if (presenting_repeat) {
+        // The previous present of this frame still owns its command buffer and fence.
+        frame->present_done.Wait();
+    }
     const vk::CommandBuffer cmdbuf{frame->cmdbuf};
     cmdbuf.Begin({
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -629,6 +756,8 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
     const VkSemaphore present_semaphore = swapchain.CurrentPresentSemaphore();
     const VkSemaphore render_semaphore = swapchain.CurrentRenderSemaphore();
     const std::array wait_semaphores = {present_semaphore, *frame->render_ready};
+    // A frame presented again was rendered long ago, and its render semaphore is consumed.
+    const u32 wait_count = presenting_repeat ? 1U : 2U;
 
     static constexpr std::array<VkPipelineStageFlags, 2> wait_stage_masks{
         VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -638,7 +767,7 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
     const VkSubmitInfo submit_info{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .pNext = nullptr,
-        .waitSemaphoreCount = 2U,
+        .waitSemaphoreCount = wait_count,
         .pWaitSemaphores = wait_semaphores.data(),
         .pWaitDstStageMask = wait_stage_masks.data(),
         .commandBufferCount = 1,
@@ -649,6 +778,9 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
 
     // Submit the image copy/blit to the swapchain
     {
+        if (presenting_repeat) {
+            frame->present_done.Reset();
+        }
         std::scoped_lock submit_lock{scheduler.submit_mutex};
         switch (const VkResult result =
                     device.GetGraphicsQueue().Submit(submit_info, *frame->present_done)) {
@@ -664,7 +796,10 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
     }
 
     // Present
-    Common::InputLatency::RecordPresent(std::exchange(frame->input_ns, 0));
+    if (!presenting_repeat) {
+        // Input latency counts a guest frame's first present only.
+        Common::InputLatency::RecordPresent(std::exchange(frame->input_ns, 0));
+    }
     swapchain.Present(render_semaphore);
 }
 

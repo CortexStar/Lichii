@@ -63,6 +63,10 @@ public:
         return swapchain.GetFrameCap();
     }
 
+    void SetGuestPresentRate(u32 hz) override {
+        present_manager.SetGuestPresentRate(hz);
+    }
+
     [[nodiscard]] VideoCore::FrameGenStatus GetFrameGenStatus() const override {
 #ifdef HAS_LSFG
         return frame_gen.CurrentStatus();
