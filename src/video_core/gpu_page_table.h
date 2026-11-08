@@ -118,8 +118,8 @@ private:
         return reinterpret_cast<u64*>(image.get() + L1_BYTES + u64{block} * BLOCK_BYTES);
     }
 
-    /// Forgets the extents overlapping guest pages [begin, end).
-    void EraseExtents(u64 begin, u64 end);
+    /// Removes guest pages [begin, end) from the extents, keeping the parts around them.
+    void CutExtents(u64 begin, u64 end);
 
     /// The L2 block for `l1_index`, allocated when `allocate`; 0 when there is none.
     u32 BlockFor(u64 l1_index, bool allocate);
@@ -137,9 +137,10 @@ private:
     u64 l1_dirty_end = 0;
     u64 null_page = 0;
 
-    /// Ranges Map wrote whole and nothing changed since, by first guest byte (page aligned): a Map
-    /// inside one with the same device offset changes nothing and skips the page walk (a 1 GiB
-    /// pool binding is 262,144 entries).
+    /// Every mapped page, as runs by first guest byte (page aligned) with the host address of
+    /// their first page. A Map inside one with the same device offset changes nothing and skips
+    /// the page walk (a 1 GiB pool binding is 262,144 entries), and UnmapDevice finds a host
+    /// buffer's pages through them instead of scanning the table.
     struct Extent {
         u64 end;    ///< guest end, page aligned
         u64 device; ///< device address of the first byte

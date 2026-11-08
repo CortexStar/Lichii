@@ -195,3 +195,30 @@ TEST_CASE("GPU page table keeps host addresses that are not page aligned", "[gpu
     REQUIRE(table.UnmapDevice(0x2141'e9020, 0x2141'eb020) == 2);
     REQUIRE(table.Translate(0x217f'6b8fff) == null_page + 0xfff);
 }
+
+TEST_CASE("GPU page table finds a host buffer's pages after maps over parts of a range",
+          "[gpu_page_table]") {
+    GpuPageTable table{3}; // the null block and two more
+    table.SetNullPage(NULL_PAGE);
+    // Four pages from buffer A, then the second page remapped to buffer B.
+    REQUIRE(table.Map(0x10000, 0x4000, 0xa000'0000));
+    REQUIRE(table.Map(0x11000, 0x1000, 0xb000'0000));
+    REQUIRE(table.Translate(0x11000) == 0xb000'0000);
+    REQUIRE(table.Translate(0x12000) == 0xa000'2000);
+    // Buffer A goes away: its three remaining pages, not B's.
+    REQUIRE(table.UnmapDevice(0xa000'0000, 0xa000'4000) == 3);
+    REQUIRE(table.Translate(0x10000) == NULL_PAGE);
+    REQUIRE(table.Translate(0x11000) == 0xb000'0000);
+    REQUIRE(table.Translate(0x13000) == NULL_PAGE);
+    // A guest unmap in the middle of a range leaves both sides findable.
+    REQUIRE(table.Map(0x20000, 0x3000, 0xc000'0000));
+    table.Unmap(0x21000, 0x1000);
+    REQUIRE(table.UnmapDevice(0xc000'2000, 0xc000'3000) == 1);
+    REQUIRE(table.Translate(0x20000) == 0xc000'0000);
+    REQUIRE(table.Translate(0x22000) == NULL_PAGE);
+    // Pages mapped before the blocks ran out are still found.
+    REQUIRE_FALSE(table.Map(0x1f'ffe000, 0x4000, 0xd000'0000)); // one block, then none
+    REQUIRE(table.Translate(0x1f'ffe000) == 0xd000'0000);
+    REQUIRE(table.UnmapDevice(0xd000'0000, 0xd000'4000) == 2);
+    REQUIRE(table.Translate(0x1f'fff000) == NULL_PAGE);
+}

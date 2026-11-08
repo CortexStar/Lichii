@@ -3,6 +3,8 @@
 
 #include <algorithm>
 
+#include <boost/container/small_vector.hpp>
+
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "video_core/gpu_page_table.h"
 
@@ -82,15 +84,28 @@ u32 GpuPageTable::BlockFor(u64 l1_index, bool allocate) {
     return block;
 }
 
-void GpuPageTable::EraseExtents(u64 begin, u64 end) {
+void GpuPageTable::CutExtents(u64 begin, u64 end) {
     auto it = extents.upper_bound(begin);
     if (it != extents.begin()) {
         --it;
     }
     while (it != extents.end() && it->first < end) {
-        if (it->second.end > begin) {
-            it = extents.erase(it);
-        } else {
+        const u64 extent_begin = it->first;
+        const Extent extent = it->second;
+        if (extent.end <= begin) {
+            ++it;
+            continue;
+        }
+        it = extents.erase(it);
+        // The parts outside [begin, end) keep their mapping.
+        if (extent_begin < begin) {
+            extents.emplace(extent_begin, Extent{.end = begin, .device = extent.device});
+        }
+        if (extent.end > end) {
+            it = extents
+                     .emplace(end, Extent{.end = extent.end,
+                                          .device = extent.device + (end - extent_begin)})
+                     .first;
             ++it;
         }
     }
@@ -119,11 +134,17 @@ bool GpuPageTable::Map(u64 gpu_addr, u64 size, u64 device_address) {
             return true;
         }
     }
-    EraseExtents(begin_address, end_address);
+    CutExtents(begin_address, end_address);
+    const u64 first_page_address = page_address;
     for (u64 page = first; page < end && page < limit; ++page, page_address += PAGE_SIZE) {
         const u64 l1_index = page >> (BLOCK_BITS - PAGE_BITS);
         const u32 block = BlockFor(l1_index, true);
         if (block == 0) {
+            // Out of blocks: the pages written so far stay mapped, and recorded.
+            if (page > first) {
+                extents.emplace(begin_address,
+                                Extent{.end = page << PAGE_BITS, .device = first_page_address});
+            }
             return false;
         }
         u64& entry = Block(block)[page & (ENTRIES_PER_BLOCK - 1)];
@@ -138,8 +159,7 @@ bool GpuPageTable::Map(u64 gpu_addr, u64 size, u64 device_address) {
         entry = page_address;
         MarkBlock(block);
     }
-    extents.emplace(begin_address, Extent{.end = end_address,
-                                          .device = device_address - (gpu_addr & (PAGE_SIZE - 1))});
+    extents.emplace(begin_address, Extent{.end = end_address, .device = first_page_address});
     return true;
 }
 
@@ -150,7 +170,7 @@ void GpuPageTable::Unmap(u64 gpu_addr, u64 size) {
     const u64 first = gpu_addr >> PAGE_BITS;
     const u64 limit = u64{1} << (ADDRESS_BITS - PAGE_BITS);
     const u64 end = (std::min)((gpu_addr + size + PAGE_SIZE - 1) >> PAGE_BITS, limit);
-    EraseExtents(first << PAGE_BITS, end << PAGE_BITS);
+    CutExtents(first << PAGE_BITS, end << PAGE_BITS);
     for (u64 page = first; page < end;) {
         const u64 l1_index = page >> (BLOCK_BITS - PAGE_BITS);
         const u64 block_end = (l1_index + 1) << (BLOCK_BITS - PAGE_BITS);
@@ -182,34 +202,30 @@ void GpuPageTable::Unmap(u64 gpu_addr, u64 size) {
 }
 
 u64 GpuPageTable::UnmapDevice(u64 device_begin, u64 device_end) {
-    u64 unmapped = 0;
     if (device_begin >= device_end) {
         return 0;
     }
-    for (auto it = extents.begin(); it != extents.end();) {
-        const u64 extent_device_end = it->second.device + (it->second.end - it->first);
-        if (it->second.device < device_end && extent_device_end > device_begin) {
-            it = extents.erase(it);
-        } else {
-            ++it;
+    // The extents record every mapped page: only the ones of this host range are walked, not
+    // the whole table (a host buffer goes away many times a second while a scene loads).
+    boost::container::small_vector<std::pair<u64, u64>, 8> ranges;
+    for (const auto& [extent_begin, extent] : extents) {
+        const u64 pages = (extent.end - extent_begin) >> PAGE_BITS;
+        // Page k holds host bytes [device + k * PAGE_SIZE, + PAGE_SIZE).
+        const u64 first =
+            device_begin <= extent.device ? 0 : (device_begin - extent.device) >> PAGE_BITS;
+        const u64 last = device_end <= extent.device
+                             ? 0
+                             : (device_end - extent.device + PAGE_SIZE - 1) >> PAGE_BITS;
+        const u64 end_page = (std::min)(last, pages);
+        if (first < end_page) {
+            ranges.emplace_back(extent_begin + (first << PAGE_BITS), (end_page - first)
+                                                                         << PAGE_BITS);
         }
     }
-    for (u32 block = 1; block < used_blocks; ++block) {
-        if (block_mapped[block] == 0) {
-            continue;
-        }
-        u64* const entries = Block(block);
-        for (u32 index = 0; index < ENTRIES_PER_BLOCK; ++index) {
-            const u64 entry = entries[index];
-            if (entry != null_page && entry + PAGE_SIZE > device_begin && entry < device_end) {
-                const u64 gpu_page = (block_l1[block] << (BLOCK_BITS - PAGE_BITS)) | index;
-                Unmap(gpu_page << PAGE_BITS, PAGE_SIZE);
-                ++unmapped;
-                if (block_mapped[block] == 0) {
-                    break;
-                }
-            }
-        }
+    u64 unmapped = 0;
+    for (const auto& [gpu_addr, size] : ranges) {
+        Unmap(gpu_addr, size);
+        unmapped += size >> PAGE_BITS;
     }
     return unmapped;
 }
