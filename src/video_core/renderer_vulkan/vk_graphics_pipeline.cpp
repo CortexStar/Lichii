@@ -26,6 +26,7 @@
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_frame_dump.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
+#include "video_core/renderer_vulkan/nx2_pipeline_stats.h"
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -345,7 +346,7 @@ GraphicsPipeline::GraphicsPipeline(
     PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
     const GraphicsPipelineCacheKey& key_, std::array<vk::ShaderModule, NUM_STAGES> stages,
     const std::array<const Shader::Info*, NUM_STAGES>& infos,
-    std::function<std::array<vk::ShaderModule, NUM_STAGES>()> emit_stages,
+    std::function<std::array<vk::ShaderModule, NUM_STAGES>()> emit_stages, const GplParams* gpl,
     std::optional<MeshEmulationSetup> mesh_emulation_)
     : key{key_}, device{device_}, texture_cache{texture_cache_}, buffer_cache{buffer_cache_},
       pipeline_cache(pipeline_cache_), scheduler{scheduler_},
@@ -441,95 +442,101 @@ GraphicsPipeline::GraphicsPipeline(
         }
     }
 
-    DescriptorLayoutBuilder builder{MakeBuilder(device, stage_infos, mesh_emulation)};
-    // Mesh emulation binds one descriptor set to both the compute dispatch and the draw.
-    uses_push_descriptor = !mesh_emulation && builder.CanUsePushDescriptor();
-    uses_descriptor_buffer = !mesh_emulation && builder.CanUseDescriptorBuffer() &&
-                             descriptor_buffer_ring.IsValid();
-    // After every stage's descriptors: the output buffer, then with a task program its payload,
-    // offset and map buffers.
-    const u32 emulation_buffers{mesh_emulation ? (mesh_emulation->has_task ? 4U : 1U) : 0U};
-    num_descriptor_entries += emulation_buffers;
-    descriptor_set_layout =
-        builder.CreateDescriptorSetLayout(uses_push_descriptor, uses_descriptor_buffer);
-    if (uses_descriptor_buffer) {
-        descriptor_buffer_layout = builder.MakeDescriptorBufferLayout(*descriptor_set_layout);
-        if (!descriptor_buffer_ring.CanAllocate(descriptor_buffer_layout.size)) {
-            LOG_WARNING(Render_Vulkan,
-                        "Graphics pipeline {:016X} needs {} descriptor bytes per draw, falling back "
-                        "to sets",
-                        key.Hash(), descriptor_buffer_layout.size);
-            uses_descriptor_buffer = false;
-            descriptor_buffer_layout = {};
-            descriptor_set_layout = builder.CreateDescriptorSetLayout(uses_push_descriptor);
-        }
-    }
-
-    const VkDescriptorSetLayout set_layout{*descriptor_set_layout};
-    pipeline_layout = builder.CreatePipelineLayout(set_layout);
-    if (!uses_descriptor_buffer) {
-        descriptor_update_template =
-            builder.CreateTemplate(set_layout, *pipeline_layout, uses_push_descriptor);
-        if (!uses_push_descriptor && mesh_emulation) {
-            // The set also holds the emulation's buffers.
-            std::array<Shader::Info, NUM_STAGES + 1> bank_infos{};
-            std::ranges::copy(stage_infos, bank_infos.begin());
-            bank_infos.back().storage_buffers_descriptors.push_back({
-                .cbuf_index = 0,
-                .cbuf_offset = 0,
-                .count = emulation_buffers,
-                .is_written = true,
-            });
-            descriptor_allocator =
-                descriptor_pool.Allocator(device, scheduler, set_layout, bank_infos);
-            if (mesh_emulation->has_task) {
-                // The distribution pass: payload, offsets, map and arguments, plus its push
-                // constants (Shader::Backend::SPIRV::MeshEmulationDistributionConstants).
-                std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
-                for (u32 binding = 0; binding < bindings.size(); ++binding) {
-                    bindings[binding] = {
-                        .binding = binding,
-                        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                        .descriptorCount = 1,
-                        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                        .pImmutableSamplers = nullptr,
-                    };
-                }
-                distribution_set_layout = device.GetLogical().CreateDescriptorSetLayout({
-                    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                    .pNext = nullptr,
-                    .flags = 0,
-                    .bindingCount = static_cast<u32>(bindings.size()),
-                    .pBindings = bindings.data(),
-                });
-                const VkDescriptorSetLayout distribution_set{*distribution_set_layout};
-                const VkPushConstantRange range{
-                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                    .offset = 0,
-                    .size = sizeof(Shader::Backend::SPIRV::MeshEmulationDistributionConstants),
-                };
-                distribution_layout = device.GetLogical().CreatePipelineLayout({
-                    .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-                    .pNext = nullptr,
-                    .flags = 0,
-                    .setLayoutCount = 1,
-                    .pSetLayouts = &distribution_set,
-                    .pushConstantRangeCount = 1,
-                    .pPushConstantRanges = &range,
-                });
-                distribution_allocator = descriptor_pool.Allocator(
-                    device, scheduler, distribution_set, DescriptorBankInfo{
-                                                             .storage_buffers = 4,
-                                                             .score = 4,
-                                                         });
+    if (gpl) {
+        Nx2InitLibraryPipeline(*gpl, descriptor_pool); // nx2 shaderwarm: EDEN_NX2_GPL
+    } else {
+        DescriptorLayoutBuilder builder{MakeBuilder(device, stage_infos, mesh_emulation)};
+        // Mesh emulation binds one descriptor set to both the compute dispatch and the draw.
+        uses_push_descriptor = !mesh_emulation && builder.CanUsePushDescriptor();
+        uses_descriptor_buffer = !mesh_emulation && builder.CanUseDescriptorBuffer() &&
+                                 descriptor_buffer_ring.IsValid();
+        // After every stage's descriptors: the output buffer, then with a task program its payload,
+        // offset and map buffers.
+        const u32 emulation_buffers{mesh_emulation ? (mesh_emulation->has_task ? 4U : 1U) : 0U};
+        num_descriptor_entries += emulation_buffers;
+        descriptor_set_layout =
+            builder.CreateDescriptorSetLayout(uses_push_descriptor, uses_descriptor_buffer);
+        if (uses_descriptor_buffer) {
+            descriptor_buffer_layout = builder.MakeDescriptorBufferLayout(*descriptor_set_layout);
+            if (!descriptor_buffer_ring.CanAllocate(descriptor_buffer_layout.size)) {
+                LOG_WARNING(Render_Vulkan,
+                            "Graphics pipeline {:016X} needs {} descriptor bytes per draw, falling back "
+                            "to sets",
+                            key.Hash(), descriptor_buffer_layout.size);
+                uses_descriptor_buffer = false;
+                descriptor_buffer_layout = {};
+                descriptor_set_layout = builder.CreateDescriptorSetLayout(uses_push_descriptor);
             }
-        } else if (!uses_push_descriptor) {
-            descriptor_allocator =
-                descriptor_pool.Allocator(device, scheduler, set_layout, stage_infos);
         }
+
+        const VkDescriptorSetLayout set_layout{*descriptor_set_layout};
+        pipeline_layout = builder.CreatePipelineLayout(set_layout);
+        if (!uses_descriptor_buffer) {
+            descriptor_update_template =
+                builder.CreateTemplate(set_layout, *pipeline_layout, uses_push_descriptor);
+            if (!uses_push_descriptor && mesh_emulation) {
+                // The set also holds the emulation's buffers.
+                std::array<Shader::Info, NUM_STAGES + 1> bank_infos{};
+                std::ranges::copy(stage_infos, bank_infos.begin());
+                bank_infos.back().storage_buffers_descriptors.push_back({
+                    .cbuf_index = 0,
+                    .cbuf_offset = 0,
+                    .count = emulation_buffers,
+                    .is_written = true,
+                });
+                descriptor_allocator =
+                    descriptor_pool.Allocator(device, scheduler, set_layout, bank_infos);
+                if (mesh_emulation->has_task) {
+                    // The distribution pass: payload, offsets, map and arguments, plus its push
+                    // constants (Shader::Backend::SPIRV::MeshEmulationDistributionConstants).
+                    std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
+                    for (u32 binding = 0; binding < bindings.size(); ++binding) {
+                        bindings[binding] = {
+                            .binding = binding,
+                            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                            .descriptorCount = 1,
+                            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                            .pImmutableSamplers = nullptr,
+                        };
+                    }
+                    distribution_set_layout = device.GetLogical().CreateDescriptorSetLayout({
+                        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                        .pNext = nullptr,
+                        .flags = 0,
+                        .bindingCount = static_cast<u32>(bindings.size()),
+                        .pBindings = bindings.data(),
+                    });
+                    const VkDescriptorSetLayout distribution_set{*distribution_set_layout};
+                    const VkPushConstantRange range{
+                        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                        .offset = 0,
+                        .size = sizeof(Shader::Backend::SPIRV::MeshEmulationDistributionConstants),
+                    };
+                    distribution_layout = device.GetLogical().CreatePipelineLayout({
+                        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                        .pNext = nullptr,
+                        .flags = 0,
+                        .setLayoutCount = 1,
+                        .pSetLayouts = &distribution_set,
+                        .pushConstantRangeCount = 1,
+                        .pPushConstantRanges = &range,
+                    });
+                    distribution_allocator = descriptor_pool.Allocator(
+                        device, scheduler, distribution_set, DescriptorBankInfo{
+                                                                 .storage_buffers = 4,
+                                                                 .score = 4,
+                                                             });
+                }
+            } else if (!uses_push_descriptor) {
+                descriptor_allocator =
+                    descriptor_pool.Allocator(device, scheduler, set_layout, stage_infos);
+            }
+        }
+
     }
 
-    auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics,
+    const bool runtime_build = worker_thread != nullptr;
+    auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics, runtime_build,
                 emit_stages = std::move(emit_stages)] {
         const auto begin = std::chrono::steady_clock::now();
         SCOPE_EXIT {
@@ -541,9 +548,26 @@ GraphicsPipeline::GraphicsPipeline(
             if (emit_stages) {
                 spv_modules = emit_stages();
             }
-            const VkRenderPass render_pass{render_pass_cache.Get(MakeRenderPassKey(key.state, device))};
+            // Library path: every 3D pipeline is drawn with dynamic rendering, made without a pass.
+            const VkRenderPass render_pass{
+                device.IsGplEnabled()
+                    ? VkRenderPass{}
+                    : render_pass_cache.Get(MakeRenderPassKey(key.state, device))};
             Validate();
-            MakePipeline(render_pass);
+            const auto driver_begin = Nx2Stats::Clock::now();
+            if (is_gpl) {
+                MakeGplPipeline();
+            } else {
+                MakePipeline(render_pass);
+            }
+            if (Nx2Stats::Enabled() && runtime_build) {
+                const auto driver_time = Nx2Stats::Clock::now() - driver_begin;
+                Nx2Stats::Add(Nx2Stats::Phase::Driver, driver_time);
+                if (Nx2Stats::Level() >= 2) {
+                    LOG_INFO(Render_Vulkan, "NX2STATS driver {:016x}: {:.2f} ms{}", key.Hash(),
+                             Nx2Stats::Ms(driver_time), driver_cache_hit ? " (cache hit)" : "");
+                }
+            }
         } catch (const Shader::Exception& exception) {
             LOG_ERROR(Render_Vulkan, "Graphics pipeline {:016x}: {}", key.Hash(), exception.what());
             throw;
@@ -556,7 +580,7 @@ GraphicsPipeline::GraphicsPipeline(
                          device.GetMaxTessellationPatchSize());
             throw;
         }
-        if (pipeline_statistics) {
+        if (pipeline_statistics && !is_gpl) {
             pipeline_statistics->Collect(device, *pipeline);
         }
         // Nothing reads the shader modules once the pipeline exists, and the driver keeps a copy
@@ -942,6 +966,14 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     const VideoCommon::SamplerId* samplers_it{samplers.data()};
     const VideoCommon::ImageViewInOut* views_it{views.data()};
     const auto prepare_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
+        if (is_gpl) {
+            // Each library stage numbers its rescaling bits from its own base (vk_gpl.h).
+            if (stage == 0) {
+                rescaling.Seek(GPL_VERTEX_TEXTURE_SCALING_BASE, GPL_VERTEX_IMAGE_SCALING_BASE);
+            } else {
+                rescaling.Seek(0, 0);
+            }
+        }
         {
             Profile::Scope scope{Profile::Zone::BindStageBuffers};
             buffer_cache.BindHostStageBuffers(stage);
@@ -1260,7 +1292,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
         });
     }
-    scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
+    scheduler.RequestRenderpass(texture_cache.GetFramebuffer(), device.IsGplEnabled());
     if (writes_storage) {
         scheduler.NoteRenderPassStores();
     }
@@ -1269,11 +1301,24 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         scheduler.Record([this](vk::CommandBuffer) {
             const auto begin = std::chrono::steady_clock::now();
             build->Wait(!worker_only_build);
+            if (Nx2Stats::Enabled()) {
+                Nx2Stats::Add(Nx2Stats::Phase::Wait, std::chrono::steady_clock::now() - begin);
+            }
             hold_time_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                        std::chrono::steady_clock::now() - begin)
                                        .count(),
                                    std::memory_order::relaxed);
         });
+    }
+    if (Nx2Stats::Enabled()) {
+        auto& stats = Nx2Stats::Get();
+        stats.draws.fetch_add(1, std::memory_order_relaxed);
+        if (is_gpl) {
+            stats.gpl_draws.fetch_add(1, std::memory_order_relaxed);
+            if (lto_pipeline_done.load(std::memory_order_relaxed)) {
+                stats.lto_draws.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
     }
     const bool is_rescaling{texture_cache.IsRescaling()};
     const bool update_rescaling{scheduler.UpdateRescaling(is_rescaling, IsMeshPipeline())};
@@ -1290,7 +1335,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     }
 
     bool update_descriptors = true;
-    if (descriptor_set_layout && !uses_push_descriptor && !uses_descriptor_buffer) {
+    if ((descriptor_set_layout || is_gpl) && !uses_push_descriptor && !uses_descriptor_buffer) {
         const auto* const entries = static_cast<const DescriptorUpdateEntry*>(descriptor_data);
         update_descriptors =
             bind_pipeline || last_descriptor_payload.size() != num_descriptor_entries ||
@@ -1305,17 +1350,25 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                       rescaling_data = rescaling.Data(), is_rescaling, update_rescaling,
                       uses_render_area = render_area.uses_render_area,
                       render_area_data = render_area.words](vk::CommandBuffer cmdbuf) {
+        // The command recording of a draw's pipeline, push constants and descriptors (scheduler
+        // worker): what library pipelines (two classic sets) cost per draw against push
+        // descriptors / descriptor buffers.
+        const Nx2Stats::Timer record_timer{is_gpl ? Nx2Stats::Phase::RecordGpl
+                                                  : Nx2Stats::Phase::RecordMono};
         if (bind_descriptor_buffer) {
             const VkDescriptorBufferBindingInfoEXT binding_info{
                 descriptor_buffer_ring.BindingInfo(descriptor_buffer_chunk)};
             cmdbuf.BindDescriptorBuffersEXT(binding_info);
         }
         if (bind_pipeline) {
-            scheduler.SetGraphicsPipelineMissing(!pipeline || build->Failed());
-            if (!pipeline || build->Failed()) {
+            const VkPipeline handle =
+                is_gpl ? active_pipeline.load(std::memory_order_acquire) : *pipeline;
+            const bool missing = !handle || build->Failed();
+            scheduler.SetGraphicsPipelineMissing(missing);
+            if (missing) {
                 return;
             }
-            cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline);
+            cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, handle);
         }
         const VkShaderStageFlags push_stages =
             mesh_emulation ? VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT
@@ -1335,6 +1388,12 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         if (uses_render_area) {
             cmdbuf.PushConstants(*pipeline_layout, push_stages, RENDERAREA_LAYOUT_OFFSET,
                                  sizeof(render_area_data), &render_area_data);
+        }
+        if (is_gpl) { // nx2 shaderwarm: a library pipeline's two descriptor sets
+            if (update_descriptors) {
+                Nx2BindLibraryDescriptors(cmdbuf, descriptor_data);
+            }
+            return;
         }
         if (!descriptor_set_layout) {
             return;
@@ -1863,9 +1922,37 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     const bool unoptimized = (flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT) != 0;
     const auto trace_begin = std::chrono::steady_clock::now();
     TracePipelineBuild("BEGIN", "graphics", key.Hash(), key.unique_hashes, unoptimized);
+    VkPipelineCreationFeedback creation_feedback{};
+    const VkPipelineCreationFeedbackCreateInfo feedback_ci{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO,
+        .pNext = nullptr,
+        .pPipelineCreationFeedback = &creation_feedback,
+        .pipelineStageCreationFeedbackCount = 0,
+        .pPipelineStageCreationFeedbacks = nullptr,
+    };
+    // No render pass (library path: drawn with dynamic rendering): the formats instead.
+    const GplFragmentOutputState output{
+        render_pass ? GplFragmentOutputState{}
+                    : MakeGplFragmentOutputState(device, key.state, fragment_has_color0_output)};
+    std::array<VkFormat, 8> rendering_formats{};
+    for (u32 i = 0; i < output.num_colors; ++i) {
+        rendering_formats[i] = static_cast<VkFormat>(output.color_formats[i]);
+    }
+    const VkPipelineRenderingCreateInfo rendering_ci{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .pNext = Nx2Stats::Enabled() ? &feedback_ci : nullptr,
+        .viewMask = 0,
+        .colorAttachmentCount = output.num_colors,
+        .pColorAttachmentFormats = rendering_formats.data(),
+        .depthAttachmentFormat = static_cast<VkFormat>(output.depth_format),
+        .stencilAttachmentFormat = static_cast<VkFormat>(output.stencil_format),
+    };
+    const void* const create_next =
+        render_pass ? (Nx2Stats::Enabled() ? static_cast<const void*>(&feedback_ci) : nullptr)
+                    : static_cast<const void*>(&rendering_ci);
     pipeline = device.GetLogical().CreateGraphicsPipeline({
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext = nullptr,
+        .pNext = create_next,
         .flags = flags,
         .stageCount = static_cast<u32>(shader_stages.size()),
         .pStages = shader_stages.data(),
@@ -1892,6 +1979,13 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                        std::chrono::duration<double, std::milli>(
                            std::chrono::steady_clock::now() - trace_begin)
                            .count());
+    driver_cache_hit =
+        (creation_feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT) != 0 &&
+        (creation_feedback.flags &
+         VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT) != 0;
+    if (driver_cache_hit) {
+        Nx2Stats::Get().driver_cache_hits.fetch_add(1, std::memory_order_relaxed);
+    }
 
     // Log graphics pipeline creation
     if (GPU::Logging::IsActive()) {

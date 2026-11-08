@@ -53,7 +53,7 @@ public:
 
     ~GenericEnvironment() override;
 
-    [[nodiscard]] u32 TextureBoundBuffer() const final;
+    [[nodiscard]] u32 TextureBoundBuffer() const override;
 
     [[nodiscard]] u32 LocalMemorySize() const final;
 
@@ -102,6 +102,10 @@ public:
     /// kind than a cache record holds
     [[nodiscard]] bool CanBeSerialized() const noexcept;
 
+    /// Diagnostics: bytes of the program in GPU memory (offset from its header); empty without
+    /// GPU memory (precompile and disk environments).
+    [[nodiscard]] std::vector<u8> ReadProgramBytes(u32 offset, u32 size) const;
+
     [[nodiscard]] u64 CalculateHash() const;
 
     void Dump(u64 pipeline_hash, u64 shader_hash) override;
@@ -114,6 +118,17 @@ public:
     }
     bool HasNativeInstructions() const override;
 
+    /// The translation's answers (texture types, pixel formats, cbuf values, storage pointer
+    /// classifications) as bytes, and taking such answers over (keeps answers already present).
+    /// The per-stage translation cache (nx2_ir_cache.h) stores and restores them, so a pipeline
+    /// built from a cached translation is serialized with the answers that translation used.
+    void SerializeAnswers(std::vector<u8>& out) const;
+    void AdoptAnswers(std::span<const u8> data) override;
+
+    [[nodiscard]] const ::Common::unordered_map<u64, u8>& StoragePointerAnswers() const noexcept {
+        return storage_pointer_types;
+    }
+
 protected:
     std::optional<u64> TryFindSize();
     virtual std::optional<u32> ReadTrapGuardConstant(u32, u32) { return std::nullopt; }
@@ -123,6 +138,10 @@ protected:
                               u32 source_header_size = 128, bool geometry_stage = false);
     std::shared_ptr<const LoweredNativeCode> LowerNativeCode(u32 source_header_size,
                                                           bool geometry_stage);
+    /// Lowers captured native instructions (`sph` and `stage` already set) and packs the result.
+    std::shared_ptr<const LoweredNativeCode> LowerCapturedNative(
+        std::vector<Shader::Ampere::Instruction>& native, u32 source_header_size,
+        bool geometry_stage);
     size_t native_source_size{};
     std::shared_ptr<const LoweredNativeCode> lowered_native;
 
@@ -325,6 +344,21 @@ private:
     std::optional<u32> recorded_read_properties;
     bool lacks_recorded_value{};
 };
+
+/// The mesh registers a task/mesh pipeline is translated and keyed with. EDEN_NX2_MESH_INIT=0:
+/// without a task program, SET_MESH_INIT_SHADER (task threads, task output lines) only sizes the
+/// mesh program's payload input, which nothing writes; games leave the last task draw's value in
+/// it (OoT: two values for the same mesh-only pipelines, a third of its mesh pipelines were such
+/// duplicates), so it is zeroed there.
+[[nodiscard]] std::array<u32, 3> EffectiveMeshRegisters(u32 shader_a, u32 shader_b, u32 init,
+                                                        bool has_task);
+
+/// The value a task/mesh stage's unique hash is XORed with in the pipeline key: the mesh registers
+/// (SET_MESH_SHADER_A/B, SET_MESH_INIT_SHADER) and the pass-through geometry header bound with them
+/// (zero when that slot is off). XORing a key's stage hash with it again gives the program's own
+/// hash.
+[[nodiscard]] u64 MeshStateHash(const std::array<u32, 3>& registers,
+                                const Shader::ProgramHeader& primitive_header);
 
 /// Where a pipeline is in a cache file, from its environment count to the end of its key, and a
 /// hash of those bytes: a rewrite removes it only while the file still holds them.
