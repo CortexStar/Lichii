@@ -492,8 +492,9 @@ void Fsr3FrameGen::Generate(const Device& device, Scheduler& scheduler, VkImage 
     if (m_nvof && !m_flow_copied) {
         // In the submission that waits for the optical flow (the first after Process).
         m_flow_copied = true;
-        scheduler.Record([nvof = m_nvof.get()](vk::CommandBuffer cmdbuf) {
-            nvof->RecordFlowCopy(cmdbuf);
+        // The slot is taken now: the next Run can change it before the worker records this.
+        scheduler.Record([nvof = m_nvof.get(), slot = m_nvof->LastSlot()](vk::CommandBuffer cmdbuf) {
+            nvof->RecordFlowCopy(cmdbuf, slot);
         });
     }
     const VkDescriptorSet set = m_interp_allocator.Commit();
@@ -614,7 +615,7 @@ void Fsr3FrameGen::GenerateAsync(const Device& device, Frame& destination, float
     });
     if (!m_flow_copied) {
         m_flow_copied = true;
-        m_nvof->RecordFlowCopy(cmdbuf);
+        m_nvof->RecordFlowCopy(cmdbuf, m_nvof->LastSlot());
     }
     DiscardForComputeWrite(cmdbuf, *destination.image);
     cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *m_interp_pipeline);

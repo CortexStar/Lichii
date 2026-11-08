@@ -418,12 +418,12 @@ VkSemaphore NvOpticalFlow::Run(Scheduler& scheduler, VkImage frame) {
     return signal;
 }
 
-void NvOpticalFlow::RecordFlowCopy(vk::CommandBuffer cmdbuf) const {
+void NvOpticalFlow::RecordFlowCopy(vk::CommandBuffer cmdbuf, u32 slot) const {
     const size_t count = backward ? 2 : 1;
     std::array<VkImageMemoryBarrier, 2> before{};
     std::array<VkImageMemoryBarrier, 2> after{};
     for (size_t direction = 0; direction < count; ++direction) {
-        const VkImage destination = *flow_copies[direction * 2 + last];
+        const VkImage destination = *flow_copies[direction * 2 + slot];
         before[direction] = Barrier(destination, VK_ACCESS_SHADER_READ_BIT,
                                     VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL,
                                     VK_IMAGE_LAYOUT_GENERAL);
@@ -441,8 +441,8 @@ void NvOpticalFlow::RecordFlowCopy(vk::CommandBuffer cmdbuf) const {
         .extent = {flow_extent.width, flow_extent.height, 1},
     };
     for (size_t direction = 0; direction < count; ++direction) {
-        cmdbuf.CopyImage(*flows[direction * 2 + last], VK_IMAGE_LAYOUT_GENERAL,
-                         *flow_copies[direction * 2 + last], VK_IMAGE_LAYOUT_GENERAL, region);
+        cmdbuf.CopyImage(*flows[direction * 2 + slot], VK_IMAGE_LAYOUT_GENERAL,
+                         *flow_copies[direction * 2 + slot], VK_IMAGE_LAYOUT_GENERAL, region);
     }
     cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                            0, {}, {}, std::span{after.data(), count});

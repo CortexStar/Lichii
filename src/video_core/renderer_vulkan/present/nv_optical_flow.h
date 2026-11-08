@@ -50,7 +50,12 @@ public:
     /// Records, in the graphics submission that waits for the last Run, the copy of its flow to
     /// the image FlowView samples. Drivers sample R16G16_SFIXED5_NV as half floats, so the raw
     /// fixed-point words are read through an R16G16_SNORM image instead.
-    void RecordFlowCopy(vk::CommandBuffer cmdbuf) const;
+    void RecordFlowCopy(vk::CommandBuffer cmdbuf, u32 slot) const;
+
+    /// The flow slot of the last Run, for RecordFlowCopy calls recorded on another thread.
+    [[nodiscard]] u32 LastSlot() const {
+        return last;
+    }
 
     /// The flow of the last Run from the current to the previous frame, one vector per grid cell.
     /// Sampled values times FlowToPixels are pixels.
