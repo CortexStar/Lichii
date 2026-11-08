@@ -1685,6 +1685,15 @@ void Maxwell3D::FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& fs, u3
         query.query.raw = fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.query)];
         // A short query writes one word, without the time stamp.
         split.NoteWrite(&memory_manager, report, query.query.short_query != 0 ? 4 : 16, true);
+        // A payload release (no counter, no reduction): its value is known now.
+        if (query.query.operation == Regs::ReportSemaphore::Operation::Release &&
+            query.query.report == Regs::ReportSemaphore::Report::Payload &&
+            query.query.reduction_enable == 0) {
+            split.NoteRelease(&memory_manager, report,
+                              fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.payload)]);
+        } else {
+            split.ForgetRelease(&memory_manager, report);
+        }
         return;
     }
     case MAXWELL3D_REG_INDEX(wait_for_idle):

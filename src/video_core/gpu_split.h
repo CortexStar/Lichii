@@ -9,6 +9,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
@@ -81,6 +82,15 @@ enum class NarrowBase : u8 {
     Read,     ///< Every unbounded write
     Acquire,  ///< Every unbounded write and dispatch (semaphore acquires)
     Recorded, ///< Only the recorded writes (and the write floor)
+};
+
+/// A queued release's value at a semaphore word (GpuSplit::PredictedRelease).
+struct SemaphorePrediction {
+    u32 value;
+    /// A max release: the word will hold at least `value`.
+    bool at_least;
+    /// The end of the work that releases it (a met acquire orders what follows behind it).
+    u64 position;
 };
 
 // Splits the GPU thread in two (NX2_GPU_THREAD_SPLIT.md). The GPU thread (the front) takes the
@@ -422,7 +432,13 @@ public:
         if (!BarrierOnly(cause)) {
             guest_write_position = write_position;
         }
-        acquire_position = write_position;
+        // Barriers (WFIs, texture invalidates, MemOpB, GP sync) release no semaphore: they
+        // write guest memory only on GPU-written pages (InvalidateGPUCache downloads GPU bytes
+        // next to CPU writes), where the narrowed read drains instead, so they don't hold
+        // semaphore acquires.
+        if (!BarrierOnly(cause) || cause == UnboundedCause::ComputeLaunch) {
+            acquire_position = write_position;
+        }
         if (writer) {
             unbounded_writer_position = write_position;
         }
@@ -442,6 +458,44 @@ public:
             return false;
         }
     }
+    /// A met acquire only orders the fetch after the work before the release that met it (sent
+    /// before `position`), not after everything sent before the acquire. The sync never moves
+    /// back.
+    void NoteSyncAt(u64 position) {
+        const u64 sync = (std::min)(position, write_position);
+        if (sync >= last_sync_position) {
+            last_sync_position = sync;
+        }
+    }
+    /// NoteSyncAt for an acquire met in guest memory: the release that wrote it ran on the back.
+    void NoteSyncDone() {
+        consumed_cache = consumed.load(std::memory_order_acquire);
+        NoteSyncAt(consumed_cache);
+    }
+    /// Whether a semaphore acquire met at `address` is a host-level wait (NoteSync): the GPU
+    /// releases semaphores on its page. An acquire on a word only the CPU writes says nothing
+    /// about the GPU work before it.
+    [[nodiscard]] bool AcquireSyncs(GPUVAddr address) const;
+
+    // Semaphore prediction: the values of the releases the front queued. While a release is
+    // still queued, an acquire it meets is met: the back runs the work after the acquire behind
+    // the release, as the hardware would once the release lands.
+    /// A release of `value` at `address` of `space` (a Tegra::MemoryManager) was just sent.
+    /// `at_least`: a max release (the word becomes max(word, value)).
+    void NoteRelease(const void* space, GPUVAddr address, u32 value, bool at_least = false);
+    /// The latest queued release at `address` of `space`, also once the back ran it while guest
+    /// memory still holds the word from before it (a fence still holds the write back) or its
+    /// value, and nothing the front sent since wrote the word; max releases as lower bounds.
+    [[nodiscard]] std::optional<SemaphorePrediction> PredictedRelease(const void* space,
+                                                                      GPUVAddr address);
+    /// Work that writes `address` of `space` with a value the front doesn't know was just sent.
+    void ForgetRelease(const void* space, GPUVAddr address);
+    /// Work sent so far may have written semaphore words with values the front doesn't know: no
+    /// release sent before now is predicted any more.
+    void NoteReleaseBarrier() {
+        release_barrier = write_position;
+    }
+
     /// Any thread: GPU work releases or reports to the page of `address` (sticky until Stop):
     /// semaphore releases, reports and QMD releases.
     static void NoteGpuSemaphore(GPUVAddr address);
@@ -555,6 +609,30 @@ private:
     u64 write_floor{};
     /// Unbounded writes that may write guest memory themselves (not BarrierOnly).
     u64 guest_write_position{};
+    /// Releases sent before it are not predicted (NoteReleaseBarrier).
+    u64 release_barrier{};
+    /// The latest release the front queued per semaphore word, found by a hash in buckets of
+    /// four; `before`: the word in guest memory when it was sent.
+    struct QueuedRelease {
+        const void* space;
+        GPUVAddr address;
+        u64 position;
+        u32 value;
+        u32 before;
+        /// Tegra::g_nx2_semaphore_landed slot of the word, its count when the entry started, and
+        /// the releases sent since: the latest landed once the count grew by `sent`.
+        u32 landed_slot;
+        u32 landed_base;
+        u32 sent;
+        bool used;
+        bool at_least; ///< A max release
+    };
+    static constexpr size_t ReleaseBuckets = 256; ///< 4 slots each
+    [[nodiscard]] QueuedRelease* FindRelease(const void* space, GPUVAddr address);
+    std::unique_ptr<QueuedRelease[]> queued_releases;
+    /// Whether the front sent work after `position` that may write the word at `address`
+    /// (true where the index no longer tells).
+    [[nodiscard]] bool WrittenSince(const void* space, GPUVAddr address, u64 position) const;
     /// The pending write index (RecordWrite).
     std::unique_ptr<PageSlot[]> page_slots;
     std::unique_ptr<WordSlot[]> word_slots;
