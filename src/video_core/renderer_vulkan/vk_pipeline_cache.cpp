@@ -898,12 +898,18 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
     if (shaders_same) {
         shaders_dirty = false;
     }
-    // With dynamic vertex input the key holds the attribute types masked by what the program
-    // reads (below); the watch compares and patches the types Refresh computes, unmasked.
+    // The key holds the attribute types (dynamic vertex input) or the attributes and divisors
+    // (static) masked by what the program reads (below); the watch compares and patches the
+    // values Refresh computes, unmasked.
     const bool dynamic_vertex_input = dynamic_features.has_dynamic_vertex_input;
     const u64 keyed_attribute_types = graphics_key.state.attribute_types;
+    const auto keyed_attributes = graphics_key.state.attributes;
+    const auto keyed_binding_divisors = graphics_key.state.binding_divisors;
     if (dynamic_vertex_input) {
         graphics_key.state.attribute_types = vertex_attribute_types;
+    } else {
+        graphics_key.state.attributes = static_vertex_attributes;
+        graphics_key.state.binding_divisors = static_binding_divisors;
     }
     // When nothing Refresh reads changed, the state part of the key stands; with the same
     // shaders too, so does the pipeline the last lookup found for it. When only the blend
@@ -925,8 +931,13 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
             if (shaders_same) {
                 Memo::Note(Stat::PipeSkipShadersSame);
             }
-            // Same program and same types: the masked types still stand.
-            graphics_key.state.attribute_types = keyed_attribute_types;
+            // Same program and same inputs: the masked types or attributes still stand.
+            if (dynamic_vertex_input) {
+                graphics_key.state.attribute_types = keyed_attribute_types;
+            } else {
+                graphics_key.state.attributes = keyed_attributes;
+                graphics_key.state.binding_divisors = keyed_binding_divisors;
+            }
             current_pipeline->MarkUsed(frame_count);
             return BuiltPipeline(current_pipeline);
         }
@@ -939,7 +950,21 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         state_watch.Store(*maxwell3d, dynamic_features);
     }
     key_pipeline = nullptr;
-    if (dynamic_vertex_input) {
+    if (!dynamic_vertex_input) {
+        // As the types below: registers the vertex program doesn't read would split its pipelines.
+        // Refresh only rewrites them when the vertex input changes, so the key keeps a masked copy.
+        static_vertex_attributes = graphics_key.state.attributes;
+        static_binding_divisors = graphics_key.state.binding_divisors;
+        std::array<u64, Maxwell::MaxShaderProgram> attribute_masks{};
+        for (size_t stage = 0; stage < Maxwell::MaxShaderProgram; ++stage) {
+            if (graphics_key.unique_hashes[stage] != 0) {
+                attribute_masks[stage] = shader_infos[stage]->vertex_attribute_mask;
+            }
+        }
+        VideoCommon::MaskStaticVertexInput(
+            graphics_key.state.attributes, graphics_key.state.binding_divisors,
+            VideoCommon::KeyedStaticAttributes(graphics_key.unique_hashes, attribute_masks));
+    } else {
         // Refresh only rewrites the types when the vertex input changes, so the masked copy in the
         // key must not carry over to the next program. Types of attributes the program doesn't
         // read would split its pipelines by whatever the game left in those registers (Ocarina

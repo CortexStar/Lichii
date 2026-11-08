@@ -221,6 +221,10 @@ private:
 
     GraphicsPipelineCacheKey graphics_key{};
     u64 vertex_attribute_types{}; ///< graphics_key's attribute types before the program's mask
+    /// Static vertex input: graphics_key's attributes and divisors before the program's mask.
+    std::array<FixedPipelineState::VertexAttribute, Maxwell::NumVertexAttributes>
+        static_vertex_attributes{};
+    std::array<u32, Maxwell::NumVertexArrays> static_binding_divisors{};
     GraphicsPipeline* current_pipeline{};
     /// The pipeline graphics_key was last resolved to, and what its state
     /// was refreshed from. While both stand, a draw reuses it without a refresh or lookup.
