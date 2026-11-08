@@ -1160,20 +1160,32 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                 capture_bytes += env.MemorySize();
             }
             if (background_pipelines.Add(
-                    key, capture_bytes, [this, key, envs = std::move(envs)]() mutable {
-                        ShaderPools pools;
+                    key, capture_bytes,
+                    [this, key, offset = envs.front().FileOffset(), count = envs.size(),
+                     filename = pipeline_cache_filename] {
+                        // Keep only an offset while queued. Cached environments are immutable;
+                        // demand and background translation use the same captured inputs.
+                        std::ifstream input{filename, std::ios::binary};
+                        input.exceptions(std::ifstream::failbit | std::ifstream::badbit);
+                        input.seekg(offset);
+                        std::vector<FileEnvironment> captured(count);
                         boost::container::static_vector<Shader::Environment*,
                                                         Maxwell::MaxShaderProgram>
                             env_ptrs;
-                        for (auto& env : envs) {
+                        for (auto& env : captured) {
+                            env.Deserialize(input);
                             env_ptrs.push_back(&env);
                         }
-                        auto pipeline =
-                            CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs), nullptr, false);
-                        if (pipeline && pipeline->Failed()) {
+                        GraphicsPipelineCacheKey captured_key;
+                        input.read(reinterpret_cast<char*>(&captured_key), sizeof(captured_key));
+                        if (captured_key != key) {
+                            LOG_WARNING(Render_Vulkan, "Cached pipeline changed before prebuild");
                             return std::unique_ptr<GraphicsPipeline>{};
                         }
-                        return pipeline;
+                        ShaderPools pools;
+                        // Publish metadata immediately; the normal pipeline workers compile the
+                        // driver pipeline, and ordered draw commands wait for that completion.
+                        return CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs), nullptr, true);
                     })) {
                 ++deferred_pipelines;
             }
@@ -1213,7 +1225,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     if (skipped_pipelines != 0) {
         LOG_INFO(
             Render_Vulkan,
-            "{} cached graphics pipelines skipped at boot, {} admitted for background prebuild",
+            "{} cached graphics pipelines skipped at boot, {} indexed for background prebuild",
             skipped_pipelines, deferred_pipelines);
     }
 
@@ -1911,6 +1923,9 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     if (is_new) {
         ReportNewPipelineKey(graphics_key);
         pipeline = background_pipelines.Take(graphics_key);
+        if (pipeline && pipeline->Failed()) {
+            pipeline.reset();
+        }
         if (!pipeline) {
             pipeline = CreateGraphicsPipeline();
         }
@@ -2251,7 +2266,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     ShaderPools& pools, const GraphicsPipelineCacheKey& key,
     std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
     bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools,
-    std::unique_ptr<EmissionBudget::Reservation> reservation, bool libraries_only) try {
+    std::unique_ptr<EmissionBudget::Reservation> reservation, bool libraries_only,
+    bool account_runtime_emission) try {
     auto hash = key.Hash();
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
     size_t env_index{0};
@@ -2598,7 +2614,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             modules[stage_index] = EmitShaderModule(
                 device, profile, runtime_info, program, binding, key.unique_hashes[index],
                 stage_index, {}, use_libraries ? &spirv_hashes[stage_index] : nullptr);
-            if (build_in_parallel) {
+            if (account_runtime_emission) {
                 AddRuntimeSpirvTime(0, begin);
             }
         }
@@ -2687,7 +2703,7 @@ namespace {
 // Pipelines built on the GPU thread at run time (shader translation, and the SPIR-V unless a worker
 // emits it; the driver compile is on workers): the first 400 over 2 ms and every one over 100 ms
 // are logged, and the totals every 10 s, to tell how much of the stutter on new content is
-// translation.
+// translation. Cached prebuild adoption is outside these runtime-creation totals.
 void ReportRuntimePipeline(const char* kind, std::chrono::steady_clock::time_point begin,
                            const std::string& shaders) {
     static std::chrono::steady_clock::duration total{};
@@ -2765,7 +2781,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
     }
     ShaderPools& pools = emit_pools ? *emit_pools : main_pools;
     auto pipeline{CreateGraphicsPipeline(pools, graphics_key, environments.Span(), nullptr, true,
-                                         std::move(emit_pools), std::move(reservation))};
+                                         std::move(emit_pools), std::move(reservation), false, true)};
     if (!pipeline || pipeline_cache_filename.empty()) {
         return pipeline;
     }

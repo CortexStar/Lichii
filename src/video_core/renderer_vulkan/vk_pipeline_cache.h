@@ -181,7 +181,7 @@ private:
         std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
         bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools = nullptr,
         std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr,
-        bool libraries_only = false);
+        bool libraries_only = false, bool account_runtime_emission = false);
 
     [[nodiscard]] bool StaleNullPointerSlot(const ComputePipelineCacheEntry& entry) const;
 

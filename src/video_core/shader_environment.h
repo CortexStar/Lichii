@@ -250,6 +250,10 @@ public:
 
     void Deserialize(std::ifstream& file);
 
+    std::streamoff FileOffset() const {
+        return file_offset;
+    }
+
     [[nodiscard]] size_t MemorySize() const;
 
     [[nodiscard]] u64 ReadInstruction(u32 address) override;
@@ -300,6 +304,7 @@ public:
     void Dump(u64 pipeline_hash, u64 shader_hash) override;
 
 private:
+    std::streamoff file_offset{};
     std::vector<u64> code;
     ::Common::unordered_map<u32, Shader::TextureType> texture_types;
     ::Common::unordered_map<u32, Shader::TexturePixelFormat> texture_pixel_formats;
