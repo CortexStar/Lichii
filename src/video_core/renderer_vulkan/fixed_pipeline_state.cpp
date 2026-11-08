@@ -274,16 +274,31 @@ void FixedPipelineState::RefreshBlending(Tegra::Engines::Maxwell3D& maxwell3d) {
     const Maxwell& regs = maxwell3d.regs;
     maxwell3d.dirty.flags[Dirty::Blending] = false;
     for (size_t index = 0; index < attachments.size(); ++index) {
-        attachments[index].Refresh(regs, index);
-        auto& attachment = attachments[index];
-        if (color_write_enable_dynamic && attachment.mask_r == 0 && attachment.mask_g == 0 &&
-            attachment.mask_b == 0 && attachment.mask_a == 0) {
-            attachment.mask_r.Assign(1);
-            attachment.mask_g.Assign(1);
-            attachment.mask_b.Assign(1);
-            attachment.mask_a.Assign(1);
+        attachments[index] = BlendingFor(regs, index);
+    }
+}
+
+FixedPipelineState::BlendingAttachment FixedPipelineState::BlendingFor(
+    const Maxwell& regs, size_t index) const noexcept {
+    BlendingAttachment attachment;
+    attachment.Refresh(regs, index);
+    if (color_write_enable_dynamic && attachment.mask_r == 0 && attachment.mask_g == 0 &&
+        attachment.mask_b == 0 && attachment.mask_a == 0) {
+        attachment.mask_r.Assign(1);
+        attachment.mask_g.Assign(1);
+        attachment.mask_b.Assign(1);
+        attachment.mask_a.Assign(1);
+    }
+    return attachment;
+}
+
+bool FixedPipelineState::BlendingMatches(const Maxwell& regs) const noexcept {
+    for (size_t index = 0; index < attachments.size(); ++index) {
+        if (BlendingFor(regs, index).raw != attachments[index].raw) {
+            return false;
         }
     }
+    return true;
 }
 
 u64 FixedPipelineState::DynamicAttributeTypes(const Maxwell& regs) noexcept {
@@ -820,13 +835,21 @@ bool PipelineStateWatch::StateUnchanged(Maxwell3D& maxwell3d, const FixedPipelin
         flag_values_same = true;
     }
     // Without dynamic blend state Refresh rebuilds the blending on every draw, Dirty::Blending
-    // or not (a native command path may write a blend register without it): patch it always.
+    // or not (a native command path may write a blend register without it). Rebuild it here and
+    // compare: only blending that differs from the key's needs the patch (and a pipeline search),
+    // so an unchanged one keeps the same-pipeline return.
     if (blending_gated) {
-        if (patch == nullptr) {
-            Note(Stat::PipeMissBlending);
-            return false;
+        const bool blending_same = state.BlendingMatches(maxwell3d.regs);
+        if (blending_same) {
+            // As RefreshBlending would leave it.
+            flags[Dirty::Blending] = false;
+        } else {
+            if (patch == nullptr) {
+                Note(Stat::PipeMissBlending);
+                return false;
+            }
+            patch->blending = true;
         }
-        patch->blending = true;
     }
     if (flags[Dirty::VertexInput]) {
         if (!dynamic_vertex_input) {

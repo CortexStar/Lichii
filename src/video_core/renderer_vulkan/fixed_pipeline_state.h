@@ -268,6 +268,12 @@ struct FixedPipelineState {
     /// attachments, from the blend and color mask registers. Clears the flag.
     void RefreshBlending(Tegra::Engines::Maxwell3D& maxwell3d);
 
+    /// Whether RefreshBlending would leave the attachments as they are.
+    [[nodiscard]] bool BlendingMatches(const Maxwell& regs) const noexcept;
+
+    /// Attachment `index` as RefreshBlending builds it.
+    [[nodiscard]] BlendingAttachment BlendingFor(const Maxwell& regs, size_t index) const noexcept;
+
     size_t Hash() const noexcept;
 
     bool operator==(const FixedPipelineState& rhs) const noexcept;
@@ -315,7 +321,7 @@ public:
     /// The parts of the key a Refresh would change that StateUnchanged left to ApplyPatch
     /// (EDEN_NX2_PIPE_PATCH).
     struct Patch {
-        bool blending{};          ///< Dirty::Blending raised (no dynamic blend state)
+        bool blending{};          ///< blending differs from the key's (no dynamic blend state)
         bool vertex_input{};      ///< dynamic vertex input: the attribute types differ
         u64 attribute_types{};    ///< what Refresh would compute for them
 
@@ -329,8 +335,9 @@ public:
     /// parts Refresh redoes under a raised VertexInput (dynamic) or ViewportSwizzles flag equal
     /// to what it would compute. Clears ViewportSwizzles then, as Refresh would. A raised flag
     /// passes when every watched register holds its value at the last Store again
-    /// (EDEN_NX2_PIPE_SKIP_VALUES); the flag is cleared then.
-    /// With `patch`: a raised Blending flag and changed dynamic attribute types don't fail it but
+    /// (EDEN_NX2_PIPE_SKIP_VALUES); the flag is cleared then. Without dynamic blend state the
+    /// blending Refresh would build is compared with the key's (and Blending cleared when equal).
+    /// With `patch`: blending that differs and changed dynamic attribute types don't fail it but
     /// are noted there, for ApplyPatch to redo alone; everything else is checked as without.
     [[nodiscard]] bool StateUnchanged(Tegra::Engines::Maxwell3D& maxwell3d,
                                       const FixedPipelineState& state,
