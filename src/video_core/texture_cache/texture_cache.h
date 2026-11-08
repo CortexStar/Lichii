@@ -1766,6 +1766,220 @@ void TextureCache<P>::ClearPoolResidency(ImageId image_id) {
 }
 
 template <class P>
+u32 TextureCache<P>::MirrorMeta(ImageViewId view_id) {
+    namespace Meta = PoolMirror::Meta;
+    if (!view_id) {
+        return Meta::NULL_ENTRY;
+    }
+    ImageView& image_view = slot_image_views[view_id];
+    u64 class_key = 0;
+    u32 meta = 0;
+    if constexpr (requires {
+                      image_view.SamplerClassKey();
+                      image_view.PoolMetaBits();
+                  }) {
+        class_key = image_view.SamplerClassKey();
+        meta = image_view.PoolMetaBits();
+    }
+    meta |= sampler_classes.Find(class_key);
+    if (IsRescaling(image_view)) {
+        meta |= Meta::RESCALED;
+    }
+    return meta;
+}
+
+template <class P>
+bool TextureCache<P>::ResolveForDraw(std::span<const u32> raw_handles, bool via_header_index,
+                                     bool compute, std::span<ResolvedHandle> out) {
+    auto& image_table =
+        compute ? channel_state->compute_image_table : channel_state->graphics_image_table;
+    auto& sampler_table =
+        compute ? channel_state->compute_sampler_table : channel_state->graphics_sampler_table;
+    PoolMirrorState& mirror =
+        compute ? channel_state->compute_mirror : channel_state->graphics_mirror;
+    const bool native = gpu_memory->UsesNativeTiling();
+    for (size_t i = 0; i < raw_handles.size(); ++i) {
+        const auto [raw_tic, tsc] = Tegra::Texture::TexturePair(raw_handles[i], via_header_index);
+        const u32 tic =
+            Tegra::Texture::TextureHeaderIndex(raw_tic, image_table.current_limit, native);
+        const ImageViewId view_id = VisitImageView(raw_tic, compute);
+        const SamplerId sampler_id = GetSamplerId(tsc, compute);
+        u32 meta = PoolMirror::Meta::NULL_ENTRY;
+        if (tic <= image_table.current_limit) {
+            // What the heap will hold once the pending updates are taken.
+            meta = tic < mirror.meta.size() && image_table.mirrored_ids[tic] == view_id
+                       ? mirror.meta[tic]
+                       : MirrorMeta(view_id);
+        }
+        out[i] = {tic, tsc, meta, ~0U, {~0U, ~0U}};
+        if (tic <= image_table.current_limit) {
+            // The layout after the pending reset, if any.
+            out[i].image_slot = tic;
+        }
+        if (!view_id || tsc > sampler_table.current_limit) {
+            continue;
+        }
+        const u32 sampler_class = meta & PoolMirror::Meta::CLASS_MASK;
+        const PoolMirror::Layout layout{.tic_stride = image_table.current_limit + 1,
+                                        .tsc_stride = sampler_table.current_limit + 1,
+                                        .num_classes = sampler_classes.Size()};
+        for (u32 depth_use = 0; depth_use < 2; ++depth_use) {
+            out[i].sampler_slots[depth_use] =
+                layout.SamplerSlot(sampler_class, depth_use != 0, tsc);
+            const size_t variant = size_t{sampler_class} * 2 + depth_use;
+            if (variant >= mirror.samplers.size() || tsc >= mirror.samplers[variant].size() ||
+                mirror.samplers[variant][tsc] != sampler_id) {
+                mirror.wanted_samplers.push_back({sampler_class, depth_use, tsc});
+            }
+        }
+    }
+    return image_table.HasMirrorUpdates() || sampler_table.HasMirrorUpdates() ||
+           !mirror.wanted_samplers.empty() || mirror.layout.num_classes != sampler_classes.Size();
+}
+
+template <class P>
+template <typename Func>
+void TextureCache<P>::TakeMirrorUpdates(bool compute, u64 draw_seq, Func&& func) {
+    using namespace PoolMirror;
+    auto& image_table =
+        compute ? channel_state->compute_image_table : channel_state->graphics_image_table;
+    auto& sampler_table =
+        compute ? channel_state->compute_sampler_table : channel_state->graphics_sampler_table;
+    PoolMirrorState& mirror =
+        compute ? channel_state->compute_mirror : channel_state->graphics_mirror;
+    u64 tick = 0;
+    if constexpr (requires { runtime.CurrentTick(); }) {
+        tick = runtime.CurrentTick();
+    }
+    const auto is_free = [this](u64 value) {
+        if constexpr (requires { runtime.IsFree(value); }) {
+            return runtime.IsFree(value);
+        } else {
+            return true;
+        }
+    };
+    const auto counted = [&](const MirrorUpdate& update) {
+        ++mirror.version;
+        func(update);
+    };
+    const auto emit = [&](UpdateKind kind, Heap heap) {
+        MirrorUpdate update{};
+        update.kind = kind;
+        update.heap = heap;
+        counted(update);
+    };
+    if (image_table.TakeMirrorReset() || mirror.layout.tic_stride == 0) {
+        mirror.layout.tic_stride = image_table.current_limit + 1;
+        mirror.image_pages.Reset(tick);
+        mirror.meta_pages.Reset(tick);
+        mirror.meta.assign(mirror.layout.tic_stride, Meta::NULL_ENTRY);
+        emit(UpdateKind::Reset, Heap::Image);
+        emit(UpdateKind::Reset, Heap::Meta);
+    }
+    if (sampler_table.TakeMirrorReset() || mirror.layout.tsc_stride == 0) {
+        mirror.layout.tsc_stride = sampler_table.current_limit + 1;
+        mirror.sampler_pages.Reset(tick);
+        mirror.samplers.assign(size_t{mirror.layout.num_classes} * 2,
+                               std::vector<SamplerId>(mirror.layout.tsc_stride, NULL_SAMPLER_ID));
+        emit(UpdateKind::Reset, Heap::Sampler);
+    }
+    image_table.TakeMirrorUpdates([&](u32 tic, ImageViewId view_id) {
+        if (tic >= mirror.layout.tic_stride) {
+            return;
+        }
+        for (u32 type = 0; type < NUM_IMAGE_TYPES; ++type) {
+            const u32 slot = mirror.layout.ImageSlot(type, tic);
+            const auto target =
+                mirror.image_pages.Write(Layout::ImagePage(slot), draw_seq, tick, is_free);
+            MirrorUpdate update{};
+            update.kind = UpdateKind::Image;
+            update.heap = Heap::Image;
+            update.type = static_cast<u8>(type);
+            update.index = tic;
+            update.slot = slot;
+            update.physical = target.physical;
+            update.copy_from = target.copy_from;
+            update.view = view_id;
+            counted(update);
+        }
+        const u32 meta = MirrorMeta(view_id);
+        if (meta == mirror.meta[tic]) {
+            return;
+        }
+        mirror.meta[tic] = meta;
+        const auto target =
+            mirror.meta_pages.Write(tic / META_WORDS_PER_PAGE, draw_seq, tick, is_free);
+        MirrorUpdate update{};
+        update.kind = UpdateKind::Meta;
+        update.heap = Heap::Meta;
+        update.index = tic;
+        update.slot = tic;
+        update.physical = target.physical;
+        update.copy_from = target.copy_from;
+        update.view = view_id;
+        update.meta = meta;
+        counted(update);
+    });
+    if (mirror.layout.num_classes != sampler_classes.Size()) {
+        // Classes are appended: the region grows, existing slots stay where they are.
+        mirror.layout.num_classes = sampler_classes.Size();
+        mirror.samplers.resize(size_t{mirror.layout.num_classes} * 2,
+                               std::vector<SamplerId>(mirror.layout.tsc_stride, NULL_SAMPLER_ID));
+        emit(UpdateKind::Layout, Heap::Sampler);
+    }
+    const auto write_sampler = [&](u32 sampler_class, u32 depth_use, u32 tsc, SamplerId id) {
+        mirror.samplers[size_t{sampler_class} * 2 + depth_use][tsc] = id;
+        const u32 slot = mirror.layout.SamplerSlot(sampler_class, depth_use != 0, tsc);
+        const auto target =
+            mirror.sampler_pages.Write(Layout::SamplerPage(slot), draw_seq, tick, is_free);
+        MirrorUpdate update{};
+        update.kind = UpdateKind::Sampler;
+        update.heap = Heap::Sampler;
+        update.depth_use = depth_use != 0;
+        update.index = tsc;
+        update.slot = slot;
+        update.physical = target.physical;
+        update.copy_from = target.copy_from;
+        update.sampler = id;
+        update.class_key = sampler_classes.Key(sampler_class);
+        counted(update);
+    };
+    // A TSC entry that changed: every slot written for it takes the new sampler.
+    sampler_table.TakeMirrorUpdates([&](u32 tsc, SamplerId id) {
+        if (tsc >= mirror.layout.tsc_stride) {
+            return;
+        }
+        for (size_t variant = 0; variant < mirror.samplers.size(); ++variant) {
+            const SamplerId held = mirror.samplers[variant][tsc];
+            if (held != NULL_SAMPLER_ID && held != id) {
+                write_sampler(static_cast<u32>(variant / 2), static_cast<u32>(variant % 2), tsc,
+                              id);
+            }
+        }
+    });
+    for (const auto& [sampler_class, depth_use, tsc] : mirror.wanted_samplers) {
+        if (tsc >= mirror.layout.tsc_stride || sampler_class >= mirror.layout.num_classes) {
+            continue;
+        }
+        const SamplerId id = sampler_table.bound_ids[tsc];
+        if (mirror.samplers[size_t{sampler_class} * 2 + depth_use][tsc] != id) {
+            write_sampler(sampler_class, depth_use, tsc, id);
+        }
+    }
+    mirror.wanted_samplers.clear();
+    // Tables last: the pages they point to are written above.
+    if (mirror.image_pages.TakeTableChanged()) {
+        emit(UpdateKind::Table, Heap::Image);
+    }
+    if (mirror.sampler_pages.TakeTableChanged()) {
+        emit(UpdateKind::Table, Heap::Sampler);
+    }
+    if (mirror.meta_pages.TakeTableChanged()) {
+        emit(UpdateKind::Table, Heap::Meta);
+    }
+}
+
+template <class P>
 void TextureCache<P>::ForgetPoolRefs(ImageId image_id) {
     const auto it = image_pool_refs.find(image_id);
     if (it == image_pool_refs.end()) {

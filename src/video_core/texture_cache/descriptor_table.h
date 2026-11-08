@@ -172,6 +172,11 @@ public:
         }
     }
 
+    /// Whether TakeMirrorReset or TakeMirrorUpdates has anything to hand over.
+    [[nodiscard]] bool HasMirrorUpdates() const noexcept {
+        return mirror_reset || !mirror_queue.empty();
+    }
+
     /// Whether the heap mirroring this pool has to start over (the table was rebound). Once.
     [[nodiscard]] bool TakeMirrorReset() noexcept {
         return std::exchange(mirror_reset, false);
