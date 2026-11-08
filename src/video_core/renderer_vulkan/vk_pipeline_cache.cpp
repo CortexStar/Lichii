@@ -1746,7 +1746,10 @@ void PipelineCache::EvictUnusedPipelines() {
     // an area rebuilt hundreds at once. Its pipelines are kept up to a memory budget. Past it, the
     // least recently used are evicted, but still only ones unused for EvictAfterFrames: evicting
     // pipelines used moments before lost the device on AMD.
-    const bool switch2 = Settings::CurrentProgramIsSwitch2();
+    // EXPERIMENT, A/B only, never merges: EDEN_NX2_EXP_EVICT_9000=1 evicts Switch 2 pipelines by
+    // the 9000-frame rule alone, as before the budget.
+    static const bool frames_only = std::getenv("EDEN_NX2_EXP_EVICT_9000") != nullptr;
+    const bool switch2 = Settings::CurrentProgramIsSwitch2() && !frames_only;
     size_t max_evicted = std::numeric_limits<size_t>::max();
     if (switch2) {
         const size_t budget = Switch2PipelineBudget();

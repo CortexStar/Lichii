@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -73,6 +74,13 @@ inline std::atomic<u32> builders_raised{};
 /// call is made under the build's mutex; the caller sets the priorities the calls ask for.
 class BuilderPriority {
 public:
+    // EXPERIMENT, A/B only, never merges: EDEN_NX2_EXP_NO_BUILDER_BOOST=1 leaves an awaited
+    // builder at ThreadPriority::Low.
+    static bool Enabled() {
+        static const bool enabled = std::getenv("EDEN_NX2_EXP_NO_BUILDER_BOOST") == nullptr;
+        return enabled;
+    }
+
     static constexpr Common::ThreadPriority RaisedPriority = Common::ThreadPriority::High;
 
     /// The thread that claimed the build, before it runs it.
@@ -104,7 +112,7 @@ public:
 
 private:
     bool Raise() {
-        if (!low_priority || !awaited || raised || finished) {
+        if (!low_priority || !awaited || raised || finished || !Enabled()) {
             return false;
         }
         raised = true;

@@ -8,6 +8,7 @@
 #include <array>
 #include <bit>
 #include <climits>
+#include <cstdlib>
 
 #include <boost/container/static_vector.hpp>
 
@@ -977,7 +978,10 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
     // with many global accesses takes NVIDIA's compiler seconds (Ocarina of Time: up to 7.6 s
     // each), so compute keeps them DontInline. Other stages inline them: with DontInline, NVIDIA
     // 580.x let a second helper call clobber the first call's live result in a mesh shader.
-    const spv::FunctionControlMask function_control = stage == Stage::Compute
+    // EXPERIMENT, A/B only, never merges: EDEN_NX2_EXP_GLOBAL_INLINE=1 keeps them inlinable in
+    // compute too.
+    static const bool inline_all = std::getenv("EDEN_NX2_EXP_GLOBAL_INLINE") != nullptr;
+    const spv::FunctionControlMask function_control = stage == Stage::Compute && !inline_all
                                                           ? spv::FunctionControlMask::DontInline
                                                           : spv::FunctionControlMask::MaskNone;
     const Id zero{u32_zero_value};

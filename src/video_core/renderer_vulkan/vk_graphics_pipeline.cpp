@@ -285,6 +285,13 @@ ConfigureFuncPtr ConfigureFunc(const std::array<bool, NUM_STAGES>& stages,
 }
 
 std::atomic<std::chrono::nanoseconds::rep> hold_time_ns{};
+
+// EXPERIMENT, A/B only, never merges: EDEN_NX2_EXP_NO_CLAIM=1 makes a held draw wait for a
+// worker-only build in the worker queue again instead of building it.
+bool ClaimsWorkerOnlyBuilds() {
+    static const bool claims = std::getenv("EDEN_NX2_EXP_NO_CLAIM") == nullptr;
+    return claims;
+}
 } // Anonymous namespace
 
 std::chrono::nanoseconds GraphicsPipeline::TakeHoldTime() noexcept {
@@ -883,7 +890,9 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         // triangles the draw then reads; both use the descriptor set committed here.
         scheduler.RequestOutsideRenderPassOperationContext();
         if (!IsBuilt()) {
-            scheduler.Record([this](vk::CommandBuffer) { build->Wait(true); });
+            scheduler.Record([this](vk::CommandBuffer) {
+                build->Wait(!worker_only_build || ClaimsWorkerOnlyBuilds());
+            });
         }
         scheduler.Record([this, descriptor_data, groups = mesh_groups, capacity = mesh_capacity,
                           task_buffers = mesh_task_buffers,
@@ -1018,7 +1027,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             const auto begin = std::chrono::steady_clock::now();
             // Claim the build here, worker-only builds included: the worker queue is FIFO, so a
             // held draw otherwise waits behind every pipeline queued before its own.
-            build->Wait(true);
+            build->Wait(!worker_only_build || ClaimsWorkerOnlyBuilds());
             hold_time_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                        std::chrono::steady_clock::now() - begin)
                                        .count(),
