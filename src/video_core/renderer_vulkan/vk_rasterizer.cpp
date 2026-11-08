@@ -2099,7 +2099,7 @@ void RasterizerVulkan::WaitForPendingDownloads(DAddr addr, u64 size) {
             }
         }
         // The fence's commands may wait in a deferred submission only the split's back makes.
-        if (attempt == 0 && VideoCommon::GpuSplit::Get().Active()) {
+        if (attempt == 0 && VideoCommon::GpuSplit::Get().BackRunning()) {
             VideoCommon::GpuSplit::Get().RequestIdleHook();
         }
         buffer_cache.WaitForLandedDownloads(seen, std::chrono::milliseconds{1});
