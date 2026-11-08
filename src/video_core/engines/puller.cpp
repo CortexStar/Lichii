@@ -82,6 +82,9 @@ bool AcquireMetQueued(DmaPusher& dma_pusher, GPUVAddr address, const Met& met) {
         !met(word)) {
         return false;
     }
+    // A drain would have run the work queued before the acquire: GPU-written command lists
+    // fetched after it wait for that work (WaitForSync) instead.
+    split.NoteSync();
     if (VideoCommon::Nx2Perf::Verify()) {
         DrainBack();
         if (const u32 drained = ReadSemaphoreWord(dma_pusher, address); !met(drained)) {

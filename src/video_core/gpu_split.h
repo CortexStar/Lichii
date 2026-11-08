@@ -256,8 +256,8 @@ public:
     }
 
     /// A host-level wait was just sent (a syncpoint acquire, a host WFI, a GP entry with its sync
-    /// bit; semaphore acquires drain): the guest's GPU work before it is complete before the
-    /// commands after it are fetched.
+    /// bit, a semaphore acquire met without a drain; other acquires drain): the guest's GPU work
+    /// before it is complete before the commands after it are fetched.
     void NoteSync() {
         last_sync_position = write_position;
     }
