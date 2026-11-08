@@ -2,12 +2,16 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <barrier>
+#include <chrono>
 #include <cstring>
 #include <deque>
 #include <exception>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <span>
 #include <thread>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
@@ -1548,4 +1552,282 @@ TEST_CASE("Read download check finds early downloaded bytes the GPU changed unre
     const u64 compared = Access::ReadChecks(*f.cache).compared;
     REQUIRE(ReadWord(f, 0x20010).preemtive);
     REQUIRE(Access::ReadChecks(*f.cache).compared == compared);
+}
+
+namespace {
+/// Last frame's values of 16 bytes the guest CPU writes each frame (the GPU's copy), and this
+/// frame's: three bytes of each word differ, the last word's top two don't.
+constexpr std::array<u8, 16> OldGuestValue{0x68, 0x34, 0x12, 0x3f, 0x8d, 0x11, 0x47, 0xbe,
+                                           0x20, 0x55, 0x20, 0x41, 0x73, 0x0c, 0x40, 0x3f};
+constexpr std::array<u8, 16> NewGuestValue{0xcd, 0x9a, 0x15, 0x3f, 0x95, 0x02, 0x49, 0xbe,
+                                           0x4b, 0x13, 0x22, 0x41, 0x54, 0xe6, 0x40, 0x3f};
+
+/// Guest CPU writes into GPU-written memory, as Core::Memory's HandleRasterizerWrite makes them
+/// on any core: collected (GPUDirtyMemoryManager::Collect, in 64-byte blocks), then stored once
+/// no download landing under them looked at the collected writes before.
+class GuestCpuWrites {
+public:
+    explicit GuestCpuWrites(Cache& cache_) : cache{cache_} {
+        cache.SetPendingCpuWrites([this](const std::function<void(DAddr, size_t)>& callback) {
+            {
+                std::scoped_lock lock{mutex};
+                for (const auto& [address, size] : collected) {
+                    callback(address, size);
+                }
+            }
+            if (on_look) {
+                on_look(++looks);
+            }
+        });
+    }
+    ~GuestCpuWrites() {
+        cache.SetPendingCpuWrites({});
+    }
+
+    void Write(u8* guest, DAddr address, std::span<const u8> value) {
+        const DAddr first = Common::AlignDown(address, 64);
+        {
+            std::scoped_lock lock{mutex};
+            collected.emplace_back(first, Common::AlignUp(address + value.size(), 64) - first);
+        }
+        VideoCore::DownloadLanding::Await(address, value.size());
+        std::memcpy(guest, value.data(), value.size());
+    }
+
+    /// GPU::InvalidateGPUCache: the collected writes are applied.
+    void Apply() {
+        std::vector<std::pair<DAddr, u64>> applied;
+        {
+            std::scoped_lock lock{mutex};
+            applied.swap(collected);
+        }
+        cache.ClaimCpuWrites(applied);
+    }
+
+    /// Called after the buffer cache's n-th look at the collected writes.
+    std::function<void(int)> on_look;
+    int looks{};
+
+private:
+    Cache& cache;
+    std::mutex mutex;
+    std::vector<std::pair<DAddr, u64>> collected;
+};
+
+/// Another core writes NewGuestValue at `address` right after the buffer cache's `at`-th look at
+/// the collected writes: the look returns once the write is stored or waits for a landing.
+class RacingGuestWrite {
+public:
+    RacingGuestWrite(Fixture& f, GuestCpuWrites& writes_, DAddr address_, int at)
+        : writes{writes_}, guest{f.bytes + (address_ - 0x10000)}, address{address_} {
+        writes.looks = 0;
+        writes.on_look = [this, at](int look) {
+            if (look != at) {
+                return;
+            }
+            const u64 waits = VideoCore::DownloadLanding::Waits();
+            go.store(true);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+            while (!stored.load() && VideoCore::DownloadLanding::Waits() == waits &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::yield();
+            }
+        };
+        thread = std::thread([this] {
+            while (!go.load() && !quit.load()) {
+                std::this_thread::yield();
+            }
+            if (go.load()) {
+                writes.Write(guest, address, NewGuestValue);
+                stored.store(true);
+            }
+        });
+    }
+    ~RacingGuestWrite() {
+        quit.store(true);
+        thread.join();
+        writes.on_look = {};
+    }
+
+    /// Whether the write was stored, waiting up to 5 s for it.
+    bool Stored() {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        while (go.load() && !stored.load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::yield();
+        }
+        return stored.load();
+    }
+
+private:
+    GuestCpuWrites& writes;
+    u8* guest;
+    DAddr address;
+    std::atomic<bool> go{};
+    std::atomic<bool> stored{};
+    std::atomic<bool> quit{};
+    std::thread thread;
+};
+
+/// The buffer at 0x20000, its first page written by a dispatch (the whole storage binding counts)
+/// and read back, with OldGuestValue at 0x20a20 in the GPU's copy and in guest memory.
+VideoCommon::BufferId GuestWrittenPage(Fixture& f) {
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    auto& buffer = Access::Get(*f.cache, id);
+    std::ranges::fill(buffer.bytes, 0x12);
+    std::ranges::copy(OldGuestValue, buffer.bytes.begin() + 0xa20);
+    std::ranges::copy(OldGuestValue, f.bytes + 0x10a20);
+    Access::MarkWritten(*f.cache, id, 0x20000, 0x1000);
+    return id;
+}
+
+bool GuestHolds(const Fixture& f, DAddr address, std::span<const u8> value) {
+    return std::equal(value.begin(), value.end(), f.bytes + (address - 0x10000));
+}
+} // namespace
+
+TEST_CASE("A guest write stored while a read download lands keeps its bytes", "[buffer_ports]") {
+    Fixture f;
+    GuestWrittenPage(f);
+    Access::CheckEveryRead(*f.cache);
+    GuestCpuWrites writes{*f.cache};
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    const u64 waits = VideoCore::DownloadLanding::Waits();
+    {
+        // Collected right after the landing looked at the collected writes.
+        RacingGuestWrite race{f, writes, 0x20a20, 1};
+        f.cache->FinishReadDownloads(0x20000, 0x1000);
+        REQUIRE(race.Stored());
+    }
+    REQUIRE(GuestHolds(f, 0x20a20, NewGuestValue));
+    REQUIRE(f.bytes[0x10a1f] == 0x12);
+    REQUIRE(f.bytes[0x10a30] == 0x12);
+    // It waited for the landing to end.
+    REQUIRE(VideoCore::DownloadLanding::Waits() > waits);
+    REQUIRE(Access::ReadChecks(*f.cache).checked == 1);
+    REQUIRE(Access::ReadChecks(*f.cache).mismatched == 0);
+}
+
+TEST_CASE("Read download check leaves out a guest write stored while it compares",
+          "[buffer_ports]") {
+    Fixture f;
+    GuestWrittenPage(f);
+    Access::CheckEveryRead(*f.cache);
+    GuestCpuWrites writes{*f.cache};
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    {
+        // The download is in guest memory: collected right after the check looked at the
+        // collected writes, before it reads guest memory.
+        RacingGuestWrite race{f, writes, 0x20a20, 2};
+        f.cache->FinishReadDownloads(0x20000, 0x1000);
+        REQUIRE(race.Stored());
+    }
+    REQUIRE(GuestHolds(f, 0x20a20, NewGuestValue));
+    REQUIRE(Access::ReadChecks(*f.cache).checked == 1);
+    REQUIRE(Access::ReadChecks(*f.cache).mismatched == 0);
+}
+
+TEST_CASE("An early download landed at a draw keeps a guest write stored meanwhile",
+          "[buffer_ports]") {
+    Fixture f;
+    const Nx2TitleScope nx2_title;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    auto& buffer = Access::Get(*f.cache, id);
+    Access::CheckEveryRead(*f.cache);
+    GuestCpuWrites writes{*f.cache};
+    for (u8 frame = 1; frame <= 2; ++frame) {
+        WriteByDispatch(f, id, 0x20000, 0x1000, frame);
+        ReadWord(f, 0x20010);
+    }
+    // The next write gets its early download. The host GPU runs it, and the GPU thread lands it
+    // at a draw while another core writes into the page.
+    WriteByDispatch(f, id, 0x20000, 0x1000, 3);
+    std::ranges::copy(OldGuestValue, buffer.bytes.begin() + 0xa20);
+    f.runtime.Complete(f.runtime.submitted_tick);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 1);
+    {
+        RacingGuestWrite race{f, writes, 0x20a20, 1};
+        for (u32 draw = 0; draw < 32; ++draw) {
+            f.cache->NoteWorkRecorded(false);
+        }
+        REQUIRE(Access::ReadDownloads(*f.cache) == 0);
+        REQUIRE(race.Stored());
+    }
+    REQUIRE(GuestHolds(f, 0x20a20, NewGuestValue));
+    REQUIRE(f.bytes[0x10a1f] == 3);
+    REQUIRE(f.bytes[0x10a30] == 3);
+    REQUIRE(Access::ReadChecks(*f.cache).mismatched == 0);
+}
+
+TEST_CASE("Synchronous downloads keep guest writes collected while they wait for the host GPU",
+          "[buffer_ports]") {
+    Fixture f;
+    const bool mapped = GENERATE(false, true);
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000, mapped);
+    std::ranges::fill(Access::Get(*f.cache, id).bytes, 0x12);
+    GuestCpuWrites writes{*f.cache};
+    // Collected and stored while the GPU thread waits for the host GPU's copies.
+    f.runtime.before_completion = [&] {
+        f.runtime.before_completion = {};
+        writes.Write(f.bytes + 0x10100, 0x20100, NewGuestValue);
+    };
+    Access::Dirty(*f.cache, 0x20000, 0x2000);
+    const std::array<std::pair<DAddr, u64>, 1> ranges{{{0x20000, 0x2000}}};
+    Access::Download(*f.cache, ranges);
+    REQUIRE(GuestHolds(f, 0x20100, NewGuestValue));
+    REQUIRE(f.bytes[0x100ff] == 0x12);
+    REQUIRE(f.bytes[0x10140] == 0x12);
+    // The same through DownloadMemory, one buffer at a time.
+    writes.Apply();
+    f.runtime.before_completion = [&] {
+        f.runtime.before_completion = {};
+        writes.Write(f.bytes + 0x10200, 0x20200, NewGuestValue);
+    };
+    Access::Dirty(*f.cache, 0x20000, 0x2000);
+    f.cache->DownloadMemory(0x20000, 0x2000);
+    REQUIRE(GuestHolds(f, 0x20200, NewGuestValue));
+    REQUIRE(f.bytes[0x101ff] == 0x12);
+    REQUIRE(f.bytes[0x10240] == 0x12);
+}
+
+TEST_CASE("Guest writes racing read downloads keep their bytes", "[buffer_ports]") {
+    Fixture f;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    auto& buffer = Access::Get(*f.cache, id);
+    Access::CheckEveryRead(*f.cache);
+    GuestCpuWrites writes{*f.cache};
+    u32 seed = 1234;
+    const auto next_delay = [&seed] {
+        seed = seed * 1103515245 + 12345;
+        return (seed >> 8) % 4000;
+    };
+    const auto spin = [](u32 iterations) {
+        for (volatile u32 i = 0; i < iterations; i = i + 1) {
+        }
+    };
+    int lost = 0;
+    for (int iteration = 0; iteration < 2000; ++iteration) {
+        // The guest's earlier writes are applied, then a dispatch writes the page: 16 of its bytes
+        // hold the GPU's value until the guest writes this round's from another core.
+        writes.Apply();
+        std::array<u8, 16> gpu_value;
+        gpu_value.fill(static_cast<u8>(iteration * 2 + 1));
+        std::array<u8, 16> cpu_value;
+        cpu_value.fill(static_cast<u8>(iteration * 2 + 2));
+        std::ranges::copy(gpu_value, buffer.bytes.begin() + 0xa20);
+        Access::MarkWritten(*f.cache, id, 0x20000, 0x1000);
+        f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+        const u32 writer_delay = next_delay();
+        const u32 reader_delay = next_delay();
+        std::thread writer{[&] {
+            spin(writer_delay);
+            writes.Write(f.bytes + 0x10a20, 0x20a20, cpu_value);
+        }};
+        spin(reader_delay);
+        f.cache->FinishReadDownloads(0x20000, 0x1000);
+        writer.join();
+        lost += GuestHolds(f, 0x20a20, cpu_value) ? 0 : 1;
+    }
+    REQUIRE(lost == 0);
+    REQUIRE(Access::ReadChecks(*f.cache).mismatched == 0);
+    REQUIRE(Access::ReadChecks(*f.cache).uncovered == 0);
 }
