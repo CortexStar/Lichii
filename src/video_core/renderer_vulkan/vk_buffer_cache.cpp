@@ -34,8 +34,8 @@
 
 namespace Vulkan {
 namespace {
-/// TEST (EDEN_NX2_GPU_COST): Buffer::MarkUsage notes page ticks, CanReorderUpload classifies.
-const bool g_trace_uploads = GpuCost::Enabled();
+/// TEST (EDEN_NX2_GPU_COST=2): Buffer::MarkUsage notes page ticks, CanReorderUpload classifies.
+const bool g_trace_uploads = GpuCost::TracesUploads();
 
 void HostReadBarrier(vk::CommandBuffer cmdbuf) {
     const VkMemoryBarrier barrier{

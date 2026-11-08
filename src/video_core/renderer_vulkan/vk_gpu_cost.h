@@ -28,6 +28,7 @@
 // This only reads: the commands, their order and their synchronization are unchanged. Logged
 // every 10 s over the frames sampled in it, per frame: "GPU cost" (totals by kind), "GPU cost
 // by site", and one "Render pass breaks" line for each of the lines that ended the most passes.
+// EDEN_NX2_GPU_COST=2 also logs "Uploads": where each upload's pages were last used.
 namespace Vulkan {
 
 class Device;
@@ -37,6 +38,10 @@ class GpuCost {
 public:
     /// Whether EDEN_NX2_GPU_COST is set.
     [[nodiscard]] static bool Enabled();
+
+    /// EDEN_NX2_GPU_COST=2: also classify the uploads that run in order (vk_buffer_cache.cpp).
+    /// Its page ticks cost the GPU thread several microseconds per bind of a large buffer.
+    [[nodiscard]] static bool TracesUploads();
 
     /// Null unless EDEN_NX2_GPU_COST is set, frames are sampled (EDEN_DKB_FRAME_TRACE's
     /// timestamp pools exist) and the query pool can be created.

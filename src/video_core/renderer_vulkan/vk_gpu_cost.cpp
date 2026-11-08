@@ -908,6 +908,11 @@ bool GpuCost::Enabled() {
     return value != nullptr && *value != '\0' && *value != '0';
 }
 
+bool GpuCost::TracesUploads() {
+    const char* const value = std::getenv("EDEN_NX2_GPU_COST");
+    return value != nullptr && std::atoi(value) >= 2;
+}
+
 std::unique_ptr<GpuCost> GpuCost::Create(const Device& device, u32 timestamp_bits,
                                          float timestamp_period, bool frames_sampled) {
     if (!Enabled()) {
