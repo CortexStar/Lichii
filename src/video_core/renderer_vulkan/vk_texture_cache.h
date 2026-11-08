@@ -518,6 +518,25 @@ public:
     /// once it ends.
     void MarkResolveShadowsUpToDate() const;
 
+    /// Dynamic rendering: the view of each render target slot (null for an unused one), up to
+    /// the last used slot.
+    [[nodiscard]] const std::array<VkImageView, NUM_RT>& ColorViews() const noexcept {
+        return color_views;
+    }
+
+    [[nodiscard]] u32 NumColorSlots() const noexcept {
+        return num_color_slots;
+    }
+
+    [[nodiscard]] VkImageView DepthStencilView() const noexcept {
+        return depth_stencil_view;
+    }
+
+    /// The render pass resolves into shadow images (tilers), which dynamic rendering doesn't.
+    [[nodiscard]] bool HasResolveShadows() const noexcept {
+        return num_resolve_shadows != 0;
+    }
+
 private:
     static constexpr size_t NUM_MEMOIZED_RENDER_PASS_VARIANTS = 8;
 
@@ -534,6 +553,9 @@ private:
     bool has_depth{};
     bool has_stencil{};
     bool is_rescaled{};
+    std::array<VkImageView, NUM_RT> color_views{};
+    u32 num_color_slots = 0;
+    VkImageView depth_stencil_view{};
     std::array<VkImage, 9> resolve_shadow_images{};
     u32 num_resolve_shadows = 0;
     TextureCacheRuntime* runtime_ptr{nullptr};

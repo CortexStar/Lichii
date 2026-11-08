@@ -148,9 +148,11 @@ public:
 
     /// Requests to begin a renderpass for draws that report their images with PrepareDrawImages.
     /// Earlier render passes are ordered before it only where their images meet.
-    void RequestDrawRenderpass(const Framebuffer* framebuffer,
+    /// @param dynamic_rendering The draws bind shader objects: a render pass instance begun with
+    ///                          vkCmdBeginRendering (VUID-vkCmdDraw-None-08876).
+    void RequestDrawRenderpass(const Framebuffer* framebuffer, bool dynamic_rendering = false,
                                std::source_location location = std::source_location::current()) {
-        RequestRenderpass(framebuffer, true, location);
+        RequestRenderpass(framebuffer, true, location, dynamic_rendering);
     }
 
     /**
@@ -532,6 +534,8 @@ private:
         bool needs_state_enable_refresh = false;
         u32 descriptor_buffer_chunk = 0;
         bool descriptor_buffer_bound = false;
+        /// The active instance was begun with vkCmdBeginRendering
+        bool dynamic_rendering = false;
     };
 
     struct DeferredClear {
@@ -548,11 +552,20 @@ private:
                              const VkClearValue* clear_values, u32 clear_value_count,
                              bool tracked);
 
+    /// Begins a dynamic rendering instance on the framebuffer's views; `clear` (or null) names
+    /// the attachments it clears.
+    void BeginRenderingImpl(const Framebuffer* framebuffer, const DeferredClear* clear,
+                            bool tracked);
+
+    /// The bookkeeping of a render pass instance beginning, both kinds.
+    void NoteRenderPassBegin(const Framebuffer* framebuffer, VkRenderPass renderpass, bool tracked,
+                             bool dynamic_rendering);
+
     /// If a deferred clear is pending.
-    void RealizeDeferredClear(bool tracked = true);
+    void RealizeDeferredClear(bool tracked = true, bool dynamic_rendering = false);
 
     void RequestRenderpass(const Framebuffer* framebuffer, bool tracked,
-                           std::source_location location);
+                           std::source_location location, bool dynamic_rendering = false);
 
     /// Records the barrier that orders the render passes ended so far before later work.
     void RecordRenderPassBarrier();

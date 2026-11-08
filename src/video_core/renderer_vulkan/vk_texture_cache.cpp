@@ -5693,6 +5693,8 @@ void Framebuffer::CreateFramebuffer(TextureCacheRuntime& runtime,
         height = (std::min)(height, is_rescaled ? resolution.ScaleUp(color_buffer->size.height)
                                               : color_buffer->size.height);
         attachments.push_back(color_buffer->RenderTarget());
+        color_views[index] = color_buffer->RenderTarget();
+        num_color_slots = static_cast<u32>(index + 1);
         renderpass_key.color_formats[index] = color_buffer->format;
         num_layers = (std::min)(num_layers, color_buffer->range.extent.layers);
         images[num_images] = color_buffer->ImageHandle();
@@ -5710,6 +5712,7 @@ void Framebuffer::CreateFramebuffer(TextureCacheRuntime& runtime,
         height = (std::min)(height, is_rescaled ? resolution.ScaleUp(depth_buffer->size.height)
                                               : depth_buffer->size.height);
         attachments.push_back(depth_buffer->RenderTarget());
+        depth_stencil_view = depth_buffer->RenderTarget();
         renderpass_key.depth_format = depth_buffer->format;
         num_layers = (std::min)(num_layers, depth_buffer->range.extent.layers);
         images[num_images] = depth_buffer->ImageHandle();
