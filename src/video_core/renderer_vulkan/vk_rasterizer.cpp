@@ -3234,6 +3234,9 @@ std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
     info.height = image_view->size.height;
     info.scaled_width = scaled ? resolution.ScaleUp(info.width) : info.width;
     info.scaled_height = scaled ? resolution.ScaleUp(info.height) : info.height;
+    // Ocarina of Time's scene comes from DLSS or FSR: FXAA or SMAA on top only blurs it.
+    info.anti_aliased =
+        VideoCommon::OotDlss::Targets().output_upscaled.load(std::memory_order_relaxed);
     return info;
 }
 

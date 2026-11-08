@@ -1534,6 +1534,7 @@ bool KeplerCompute::ReplaceOotNetwork(u64 program_id, u64 native_key, u64 shader
         .src_y1 = static_cast<s32>(output.Height()),
     };
     bool done = false;
+    bool upscaled = false;
     std::optional<Texture::TICEntry> depth_tic;
     {
         std::scoped_lock lock{Targets().depth_mutex};
@@ -1572,6 +1573,7 @@ bool KeplerCompute::ReplaceOotNetwork(u64 program_id, u64 native_key, u64 shader
             }
             done = rasterizer->AccelerateOotDlss(source, destination, *depth_tic,
                                                  ReportedJitter(scene_frame), reproject, flip_y, reset);
+            upscaled = done;
         }
         if (!valid) {
             NoteFallback("camera not found");
@@ -1579,7 +1581,9 @@ bool KeplerCompute::ReplaceOotNetwork(u64 program_id, u64 native_key, u64 shader
     }
     if (!done) {
         done = rasterizer->AccelerateSurfaceCopy(source, destination, config);
+        upscaled = done && hdr_done;
     }
+    Targets().output_upscaled.store(upscaled, std::memory_order_relaxed);
     if (const u64 frame = SceneFrame().fetch_add(1, std::memory_order_relaxed) + 1;
         Requested() && frame % 600 == 0) {
         if (const std::string summary = TakeFallbackSummary(); !summary.empty()) {

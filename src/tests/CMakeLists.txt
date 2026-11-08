@@ -35,6 +35,7 @@ add_executable(tests
     video_core/amd_ffx.cpp
     video_core/oot_camera.cpp
     video_core/oot_amd_upscaler.cpp
+    video_core/present_filters.cpp
     video_core/frame_gen_queues.cpp
     video_core/guest_frame_timing.cpp
     core/nx2_streamplay.cpp

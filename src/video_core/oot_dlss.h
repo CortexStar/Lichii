@@ -257,6 +257,9 @@ struct SceneTargets {
     /// particles, and what they added to the tonemapped image goes on top of its output.
     std::atomic<u64> particle_base_frame{~u64{0}};
     std::atomic<u64> particle_frame{~u64{0}};
+    /// The latest network output is the upscaler's (DLSS, FSR) image, not a copy of the
+    /// tonemapped one: the presented frame needs no anti-aliasing and no scaling filter at 1:1.
+    std::atomic<bool> output_upscaled{};
 };
 
 /// Why DLSS did not run on a frame (it then copies the tonemapped image), counted for a summary

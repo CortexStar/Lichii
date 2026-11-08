@@ -151,7 +151,14 @@ void Layer::ConfigureDraw(const Device& device, PresentPushConstants* out_push_c
         .height = scaled_height,
     };
 
-    if (!already_upscaled && !hdr_output) {
+    const auto source_size = [](u32 size, f32 from, f32 to) {
+        return static_cast<u32>(static_cast<f32>(size) * (to - from) + 0.5f);
+    };
+    const bool one_to_one = SkipsScalingFilter(
+        anti_aliased, source_size(render_extent.width, crop_rect.left, crop_rect.right),
+        source_size(render_extent.height, crop_rect.top, crop_rect.bottom),
+        layout.screen.GetWidth(), layout.screen.GetHeight());
+    if (!already_upscaled && !hdr_output && !one_to_one) {
         if (auto* fsr = std::get_if<FSR>(&sr_filter)) {
             source_image_view = fsr->Draw(device, scheduler, image_index, source_image, source_image_view, render_extent, crop_rect);
             crop_rect = {0, 0, 1, 1};

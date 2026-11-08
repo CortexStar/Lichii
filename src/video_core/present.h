@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "common/common_types.h"
 #include "common/settings.h"
 
 static inline Settings::ScalingFilter GetScalingFilter() {
@@ -19,6 +20,13 @@ static inline Settings::ScalingFilter GetScalingFilterForAppletCapture() {
 
 static inline Settings::AntiAliasing GetAntiAliasingForAppletCapture() {
     return Settings::AntiAliasing::None;
+}
+
+/// The presented image is an upscaler's anti-aliased output (DLSS, FSR) shown at its own size:
+/// a scaling filter (EASU/RCAS, SGSR) has nothing to scale, and the plain sampled copy stays.
+constexpr bool SkipsScalingFilter(bool upscaler_output, u32 source_width, u32 source_height,
+                                  u32 screen_width, u32 screen_height) {
+    return upscaler_output && source_width == screen_width && source_height == screen_height;
 }
 
 struct PresentFilters {
