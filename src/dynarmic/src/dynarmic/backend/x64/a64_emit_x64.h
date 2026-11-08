@@ -20,6 +20,7 @@
 #include "dynarmic/backend/block_range_information.h"
 #include "dynarmic/backend/x64/a64_jitstate.h"
 #include "dynarmic/backend/x64/atomic_fallback.h"
+#include "dynarmic/backend/x64/devirtualize.h"
 #include "dynarmic/backend/x64/emit_x64.h"
 #include "dynarmic/backend/x64/reg_alloc.h"
 #include "dynarmic/frontend/A64/a64_location_descriptor.h"
@@ -154,6 +155,28 @@ public:
     size_t fast_dispatch_set_size = 1;
     /// EmitA64SetCheckBit left the check bit in ZF for the CheckBit terminal.
     bool check_bit_in_zf = false;
+
+    /// A UserCallbacks member call; with core_independent_code `this` comes from the JIT state.
+    /// Every core's callbacks object has the same type, so the devirtualized target is the same.
+    template<auto mfp>
+    ArgCallback UserCallback() const {
+        const ArgCallback callback = Devirtualize<mfp>(conf.callbacks);
+        if (!conf.core_independent_code) {
+            return callback;
+        }
+        ASSERT(callback.Arg() == std::bit_cast<u64>(conf.callbacks));
+        return callback.WithArgFromJitState(s32(offsetof(A64JitState, callbacks)));
+    }
+    /// reg = a per-Jit pointer: from the JIT state with core_independent_code, else `value`.
+    void EmitLoadJitPointer(Xbyak::Reg64 reg, size_t jit_state_offset, u64 value) const;
+    /// reg = &conf (the Jit's UserConfig).
+    void EmitLoadUserConfig(Xbyak::Reg64 reg) const;
+    /// reg = the AtomicFallbackContext the LSE fallbacks take.
+    void EmitLoadAtomicFallback(Xbyak::Reg64 reg) const;
+    /// With core_independent_code: where this processor's exclusive slot pointer is.
+    std::optional<s32> OwnExclusiveSlotOffset() const;
+    /// reg = this processor's exclusive-monitor address (or value) slot.
+    void EmitLoadExclusiveSlot(Xbyak::Reg64 reg, bool value_slot) const;
     /// host_call_return: the guest return address of the block's BL/BLR, pushed as a host call
     /// frame right before the terminal.
     std::optional<IR::LocationDescriptor> call_return_target;

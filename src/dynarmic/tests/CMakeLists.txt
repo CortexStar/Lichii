@@ -22,6 +22,7 @@ add_executable(dynarmic_tests
     A64/fp_min_max.cpp
     A64/host_call_return.cpp
     A64/indirect_branch_cache.cpp
+    A64/core_independent_code.cpp
     A64/misaligned_page_table.cpp
     A64/test_invalidation.cpp
     A64/real_world.cpp

@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: 0BSD
  */
 
+#include "dynarmic/backend/x64/exclusive_monitor_friend.h"
 #include "dynarmic/backend/x64/a64_emit_x64.h"
 
 #include <algorithm>
@@ -542,6 +543,43 @@ void A64EmitX64::EmitA64SetCheckBit(A64EmitContext& ctx, IR::Inst* inst) {
     code.mov(CheckBitAddress(), to_store);
 }
 
+void A64EmitX64::EmitLoadJitPointer(Xbyak::Reg64 reg, size_t jit_state_offset, u64 value) const {
+    if (conf.core_independent_code) {
+        code.mov(reg, qword[code.ABI_JIT_PTR + jit_state_offset]);
+    } else {
+        code.mov(reg, value);
+    }
+}
+
+void A64EmitX64::EmitLoadUserConfig(Xbyak::Reg64 reg) const {
+    EmitLoadJitPointer(reg, offsetof(A64JitState, user_config), std::bit_cast<u64>(&conf));
+}
+
+void A64EmitX64::EmitLoadExclusiveSlot(Xbyak::Reg64 reg, bool value_slot) const {
+    if (value_slot) {
+        EmitLoadJitPointer(reg, offsetof(A64JitState, exclusive_value_slot),
+                           std::bit_cast<u64>(GetExclusiveMonitorValuePointer(conf.global_monitor, conf.processor_id)));
+    } else {
+        EmitLoadJitPointer(reg, offsetof(A64JitState, exclusive_address_slot),
+                           std::bit_cast<u64>(GetExclusiveMonitorAddressPointer(conf.global_monitor, conf.processor_id)));
+    }
+}
+
+void A64EmitX64::EmitLoadAtomicFallback(Xbyak::Reg64 reg) const {
+    if (conf.core_independent_code) {
+        code.lea(reg, ptr[code.ABI_JIT_PTR + offsetof(A64JitState, atomic_fallback_context)]);
+    } else {
+        code.mov(reg, std::bit_cast<u64>(&atomic_fallback));
+    }
+}
+
+std::optional<s32> A64EmitX64::OwnExclusiveSlotOffset() const {
+    if (conf.core_independent_code) {
+        return s32(offsetof(A64JitState, exclusive_address_slot));
+    }
+    return std::nullopt;
+}
+
 Xbyak::Address A64EmitX64::CheckBitAddress() const {
     if (HostCallReturn(conf)) {
         return code.byte[code.ABI_JIT_PTR + offsetof(A64JitState, check_bit)];
@@ -824,7 +862,7 @@ void A64EmitX64::EmitA64CallSupervisor(A64EmitContext& ctx, IR::Inst* inst) {
     ASSERT(args[0].IsImmediate());
     const u32 imm = args[0].GetImmediateU32();
     code.EnterHostMxcsr();
-    Devirtualize<&A64::UserCallbacks::CallSVC>(conf.callbacks).EmitCall(code, [&](RegList param) {
+    UserCallback<&A64::UserCallbacks::CallSVC>().EmitCall(code, [&](RegList param) {
         code.mov(param[0], imm);
     });
     code.LeaveHostMxcsr();
@@ -839,7 +877,7 @@ void A64EmitX64::EmitA64ExceptionRaised(A64EmitContext& ctx, IR::Inst* inst) {
     const u64 pc = args[0].GetImmediateU64();
     const u64 exception = args[1].GetImmediateU64();
     code.EnterHostMxcsr();
-    Devirtualize<&A64::UserCallbacks::ExceptionRaised>(conf.callbacks).EmitCall(code, [&](RegList param) {
+    UserCallback<&A64::UserCallbacks::ExceptionRaised>().EmitCall(code, [&](RegList param) {
         code.mov(param[0], pc);
         code.mov(param[1], exception);
     });
@@ -850,7 +888,7 @@ void A64EmitX64::EmitA64DataCacheOperationRaised(A64EmitContext& ctx, IR::Inst* 
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     ctx.reg_alloc.HostCall(code, nullptr, {}, args[1], args[2]);
     code.EnterHostMxcsr();
-    Devirtualize<&A64::UserCallbacks::DataCacheOperationRaised>(conf.callbacks).EmitCall(code);
+    UserCallback<&A64::UserCallbacks::DataCacheOperationRaised>().EmitCall(code);
     code.LeaveHostMxcsr();
 }
 
@@ -858,7 +896,7 @@ void A64EmitX64::EmitA64InstructionCacheOperationRaised(A64EmitContext& ctx, IR:
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     ctx.reg_alloc.HostCall(code, nullptr, {}, args[0], args[1]);
     code.EnterHostMxcsr();
-    Devirtualize<&A64::UserCallbacks::InstructionCacheOperationRaised>(conf.callbacks).EmitCall(code);
+    UserCallback<&A64::UserCallbacks::InstructionCacheOperationRaised>().EmitCall(code);
     code.LeaveHostMxcsr();
 }
 
@@ -883,7 +921,7 @@ void A64EmitX64::EmitA64InstructionSynchronizationBarrier(A64EmitContext& ctx, I
 
     ctx.reg_alloc.HostCall(code, nullptr);
     code.EnterHostMxcsr();
-    Devirtualize<&A64::UserCallbacks::InstructionSynchronizationBarrierRaised>(conf.callbacks).EmitCall(code);
+    UserCallback<&A64::UserCallbacks::InstructionSynchronizationBarrierRaised>().EmitCall(code);
     code.LeaveHostMxcsr();
 }
 
@@ -927,7 +965,7 @@ void A64EmitX64::EmitA64GetCNTPCT(A64EmitContext& ctx, IR::Inst* inst) {
         code.UpdateTicks();
     }
     code.EnterHostMxcsr();
-    Devirtualize<&A64::UserCallbacks::GetCNTPCT>(conf.callbacks).EmitCall(code);
+    UserCallback<&A64::UserCallbacks::GetCNTPCT>().EmitCall(code);
     code.LeaveHostMxcsr();
 }
 
@@ -946,7 +984,7 @@ void A64EmitX64::EmitA64GetDCZID(A64EmitContext& ctx, IR::Inst* inst) {
 void A64EmitX64::EmitA64GetTPIDR(A64EmitContext& ctx, IR::Inst* inst) {
     const Xbyak::Reg64 result = ctx.reg_alloc.ScratchGpr(code);
     if (conf.tpidr_el0) {
-        code.mov(result, u64(conf.tpidr_el0));
+        EmitLoadJitPointer(result, offsetof(A64JitState, tpidr_el0), u64(conf.tpidr_el0));
         code.mov(result, qword[result]);
     } else {
         code.xor_(result.cvt32(), result.cvt32());
@@ -957,7 +995,7 @@ void A64EmitX64::EmitA64GetTPIDR(A64EmitContext& ctx, IR::Inst* inst) {
 void A64EmitX64::EmitA64GetTPIDRRO(A64EmitContext& ctx, IR::Inst* inst) {
     const Xbyak::Reg64 result = ctx.reg_alloc.ScratchGpr(code);
     if (conf.tpidrro_el0) {
-        code.mov(result, u64(conf.tpidrro_el0));
+        EmitLoadJitPointer(result, offsetof(A64JitState, tpidrro_el0), u64(conf.tpidrro_el0));
         code.mov(result, qword[result]);
     } else {
         code.xor_(result.cvt32(), result.cvt32());
@@ -970,7 +1008,7 @@ void A64EmitX64::EmitA64SetTPIDR(A64EmitContext& ctx, IR::Inst* inst) {
     const Xbyak::Reg64 value = ctx.reg_alloc.UseGpr(code, args[0]);
     const Xbyak::Reg64 addr = ctx.reg_alloc.ScratchGpr(code);
     if (conf.tpidr_el0) {
-        code.mov(addr, u64(conf.tpidr_el0));
+        EmitLoadJitPointer(addr, offsetof(A64JitState, tpidr_el0), u64(conf.tpidr_el0));
         code.mov(qword[addr], value);
     }
 }

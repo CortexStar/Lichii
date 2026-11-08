@@ -367,6 +367,12 @@ struct UserConfig {
     /// dispatcher and refills the entry.
     bool indirect_branch_cache = false;
 
+    /// x64 only. Emitted code holds no per-Jit pointers: the UserCallbacks object, this config,
+    /// the TPIDR pointers and this processor's exclusive-monitor slots are read from the JIT
+    /// state instead of being immediates, so a block compiled for one core is valid for every
+    /// core with the same config otherwise (the step towards one code cache per process).
+    bool core_independent_code = false;
+
     /// This option relates to translation. Generally when we run into an unpredictable
     /// instruction the ExceptionRaised callback is called. If this is true, we define
     /// definite behaviour for some unpredictable instructions.
