@@ -31,6 +31,7 @@ A copy of this handbook is [available online](https://git.eden-emu.dev/eden-emu/
 
 ## 3rd-party Integration
 
+- **[Experimental DLSS 5 Neural Rendering on Linux](./DLSS5Linux.md)**
 - **[Configuring Steam ROM Manager](./SteamROM.md)**
 - **[Server hosting](./ServerHosting.md)**
 - **[Syncthing Guide](./SyncthingGuide.md)**
