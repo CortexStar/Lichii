@@ -146,6 +146,9 @@ Buffer::Buffer(BufferCacheRuntime& runtime, DAddr cpu_addr_, u64 size_bytes_,
 void Buffer::MarkUsage(u64 offset, u64 size) noexcept {
     const u64 tick = scheduler->CurrentTick();
     uses.Track(offset, size, tick);
+    if (UploadReorderCheck* const check = UploadReorderCheck::Active()) [[unlikely]] {
+        check->NoteUse(*buffer, offset, size, UploadReorderCheck::Source::Marked);
+    }
     if (g_trace_uploads) [[unlikely]] {
         const std::array<u64, 3> use{offset, size, tick};
         if (std::ranges::find(noted_uses, use) != noted_uses.end() || size == 0) {
@@ -422,7 +425,7 @@ BufferCacheRuntime::BufferCacheRuntime(const Device& device_, MemoryAllocator& m
       staging_pool{staging_pool_}, guest_descriptor_queue{guest_descriptor_queue_},
       quad_index_pass(device, scheduler, descriptor_pool, staging_pool,
                       compute_pass_descriptor_queue),
-      multi_range_buffers(device_) {
+      multi_range_buffers(device_), reorder_check{UploadReorderCheck::Create(scheduler_)} {
     const VkDriverIdKHR driver_id = device.GetDriverID();
     const bool enable_vertex_repack = VertexRepackEnabled();
     LOG_INFO(Render_Vulkan, "69-byte vertex layout repacking {} ({})",
@@ -701,6 +704,22 @@ void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
         .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
     };
 
+    if (reorder_check) [[unlikely]] {
+        // The upload's place against the uses before it, then the copy's own uses.
+        if (from_stream) {
+            reorder_check->CheckUpload(dst_buffer, copies,
+                                       reorder ? order : VideoCommon::UploadOrder{}, location);
+        }
+        for (const VideoCommon::BufferCopy& copy : copies) {
+            if (!from_stream) {
+                reorder_check->NoteUse(src_buffer, copy.src_offset, copy.size,
+                                       UploadReorderCheck::Source::CopyRead);
+            }
+            reorder_check->NoteUse(dst_buffer, copy.dst_offset, copy.size,
+                                   UploadReorderCheck::Source::CopyWrite);
+        }
+    }
+
     // Measuring a popular game, this number never exceeds the specified size once data is warmed up
     boost::container::small_vector<VkBufferCopy, 8> vk_copies(copies.size());
     std::ranges::transform(copies, vk_copies.begin(), MakeBufferCopy);
@@ -772,6 +791,7 @@ void BufferCacheRuntime::ClearBuffer(VkBuffer dest_buffer, u32 offset, size_t si
     if (dest_buffer == VK_NULL_HANDLE) {
         return;
     }
+    NoteCheckUse(dest_buffer, offset, size, UploadReorderCheck::Source::Clear);
     static constexpr VkMemoryBarrier READ_BARRIER{
         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
         .pNext = nullptr,
@@ -829,6 +849,7 @@ bool BufferCacheRuntime::BindMultiRangeStorageBuffer(u64 key, bool is_written) {
 void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat index_format,
                                          u32 base_vertex, u32 num_indices, VkBuffer buffer,
                                          u32 offset, [[maybe_unused]] u32 size) {
+    NoteCheckUse(buffer, offset, size, UploadReorderCheck::Source::Index);
     VkIndexType vk_index_type = MaxwellToVK::IndexFormat(index_format);
     VkDeviceSize vk_offset = offset;
     VkBuffer vk_buffer = buffer;
@@ -904,6 +925,7 @@ void BufferCacheRuntime::BindVertexBuffer(u32 index, VkBuffer buffer, u32 offset
     if (index >= device.GetMaxVertexInputBindings()) {
         return;
     }
+    NoteCheckUse(buffer, offset, size, UploadReorderCheck::Source::Vertex);
     if (buffer != VK_NULL_HANDLE && size != 0 && IsVertexRepacked(index)) {
         const auto repacked =
             vertex_repack_pass->Assemble(buffer, offset, size, u64{offset} + size);
@@ -938,6 +960,8 @@ void BufferCacheRuntime::BindVertexBuffers(VideoCommon::HostBindings<Buffer>& bi
     boost::container::static_vector<VkBuffer, VideoCommon::NUM_VERTEX_BUFFERS> buffer_handles(bindings.buffers.size());
     for (u32 i = 0; i < bindings.buffers.size(); ++i) {
         auto handle = bindings.buffers[i]->Handle();
+        NoteCheckUse(handle, bindings.offsets[i], bindings.sizes[i],
+                     UploadReorderCheck::Source::Vertex);
         if (handle == VK_NULL_HANDLE) {
             bindings.offsets[i] = 0;
             bindings.sizes[i] = VK_WHOLE_SIZE;
@@ -991,6 +1015,7 @@ void BufferCacheRuntime::BindTransformFeedbackBuffer(u32 index, VkBuffer buffer,
         // Already logged in the rasterizer
         return;
     }
+    NoteCheckUse(buffer, offset, size, UploadReorderCheck::Source::TransformFeedback);
     if (buffer == VK_NULL_HANDLE) {
         // Vulkan doesn't support null transform feedback buffers.
         // Replace it with our own null buffer.
@@ -1014,6 +1039,8 @@ void BufferCacheRuntime::BindTransformFeedbackBuffers(VideoCommon::HostBindings<
     boost::container::static_vector<VkBuffer, VideoCommon::NUM_VERTEX_BUFFERS> buffer_handles(bindings.buffers.size());
     for (u32 i = 0; i < bindings.buffers.size(); ++i) {
         auto handle = bindings.buffers[i]->Handle();
+        NoteCheckUse(handle, bindings.offsets[i], bindings.sizes[i],
+                     UploadReorderCheck::Source::TransformFeedback);
         if (handle == VK_NULL_HANDLE) {
             ReserveNullBuffer();
             handle = *null_buffer;
