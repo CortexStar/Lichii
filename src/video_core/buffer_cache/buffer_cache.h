@@ -3350,8 +3350,8 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
             // Apply the staging offset
             copy.src_offset += upload_staging.offset;
         }
-        const bool can_reorder = runtime.CanReorderUpload(buffer, copies);
-        runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, can_reorder);
+        const auto order = runtime.DecideUploadOrder(buffer, copies);
+        runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, order);
     }
 }
 
@@ -3400,8 +3400,8 @@ void BufferCache<P>::InlineMemoryImplementation(DAddr dest_address, size_t copy_
         }};
         u8* const src_pointer = upload_staging.mapped_span.data();
         std::memcpy(src_pointer, inlined_buffer.data(), copy_size);
-        const bool can_reorder = runtime.CanReorderUpload(buffer, copies);
-        runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, can_reorder);
+        const auto order = runtime.DecideUploadOrder(buffer, copies);
+        runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, order);
     } else {
         buffer.ImmediateUpload(buffer.Offset(dest_address), inlined_buffer.first(copy_size));
     }
@@ -3515,8 +3515,8 @@ void BufferCache<P>::UploadNativeBank(Buffer& buffer, DAddr device_addr, u64 upl
             staging_offset += copy.size;
         }
         const std::span<BufferCopy> copies_span(buffer_copies.data(), buffer_copies.size());
-        const bool can_reorder = runtime.CanReorderUpload(buffer, copies_span);
-        runtime.CopyBuffer(buffer, upload_staging.buffer, copies_span, true, can_reorder);
+        const auto order = runtime.DecideUploadOrder(buffer, copies_span);
+        runtime.CopyBuffer(buffer, upload_staging.buffer, copies_span, true, order);
         for (const Copy& copy : copies) {
             RefreshHotShadows(copy.address, copy.bytes, copy.size);
         }
@@ -3689,8 +3689,8 @@ void BufferCache<P>::UploadHotPages(Buffer& buffer) {
             copy.src_offset += upload_staging.offset;
         }
         const std::span<BufferCopy> copies_span(copies.data(), copies.size());
-        const bool can_reorder = runtime.CanReorderUpload(buffer, copies_span);
-        runtime.CopyBuffer(buffer, upload_staging.buffer, copies_span, true, can_reorder);
+        const auto order = runtime.DecideUploadOrder(buffer, copies_span);
+        runtime.CopyBuffer(buffer, upload_staging.buffer, copies_span, true, order);
     } else {
         for (const DAddr page : hot_changed_pages) {
             buffer.ImmediateUpload(
@@ -3866,8 +3866,8 @@ void BufferCache<P>::MappedUploadMemoryRefreshingBanks(
             }
             copy.src_offset += upload_staging.offset;
         }
-        const bool can_reorder = runtime.CanReorderUpload(buffer, copies);
-        runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, can_reorder);
+        const auto order = runtime.DecideUploadOrder(buffer, copies);
+        runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, order);
     }
 }
 

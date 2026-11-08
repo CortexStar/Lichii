@@ -107,7 +107,7 @@ vk::Buffer CreateBuffer(const Device& device, const MemoryAllocator& memory_allo
 } // Anonymous namespace
 
 Buffer::Buffer(BufferCacheRuntime& runtime, VideoCommon::NullBufferParams null_params)
-    : VideoCommon::BufferBase(null_params), scheduler{&runtime.scheduler}, tracker{4096} {
+    : VideoCommon::BufferBase(null_params), scheduler{&runtime.scheduler} {
     if (runtime.device.HasNullDescriptor()) {
         return;
     }
@@ -124,8 +124,7 @@ Buffer::Buffer(BufferCacheRuntime& runtime, DAddr cpu_addr_, u64 size_bytes_,
     : VideoCommon::BufferBase(cpu_addr_, size_bytes_), device{&runtime.device},
       scheduler{&runtime.scheduler},
       buffer{CreateBuffer(*device, runtime.memory_allocator, SizeBytes(),
-                          runtime.SparseAlignmentFor(sparse_compatible_))},
-      tracker{SizeBytes()} {
+                          runtime.SparseAlignmentFor(sparse_compatible_))} {
     sparse_compatible = sparse_compatible_;
     if (runtime.device.HasDebuggingToolAttached()) {
         buffer.SetObjectNameEXT(fmt::format("Buffer {:#x}", CpuAddr()).c_str());
@@ -136,8 +135,7 @@ Buffer::Buffer(BufferCacheRuntime& runtime, DAddr cpu_addr_, u64 size_bytes_,
 }
 
 void Buffer::MarkUsage(u64 offset, u64 size) noexcept {
-    tracker.Track(offset, size);
-    last_usage_tick = scheduler->CurrentTick();
+    uses.Track(offset, size, scheduler->CurrentTick());
 }
 
 VkBufferView Buffer::View(u32 offset, u32 size, VideoCore::Surface::PixelFormat format) {
@@ -457,13 +455,10 @@ u64 BufferCacheRuntime::GetMaxStorageBufferRange() const {
     return device.GetMaxStorageBufferRange();
 }
 
-void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>& slot_buffers) noexcept {
+void BufferCacheRuntime::TickFrame(
+    [[maybe_unused]] Common::SlotVector<Buffer>& slot_buffers) noexcept {
+    // Buffers' uses need no reset: they are kept by submission (VideoCommon::SubmissionUses).
     multi_range_buffers.TickFrame(scheduler);
-    for (auto it = slot_buffers.begin(); it != slot_buffers.end(); it++) {
-        if (scheduler.IsFree(it->LastUsageTick())) {
-            it->ResetUsageTracking();
-        }
-    }
 }
 
 u64 BufferCacheRuntime::CurrentTick() {
@@ -514,24 +509,26 @@ void BufferCacheRuntime::FinishForHostRead() {
     scheduler.Finish();
 }
 
-bool BufferCacheRuntime::CanReorderUpload(const Buffer& buffer,
-                                          std::span<const VideoCommon::BufferCopy> copies) {
-    if (Settings::values.disable_buffer_reorder) {
-        return false;
+VideoCommon::UploadOrder BufferCacheRuntime::DecideUploadOrder(
+    Buffer& buffer, std::span<const VideoCommon::BufferCopy> copies) {
+    VideoCommon::UploadOrder order{};
+    if (!Settings::values.disable_buffer_reorder) {
+        order = VideoCommon::DecideUploadOrder(buffer.Uses(), copies, scheduler.CurrentTick());
     }
-    const bool can_use_upload_cmdbuf =
-        std::ranges::all_of(copies, [&](const VideoCommon::BufferCopy& copy) {
-            return !buffer.IsRegionUsed(copy.dst_offset, copy.size);
-        });
-    return can_use_upload_cmdbuf;
+    // An upload of these bytes later in this submission must run after this one: in order.
+    for (const VideoCommon::BufferCopy& copy : copies) {
+        buffer.MarkUsage(copy.dst_offset, copy.size);
+    }
+    return order;
 }
 
 void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
                                     std::span<const VideoCommon::BufferCopy> copies, bool barrier,
-                                    bool can_reorder_upload) {
+                                    VideoCommon::UploadOrder order) {
     if (dst_buffer == VK_NULL_HANDLE || src_buffer == VK_NULL_HANDLE) {
         return;
     }
+    const bool from_stream = src_buffer == staging_pool.StreamBuf();
     static constexpr VkMemoryBarrier READ_BARRIER{
         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
         .pNext = nullptr,
@@ -548,16 +545,17 @@ void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
     // Measuring a popular game, this number never exceeds the specified size once data is warmed up
     boost::container::small_vector<VkBufferCopy, 8> vk_copies(copies.size());
     std::ranges::transform(copies, vk_copies.begin(), MakeBufferCopy);
-    if (src_buffer == staging_pool.StreamBuf() && can_reorder_upload) {
-        scheduler.RecordWithUploadBuffer([src_buffer, dst_buffer, vk_copies](
-                                             vk::CommandBuffer, vk::CommandBuffer upload_cmdbuf) {
-            upload_cmdbuf.CopyBuffer(src_buffer, dst_buffer, vk_copies);
-        });
+    if (from_stream && order.reorder) {
+        // Ahead of this submission's work: no render pass ends for it. Recorded into the upload
+        // command buffer with the submission's other reordered uploads when it is submitted.
+        scheduler.RecordReorderedUpload(
+            src_buffer, dst_buffer,
+            std::span<const VkBufferCopy>(vk_copies.data(), vk_copies.size()), order.prior_tick);
         return;
     }
 
     scheduler.RequestOutsideRenderPassOperationContext();
-    if (barrier && src_buffer == staging_pool.StreamBuf() && !vk_copies.empty()) {
+    if (barrier && from_stream && !vk_copies.empty()) {
         // An upload in order, with these barriers. Runs of them (Ocarina of Time's inline writes
         // into GPU-written pages: ~600 a frame) go in one command between one pair of them.
         scheduler.RecordUpload(src_buffer, dst_buffer,

@@ -113,7 +113,8 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
     : device{device_}, state_tracker{state_tracker_},
       master_semaphore{std::make_unique<MasterSemaphore>(device)},
       command_pool{std::make_unique<CommandPool>(*master_semaphore, device)},
-      upload_batch{std::make_unique<UploadBatch>()} {
+      upload_batch{std::make_unique<UploadBatch>()},
+      reordered_uploads{std::make_unique<ReorderedUploadBatch>()} {
 
     if (Common::DkbFrameTrace::Enabled()) {
         const auto physical = device.GetPhysical();
@@ -900,6 +901,38 @@ void Scheduler::FlushUploads() {
     RecordWithUploadBuffer(std::move(command));
 }
 
+void Scheduler::RecordReorderedUpload(VkBuffer src, VkBuffer dst,
+                                      std::span<const VkBufferCopy> copies, u64 prior_tick) {
+    if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
+        VideoCommon::GpuSplit::CheckOwner("Scheduler::RecordReorderedUpload");
+    }
+    if (copies.empty()) {
+        return;
+    }
+    reordered_uploads->Add(src, dst, copies, prior_tick);
+    reordered_uploads_pending = true;
+}
+
+void Scheduler::FlushReorderedUploads() {
+    std::vector<VkBufferCopy> batch_copies;
+    std::vector<UploadBatch::Group> batch_groups;
+    u64 prior_tick = 0;
+    reordered_uploads->Take(batch_copies, batch_groups, prior_tick);
+    reordered_uploads_pending = false;
+    // The copies must come after earlier submissions' work on their bytes: finished already, or
+    // waited for by a barrier. The host GPU is asked once a submission, when it may still run it.
+    bool batch_after_prior = prior_tick != 0 && !master_semaphore->IsFree(prior_tick);
+    if (batch_after_prior) {
+        master_semaphore->Refresh();
+        batch_after_prior = !master_semaphore->IsFree(prior_tick);
+    }
+    RecordWithUploadBuffer(
+        [copies = std::move(batch_copies), groups = std::move(batch_groups),
+         after_prior_work = batch_after_prior](vk::CommandBuffer, vk::CommandBuffer upload_cmdbuf) {
+            ReorderedUploadBatch::Record(upload_cmdbuf, copies, groups, after_prior_work);
+        });
+}
+
 u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
     if (uploads_pending) {
         // In the tick they were recorded at.
@@ -911,6 +944,10 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
     }
     EndPendingOperations();
     InvalidateState();
+    if (reordered_uploads_pending) {
+        // Into the upload command buffer of the submission their uploads were decided for.
+        FlushReorderedUploads();
+    }
 
     const u64 signal_value = master_semaphore->NextTick();
     RecordWithUploadBuffer([signal_semaphore, wait_semaphore, signal_value,

@@ -45,6 +45,7 @@ class CommandPool;
 class Device;
 class Framebuffer;
 class GraphicsPipeline;
+class ReorderedUploadBatch;
 class StateTracker;
 class UploadBatch;
 
@@ -256,6 +257,15 @@ public:
     /// command between them share one command and one pair of barriers, unless one would write
     /// bytes another writes, or a buffer another reads. Call outside a render pass.
     void RecordUpload(VkBuffer src, VkBuffer dst, std::span<const VkBufferCopy> copies);
+
+    /// An upload ahead of all the work of this submission's main command buffer: it runs in the
+    /// upload command buffer, which the submission's reordered uploads are recorded into as one
+    /// command when it is submitted. The caller guarantees that no work recorded in this
+    /// submission uses the bytes it writes, nor work of an earlier submission after prior_tick
+    /// (0: of any). Unless the host GPU has finished submission prior_tick by then, the upload
+    /// command buffer begins with a barrier on the work of earlier submissions.
+    void RecordReorderedUpload(VkBuffer src, VkBuffer dst, std::span<const VkBufferCopy> copies,
+                               u64 prior_tick);
 
     template <typename T>
         requires std::is_invocable_v<T, vk::CommandBuffer>
@@ -542,6 +552,11 @@ private:
     bool uploads_pending{};
     /// Records the pending uploads as one command.
     void FlushUploads();
+    /// RecordReorderedUpload's copies, recorded when the submission is.
+    std::unique_ptr<ReorderedUploadBatch> reordered_uploads;
+    bool reordered_uploads_pending{};
+    /// Records the reordered uploads into the upload command buffer as one command.
+    void FlushReorderedUploads();
 
     vk::QueryPool trace_query_pool;
     static constexpr u32 TraceMaxSubmissions = 512;
