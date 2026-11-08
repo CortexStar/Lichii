@@ -331,10 +331,16 @@ void Nx2VideoDecoder::Render(const Nx2Picture& picture, Nx2PictureFormat format,
         }
         return;
     }
+    // To RGB with the chroma interpolated to every pixel: without these flags swscale's
+    // yuv2rgb tables give each chroma sample to a 2x2 block of pixels (yuv2rgb.c LOADCHROMA),
+    // which shows as colour steps.
+    const int flags = target == AV_PIX_FMT_NV12
+                          ? SWS_BILINEAR
+                          : SWS_BILINEAR | SWS_FULL_CHR_H_INT | SWS_ACCURATE_RND;
     impl->scaler = sws_getCachedContext(impl->scaler, f->width, f->height,
                                         static_cast<AVPixelFormat>(f->format),
                                         static_cast<int>(width), static_cast<int>(height), target,
-                                        SWS_BILINEAR, nullptr, nullptr, nullptr);
+                                        flags, nullptr, nullptr, nullptr);
     if (impl->scaler == nullptr) {
         LOG_ERROR(HW_GPU, "nx2 video: cannot convert {} to {}",
                   av_get_pix_fmt_name(static_cast<AVPixelFormat>(f->format)),
