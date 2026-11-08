@@ -7,6 +7,7 @@
 add_executable(tests
     common/addon_config.cpp
     video_core/amd_float16.cpp
+    video_core/oot_ultrawide_hud.cpp
     video_core/graphics_pipeline_library.cpp
     video_core/pipeline_binary_store.cpp
     video_core/maxwell_half_fmz.cpp
