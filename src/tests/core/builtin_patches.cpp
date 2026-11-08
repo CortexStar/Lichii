@@ -401,6 +401,7 @@ constexpr size_t UltrawideSizeOffset = sizeof(Loader::NSOHeader) + 0x3F58568;
 constexpr size_t UltrawideIndexOffset = sizeof(Loader::NSOHeader) + 0x1087FC0;
 constexpr size_t UltrawideListIndexOffset = sizeof(Loader::NSOHeader) + 0x1087EE0;
 constexpr size_t UltrawideAspectOffset = sizeof(Loader::NSOHeader) + 0x3EF5DCC;
+constexpr size_t UltrawideCtorOffset = sizeof(Loader::NSOHeader) + 0xEF3834;
 constexpr u32 BneInstruction = 0x54000061;
 constexpr u32 AspectSixteenNine = 0x3FE38E3B;
 constexpr u32 AspectFortyThreeEighteen = 0x4018E38E;
@@ -417,6 +418,8 @@ std::vector<u8> MakeUltrawideMain() {
     PutWord(nso, UltrawideIndexOffset, BneInstruction);
     PutWord(nso, UltrawideListIndexOffset, BneInstruction);
     PutWord(nso, UltrawideAspectOffset, AspectSixteenNine);
+    PutWord(nso, UltrawideCtorOffset, 0xD291C768);     // mov x8, #0x8e3b
+    PutWord(nso, UltrawideCtorOffset + 8, 0xF2A7FC68); // movk x8, #0x3fe3, lsl #16
     return nso;
 }
 
@@ -455,6 +458,8 @@ TEST_CASE("Built-in Ultrawide applies only docked with the 21:9 aspect ratio", "
         REQUIRE(WordAt(patched, UltrawideIndexOffset) == NopInstruction);
         REQUIRE(WordAt(patched, UltrawideListIndexOffset) == NopInstruction);
         REQUIRE(WordAt(patched, UltrawideAspectOffset) == AspectFortyThreeEighteen);
+        REQUIRE(WordAt(patched, UltrawideCtorOffset) == 0xD29C71C8);     // mov x8, #0xe38e
+        REQUIRE(WordAt(patched, UltrawideCtorOffset + 8) == 0xF2A80308); // movk x8, #0x4018
     }
 
     SECTION("16:9 leaves the game alone") {
