@@ -19,6 +19,7 @@
 #include "common/logging.h"
 #include "video_core/vulkan_common/driver_call.h"
 #include "video_core/vulkan_common/driver_crash.h"
+#include "video_core/vulkan_common/spirv_check.h"
 #include "video_core/vulkan_common/vk_enum_string_helper.h"
 #include "video_core/vulkan_common/vma.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -939,6 +940,9 @@ QueryPool Device::CreateQueryPool(const VkQueryPoolCreateInfo& ci) const {
 ShaderModule Device::CreateShaderModule(const VkShaderModuleCreateInfo& ci) const {
     VkShaderModule object;
     DriverCall::Scope call{"vkCreateShaderModule", DriverCall::Kind::ShaderModule, &ci};
+    if (SpirvCheck::Enabled()) {
+        SpirvCheck::Check(DriverCall::SpirvWords(ci.pCode, ci.codeSize));
+    }
     Check(dld->vkCreateShaderModule(handle, &ci, nullptr, &object));
     if (DriverCrash::Enabled()) {
         DriverCrash::RegisterModule(object, DriverCall::SpirvWords(ci.pCode, ci.codeSize));
@@ -951,6 +955,13 @@ std::vector<ShaderEXT> Device::CreateShadersEXT(
     std::vector<VkShaderEXT> objects(infos.size());
     DriverCall::Scope call{"vkCreateShadersEXT", DriverCall::Kind::Shaders, infos.data(),
                            static_cast<u32>(infos.size())};
+    if (SpirvCheck::Enabled()) {
+        for (const VkShaderCreateInfoEXT& info : infos) {
+            if (info.codeType == VK_SHADER_CODE_TYPE_SPIRV_EXT) {
+                SpirvCheck::Check(DriverCall::SpirvWords(info.pCode, info.codeSize));
+            }
+        }
+    }
     const VkResult result = dld->vkCreateShadersEXT(handle, static_cast<u32>(infos.size()),
                                                     infos.data(), nullptr, objects.data());
     if (result != VK_SUCCESS) {

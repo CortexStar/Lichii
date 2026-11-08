@@ -33,6 +33,7 @@
 #include "video_core/vulkan_common/amd_ffx.h"
 #include "video_core/vulkan_common/address_bindings.h"
 #include "video_core/vulkan_common/gpu_crumbs.h"
+#include "video_core/vulkan_common/spirv_check.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -909,6 +910,20 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 
     // Initialize GPU logging if enabled
     InitializeGPULogging();
+
+    if (SpirvCheck::Enabled()) {
+        SpirvCheck::Configure({
+            .api_version = ApiVersion(),
+            .uniform_buffer_standard_layout =
+                features.uniform_buffer_standard_layout.uniformBufferStandardLayout == VK_TRUE,
+            .scalar_block_layout = false,
+            .workgroup_scalar_block_layout =
+                extensions.workgroup_memory_explicit_layout &&
+                features.workgroup_memory_explicit_layout
+                        .workgroupMemoryExplicitLayoutScalarBlockLayout == VK_TRUE,
+            .local_size_id = extensions.maintenance4,
+        });
+    }
 
     if (surface != VkSurfaceKHR{}) {
         // Every path a device loss takes ends in a vk::Exception; report it at the first.

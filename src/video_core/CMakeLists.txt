@@ -315,6 +315,8 @@ add_library(video_core STATIC
     vulkan_common/driver_call.h
     vulkan_common/driver_crash.cpp
     vulkan_common/driver_crash.h
+    vulkan_common/spirv_check.cpp
+    vulkan_common/spirv_check.h
     vulkan_common/vulkan_device.cpp
     vulkan_common/vulkan_device.h
     vulkan_common/vulkan_instance.cpp

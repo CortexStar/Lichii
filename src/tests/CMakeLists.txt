@@ -39,6 +39,7 @@ add_executable(tests
     video_core/driver_call.cpp
     video_core/driver_crash.cpp
     video_core/gpu_crumb_log.cpp
+    video_core/spirv_check.cpp
     video_core/oot_camera.cpp
     video_core/oot_amd_upscaler.cpp
     video_core/present_filters.cpp
