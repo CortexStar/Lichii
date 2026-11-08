@@ -206,6 +206,7 @@ void GpuSplit::Stop() {
     wake.notify_one();
     back_thread.join();
     active = false;
+    ForgetFencesQuiet();
     // The split is static and outlives the emulation session. The next session's back thread
     // starts reading at 0: with the old positions kept it skipped through the new, empty ring a
     // wrap at a time and never reached the old write position (the next game's first GPU work
@@ -1141,9 +1142,13 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             }
             if (available == read_position && idle_hook != nullptr) {
                 hook_requested.store(false, std::memory_order_seq_cst);
+                ForgetFencesQuiet();
                 Nx2Profile::Scope hook_scope{Nx2Profile::Zone::IdleHook};
                 idle_hook(idle_argument);
                 available = published.load(std::memory_order_acquire);
+                if (available == read_position) {
+                    CheckFencesQuiet(read_position);
+                }
             }
             if (available == read_position) {
                 // Publish bumps `wake` when it sees back_waiting: read it before the last look
@@ -1190,6 +1195,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             if ((++entries & 3) == 0 && hook_requested.load(std::memory_order_relaxed) &&
                 idle_hook != nullptr) [[unlikely]] {
                 hook_requested.store(false, std::memory_order_seq_cst);
+                ForgetFencesQuiet();
                 Nx2Profile::Scope hook_scope{Nx2Profile::Zone::IdleHook};
                 idle_hook(idle_argument);
             }
@@ -1203,6 +1209,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 NotifyFront();
             }
         }
+        CheckFencesQuiet(read_position);
         consumed.store(read_position, std::memory_order_seq_cst);
         NotifyFront();
     }

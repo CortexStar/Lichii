@@ -130,6 +130,23 @@ public:
         idle_hook = hook;
         idle_argument = argument;
     }
+    /// Asked on the back whenever it has run everything published: whether a ReleaseFences there
+    /// would only wait for fences that complete without it (RasterizerInterface::FencesQuiet).
+    using FenceQuietCheck = bool (*)(void* argument, u64* epoch);
+    void SetFenceQuietCheck(FenceQuietCheck check, void* argument) {
+        fence_quiet_check = check;
+        fence_quiet_argument = argument;
+    }
+    /// Front: whether the back's last check found nothing to release with everything sent run,
+    /// and the fence work epoch it saw then (compare with FenceWorkEpoch()).
+    [[nodiscard]] bool FencesQuietNow(u64& epoch) const {
+        if (consumed.load(std::memory_order_acquire) != write_position ||
+            fence_quiet_position.load(std::memory_order_acquire) != write_position) {
+            return false;
+        }
+        epoch = fence_quiet_epoch.load(std::memory_order_relaxed);
+        return true;
+    }
     /// Any thread: whether the back thread runs (false before it starts and once it stopped).
     [[nodiscard]] bool BackRunning() const {
         return back_running.load(std::memory_order_acquire);
@@ -771,6 +788,26 @@ private:
     static inline thread_local bool on_back_thread{};
     void (*idle_hook)(void*){};
     void* idle_argument{};
+    FenceQuietCheck fence_quiet_check{};
+    void* fence_quiet_argument{};
+    /// Back: runs fence_quiet_check at `position` (everything published run).
+    void CheckFencesQuiet(u64 position) {
+        u64 epoch{};
+        if (fence_quiet_check != nullptr && fence_quiet_check(fence_quiet_argument, &epoch)) {
+            fence_quiet_epoch.store(epoch, std::memory_order_relaxed);
+            fence_quiet_position.store(position, std::memory_order_release);
+        } else {
+            ForgetFencesQuiet();
+        }
+    }
+    /// Back: forgets the last check (the idle hook submits, which may change the caches).
+    void ForgetFencesQuiet() {
+        fence_quiet_position.store(~u64{0}, std::memory_order_relaxed);
+    }
+    /// Written by the back before `consumed`: the position of its last check that found nothing
+    /// to release, with the epoch it saw; ~0 for none.
+    alignas(128) std::atomic<u64> fence_quiet_position{~u64{0}};
+    std::atomic<u64> fence_quiet_epoch{};
     alignas(64) std::atomic<bool> hook_requested{};
     std::atomic<bool> back_running{};
 

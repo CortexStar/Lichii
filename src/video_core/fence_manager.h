@@ -81,12 +81,16 @@ public:
         // Not only the GPU thread queues these (query cache work runs elsewhere too), while
         // SignalFence moves the list into pending_operations: unguarded, the list was corrupted
         // and the fencing thread crashed walking it. Its own lock, held for no callbacks.
-        std::scoped_lock lock{uncommitted_guard};
-        uncommitted_operations.emplace_back(std::move(func));
+        {
+            std::scoped_lock lock{uncommitted_guard};
+            uncommitted_operations.emplace_back(std::move(func));
+        }
+        work_epoch.fetch_add(1, std::memory_order_release);
     }
 
     void SignalFence(std::function<void()>&& func) {
         Nx2Profile::Scope profile_scope{Nx2Profile::Zone::Fence};
+        work_epoch.fetch_add(1, std::memory_order_release);
         // A guest read waits for downloads to land (GPU::WaitForLanding): submit the deferred
         // work now rather than at the end of the batching window.
         if (Nx2Reactive::GetLanding().waiters.load(std::memory_order_relaxed) != 0) {
@@ -206,6 +210,56 @@ public:
             wait_cv.wait(
                 lk, [&wait_finished] { return wait_finished.load(std::memory_order_relaxed); });
         }
+    }
+
+    /// The split's back, between entries: whether WaitPendingFences(true) would only make an
+    /// empty fence and wait for the fences already made, as no download, query or fence
+    /// operation is uncommitted and fences don't hold operations back (no delayed fences); those
+    /// fences then complete on the fencing thread without it. A cache lock held elsewhere counts
+    /// as work. `epoch`: FenceWorkEpoch() as of the check.
+    bool FencesQuiet(u64& epoch) {
+        epoch = work_epoch.load(std::memory_order_acquire);
+        if constexpr (!can_async_check) {
+            return false;
+        }
+        if (VideoCore::g_signaling_query_report_fence ||
+            (Settings::IsGPUFenceBehaviorDefault() ? Settings::IsGPULevelHigh()
+                                                   : Settings::IsGPUFenceBehaviorBalanced() ||
+                                                         Settings::IsGPUFenceBehaviorAccurate())) {
+            return false;
+        }
+        {
+            std::unique_lock lock{uncommitted_guard, std::try_to_lock};
+            if (!lock || !uncommitted_operations.empty()) {
+                return false;
+            }
+        }
+        {
+            std::unique_lock lock{texture_cache.mutex, std::try_to_lock};
+            if (!lock || texture_cache.HasAsyncFlushWork()) {
+                return false;
+            }
+        }
+        {
+            std::unique_lock lock{buffer_cache.mutex, std::try_to_lock};
+            if (!lock || buffer_cache.HasUncommittedFlushes()) {
+                return false;
+            }
+        }
+        if (query_cache.HasUncommittedFlushes()) {
+            return false;
+        }
+        if constexpr (requires { query_cache.HasPendingFenceWork(); }) {
+            if (query_cache.HasPendingFenceWork()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Any thread: changes whenever a fence or a fence operation is added.
+    [[nodiscard]] u64 FenceWorkEpoch() const {
+        return work_epoch.load(std::memory_order_acquire);
     }
 
 protected:
@@ -569,6 +623,7 @@ private:
     std::mutex guard;
     std::mutex ring_guard;
     std::mutex uncommitted_guard; ///< Guards uncommitted_operations
+    std::atomic<u64> work_epoch{}; ///< Bumped by every fence and fence operation added
     std::condition_variable cv;
 
     std::jthread fence_thread;

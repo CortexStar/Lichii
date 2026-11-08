@@ -437,6 +437,11 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
     VideoCommon::GpuSplit::Get().SetIdleHook(
         [](void* argument) { static_cast<Scheduler*>(argument)->FlushDeferred(); },
         &scheduler);
+    VideoCommon::GpuSplit::Get().SetFenceQuietCheck(
+        [](void* argument, u64* epoch) {
+            return static_cast<RasterizerVulkan*>(argument)->FencesQuiet(*epoch);
+        },
+        this);
     // Whoever takes or releases the buffer cache's lock first applies the guest write traps
     // queued while it was held, as each trap would have once it got the lock (OnCPUWrite).
     buffer_cache.mutex.SetOwnerHook(
@@ -465,6 +470,7 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
 RasterizerVulkan::~RasterizerVulkan() {
     buffer_cache.mutex.SetOwnerHook(nullptr, nullptr);
     VideoCommon::GpuSplit::Get().SetIdleHook(nullptr, nullptr);
+    VideoCommon::GpuSplit::Get().SetFenceQuietCheck(nullptr, nullptr);
     scheduler.WaitWorker();
     scheduler.Finish();
 }
@@ -2409,6 +2415,14 @@ void RasterizerVulkan::SignalReference() {
 
 void RasterizerVulkan::ReleaseFences(bool force) {
     fence_manager.WaitPendingFences(force);
+}
+
+bool RasterizerVulkan::FencesQuiet(u64& epoch) {
+    return fence_manager.FencesQuiet(epoch);
+}
+
+u64 RasterizerVulkan::FenceWorkEpoch() const {
+    return fence_manager.FenceWorkEpoch();
 }
 
 void RasterizerVulkan::FlushQueryResults(DAddr addr, u64 size) {

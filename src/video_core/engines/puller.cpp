@@ -65,10 +65,21 @@ void DrainBack() {
 
 // The fence manager records into the scheduler and downloads the CPU's writes over GPU data:
 // the back's state, which a drained back still uses from its idle hook (it submits).
+// No drain when the back, having run everything sent, found that the release would only wait
+// for fences that complete on the fencing thread anyway (GpuSplit::FencesQuietNow) and no fence
+// work was added since: the GPU cache is still invalidated on the back, in order. Ocarina of Time
+// meets ~2,350 unmet acquires a second, each such drain and wait ~120 us of the front.
 void ReleaseFences(DmaPusher& dma_pusher) {
-    VideoCommon::GpuSplit::Get().Run(
-        [rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); },
-        VideoCommon::DrainSite::FenceRelease);
+    auto& split = VideoCommon::GpuSplit::Get();
+    if (split.Active()) {
+        u64 epoch{};
+        if (split.FencesQuietNow(epoch) && dma_pusher.rasterizer->FenceWorkEpoch() == epoch) {
+            split.Defer([rasterizer = dma_pusher.rasterizer] { rasterizer->InvalidateGPUCache(); });
+            return;
+        }
+    }
+    split.Run([rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); },
+              VideoCommon::DrainSite::FenceRelease);
 }
 
 // Narrow drains (GpuSplit::NarrowDrains): the semaphore word once the queued work that may write

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <functional>
@@ -791,6 +792,54 @@ TEST_CASE("Split restart resets writer positions without replaying old releases"
         REQUIRE_FALSE(split.BackRunning());
         REQUIRE(Access::End(split) == 0);
     }
+}
+
+TEST_CASE("Split fence releases skip the drain only at a position the back found quiet",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    Fixture f;
+    f.system.Initialize();
+    VideoCommon::GpuSplit split;
+    struct Check {
+        std::atomic<bool> quiet{true};
+        std::atomic<u64> epoch{7};
+    } check;
+    split.SetFenceQuietCheck(
+        [](void* argument, u64* epoch) {
+            auto& state = *static_cast<Check*>(argument);
+            *epoch = state.epoch.load();
+            return state.quiet.load();
+        },
+        &check);
+    Access::Start(split, f.system);
+    SCOPE_EXIT { split.Stop(); };
+    u64 epoch{};
+    split.Defer([] {});
+    split.Drain(VideoCommon::DrainSite::Acquire);
+    REQUIRE(split.FencesQuietNow(epoch));
+    REQUIRE(epoch == 7);
+    // Work sent since the check: not quiet until the back has run it and checked again.
+    std::atomic<bool> release{};
+    split.Defer([&] {
+        while (!release.load()) {
+            std::this_thread::yield();
+        }
+    });
+    split.Publish();
+    REQUIRE_FALSE(split.FencesQuietNow(epoch));
+    check.quiet = false;
+    release = true;
+    split.Drain(VideoCommon::DrainSite::Acquire);
+    REQUIRE_FALSE(split.FencesQuietNow(epoch));
+    check.quiet = true;
+    check.epoch = 8;
+    split.Defer([] {});
+    split.Drain(VideoCommon::DrainSite::Acquire);
+    REQUIRE(split.FencesQuietNow(epoch));
+    REQUIRE(epoch == 8);
+    split.Stop();
+    REQUIRE_FALSE(split.FencesQuietNow(epoch));
+    split.SetFenceQuietCheck(nullptr, nullptr);
 }
 
 TEST_CASE("Maxwell3D takes its macros back from the split's front once the split stops",
