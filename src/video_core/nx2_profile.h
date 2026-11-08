@@ -71,6 +71,7 @@ enum class Zone : u32 {
     CbBind,       ///< Kind::CbBind and bind group methods (Maxwell3D::ProcessCBBind)
     CbMulti,      ///< Constant buffer data in method runs (Maxwell3D::ProcessCBMultiData)
     DrawBatch,    ///< Kind::DrawBatch expansion (Maxwell3D::RunDrawBatch)
+    DrawRun,      ///< Kind::DrawRun (Maxwell3D::RunDrawRun), the draws in it included
     DrawManager,  ///< DrawManager begin/end/deferred, outside the rasterizer's draw
     Method3D,     ///< Maxwell3D method entries ("method" keeps the other engines and runs)
     Call,         ///< Kind::Call entries, by thunk in the "calls" report line
@@ -94,7 +95,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "configure draw", "dynamic state", "draw record", "texture upload", "fence",
     "fence skipped", "method", "split drain", "split wait",
     "writer wait", "list submit wait", "list GPU wait", "tick work", "inline to memory",
-    "ring decode", "delta apply", "cb write", "cb bind", "cb multi", "draw batch",
+    "ring decode", "delta apply", "cb write", "cb bind", "cb multi", "draw batch", "draw run",
     "draw manager", "method 3D", "call", "finish macro", "query report", "counter reset",
     "render enable", "syncpoint", "wait for idle", "cache barrier", "idle hook",
 };
@@ -149,6 +150,7 @@ enum class Counter : u32 {
     RingEntries,    ///< Split back: ring entries executed
     FusedWrites,    ///< Split back: compute writes in Kind::Writes entries (EDEN_NX2_COMPUTE_FUSE)
     MergedUploads,  ///< Split back: inline upload flushes joined to the one before (I2M_MERGE)
+    RunDraws,       ///< Split back: draw.end words in Kind::DrawRun entries
     Count,
 };
 
@@ -322,11 +324,13 @@ inline bool Report(const char* thread_name = "GPU thread") {
         };
         line += fmt::format(" | ring {:.0f} entries {:.0f} words | delta words {:.0f} ({:.0f} "
                             "same on the back) | cb write words {:.0f} | batch repeats {:.0f} | "
-                            "fused compute writes {:.0f} | merged uploads {:.0f}",
+                            "fused compute writes {:.0f} | merged uploads {:.0f} | run draws "
+                            "{:.0f}",
                             per_second(Counter::RingEntries), per_second(Counter::RingWords),
                             per_second(Counter::DeltaWords), per_second(Counter::DeltaSameWords),
                             per_second(Counter::CbWriteWords), per_second(Counter::BatchRepeats),
-                            per_second(Counter::FusedWrites), per_second(Counter::MergedUploads));
+                            per_second(Counter::FusedWrites), per_second(Counter::MergedUploads),
+                            per_second(Counter::RunDraws));
     }
     std::string drains;
     for (size_t i = 0; i < data.drain_count.size(); ++i) {

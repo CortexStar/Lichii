@@ -1339,6 +1339,21 @@ struct Maxwell3D::FrontState {
     u32 cb_nibbles{};
     GPUVAddr cb_address{}; ///< Where the run's first word goes (for the narrow-drain record)
     std::array<u32, MaxCbWords> cb_words{};
+    /// Draw runs: plain draws (draw.begin not Subsequent .. draw.end), the draw parameters and
+    /// constant buffer data written between them and the ends of the macros that drew them,
+    /// held as one Kind::DrawRun until anything else is sent (Maxwell3D::RunDrawRun). While a
+    /// run is held nothing else is.
+    static constexpr u32 MaxRunWords = 64;
+    std::array<u64, MaxRunWords> run{};
+    u32 run_size{};
+    /// Where the run's constant buffer data goes (for the narrow-drain records).
+    struct RunNote {
+        GPUVAddr address;
+        u32 bytes;
+    };
+    static constexpr u32 MaxRunNotes = 16;
+    std::array<RunNote, MaxRunNotes> run_notes{};
+    u32 run_note_count{};
     /// What the back's inline upload took at its last launch_dma (Upload::State::ProcessExec):
     /// pitch layout and copy size; none seen yet by this front copy: unknown destination.
     bool upload_seen{};
@@ -1404,6 +1419,30 @@ bool IsBatchMiddle(u32 method) {
     default:
         return false;
     }
+}
+
+// Draw methods a draw run holds: a plain draw's begin and end (an instance loop's repeats go in
+// draw batches) and the draw parameters among them.
+bool IsRunMethod(u32 method, u32 value) {
+    if (method == MAXWELL3D_REG_INDEX(draw.begin)) {
+        return ((value >> 26) & 3) !=
+               static_cast<u32>(Maxwell3D::Regs::Draw::InstanceId::Subsequent);
+    }
+    return method == MAXWELL3D_REG_INDEX(draw.end) || IsBatchMiddle(method);
+}
+
+// State registers a draw run holds: what only the draws read (index buffer, base vertex and
+// instance) and where constant buffer data goes. Pipeline, binding and render target state ends
+// the run.
+bool IsRunState(u32 method) {
+    constexpr u32 index_buffer = MAXWELL3D_REG_INDEX(index_buffer);
+    constexpr u32 const_buffer = MAXWELL3D_REG_INDEX(const_buffer);
+    static_assert(MAXWELL3D_REG_INDEX(index_buffer.format) == index_buffer + 4);
+    static_assert(MAXWELL3D_REG_INDEX(const_buffer.offset) == const_buffer + 3);
+    return method - index_buffer <= 4 || method - const_buffer <= 3 ||
+           method == MAXWELL3D_REG_INDEX(vertex_id_base) ||
+           method == MAXWELL3D_REG_INDEX(global_base_vertex_index) ||
+           method == MAXWELL3D_REG_INDEX(global_base_instance_index);
 }
 
 // EDEN_NX2_SPLIT_VERIFY=1: every 4096 front macro calls, wait for the back and compare the
@@ -1898,7 +1937,11 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     fs.parameters.clear();
     if (fs.draw_pending) {
         fs.draw_pending = false;
-        split.Defer([this, system_ptr = &system] { FinishFrontMacro(*system_ptr); });
+        if (fs.run_size != 0) {
+            FrontRunWord(split, fs, RunFinishMacro);
+        } else {
+            split.Defer([this, system_ptr = &system] { FinishFrontMacro(*system_ptr); });
+        }
     }
     if (FrontVerifyEnabled() && (++fs.calls & 4095) == 0) [[unlikely]] {
         FrontVerify(split, fs);
@@ -2424,8 +2467,69 @@ void Maxwell3D::RunDrawBatch(Core::System& system, const u64* methods, u32 count
     }
 }
 
+void Maxwell3D::RunDrawRun(Core::System& system, const u64* words, u32 count) {
+    // Each word as the entry it stands for: draw methods and constant buffer data as Method
+    // entries (rows of data words as one write), state as ApplyFrontDelta, macro ends as their
+    // FinishFrontMacro call.
+    constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
+    ConsumeSink(system);
+    const bool skip_same = SkipSameValueWrites();
+    std::array<u32, 64> cb_methods;
+    std::array<u32, 64> cb_words;
+    u32 cb_count = 0;
+    u32 draws = 0;
+    const auto flush_cb = [&] {
+        if (cb_count != 0) {
+            CallConstBufferWords(system, cb_methods.data(), cb_words.data(), cb_count);
+            cb_count = 0;
+        }
+    };
+    for (u32 i = 0; i < count; ++i) {
+        const u64 word = words[i];
+        const u32 method = static_cast<u32>(word) & 0xffff;
+        const u32 value = static_cast<u32>(word >> 32);
+        if ((word & (RunStateWord | RunFinishMacro)) == 0 && method - cb_data < 16) {
+            if (cb_count == cb_methods.size()) {
+                flush_cb();
+            }
+            cb_methods[cb_count] = method;
+            cb_words[cb_count] = value;
+            ++cb_count;
+            continue;
+        }
+        flush_cb();
+        if ((word & RunFinishMacro) != 0) {
+            FinishFrontMacro(system);
+        } else if ((word & RunStateWord) != 0) {
+            const auto control = shadow_state.shadow_ram_control;
+            if (control == Regs::ShadowRamControl::Track ||
+                control == Regs::ShadowRamControl::TrackWithFilter) {
+                shadow_state.reg_array[method] = value;
+            }
+            if (!skip_same || regs.reg_array[method] != value) {
+                ProcessDirtyRegisters(method, value);
+            }
+        } else {
+            draws += method == MAXWELL3D_REG_INDEX(draw.end) ? 1 : 0;
+            CallMethod(system, method, value, true);
+        }
+    }
+    flush_cb();
+    if (VideoCommon::Nx2Profile::Enabled()) [[unlikely]] {
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::RunDraws, draws);
+    }
+}
+
 void Maxwell3D::FrontMarkDelta(VideoCommon::GpuSplit& split, FrontState& fs, u32 method,
                                u32 value) {
+    if (fs.run_size != 0) {
+        if (IsRunState(method)) {
+            FrontRunWord(split, fs, u64{method} | RunStateWord | (u64{value} << 32));
+            return;
+        }
+        // The held draws come before this write.
+        split.RunPendingFlush();
+    }
     if (fs.batch_size != 0 || fs.capture_size != 0 || fs.cb_count != 0) {
         // The held-back draws come before this write (a state change ends the instance loop).
         split.RunPendingFlush();
@@ -2448,8 +2552,9 @@ void Maxwell3D::FrontSend(VideoCommon::GpuSplit& split, FrontState& fs, u32 meth
         // Regs::Draw::instance_id, bits 26-27 of the value the back will hold.
         constexpr u32 subsequent = static_cast<u32>(Regs::Draw::InstanceId::Subsequent);
         if (((value >> 26) & 3) == subsequent) {
-            if (fs.capture_size != 0 || fs.delta_count != 0 || fs.cb_count != 0) {
-                // A group that never ended, or state writes: they go first.
+            if (fs.capture_size != 0 || fs.delta_count != 0 || fs.cb_count != 0 ||
+                fs.run_size != 0) {
+                // A group that never ended, state writes or plain draws: they go first.
                 split.RunPendingFlush();
             }
             fs.capture[0] = write;
@@ -2484,6 +2589,20 @@ void Maxwell3D::FrontSend(VideoCommon::GpuSplit& split, FrontState& fs, u32 meth
             split.SetPendingFlush(&FrontFlushPending, this);
             return;
         }
+    }
+    if (IsRunMethod(method, value) &&
+        (fs.run_size != 0 || method == MAXWELL3D_REG_INDEX(draw.begin))) {
+        if (fs.run_size == 0 && (fs.capture_size != 0 || fs.batch_size != 0 ||
+                                 fs.delta_count != 0 || fs.cb_count != 0)) {
+            // What is held goes before the run.
+            split.RunPendingFlush();
+        }
+        FrontRunWord(split, fs, u64{method} | (u64{argument} << 32));
+        // A back without work gets each draw at once.
+        if (method == MAXWELL3D_REG_INDEX(draw.end) && fs.run_size != 0 && split.BackIdle()) {
+            split.RunPendingFlush();
+        }
+        return;
     }
     // Anything held back goes first (GpuSplit::SelectEngine runs FrontFlushPending).
     if (from_macro) {
@@ -2529,11 +2648,57 @@ void Maxwell3D::FrontEmitCapture(VideoCommon::GpuSplit& split, FrontState& fs) {
     fs.capture_size = 0;
 }
 
+void Maxwell3D::FrontRunWord(VideoCommon::GpuSplit& split, FrontState& fs, u64 word) {
+    fs.run[fs.run_size++] = word;
+    split.SetPendingFlush(&FrontFlushPending, this);
+    if (fs.run_size == FrontState::MaxRunWords) {
+        split.RunPendingFlush();
+    }
+}
+
+bool Maxwell3D::FrontRunCbWord(VideoCommon::GpuSplit& split, FrontState& fs, u32 method,
+                               u32 argument) {
+    // As FrontCbWord: FrontWriteFull has advanced the offset past this word already.
+    const GPUVAddr address =
+        ((GPUVAddr{fs.regs[MAXWELL3D_REG_INDEX(const_buffer.address_high)]} << 32) |
+         fs.regs[MAXWELL3D_REG_INDEX(const_buffer.address_low)]) +
+        static_cast<u32>(fs.regs[MAXWELL3D_REG_INDEX(const_buffer.offset)] - sizeof(u32));
+    if (fs.run_note_count != 0) {
+        auto& last = fs.run_notes[fs.run_note_count - 1];
+        if (last.address + last.bytes == address) {
+            last.bytes += sizeof(u32);
+            FrontRunWord(split, fs, u64{method} | (u64{argument} << 32));
+            return true;
+        }
+    }
+    if (fs.run_note_count == FrontState::MaxRunNotes) {
+        return false;
+    }
+    fs.run_notes[fs.run_note_count++] = {address, sizeof(u32)};
+    FrontRunWord(split, fs, u64{method} | (u64{argument} << 32));
+    return true;
+}
+
+void Maxwell3D::FrontEmitRun(VideoCommon::GpuSplit& split, FrontState& fs) {
+    const u32 count = fs.run_size;
+    if (count == 0) {
+        return;
+    }
+    fs.run_size = 0;
+    split.DrawRun(this, fs.run.data(), count);
+    // As FrontEmitCb for the data words, at the end of the run.
+    for (u32 i = 0; i < fs.run_note_count; ++i) {
+        split.NoteWrite(&memory_manager, fs.run_notes[i].address, fs.run_notes[i].bytes);
+    }
+    fs.run_note_count = 0;
+}
+
 void Maxwell3D::FrontFlushPending(void* maxwell3d) {
     // GpuSplit cleared the hook before calling: the entries below don't come back here.
     auto* const self = static_cast<Maxwell3D*>(maxwell3d);
     FrontState& fs = *self->front;
     auto& split = VideoCommon::GpuSplit::Get();
+    self->FrontEmitRun(split, fs);
     self->FrontEmitCb(split, fs);
     self->FrontEmitBatch(split, fs);
     self->FrontEmitCapture(split, fs);
@@ -2552,6 +2717,9 @@ void Maxwell3D::FrontFlushPending(void* maxwell3d) {
 
 void Maxwell3D::FrontCbWord(VideoCommon::GpuSplit& split, FrontState& fs, u32 method,
                             u32 argument) {
+    if (fs.run_size != 0 && FrontRunCbWord(split, fs, method, argument)) {
+        return;
+    }
     if (fs.cb_count == 0 || fs.cb_count == FrontState::MaxCbWords) {
         // Whatever is held goes first (a full run too). FrontWriteFull has advanced the offset
         // past this word already.

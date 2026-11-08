@@ -3235,6 +3235,14 @@ public:
     /// GpuSplit's back (Kind::DrawBatch): an instance loop's begin..end writes, then
     /// `repeats - 1` more identical instances.
     void RunDrawBatch(Core::System& system, const u64* methods, u32 count, u32 repeats);
+    /// Kind::DrawRun words: method (bits 0-15) | flags | argument or value << 32. Without a
+    /// flag a draw method or constant buffer data word, run as CallMethod would.
+    static constexpr u64 RunStateWord = u64{1} << 16;   ///< A state write as in a StateDelta
+    static constexpr u64 RunFinishMacro = u64{1} << 17; ///< FinishFrontMacro (no method)
+    /// GpuSplit's back (Kind::DrawRun): plain draws, the draw parameters and constant buffer
+    /// data written around them and the ends of the macros that drew them, in the order the
+    /// front sent them (`count` words, see RunStateWord).
+    void RunDrawRun(Core::System& system, const u64* words, u32 count);
     /// GpuSplit's back (Kind::CbWrite): `count` (1-4) constant buffer data words (`first`, then
     /// the others two per u64 of `rest`, low half first), to const_buffer.buffer + nibble i of
     /// `nibbles`, as the single writes would.
@@ -3462,6 +3470,12 @@ private:
                    u32 value, bool is_last_call, bool from_macro);
     void FrontEmitBatch(VideoCommon::GpuSplit& split, FrontState& state);
     void FrontEmitCapture(VideoCommon::GpuSplit& split, FrontState& state);
+    /// Holds `word` (RunDrawRun's format) in the current draw run.
+    void FrontRunWord(VideoCommon::GpuSplit& split, FrontState& state, u64 word);
+    /// Holds a constant buffer data write in the open draw run; false: no room for it.
+    bool FrontRunCbWord(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 argument);
+    /// Sends the held draw run (Kind::DrawRun).
+    void FrontEmitRun(VideoCommon::GpuSplit& split, FrontState& state);
     /// Holds a constant buffer data write in the current run.
     void FrontCbWord(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 argument);
     /// Sends the held constant buffer run (Kind::CbWrite).
