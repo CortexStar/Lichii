@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <span>
 #include <vector>
 
@@ -48,7 +49,9 @@ void DestroyBinaries(const Device& device, std::span<const VkPipelineBinaryKHR> 
 } // Anonymous namespace
 
 PipelineBinaryCache::PipelineBinaryCache(const Device& device_)
-    : device{device_}, supported{device_.IsKhrPipelineBinarySupported()} {}
+    // EXPERIMENT, A/B only, never merges: EDEN_NX2_EXP_NO_PIPELINE_BINARY=1 keeps no binaries.
+    : device{device_}, supported{device_.IsKhrPipelineBinarySupported() &&
+                                 std::getenv("EDEN_NX2_EXP_NO_PIPELINE_BINARY") == nullptr} {}
 
 void PipelineBinaryCache::Open(const std::filesystem::path& file) {
     open = false;

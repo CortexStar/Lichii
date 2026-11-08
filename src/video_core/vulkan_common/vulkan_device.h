@@ -762,6 +762,12 @@ FN_MAX_LIMIT_LIST
     /// Whether pipelines are linked from graphics pipeline libraries with link time optimization
     /// (GraphicsLibraryLinksOptimized); their libraries then keep link time optimization info.
     bool LinksGraphicsLibrariesOptimized() const {
+        // EXPERIMENT, A/B only, never merges: EDEN_NX2_EXP_GPL_FAST_LINK=1 fast links on any
+        // driver with fast linking (the AMD fringe repro).
+        static const bool fast = std::getenv("EDEN_NX2_EXP_GPL_FAST_LINK") != nullptr;
+        if (fast && properties.graphics_pipeline_library.graphicsPipelineLibraryFastLinking) {
+            return false;
+        }
         return GraphicsLibraryLinksOptimized(
             GetDriverID(), properties.graphics_pipeline_library.graphicsPipelineLibraryFastLinking);
     }

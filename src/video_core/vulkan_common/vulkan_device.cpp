@@ -1224,7 +1224,8 @@ bool Device::GetSuitability(bool requires_swapchain) {
 
     // Graphics pipelines built during play are linked from per-stage libraries
     // (vk_pipeline_library). Kept out of the extension tables: it is added only with its feature.
-    graphics_pipeline_library_requested = true;
+    // EXPERIMENT, A/B only, never merges: EDEN_NX2_EXP_NO_GPL=1 builds every pipeline whole.
+    graphics_pipeline_library_requested = std::getenv("EDEN_NX2_EXP_NO_GPL") == nullptr;
     if (graphics_pipeline_library_requested &&
         supported_extensions.contains(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) &&
         supported_extensions.contains(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME)) {
