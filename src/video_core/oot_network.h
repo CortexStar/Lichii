@@ -9,6 +9,7 @@
 
 #include "common/common_types.h"
 #include "common/logging.h"
+#include "common/nx2_switches.h"
 #include "common/settings.h"
 #include "video_core/engines/maxwell_3d.h"
 
@@ -43,11 +44,7 @@ constexpr bool FeedsOutputPass(u64 native_key, u64 shader_hash) {
 /// EXPERIMENT (do not merge): EDEN_NX2_EXP_HEAVY_DISPATCH=1 runs the heavy dispatch while the
 /// output pass is replaced (the A/B of skipping it).
 inline bool ExpRunHeavyDispatch() {
-    static const bool on = [] {
-        const char* const value = std::getenv("EDEN_NX2_EXP_HEAVY_DISPATCH");
-        return value != nullptr && value[0] == '1';
-    }();
-    return on;
+    return Common::Nx2Switches::Get(Common::Nx2Switches::Switch::HeavyDispatch) != 0;
 }
 
 /// Logs once that the heavy dispatch is skipped, so a log shows the hash still matches.

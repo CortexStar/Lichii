@@ -22,6 +22,7 @@
 #include "common/assert.h"
 #include "common/div_ceil.h"
 #include "common/memory_detect.h"
+#include "common/nx2_switches.h"
 #include "common/paged_scalar.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -219,10 +220,7 @@ void DeviceMemoryManager<Traits>::HintCold(DAddr address, size_t size) {
     // the host needs the RAM, and an image made again over them faults them all back in during
     // its upload (Ocarina of Time: 1% lows). Only when RAM is short.
     // EXPERIMENT (do not merge): EDEN_NX2_EXP_COLD_ALWAYS=1 hints whatever the RAM.
-    static const bool cold_always = [] {
-        const char* const value = std::getenv("EDEN_NX2_EXP_COLD_ALWAYS");
-        return value != nullptr && value[0] == '1';
-    }();
+    const bool cold_always = Common::Nx2Switches::Get(Common::Nx2Switches::Switch::ColdAlways) != 0;
     if (!cold_always && !Common::IsLowOnMemory(Common::GetAvailablePhysicalMemory(),
                                                Common::GetMemInfo().TotalPhysicalMemory)) {
         return;

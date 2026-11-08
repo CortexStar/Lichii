@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "common/logging.h"
+#include "common/nx2_switches.h"
 #include "common/thread_worker.h"
 #include "video_core/renderer_vulkan/async_draw_policy.h"
 
@@ -77,8 +78,7 @@ public:
     // EXPERIMENT, A/B only, never merges: EDEN_NX2_EXP_NO_BUILDER_BOOST=1 leaves an awaited
     // builder at ThreadPriority::Low.
     static bool Enabled() {
-        static const bool enabled = std::getenv("EDEN_NX2_EXP_NO_BUILDER_BOOST") == nullptr;
-        return enabled;
+        return Common::Nx2Switches::Get(Common::Nx2Switches::Switch::NoBuilderBoost) == 0;
     }
 
     static constexpr Common::ThreadPriority RaisedPriority = Common::ThreadPriority::High;

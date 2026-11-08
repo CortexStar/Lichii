@@ -33,23 +33,29 @@
 #include "common/assert.h"
 #include "common/div_ceil.h"
 #include "common/dkb_frame_trace.h"
-#include "shader_recompiler/exception.h"
 #include "common/logging.h"
+#include "common/nx2_switches.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
+#include "shader_recompiler/exception.h"
 #include "video_core/buffer_cache/buffer_cache.h"
-#include "video_core/gpu_logging/gpu_logging.h"
-#include "video_core/host_logic_op.h"
 #include "video_core/control/channel_state.h"
-#include "video_core/native_query_trace.h"
-#include "video_core/nx2_reactive.h"
-#include "video_core/native_indirect_reset.h"
-#include "video_core/render_trace.h"
-#include "video_core/indirect_reset.h"
-#include "video_core/engines/maxwell_3d.h"
+#include "video_core/draw_debug_switches.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/host_logic_op.h"
+#include "video_core/indirect_reset.h"
+#include "video_core/memory_manager.h"
+#include "video_core/native_indirect_reset.h"
+#include "video_core/native_query_trace.h"
+#include "video_core/nx2.h"
+#include "video_core/nx2_debug_control.h"
+#include "video_core/nx2_profile.h"
+#include "video_core/nx2_reactive.h"
+#include "video_core/oot_dlss.h"
+#include "video_core/render_trace.h"
 #include "video_core/renderer_vulkan/blit_image.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/framebuffer_clear_layers.h"
@@ -58,11 +64,10 @@
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
+#include "video_core/renderer_vulkan/vk_oot_object_motion.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
-#include "video_core/renderer_vulkan/vk_oot_object_motion.h"
-#include "video_core/oot_dlss.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
@@ -73,11 +78,6 @@
 #include "video_core/textures/texture.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
-#include "video_core/draw_debug_switches.h"
-#include "video_core/memory_manager.h"
-#include "video_core/nx2.h"
-#include "video_core/nx2_debug_control.h"
-#include "video_core/nx2_profile.h"
 
 namespace Vulkan {
 
@@ -276,11 +276,7 @@ void RecordDispatchBarrier(vk::CommandBuffer cmdbuf, VkPipelineStageFlags src) {
 /// EXPERIMENT (do not merge): EDEN_NX2_EXP_DISPATCH_BARRIERS=all records the barrier before every
 /// guest dispatch from all stages, as before hazard tracking (the decisions are still counted).
 bool AllDispatchBarriers() {
-    static const bool all = [] {
-        const char* value = std::getenv("EDEN_NX2_EXP_DISPATCH_BARRIERS");
-        return value != nullptr && std::string_view{value} == "all";
-    }();
-    return all;
+    return Common::Nx2Switches::Get(Common::Nx2Switches::Switch::DispatchBarriersAll) != 0;
 }
 
 bool IsPrimitiveRestartSupported(const Device& device, VkPrimitiveTopology topology) {
@@ -2044,10 +2040,8 @@ void RasterizerVulkan::DispatchCompute() {
     // the next fence.
     (void)buffer_cache.TakeReadPrefetchQueued();
     // EXPERIMENT (do not merge): EDEN_NX2_EXP_NO_EARLY_READ=1 leaves them to the next fence.
-    static const bool no_early_read = [] {
-        const char* const value = std::getenv("EDEN_NX2_EXP_NO_EARLY_READ");
-        return value != nullptr && value[0] == '1';
-    }();
+    const bool no_early_read =
+        Common::Nx2Switches::Get(Common::Nx2Switches::Switch::NoEarlyRead) != 0;
     SCOPE_EXIT {
         if (buffer_cache.TakeReadPrefetchQueued() && !no_early_read) {
             fence_manager.SignalReference();
@@ -3022,6 +3016,9 @@ void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
 }
 
 void RasterizerVulkan::TickFrame() {
+    // EXPERIMENT (do not merge): A/B switches flipped by the debug server take effect here,
+    // between frames (common/nx2_switches.h).
+    Common::Nx2Switches::Latch(draw_watch_frame + 1);
     {
         auto& watch = VideoCommon::GetDrawInputWatch();
         watch.Sweep(++draw_watch_frame);
@@ -3366,10 +3363,8 @@ std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
     // Ocarina of Time's scene comes from DLSS or FSR: FXAA or SMAA on top only blurs it.
     // EXPERIMENT (do not merge): EDEN_NX2_EXP_PRESENT_FILTERS=1 keeps FXAA/SMAA and the scaling
     // filter on the upscaled image (the A/B of skipping them).
-    static const bool keep_filters = [] {
-        const char* const value = std::getenv("EDEN_NX2_EXP_PRESENT_FILTERS");
-        return value != nullptr && value[0] == '1';
-    }();
+    const bool keep_filters =
+        Common::Nx2Switches::Get(Common::Nx2Switches::Switch::KeepPresentFilters) != 0;
     info.anti_aliased = !keep_filters && VideoCommon::OotDlss::Targets().output_upscaled.load(
                                              std::memory_order_relaxed);
     return info;
@@ -3590,10 +3585,9 @@ void RasterizerVulkan::BuildDynamicStateMask() {
     dyn_state_slots = slots;
     // EXPERIMENT (do not merge): EDEN_NX2_DYNSTATE_BATCH=0 records each changed state as its own
     // command, the recording before the per-draw packet, for the A/B.
-    const char* const batch = std::getenv("EDEN_NX2_DYNSTATE_BATCH");
-    dyn_state_batch = batch == nullptr || std::string_view{batch} != "0";
+    // Read per draw (DynStateBatched), so the debug server's `switch` command flips it.
     LOG_INFO(Render_Vulkan, "Dynamic state: {} (EDEN_NX2_DYNSTATE_BATCH)",
-             dyn_state_batch ? "one packet per draw" : "one command per changed state");
+             DynStateBatched() ? "one packet per draw" : "one command per changed state");
     dyn_apply_options = {
         .with_count = pipeline_cache.UsesShaderObjects(),
         .depth_bias_force_unorm = device.IsExtDepthBiasControlSupported(),
@@ -4092,7 +4086,7 @@ void RasterizerVulkan::StageDynamicState(DynamicStateDelta::Slot slot,
     if (count == 0) {
         return;
     }
-    if (dyn_state.Stage(slot, std::span<const u32>(words.data(), count)) && !dyn_state_batch) {
+    if (dyn_state.Stage(slot, std::span<const u32>(words.data(), count)) && !DynStateBatched()) {
         // One command per changed state.
         RecordDynamicStatePacket(DynamicStateDelta::Bit(slot));
     }
@@ -5181,7 +5175,7 @@ void RasterizerVulkan::UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs) 
         last_vertex_input_layout = layout;
         if (dyn_state.Stage(DynamicStateDelta::Slot::VertexInput,
                             DynamicStateDelta::VertexInputWords(layout)) &&
-            !dyn_state_batch) {
+            !DynStateBatched()) {
             RecordDynamicStatePacket(DynamicStateDelta::Bit(DynamicStateDelta::Slot::VertexInput));
         }
         return;

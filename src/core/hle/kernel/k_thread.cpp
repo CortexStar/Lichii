@@ -1388,7 +1388,7 @@ namespace Kernel {
         // Block until runnable. HLE service threads wait here for every request: a short spin
         // on the word before sleeping saves the OS wake-up (~5-10 us) of each request that
         // follows the last one closely, on the IPC round trip of the client.
-        static const bool svcwait_off = Core::GuestCpuExperimentOff("svcwait");
+        const bool svcwait_off = Core::GuestCpuExperimentOff(Common::Nx2Switches::Svcwait);
         Common::Nx2AddressWait::WaitSpinning(m_dummy_thread_runnable, 0,
                                              svcwait_off ? std::chrono::microseconds{0}
                                                          : DummyThreadSpin);

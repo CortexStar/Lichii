@@ -20,6 +20,7 @@
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 
 #include "common/bit_field.h"
+#include "common/nx2_switches.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "shader_recompiler/exception.h"
@@ -345,8 +346,7 @@ std::atomic<std::chrono::nanoseconds::rep> hold_time_ns{};
 // EXPERIMENT, A/B only, never merges: EDEN_NX2_EXP_NO_CLAIM=1 makes a held draw wait for a
 // worker-only build in the worker queue again instead of building it.
 bool ClaimsWorkerOnlyBuilds() {
-    static const bool claims = std::getenv("EDEN_NX2_EXP_NO_CLAIM") == nullptr;
-    return claims;
+    return Common::Nx2Switches::Get(Common::Nx2Switches::Switch::NoClaim) == 0;
 }
 } // Anonymous namespace
 
@@ -2719,7 +2719,7 @@ bool GraphicsPipeline::MakeLibraryPipeline(VkRenderPass render_pass) {
     pipeline = LinkLibraries(render_pass, optimized);
     linked = true;
     // EXPERIMENT (do not merge): EDEN_NX2_EXP_NO_GPL_RELINK=1 keeps the fast links for the A/B.
-    static const bool no_relink = std::getenv("EDEN_NX2_EXP_NO_GPL_RELINK") != nullptr;
+    const bool no_relink = Common::Nx2Switches::Get(Common::Nx2Switches::Switch::NoGplRelink) != 0;
     if (!no_relink && GraphicsLibraryRelinksOptimized(device.GetDriverID(), optimized,
                                                       device.KeepsGraphicsLibraryLinkInfo())) {
         QueueOptimizedLink(render_pass);

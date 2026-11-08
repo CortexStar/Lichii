@@ -11,9 +11,9 @@
 
 #include "common/assert.h"
 #include "common/logging.h"
+#include "common/nx2_switches.h"
 #include "common/settings.h"
 #include "core/core.h"
-#include "video_core/nx2_profile.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dma_pusher.h"
 #include "video_core/engines/fermi_2d.h"
@@ -26,6 +26,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace Tegra::Engines {
@@ -77,10 +78,7 @@ void DrainBack() {
 void ReleaseFences(DmaPusher& dma_pusher) {
     auto& split = VideoCommon::GpuSplit::Get();
     // EXPERIMENT (do not merge): EDEN_NX2_EXP_NO_FENCE_QUIET=1 always drains.
-    static const bool no_quiet = [] {
-        const char* const value = std::getenv("EDEN_NX2_EXP_NO_FENCE_QUIET");
-        return value != nullptr && value[0] == '1';
-    }();
+    const bool no_quiet = Common::Nx2Switches::Get(Common::Nx2Switches::Switch::NoFenceQuiet) != 0;
     if (split.Active() && !no_quiet) {
         u64 epoch{};
         if (split.FencesQuietNow(epoch) && dma_pusher.rasterizer->FenceWorkEpoch() == epoch) {

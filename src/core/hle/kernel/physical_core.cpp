@@ -257,7 +257,7 @@ void PhysicalCore::Idle(KernelCore& kernel) {
     }
     // Interrupt stores the flag and wakes the word: stay on the CPU for the spin (PAUSE, then
     // MWAITX on the flag), then sleep in the OS.
-    static const bool idle_off = Core::GuestCpuExperimentOff("idle");
+    const bool idle_off = Core::GuestCpuExperimentOff(Common::Nx2Switches::Idle);
     if (idle_off) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds{spin_us};
         while (!m_is_interrupted.load(std::memory_order_acquire) &&

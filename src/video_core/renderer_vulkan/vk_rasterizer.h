@@ -22,6 +22,7 @@
 #include "common/common_types.h"
 #include "common/dkb_cpu_trace.h"
 #include "common/dkb_frame_trace.h"
+#include "common/nx2_switches.h"
 #include "video_core/buffer_cache/nx2_write_handoff.h"
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/engines/maxwell_dma.h"
@@ -460,8 +461,11 @@ private:
     /// The slots the draws record dynamically on this device (BuildDynamicStateMask).
     u64 dyn_state_slots{};
     DynamicStateDelta::ApplyOptions dyn_apply_options{};
-    /// One command per draw for the changed states (false: one per changed state).
-    bool dyn_state_batch{true};
+    /// One command per draw for the changed states (false: one per changed state). EXPERIMENT (do
+    /// not merge): EDEN_NX2_DYNSTATE_BATCH=0, a runtime switch.
+    static bool DynStateBatched() {
+        return Common::Nx2Switches::Get(Common::Nx2Switches::Switch::DynStateUnbatched) == 0;
+    }
     /// The dirty flags UpdateDynamicStates consumes on this device: none set, nothing to record.
     Tegra::Engines::Maxwell3D::DirtyState::Flags dyn_state_mask{};
     bool dyn_state_mask_built{};

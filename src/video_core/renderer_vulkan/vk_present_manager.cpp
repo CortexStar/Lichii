@@ -9,6 +9,7 @@
 
 #include "common/display_hdr.h"
 #include "common/input_latency.h"
+#include "common/nx2_switches.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/frontend/emu_window.h"
@@ -381,10 +382,8 @@ void PresentManager::PresentThread(std::stop_token token) {
     std::stop_callback wake_on_stop{token, [this] { cadence_wake.Set(); }};
     while (!token.stop_requested()) {
         // EXPERIMENT (do not merge): EDEN_NX2_PRESENT_CADENCE=0 presents every frame at once.
-        static const bool cadence_off = [] {
-            const char* value = std::getenv("EDEN_NX2_PRESENT_CADENCE");
-            return value != nullptr && value[0] == '0';
-        }();
+        const bool cadence_off =
+            Common::Nx2Switches::Get(Common::Nx2Switches::Switch::PresentCadenceOff) != 0;
         const u32 rate = cadence_off ? 0
                                      : PresentCadenceRate(
                                            swapchain.GetFrameCap(),

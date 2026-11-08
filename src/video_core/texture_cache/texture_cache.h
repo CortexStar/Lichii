@@ -27,6 +27,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "common/alignment.h"
+#include "common/nx2_switches.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/slot_vector.h"
@@ -36,10 +37,10 @@
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/native_verify.h"
-#include "video_core/oot_dlss.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_bindmemo_stats.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/oot_dlss.h"
 #include "video_core/render_trace.h"
 #include "video_core/texture_cache/conversion.h"
 #include "video_core/texture_cache/host_mip_limits.h"

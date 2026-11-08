@@ -236,8 +236,7 @@ void DynarmicCallbacks64::ExceptionRaised(u64 pc, Dynarmic::A64::Exception excep
 
 void DynarmicCallbacks64::OnSpinHint(u64 pc) {
 #if defined(_M_X64) || defined(__x86_64__)
-    static const bool spin_off = GuestCpuExperimentOff("spin");
-    if (spin_off) {
+    if (GuestCpuExperimentOff(Common::Nx2Switches::Spin)) {
         _mm_pause();
         _mm_pause();
         return;
@@ -588,7 +587,8 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
     }
 
     // Small hot guest functions as host code (GetHostFunction) when memory needs no checks.
-    if (page_table != nullptr && !m_cb->m_check_memory_access && !GuestCpuExperimentOff("hostfn")) {
+    if (page_table != nullptr && !m_cb->m_check_memory_access &&
+        !GuestCpuExperimentOff(Common::Nx2Switches::Hostfn)) {
         m_cb->m_page_table = page_table;
     }
 
@@ -730,7 +730,7 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
         // the callback and its fenced RDTSC (guest code reads the counter ~10^5-10^7 times a
         // second). Only when the counter is the host clock unchanged.
         if (config.wall_clock_cntpct && m_system.CoreTiming().GuestCounterIsHostClock() &&
-            !GuestCpuExperimentOff("cntpct")) {
+            !GuestCpuExperimentOff(Common::Nx2Switches::Cntpct)) {
             config.cntpct_rdtsc_factor = Common::g_wall_clock.CNTPCTRdtscFactor();
             if (CounterPollPauseEnabled()) {
                 // The same ~1.7 us as m_spin_ticks, in TSC ticks.

@@ -4,18 +4,18 @@
 
 #pragma once
 
-#include <cstdlib>
-#include <string>
-#include <string_view>
+#include "common/nx2_switches.h"
 
 namespace Core {
 
-inline bool GuestCpuExperimentOff(std::string_view name) {
-    static const std::string off = [] {
-        const char* value = std::getenv("EDEN_NX2_GUEST_CPU_OFF");
-        return std::string{value != nullptr ? value : ""};
-    }();
-    return off.find(name) != std::string::npos;
+/// Whether the guest-CPU change `bit` (a Common::Nx2Switches::GuestCpuOffBits) is turned off.
+/// Cntpct and Hostfn change emitted code: they keep the value the process started with. The others
+/// are read per call and follow the debug server's `switch` command.
+inline bool GuestCpuExperimentOff(u32 bit) {
+    namespace S = Common::Nx2Switches;
+    const bool emitted = (bit & (S::Cntpct | S::Hostfn)) != 0;
+    const u32 off = emitted ? S::AtLaunch(S::Switch::GuestCpuOff) : S::Get(S::Switch::GuestCpuOff);
+    return (off & bit) != 0;
 }
 
 } // namespace Core

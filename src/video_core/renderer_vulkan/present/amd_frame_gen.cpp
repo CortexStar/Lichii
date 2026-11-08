@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include "common/logging.h"
+#include "common/nx2_switches.h"
 #include "common/settings.h"
 #include "video_core/renderer_vulkan/present/amd_frame_gen.h"
 #include "video_core/renderer_vulkan/present/perf_overlay_pass.h"
@@ -581,10 +582,8 @@ void AmdFrameGen::ComposeHudless(MemoryAllocator& allocator, VkImage frame_image
     auto& state = *impl;
     // EXPERIMENT (do not merge): EDEN_NX2_EXP_FG_HUDLESS=0 gives frame generation no HUD-less
     // image (the A/B of it).
-    static const bool hudless_off = [] {
-        const char* const value = std::getenv("EDEN_NX2_EXP_FG_HUDLESS");
-        return value != nullptr && value[0] == '0';
-    }();
+    const bool hudless_off =
+        Common::Nx2Switches::Get(Common::Nx2Switches::Switch::FgHudlessOff) != 0;
     // The frame is copied to the back buffer as it is only when they match (CopyToSwapchain).
     if (hudless_off || state.frame_gen_context == nullptr || frame_format != state.format ||
         frame_extent.width != state.display_size.width ||

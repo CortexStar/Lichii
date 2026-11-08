@@ -22,6 +22,7 @@
 
 #include "common/common_types.h"
 #include "common/logging.h"
+#include "common/nx2_switches.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "video_core/delayed_destruction_ring.h"
@@ -162,10 +163,8 @@ public:
         }
         fences.push(std::move(new_fence));
         // EXPERIMENT (do not merge): EDEN_NX2_EXP_FENCE_FLUSH_TWICE=1 flushes again here.
-        static const bool flush_twice = [] {
-            const char* const value = std::getenv("EDEN_NX2_EXP_FENCE_FLUSH_TWICE");
-            return value != nullptr && value[0] == '1';
-        }();
+        const bool flush_twice =
+            Common::Nx2Switches::Get(Common::Nx2Switches::Switch::FenceFlushTwice) != 0;
         if (flush_twice && should_flush) {
             rasterizer.FlushCommands();
         }

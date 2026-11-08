@@ -17,14 +17,15 @@
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vertex_repack.h"
 
+#include "common/nx2_switches.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
+#include "video_core/texture_cache/util.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
-#include "video_core/texture_cache/util.h"
 
 namespace Vulkan {
 namespace {
@@ -578,10 +579,8 @@ void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
 
     scheduler.RequestOutsideRenderPassOperationContext();
     // EXPERIMENT (do not merge): EDEN_NX2_EXP_NO_UPLOAD_BATCH=1 records each upload alone.
-    static const bool no_upload_batch = [] {
-        const char* const value = std::getenv("EDEN_NX2_EXP_NO_UPLOAD_BATCH");
-        return value != nullptr && value[0] == '1';
-    }();
+    const bool no_upload_batch =
+        Common::Nx2Switches::Get(Common::Nx2Switches::Switch::NoUploadBatch) != 0;
     if (barrier && from_stream && !vk_copies.empty() && !no_upload_batch) {
         // An upload in order, with these barriers. Runs of them (Ocarina of Time's inline writes
         // into GPU-written pages: ~600 a frame) go in one command between one pair of them.

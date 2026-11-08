@@ -5,9 +5,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
-#include <bitset>
 #include <atomic>
 #include <bit>
+#include <bitset>
 #include <chrono>
 #include <cstddef>
 #include <fstream>
@@ -25,6 +25,7 @@
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/memory_detect.h"
+#include "common/nx2_switches.h"
 #include "common/scope_exit.h"
 #include "common/thread.h"
 #include "common/thread_worker.h"
@@ -35,7 +36,6 @@
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/ir_opt/passes.h"
-#include "video_core/oot_dlss.h"
 #include "shader_recompiler/program_header.h"
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/kepler_compute.h"
@@ -45,6 +45,7 @@
 #include "video_core/native_verify.h"
 #include "video_core/nx2_bindmemo_stats.h"
 #include "video_core/nx2_perf.h"
+#include "video_core/oot_dlss.h"
 #include "video_core/pipeline_cache_files.h"
 #include "video_core/pipeline_cache_policy.h"
 #include "video_core/renderer_vulkan/async_draw_policy.h"
@@ -1960,7 +1961,7 @@ void PipelineCache::EvictUnusedPipelines() {
     // pipelines used moments before lost the device on AMD.
     // EXPERIMENT, A/B only, never merges: EDEN_NX2_EXP_EVICT_9000=1 evicts Switch 2 pipelines by
     // the 9000-frame rule alone, as before the budget.
-    static const bool frames_only = std::getenv("EDEN_NX2_EXP_EVICT_9000") != nullptr;
+    const bool frames_only = Common::Nx2Switches::Get(Common::Nx2Switches::Switch::Evict9000) != 0;
     const bool switch2 = Settings::CurrentProgramIsSwitch2() && !frames_only;
     size_t max_evicted = std::numeric_limits<size_t>::max();
     if (switch2) {

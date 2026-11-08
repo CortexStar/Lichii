@@ -175,7 +175,7 @@ bool SpinBeforeWait(KernelCore& kernel, KThread* cur_thread, uint64_t addr, bool
 #if defined(_M_X64) || defined(__x86_64__)
     // Past the first 2 us, wait for a write to the word's line with MONITORX/MWAITX instead of
     // polling (the SMT sibling gets the core), 1 us at a time so an interrupt is still seen.
-    static const bool arb_off = Core::GuestCpuExperimentOff("arb");
+    const bool arb_off = Core::GuestCpuExperimentOff(Common::Nx2Switches::Arb);
     if (Common::g_wall_clock.IsNative() && Common::X64::HasMonitorWait() && !arb_off) {
         const u64 budget = Common::g_wall_clock.NsToTicks(ArbSpin);
         const u64 poll = Common::g_wall_clock.NsToTicks(std::chrono::microseconds{2});

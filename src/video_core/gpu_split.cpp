@@ -25,6 +25,7 @@
 #include "common/x64/rdtsc.h"
 #endif
 #include "common/logging.h"
+#include "common/nx2_switches.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/core.h"
@@ -81,10 +82,7 @@ void Park([[maybe_unused]] const std::atomic<u64>& word, [[maybe_unused]] u64 se
 bool CanPark() {
 #if defined(__x86_64__) || defined(_M_X64)
     // EXPERIMENT (do not merge): EDEN_NX2_EXP_NO_PARK=1 keeps the PAUSE loops.
-    static const bool no_park = [] {
-        const char* const value = std::getenv("EDEN_NX2_EXP_NO_PARK");
-        return value != nullptr && value[0] == '1';
-    }();
+    const bool no_park = Common::Nx2Switches::Get(Common::Nx2Switches::Switch::NoPark) != 0;
     return !no_park && (Common::g_cpu_caps.monitorx || Common::g_cpu_caps.waitpkg);
 #else
     return false;
