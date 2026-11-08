@@ -62,6 +62,11 @@ private:
     std::shared_ptr<std::atomic<size_t>> pending = std::make_shared<std::atomic<size_t>>(0);
 };
 
+/// Builds a waiting thread ran itself and builders a waiter raised, for the runtime pipeline
+/// report.
+inline std::atomic<u32> builds_run_by_waiter{};
+inline std::atomic<u32> builders_raised{};
+
 /// Priority inheritance for a build on a ThreadPriority::Low builder thread: once a thread waits
 /// for the build, the builder runs at RaisedPriority until the build is done, so threads of
 /// normal priority (other programs) do not preempt the build the renderer is waiting on. Every
@@ -118,14 +123,16 @@ class PipelineBuild {
     struct State {
         explicit State(std::function<void()> task_) : task{std::move(task_)} {}
 
-        void Run(bool low_priority_thread = false) noexcept {
+        /// @return True when this call ran the build.
+        bool Run(bool low_priority_thread = false) noexcept {
             if (claimed.exchange(true)) {
-                return;
+                return false;
             }
             {
                 std::scoped_lock lock{mutex};
                 if (priority.Start(low_priority_thread, Common::CurrentThreadPriorityTarget())) {
                     Common::SetCurrentThreadPriority(BuilderPriority::RaisedPriority);
+                    builders_raised.fetch_add(1, std::memory_order_relaxed);
                 }
             }
             try {
@@ -149,12 +156,14 @@ class PipelineBuild {
             if (lower) {
                 Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
             }
+            return true;
         }
 
         /// Raises the builder for a waiter; called under the mutex.
         void Await() {
             if (!complete.load(std::memory_order_relaxed) && priority.Await()) {
                 Common::SetOtherThreadPriority(priority.Target(), BuilderPriority::RaisedPriority);
+                builders_raised.fetch_add(1, std::memory_order_relaxed);
             }
         }
 
@@ -192,8 +201,8 @@ public:
 
     void Wait(bool may_build = false) const {
         const auto shared = state;
-        if (may_build) {
-            shared->Run();
+        if (may_build && shared->Run()) {
+            builds_run_by_waiter.fetch_add(1, std::memory_order_relaxed);
         }
         std::unique_lock lock{shared->mutex};
         shared->Await();

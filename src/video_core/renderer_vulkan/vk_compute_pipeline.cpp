@@ -359,6 +359,7 @@ void ComputePipeline::RunBuild(bool low_priority_thread) {
         std::scoped_lock lock{build_mutex};
         if (build_priority.Start(low_priority_thread, Common::CurrentThreadPriorityTarget())) {
             Common::SetCurrentThreadPriority(BuilderPriority::RaisedPriority);
+            builders_raised.fetch_add(1, std::memory_order_relaxed);
         }
     }
     build_task();
@@ -670,6 +671,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
             if (!is_built.load(std::memory_order::relaxed) && build_priority.Await()) {
                 Common::SetOtherThreadPriority(build_priority.Target(),
                                                BuilderPriority::RaisedPriority);
+                builders_raised.fetch_add(1, std::memory_order_relaxed);
             }
             build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
         });

@@ -2344,9 +2344,12 @@ void ReportRuntimePipeline(const char* kind, std::chrono::steady_clock::time_poi
         LOG_INFO(Render_Vulkan,
                  "Runtime pipelines in the last 10 s: {} built, {:.1f} ms on the GPU thread "
                  "({:.1f} ms of it graphics SPIR-V), {:.1f} ms graphics SPIR-V on workers, "
-                 "{:.1f} ms of draws held for unbuilt pipelines",
+                 "{:.1f} ms of draws held for unbuilt pipelines ({} built by the held draw, "
+                 "{} builders raised for a waiter)",
                  count, ms(total), ms(take(runtime_spirv_ns[0])), ms(take(runtime_spirv_ns[1])),
-                 ms(GraphicsPipeline::TakeHoldTime()));
+                 ms(GraphicsPipeline::TakeHoldTime()),
+                 builds_run_by_waiter.exchange(0, std::memory_order_relaxed),
+                 builders_raised.exchange(0, std::memory_order_relaxed));
         total = {};
         count = 0;
         window = now;
