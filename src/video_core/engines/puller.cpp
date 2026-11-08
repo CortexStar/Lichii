@@ -164,15 +164,16 @@ ViewAnswer AskView(DmaPusher& dma_pusher, const Puller::PendingAcquire& acquire,
     // releases): a value that meets it stands once the back ran that work.
     const bool settled = acquire.WaitsToReach() || split.Ran(acquire.writers_before);
     // The last release the front sent to the word decides while it may not be in memory.
-    if (const auto queued = split.QueuedSemaphoreWriteAt(device)) {
-        if (queued->fenced) {
-            // It lands once a fence ran, at no position the front can wait for. A greater-or-equal
-            // acquire the word meets now and once it landed stands either way (the words only
-            // advance); else the landing latches the waiter, or a poll finds it in memory.
-            const bool landed_meets =
-                queued->known && acquire.WaitsToReach() && acquire.Matches(queued->payload);
-            return {landed_meets && acquire.Matches(memory()) ? Kind::Met : Kind::NotMet};
+    const auto queued = split.QueuedSemaphoreWriteAt(device);
+    if (queued && queued->fenced) {
+        // It lands once a fence ran, at no position the front can wait for: memory decides, as
+        // after a drain, and the landing latches the waiter or a poll finds the word. Writes sent
+        // to the word before it are in memory once the back ran it. A greater-or-equal acquire
+        // memory meets now meets it then too (the words only advance).
+        if (!split.Ran(queued->position) && !(queued->known && acquire.WaitsToReach())) {
+            return {Kind::Unknown, queued->position};
         }
+    } else if (queued) {
         if (!queued->known) {
             return {Kind::Unknown, queued->position};
         }
@@ -219,6 +220,25 @@ bool MetAfterDrain(DmaPusher& dma_pusher, const Puller::PendingAcquire& acquire,
            (waiter != nullptr && Nx2SemaphoreWaiters::Get().Latched(waiter));
 }
 
+// TEST (EDEN_NX2_DRAIN_CHECK): whether a fence-flagged release to the word at `device` may still
+// land. One that lands during the drain can change the word the view read, as it can on the
+// drain path itself.
+bool FencedWritePending(u64 device) {
+    const auto queued = VideoCommon::GpuSplit::Get().QueuedSemaphoreWriteAt(device);
+    return queued && queued->fenced;
+}
+
+// TEST: checks a pass of the view against the drain path: whether the drained word meets it, and
+// whether a fenced release that landed during the drain changed it.
+bool PassStands(DmaPusher& dma_pusher, const Puller::PendingAcquire& acquire, const void* waiter,
+                u64 device, bool poll, VideoCommon::Nx2DrainCheck::ViewPass how) {
+    const bool fenced = FencedWritePending(device);
+    const bool met = MetAfterDrain(dma_pusher, acquire, waiter);
+    VideoCommon::Nx2DrainCheck::NoteViewPass(poll, how, met,
+                                             !met && fenced && !FencedWritePending(device));
+    return met;
+}
+
 // TEST: counts the view's decision on an acquire (EDEN_NX2_ACQUIRE_STATS) and checks it against
 // the drain path (EDEN_NX2_DRAIN_CHECK): a pass the drained word doesn't meet suspends instead,
 // a suspension the drained word meets passes.
@@ -240,13 +260,12 @@ ViewAnswer CheckAcquire(DmaPusher& dma_pusher, const Puller::PendingAcquire& acq
                            Nx2MayBeGpuWritten(device, sizeof(u32)), answer.kind == Kind::Flush);
     }
     if (Check::g_enabled) {
-        const bool met = MetAfterDrain(dma_pusher, acquire, nullptr);
         if (pass) {
-            Check::NoteViewPass(false, how, met);
-            if (!met) {
+            if (!PassStands(dma_pusher, acquire, nullptr, device, false, how)) {
                 return {Kind::NotMet};
             }
         } else {
+            const bool met = MetAfterDrain(dma_pusher, acquire, nullptr);
             Check::NoteViewWait(false, met);
             if (met) {
                 return {Kind::Met};
@@ -258,13 +277,11 @@ ViewAnswer CheckAcquire(DmaPusher& dma_pusher, const Puller::PendingAcquire& acq
 
 // TEST: whether the view's resume of a poll stands (EDEN_NX2_DRAIN_CHECK).
 bool PollPassStands(DmaPusher& dma_pusher, const Puller::PendingAcquire& acquire,
-                    const void* waiter, VideoCommon::Nx2DrainCheck::ViewPass how) {
+                    const void* waiter, u64 device, VideoCommon::Nx2DrainCheck::ViewPass how) {
     if (!VideoCommon::Nx2DrainCheck::g_enabled) {
         return true;
     }
-    const bool met = MetAfterDrain(dma_pusher, acquire, waiter);
-    VideoCommon::Nx2DrainCheck::NoteViewPass(true, how, met);
-    return met;
+    return PassStands(dma_pusher, acquire, waiter, device, true, how);
 }
 
 // TEST: a suspended acquire resumes (EDEN_NX2_ACQUIRE_STATS).
@@ -408,14 +425,14 @@ bool Puller::PollWithoutDrain(DmaPusher& dma_pusher, u64 device) {
         const ViewAnswer answer = AskView(dma_pusher, acquire, device);
         switch (answer.kind) {
         case Kind::Met:
-            if (!PollPassStands(dma_pusher, acquire, this, ViewPass::Memory)) {
+            if (!PollPassStands(dma_pusher, acquire, this, device, ViewPass::Memory)) {
                 checked = true;
                 break;
             }
             NoteResumed(this, acquire, Resume::Memory);
             return true;
         case Kind::MetByQueued:
-            if (!PollPassStands(dma_pusher, acquire, this, ViewPass::Queued)) {
+            if (!PollPassStands(dma_pusher, acquire, this, device, ViewPass::Queued)) {
                 checked = true;
                 break;
             }

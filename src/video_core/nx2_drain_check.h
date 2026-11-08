@@ -63,6 +63,9 @@ struct State {
     /// not meet.
     std::array<std::atomic<u64>, 6> view_passes{};
     std::array<std::atomic<u64>, 6> view_wrong{};
+    /// Passes the drained word didn't meet because a fenced release landed during the drain: the
+    /// drain path itself may read either value then.
+    std::array<std::atomic<u64>, 6> view_raced{};
     /// Acquires the view suspended and polls it kept waiting (by poll), and of those the ones
     /// the drained word met.
     std::array<std::atomic<u64>, 2> view_waits{};
@@ -129,13 +132,15 @@ enum class ViewPass : u32 {
 };
 
 /// The view passed an acquire (or resumed a poll, `poll`); whether the word read after a drain
-/// met it too.
-inline void NoteViewPass(bool poll, ViewPass how, bool met_after_drain) {
+/// met it too, and if not, whether a fenced release that landed during the drain changed it
+/// (`raced`).
+inline void NoteViewPass(bool poll, ViewPass how, bool met_after_drain, bool raced) {
     const size_t index = (poll ? 3U : 0U) + static_cast<size_t>(how);
     State& state = Get();
     state.view_passes[index].fetch_add(1, std::memory_order_relaxed);
     if (!met_after_drain) {
-        state.view_wrong[index].fetch_add(1, std::memory_order_relaxed);
+        (raced ? state.view_raced : state.view_wrong)[index].fetch_add(1,
+                                                                       std::memory_order_relaxed);
     }
 }
 
@@ -438,12 +443,15 @@ inline void MaybeReport() {
         const u64 wrong_memory = take(state.view_wrong[base]);
         const u64 wrong_queued = take(state.view_wrong[base + 1]);
         const u64 wrong_waited = take(state.view_wrong[base + 2]);
+        const u64 raced = take(state.view_raced[base]) + take(state.view_raced[base + 1]) +
+                          take(state.view_raced[base + 2]);
         return fmt::format("{} (by memory {}, by a release still queued {}, after a positioned "
                            "wait {}), not met after the drain {} (of those by memory {}, queued "
-                           "{}, after a wait {})",
+                           "{}, after a wait {}), changed by a fenced release landing during the "
+                           "drain {}",
                            by_memory + by_queued + waited, by_memory, by_queued, waited,
                            wrong_memory + wrong_queued + wrong_waited, wrong_memory, wrong_queued,
-                           wrong_waited);
+                           wrong_waited, raced);
     };
     const auto waits = [&](bool poll) {
         const u64 count = take(state.view_waits[poll ? 1 : 0]);
