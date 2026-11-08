@@ -50,6 +50,14 @@
 
 namespace VideoCommon {
 
+/// How much of a guest uniform bank [gpu_addr, +size) to bind: up to where its mapping, or the
+/// mapping's device range, ends. The bank size is only an upper limit (native titles bind 64 KiB
+/// banks over smaller allocations); bound in full, the buffer covered device memory past the
+/// mapping, and uploads read it as unmapped memory.
+inline u32 MappedUniformSize(const Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, u32 size) {
+    return static_cast<u32>(gpu_memory.MaxContinuousRange(gpu_addr, size));
+}
+
 using BufferId = Common::SlotId;
 
 using VideoCore::Surface::PixelFormat;

@@ -12,6 +12,7 @@
 #include "core/core.h"
 #include "core/device_memory.h"
 #include "tests/core/system_test_context.h"
+#include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/texture_cache/util.h"
@@ -313,4 +314,32 @@ TEST_CASE("Zero-read device ranges cover their bytes until freed", "[memory_mana
 
     device_memory.Free(range, size);
     REQUIRE_FALSE(device_memory.IsZeroReadRange(range));
+}
+
+TEST_CASE("Uniform banks are bound only as far as their mapping reaches", "[memory_manager]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    Core::DeviceMemory physical;
+    Tegra::MaxwellDeviceMemoryManager device_memory{physical};
+    NullRasterizer rasterizer;
+    Tegra::MemoryManager memory{system, device_memory, 32, 1ULL << 31, 16};
+    memory.BindRasterizer(&rasterizer);
+
+    // Ocarina of Time binds 64 KiB banks at unaligned addresses near the end of a 48 KiB
+    // allocation: the bank's tail lies past the mapping.
+    constexpr GPUVAddr allocation = 0x4000'0000;
+    constexpr u64 allocation_size = 0xC000;
+    constexpr GPUVAddr bank = allocation + 0xA800;
+    memory.Map(allocation, 0x1000'0000, allocation_size, Tegra::PTEKind::PITCH, false);
+    CHECK(VideoCommon::MappedUniformSize(memory, bank, 0x10000) == allocation_size - 0xA800);
+    // A bank inside the allocation keeps its size.
+    CHECK(VideoCommon::MappedUniformSize(memory, allocation, 0x8000) == 0x8000);
+
+    // The next GPU pages mapped to device memory elsewhere: still a different range.
+    memory.Map(allocation + allocation_size, 0x3000'0000, 0x10000, Tegra::PTEKind::PITCH, false);
+    CHECK(VideoCommon::MappedUniformSize(memory, bank, 0x10000) == allocation_size - 0xA800);
+    // Mapped right after it in device memory too: one range, the whole bank.
+    memory.Map(allocation + allocation_size, 0x1000'0000 + allocation_size, 0x10000,
+               Tegra::PTEKind::PITCH, false);
+    CHECK(VideoCommon::MappedUniformSize(memory, bank, 0x10000) == 0x10000);
 }

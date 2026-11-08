@@ -581,7 +581,7 @@ void BufferCache<P>::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr
     }
     const Binding binding{
         .device_addr = *device_addr,
-        .size = size,
+        .size = MappedUniformSize(*gpu_memory, gpu_addr, size),
         .buffer_id = BufferId{},
     };
     channel_state->uniform_buffers[stage][index] = binding;
@@ -2066,7 +2066,7 @@ void BufferCache<P>::UpdateComputeUniformBuffers() {
             const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(cbuf.Address());
             if (device_addr) {
                 binding.device_addr = *device_addr;
-                binding.size = cbuf.size;
+                binding.size = MappedUniformSize(*gpu_memory, cbuf.Address(), cbuf.size);
             }
         }
         binding.buffer_id = FindBuffer(binding.device_addr, binding.size, false);
