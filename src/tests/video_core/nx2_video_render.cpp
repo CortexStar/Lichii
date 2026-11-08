@@ -275,3 +275,25 @@ TEST_CASE("NX2 video interpolates chroma when converting to RGBA",
         REQUIRE(blue(7) < blue(15));
     }
 }
+
+TEST_CASE("NX2 picture hashes match across layouts and the written NV12 image",
+          "[video_core][nx2_video_render]") {
+    using Tegra::Host1x::Nx2Nv12Hash;
+    using Tegra::Host1x::Nx2PictureHash;
+    Nx2VideoDecoder decoder{"video/avc"};
+    REQUIRE(decoder.IsOpen());
+    constexpr u32 width = 18, height = 10, pitch = 64;
+    const auto planar = Picture(width, height, AV_PIX_FMT_YUV420P);
+    const auto nv12 = Picture(width, height, AV_PIX_FMT_NV12);
+    // Picture fills both from the same sample pattern.
+    REQUIRE(Nx2PictureHash(planar) != 0);
+    REQUIRE(Nx2PictureHash(planar) == Nx2PictureHash(nv12));
+    // What the service writes for a same-size NV12 image hashes the same: a self-check of the
+    // write path.
+    std::vector<u8> image(pitch * height * 2, 0xcd);
+    decoder.Render(planar, Nx2PictureFormat::Nv12, width, height, pitch, pitch * height, image);
+    REQUIRE(Nx2Nv12Hash(image, width, height, pitch, pitch * height) == Nx2PictureHash(planar));
+    // One wrong byte anywhere in the visible image changes it.
+    image[pitch * height + pitch * 2 + 5] ^= 1;
+    REQUIRE(Nx2Nv12Hash(image, width, height, pitch, pitch * height) != Nx2PictureHash(planar));
+}

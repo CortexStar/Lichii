@@ -35,6 +35,15 @@ enum class Nx2PictureFormat : u32 {
 /// Checks if stream data begins with an H.264 Annex-B start code or avcC/MP4 length-prefixed NALUs.
 bool IsH264Stream(std::span<const u8> data);
 
+/// FNV-1a hash of a picture's visible 8-bit 4:2:0 samples (luma, then Cb/Cr pairs), the same for
+/// planar and NV12 frames and the same as tools/nx2/av1_hw_probe.c's frame hashes, so a stream
+/// decoded here can be compared with one decoded elsewhere. 0 for other formats.
+u64 Nx2PictureHash(const Nx2Picture& picture);
+
+/// The same hash over an NV12 image as the service writes it: rows `pitch` bytes apart, the
+/// chroma plane at `chroma_offset`.
+u64 Nx2Nv12Hash(std::span<const u8> image, u32 width, u32 height, u64 pitch, u64 chroma_offset);
+
 /// The decoder behind the Switch 2 video decoder service (nn::codec::video): FFmpeg decodes the
 /// elementary stream the game demuxed, in software or on the host GPU (NVDEC emulation setting).
 /// A stream the host GPU can't decode falls back to software. Used from one thread at a time.

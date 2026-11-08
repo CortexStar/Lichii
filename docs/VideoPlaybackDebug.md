@@ -70,6 +70,18 @@ native `av1` decoder and an AV1 hwaccel (the MinGW package from
 the GPU`. A GPU decoder that fails logs `GPU decoder for "video/av1" failed, decoding
 on the CPU`. The `frame <n>` lines count late frames dropped and early replies held.
 
+## Check a decoder against the stream
+
+`EDEN_NX2_VDEC_STREAM_DUMP=<dir>` saves every packet the game submits as one IVF file per
+stream (`nx2-vdec-<syncpoint>-<n>.ivf`). With `EDEN_NX2_VDEC_TRACE=1` each written frame logs
+`frame hash ... pts=<us> picture=<hash> written=<hash> memory=same`: `picture` is the decoded
+frame, `written` the NV12 image built from it (same value when nothing was lost converting),
+`memory` whether guest memory holds what was written. Any difference is logged as an error.
+Keep the dumps on the PC. Decode one with `tools/nx2/av1_hw_probe.c` and
+`PROBE_FRAME_HASHES=1` on `none` (libdav1d), `vulkan`, `d3d12va` and `d3d11va`: its
+`frame <n> pts <pts> <hash>` lines use the same hash, so the decoder that differs from
+libdav1d, and the frame where it starts, show up by pts.
+
 Unset all trace/capture variables after testing. `EDEN_NX2_VDEC_TRACE` is enabled
 by presence, so setting it to `0` does not disable it. Restart after changing
 environment variables because the emulator caches them.

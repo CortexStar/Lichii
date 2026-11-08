@@ -2743,6 +2743,7 @@ public:
             m_cv.notify_all();
             m_worker.join();
         }
+        CloseStreamDump();
         // The ready timer runs on the HostTiming thread: clear its event under its lock first.
         {
             std::scoped_lock lk{m_ready->mutex};
@@ -3212,6 +3213,7 @@ private:
                 m_decoded.clear();
                 m_last_decoded_pts = 0;
                 m_dropped_in_a_row = 0;
+                CloseStreamDump();
                 if (decoder) {
                     lk.unlock();
                     decoder->Reset();
@@ -3326,6 +3328,7 @@ private:
                 decoder = std::make_unique<Tegra::Host1x::Nx2VideoDecoder>(codec, width, height,
                                                                            rate);
             }
+            DumpPacket(input, codec, width, height);
             pictures.clear();
             decoder->Decode(input.data, input.pts, pictures);
             if (input.end) {
@@ -3481,6 +3484,8 @@ private:
                     Nvidia::Devices::Nx2GpuMemoryRegistry::Get().DeviceAddressOf(address)) {
                 system.GPU().InvalidateRegion(*device, m_tiled.size());
             }
+            CheckWrite(frame, address, {WriteRange{0, m_tiled.size()}, WriteRange{0, 0}}, m_tiled,
+                       std::nullopt);
             trace_write();
             return {width, height};
         }
@@ -3496,6 +3501,19 @@ private:
         if (const auto device = Nvidia::Devices::Nx2GpuMemoryRegistry::Get().DeviceAddressOf(address)) {
             system.GPU().InvalidateRegion(*device, layout.size);
         }
+        const bool nv12 = layout.format == Tegra::Host1x::Nx2PictureFormat::Nv12;
+        // Assigned, not built from a conditional: GCC 13 -Wmaybe-uninitialized reports the
+        // optional's payload read in CheckWrite otherwise (a false positive that fails -Werror).
+        std::optional<u64> nv12_hash;
+        if (nv12 && width == frame.picture->width && height == frame.picture->height) {
+            nv12_hash = Tegra::Host1x::Nx2Nv12Hash(bytes, width, height, layout.pitch,
+                                                   layout.chroma_offset);
+        }
+        CheckWrite(frame, address,
+                   {WriteRange{0, layout.pitch * height},
+                    WriteRange{nv12 ? layout.chroma_offset : 0,
+                               nv12 ? layout.pitch * ((height + 1) / 2) : 0}},
+                   bytes, nv12_hash);
         trace_write();
         // A 428/426 that came in while this frame was written didn't see it: relayout it here.
         bool relayout = false;
@@ -3511,6 +3529,96 @@ private:
             Nx2RelayoutDecoderImage(system, address, layout);
         }
         return {width, height};
+    }
+
+    // EDEN_NX2_VDEC_TRACE self-check of a written frame: the hash of the decoded picture (the same
+    // as tools/nx2/av1_hw_probe.c prints, to compare with a decode of the stream dumped by
+    // EDEN_NX2_VDEC_STREAM_DUMP), whether the NV12 image built from it hashes the same, and
+    // whether guest memory holds what was written. Mismatches are errors.
+    using WriteRange = std::pair<u64, u64>; ///< Offset and size of a write into the image
+
+    void CheckWrite(const Decoded& frame, u64 address, std::array<WriteRange, 2> ranges,
+                    std::span<const u8> written,
+                    std::optional<u64> written_hash) {
+        if (!Nx2VideoTraceEnabled()) {
+            return;
+        }
+        const u64 picture_hash = Tegra::Host1x::Nx2PictureHash(*frame.picture);
+        bool memory_same = true;
+        std::vector<u8> readback;
+        for (const auto& [offset, size] : ranges) {
+            if (size == 0) {
+                continue;
+            }
+            readback.resize(size);
+            system.ApplicationMemory().ReadBlock(address + offset, readback.data(), size);
+            memory_same &= std::memcmp(readback.data(), written.data() + offset, size) == 0;
+        }
+        LOG_INFO(Service,
+                 "nx2:vdec trace frame hash syncpoint={} output={} pts={} picture={:016x} "
+                 "written={} memory={}",
+                 m_syncpoint, m_frames_out + 1, frame.pts, picture_hash,
+                 written_hash ? fmt::format("{:016x}", *written_hash) : std::string{"-"},
+                 memory_same ? "same" : "DIFFERS");
+        if (!memory_same || (written_hash && *written_hash != picture_hash)) {
+            LOG_ERROR(Service, "nx2:vdec frame pts {} was not written as decoded ({})", frame.pts,
+                      memory_same ? "converted image differs" : "guest memory differs");
+        }
+    }
+
+    // EDEN_NX2_VDEC_STREAM_DUMP=<dir>: every packet the game submits, one IVF file per stream
+    // (nx2-vdec-<syncpoint>-<n>.ivf), for tools/nx2/av1_hw_probe.c. Decode thread only.
+    void DumpPacket(const Input& input, const std::string& codec, u32 width, u32 height) {
+        static const char* const directory = std::getenv("EDEN_NX2_VDEC_STREAM_DUMP");
+        if (directory == nullptr) {
+            return;
+        }
+        if (m_stream_dump == nullptr) {
+            const std::string path = fmt::format("{}/nx2-vdec-{}-{}.ivf", directory, m_syncpoint,
+                                                 m_stream_dumps++);
+            m_stream_dump = std::fopen(path.c_str(), "wb");
+            if (m_stream_dump == nullptr) {
+                return;
+            }
+            const char* fourcc = codec.find("av1") != std::string::npos   ? "AV01"
+                                 : codec.find("vp9") != std::string::npos ? "VP90"
+                                 : codec.find("vp8") != std::string::npos ? "VP80"
+                                                                          : "H264";
+            std::array<u8, 32> header{'D', 'K', 'I', 'F', 0, 0, 32, 0};
+            std::memcpy(header.data() + 8, fourcc, 4);
+            const auto put16 = [&](size_t at, u32 v) {
+                header[at] = static_cast<u8>(v);
+                header[at + 1] = static_cast<u8>(v >> 8);
+            };
+            const auto put32 = [&](size_t at, u32 v) {
+                put16(at, v);
+                put16(at + 2, v >> 16);
+            };
+            put16(12, width);
+            put16(14, height);
+            put32(16, 1'000'000); // time base: pts in us
+            put32(20, 1);
+            std::fwrite(header.data(), 1, header.size(), m_stream_dump);
+        }
+        std::array<u8, 12> frame_header{};
+        for (u32 i = 0; i < 4; ++i) {
+            frame_header[i] = static_cast<u8>(input.data.size() >> (8 * i));
+        }
+        for (u32 i = 0; i < 8; ++i) {
+            frame_header[4 + i] = static_cast<u8>(input.pts >> (8 * i));
+        }
+        std::fwrite(frame_header.data(), 1, frame_header.size(), m_stream_dump);
+        std::fwrite(input.data.data(), 1, input.data.size(), m_stream_dump);
+        if (input.end) {
+            CloseStreamDump();
+        }
+    }
+
+    void CloseStreamDump() {
+        if (m_stream_dump != nullptr) {
+            std::fclose(m_stream_dump);
+            m_stream_dump = nullptr;
+        }
     }
 
     // EDEN_NX2_VDEC_DUMP=<dir>: save the luma of every 120th decoded frame, a quarter of its size,
@@ -3576,6 +3684,8 @@ private:
     bool m_flush{};
     bool m_quit{};
     std::thread m_worker;
+    std::FILE* m_stream_dump{}; ///< EDEN_NX2_VDEC_STREAM_DUMP file of the current stream
+    u32 m_stream_dumps{};
 };
 
 // Placeholder for the Switch 2 graphics-system server that nn::gsv::BootWithRemoteMemory talks

@@ -10,6 +10,9 @@
 //   x86_64-w64-mingw32-clang -O2 tools/nx2/av1_hw_probe.c -I<pkg>/include -L<pkg>/lib \
 //     -lavcodec -lswresample -lavutil -lbcrypt -lole32 -luser32 -static -o av1_hw_probe.exe
 // Run: av1_hw_probe.exe <file.ivf> <vulkan|d3d12va|d3d11va|cuda|none> [vulkan device index]
+// PROBE_FRAME_HASHES=1 prints "frame <n> pts <pts> <hash>" per frame: the same hash as Lichii's
+// EDEN_NX2_VDEC_TRACE "frame hash ... picture=" lines, so a stream dumped with
+// EDEN_NX2_VDEC_STREAM_DUMP can be compared frame by frame across decoders and with Lichii.
 
 #include <stdint.h>
 #include <stdio.h>
@@ -70,6 +73,36 @@ static int receive(AVCodecContext* ctx, int* frames, uint64_t* sum) {
             for (int x = 0; x < out->width; x += 61) {
                 *sum = *sum * 31 + out->data[0][y * out->linesize[0] + x];
             }
+        }
+        if (getenv("PROBE_FRAME_HASHES")) {
+            // Every visible luma and chroma byte, one line per frame, to compare paths with diff.
+            uint64_t hash = 1469598103934665603ULL;
+            const int nv12 = out->format == AV_PIX_FMT_NV12;
+            for (int plane = 0; plane < (nv12 ? 2 : 3); plane++) {
+                const int h = plane ? (out->height + 1) / 2 : out->height;
+                const int w = plane ? (nv12 ? (out->width + 1) / 2 * 2 : (out->width + 1) / 2)
+                                    : out->width;
+                for (int y = 0; y < h; y++) {
+                    for (int x = 0; x < w; x++) {
+                        int v = out->data[plane][y * out->linesize[plane] + x];
+                        if (!nv12 && plane) {
+                            // Planar U/V to NV12 order: hash as interleaved pairs.
+                            continue;
+                        }
+                        hash = (hash ^ (uint64_t)v) * 1099511628211ULL;
+                    }
+                }
+            }
+            if (!nv12) {
+                for (int y = 0; y < (out->height + 1) / 2; y++) {
+                    for (int x = 0; x < (out->width + 1) / 2; x++) {
+                        hash = (hash ^ out->data[1][y * out->linesize[1] + x]) * 1099511628211ULL;
+                        hash = (hash ^ out->data[2][y * out->linesize[2] + x]) * 1099511628211ULL;
+                    }
+                }
+            }
+            printf("frame %d pts %lld %016llx\n", *frames, (long long)frame->pts,
+                   (unsigned long long)hash);
         }
         if (*frames < 3 || (*frames % 60) == 0) {
             fprintf(stderr, "probe: frame %d %dx%d %s pts %lld\n", *frames, out->width, out->height,
@@ -142,8 +175,12 @@ int main(int argc, char** argv) {
             fprintf(stderr, "probe: short packet\n");
             return 1;
         }
-        packet->pts = packets;
-        packet->dts = packets;
+        // The IVF timestamp (Lichii's EDEN_NX2_VDEC_STREAM_DUMP writes the game's, in us).
+        packet->pts = (int64_t)((uint64_t)frame_header[4] | (uint64_t)frame_header[5] << 8 |
+                                (uint64_t)frame_header[6] << 16 | (uint64_t)frame_header[7] << 24 |
+                                (uint64_t)frame_header[8] << 32 | (uint64_t)frame_header[9] << 40 |
+                                (uint64_t)frame_header[10] << 48 | (uint64_t)frame_header[11] << 56);
+        packet->dts = packet->pts;
         ret = avcodec_send_packet(ctx, packet);
         av_packet_free(&packet);
         if (ret < 0 && ret != AVERROR(EAGAIN)) {
