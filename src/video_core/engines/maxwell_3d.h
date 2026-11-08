@@ -3281,9 +3281,44 @@ private:
 
     void ProcessMacro(Core::System& system, u32 method, const u32* base_start, u32 amount, bool is_last_call);
 
-    u32 ProcessShadowRam(u32 method, u32 argument);
+    /// The value a write leaves in the register, as the shadow RAM mode has it: the argument
+    /// (tracked in shadow_state when tracking), or the shadow copy when replaying.
+    u32 ProcessShadowRam(u32 method, u32 argument) {
+        const auto control = shadow_state.shadow_ram_control;
+        if (control == Regs::ShadowRamControl::Track ||
+            control == Regs::ShadowRamControl::TrackWithFilter) {
+            return shadow_state.reg_array[method] = argument;
+        }
+        if (control == Regs::ShadowRamControl::Replay) {
+            return shadow_state.reg_array[method];
+        }
+        return argument;
+    }
 
-    void ProcessDirtyRegisters(u32 method, u32 argument);
+    /// Stores a register's value and sets its dirty flags. Defined here, as the hot method paths
+    /// call it for nearly every write.
+    void ProcessDirtyRegisters(u32 method, u32 argument) {
+        // The instances after the first are drawn together once their loop ends, and they must
+        // see the state they were begun with: NVN's draw macros reset the base instance (and its
+        // copy in c[0][0x644]) right after the loop, before the macro returns.
+        if (draw_manager.HasDeferredDraw() && !DrawManager::IsInstanceLoopMethod(method))
+            [[unlikely]] {
+            draw_manager.DrawDeferred(*this, true);
+        }
+        regs.reg_array[method] = argument;
+        for (const auto& table : dirty.tables) {
+            dirty.flags[table[method]] = true;
+        }
+    }
+
+    /// CallMethodFast for a state register (not in execution_mask): a write of the value the
+    /// register holds changes nothing (EDEN_NX2_SKIP_SAME=0 keeps it).
+    void WriteStateRegister(u32 method, u32 method_argument) {
+        const u32 argument = ProcessShadowRam(method, method_argument);
+        if (!SkipSameValueWrites() || regs.reg_array[method] != argument) {
+            ProcessDirtyRegisters(method, argument);
+        }
+    }
 
     void ConsumeSinkImpl(Core::System& system) override;
 
@@ -3315,13 +3350,16 @@ private:
     void CallMacroMethod(Core::System& system, u32 method, std::span<const u32> parameters);
 
     /// Whether state register writes that keep the register's value are dropped (CallMethod).
-    static bool SkipSameValueWrites() {
-        static const bool skip = [] {
-            const char* value = std::getenv("EDEN_NX2_SKIP_SAME");
-            return value == nullptr || value[0] != '0';
-        }();
-        return skip;
+    bool SkipSameValueWrites() const {
+        return skip_same_value_writes;
     }
+    /// EDEN_NX2_SKIP_SAME=0 keeps them. Read per engine: a function's static is checked for its
+    /// initialization on every call (MSVC reads a thread-local for it), nearly every 3D write,
+    /// and static initialization runs before the frontend loads nx2_switches.txt.
+    const bool skip_same_value_writes = [] {
+        const char* value = std::getenv("EDEN_NX2_SKIP_SAME");
+        return value == nullptr || value[0] != '0';
+    }();
 
     /// Handles writes to the macro uploading register.
     void ProcessMacroUpload(u32 data);
