@@ -4093,6 +4093,7 @@ void RasterizerVulkan::InitializeChannel(Tegra::Control::ChannelState& channel) 
     pipeline_cache.CreateChannel(channel);
     query_cache.CreateChannel(channel);
     state_tracker.SetupTables(channel);
+    pipeline_cache.ResetStateWatch();
 }
 
 void RasterizerVulkan::BindChannel(Tegra::Control::ChannelState& channel) {

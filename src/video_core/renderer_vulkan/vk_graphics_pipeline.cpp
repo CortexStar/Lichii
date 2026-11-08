@@ -572,8 +572,8 @@ GraphicsPipeline::GraphicsPipeline(
 }
 
 void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
-    transition_keys.push_back(transition->key);
     transitions.push_back(transition);
+    transition_tags.push_back(TransitionTag(transition->key));
 }
 
 template <typename Spec>
