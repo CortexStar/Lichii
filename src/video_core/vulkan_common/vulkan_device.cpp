@@ -724,6 +724,27 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         RemoveExtensionFeature(extensions.vertex_input_dynamic_state, features.vertex_input_dynamic_state, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
     }
 
+    // VK_EXT_legacy_vertex_attributes: only for library pipelines (EDEN_NX2_GPL=1) with dynamic
+    // vertex input and null vertex buffers, and only on RADV (see IsGplUntypedAttributes).
+    {
+        const char* const env = std::getenv("EDEN_NX2_GPL_ATTRS");
+        const bool usable = extensions.legacy_vertex_attributes &&
+                            features.legacy_vertex_attributes.legacyVertexAttributes &&
+                            extensions.graphics_pipeline_library &&
+                            extensions.vertex_input_dynamic_state &&
+                            features.robustness2.nullDescriptor &&
+                            GetDriverID() == VK_DRIVER_ID_MESA_RADV &&
+                            !(env != nullptr && env[0] == '0');
+        if (!usable) {
+            RemoveExtensionFeature(extensions.legacy_vertex_attributes,
+                                   features.legacy_vertex_attributes,
+                                   VK_EXT_LEGACY_VERTEX_ATTRIBUTES_EXTENSION_NAME);
+        } else {
+            LOG_INFO(Render_Vulkan, "EDEN_NX2_GPL: vertex attributes declared as float in "
+                                    "library vertex stages (VK_EXT_legacy_vertex_attributes)");
+        }
+    }
+
     // Descriptors feature list
     {
         auto& descriptor_indexing = features.descriptor_indexing;
@@ -1447,6 +1468,11 @@ bool Device::GetSuitability(bool requires_swapchain) {
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES;
         SetNext(next, properties.integer_dot_product);
     }
+    if (extensions.graphics_pipeline_library) {
+        properties.graphics_pipeline_library.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT;
+        SetNext(next, properties.graphics_pipeline_library);
+    }
 
     // Perform the property fetch.
     physical.GetProperties2(properties2);
@@ -1526,6 +1552,30 @@ bool Device::GetSuitability(bool requires_swapchain) {
 }
 
 void Device::RemoveUnsuitableExtensions() {
+    // VK_EXT_graphics_pipeline_library + dynamic rendering: only for the per-stage pipeline path
+    // (EDEN_NX2_GPL=1), which needs fast linking. Otherwise neither is enabled, as before.
+    {
+        const char* const gpl_env = std::getenv("EDEN_NX2_GPL");
+        const bool wanted = gpl_env != nullptr && gpl_env[0] == '1';
+        const bool usable = wanted && extensions.pipeline_library &&
+                            features.graphics_pipeline_library.graphicsPipelineLibrary &&
+                            properties.graphics_pipeline_library.graphicsPipelineLibraryFastLinking &&
+                            features.dynamic_rendering.dynamicRendering;
+        if (wanted && !usable) {
+            LOG_WARNING(Render_Vulkan, "EDEN_NX2_GPL: the device lacks graphics pipeline libraries "
+                                       "with fast linking or dynamic rendering");
+        }
+        extensions.graphics_pipeline_library = usable;
+        RemoveExtensionFeatureIfUnsuitable(extensions.graphics_pipeline_library,
+                                           features.graphics_pipeline_library,
+                                           VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+        if (!usable) {
+            RemoveExtension(extensions.pipeline_library, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+            features.dynamic_rendering.dynamicRendering = VK_FALSE;
+        } else {
+            LOG_INFO(Render_Vulkan, "EDEN_NX2_GPL: per-stage graphics pipeline libraries enabled");
+        }
+    }
     // VK_EXT_color_write_enable
     extensions.color_write_enable = features.color_write_enable.colorWriteEnable;
     RemoveExtensionFeatureIfUnsuitable(extensions.color_write_enable, features.color_write_enable,
