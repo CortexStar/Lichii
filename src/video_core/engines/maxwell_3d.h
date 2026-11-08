@@ -26,6 +26,7 @@
 #include "video_core/engines/engine_upload.h"
 #include "video_core/gpu.h"
 #include "video_core/macro.h"
+#include "video_core/nx2_perf.h"
 #include "video_core/textures/texture.h"
 #include "video_core/engines/maxwell_3d.h"
 
@@ -3353,13 +3354,6 @@ private:
     bool SkipSameValueWrites() const {
         return skip_same_value_writes;
     }
-    /// EDEN_NX2_SKIP_SAME=0 keeps them. Read per engine: a function's static is checked for its
-    /// initialization on every call (MSVC reads a thread-local for it), nearly every 3D write,
-    /// and static initialization runs before the frontend loads nx2_switches.txt.
-    const bool skip_same_value_writes = [] {
-        const char* value = std::getenv("EDEN_NX2_SKIP_SAME");
-        return value == nullptr || value[0] != '0';
-    }();
 
     /// Handles writes to the macro uploading register.
     void ProcessMacroUpload(u32 data);
@@ -3431,6 +3425,13 @@ private:
     // differ from the ones it read first and logs the counts every 10 s, the first 16 reads
     // with their words. The differences must stay 0. Read per engine, as the switch above.
     const bool dma_read_verify = std::getenv("EDEN_NX2_DMA_READ_VERIFY") != nullptr;
+    // EDEN_NX2_SKIP_SAME and EDEN_NX2_PERF_VERIFY, read per engine like the switch above. Every
+    // method checks them, so they are members rather than statics with a guard on the hot path.
+    const bool skip_same_value_writes = [] {
+        const char* value = std::getenv("EDEN_NX2_SKIP_SAME");
+        return value == nullptr || value[0] != '0';
+    }();
+    const bool perf_verify = VideoCommon::Nx2Perf::Verify();
     /// Parameters that have been submitted to the macro call so far.
     std::vector<u32> macro_params;
 
