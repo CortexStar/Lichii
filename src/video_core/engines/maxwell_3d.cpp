@@ -28,6 +28,7 @@
 #include "video_core/nx2_cmdpage_diag.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_query_fast.h"
 #include "video_core/oot_network.h"
 #include "video_core/query_cache/frame_trace.h"
 #include "video_core/query_dma.h"
@@ -956,6 +957,221 @@ void Maxwell3D::ProcessCounterReset() {
     rasterizer->ResetCounter(query_type);
 }
 
+namespace {
+
+// The split front's occlusion query fast path (Ocarina of Time only, VideoCommon::Nx2QueryFast).
+// Ocarina resets the ZPASS_PIXEL_CNT counter, reports it and sets render_enable around most draws
+// (~40,000 of each a second); on the back each report allocates, takes the query cache's locks and
+// makes the next fence real. A report address is handled on the front once a GPU condition read it
+// (a render_enable operand, or a macro's MME DMA read: NVN2 decides conditional rendering in a
+// macro): later reports to it write a "visible" result at once (counts growing by 0x1000 per
+// report, so every result is nonzero and no two are equal) and never reach the back. Addresses
+// only the CPU reads keep the real path (CPU reads of report memory can't be seen: the results
+// are written to guest memory directly).
+struct QueryFastState {
+    enum : u8 {
+        RealReported = 1, ///< A ZPass report to it went to the back
+        Source = 2,       ///< A GPU condition read it
+        FrontWritten = 4, ///< Holds the front's result: no report to it is queued for the back
+        ShortResult = 8,  ///< The front's result is one word (a short query)
+    };
+    /// The real path's resets keep going for this many ZPass resets after a real ZPass report.
+    static constexpr u32 RealWindow = 8192;
+
+    std::unordered_map<GPUVAddr, u8> addresses;
+    GPUVAddr min_address = ~GPUVAddr{0};
+    GPUVAddr max_address = 0;
+    u64 next_result = 0x100000;
+    u32 real_window = RealWindow;
+    // What the back's render_enable holds: valid in split session sent_session while the front's
+    // register still holds last_mode (no other path wrote it).
+    bool sent_valid = false;
+    u32 sent_mode = 0;
+    u32 sent_override = 0;
+    u64 sent_session = 0;
+    u32 last_mode = 0;
+
+    u8& Note(GPUVAddr address) {
+        min_address = (std::min)(min_address, address);
+        max_address = (std::max)(max_address, address);
+        return addresses[address];
+    }
+};
+
+QueryFastState& QueryFastFor(const void* engine) {
+    // Front thread only.
+    static std::unordered_map<const void*, std::unique_ptr<QueryFastState>> states;
+    static const void* last_engine = nullptr;
+    static QueryFastState* last_state = nullptr;
+    if (engine != last_engine) {
+        auto& state = states[engine];
+        if (!state) {
+            state = std::make_unique<QueryFastState>();
+        }
+        last_engine = engine;
+        last_state = state.get();
+    }
+    return *last_state;
+}
+
+/// The front's part of the query fast path for a write of `value` to `method`
+/// (Nx2QueryFast::Watches). `regs`: the front's registers before the write. Returns true when
+/// the write is done here and must not reach the back; may set `argument` (the render_enable
+/// mode decided here).
+bool FrontQueryFast(Tegra::MemoryManager& memory, VideoCommon::GpuSplit& split, const void* engine,
+                    u32* regs, u32 method, u32 value, u32& argument, bool replay) {
+    auto& state = QueryFastFor(engine);
+    constexpr bool front_results = true;
+    if (replay) {
+        // The back takes the shadow RAM's value instead of the argument.
+        state.sent_valid = false;
+        return false;
+    }
+    const auto find = [&state](GPUVAddr address) -> u8* {
+        const auto it = state.addresses.find(address);
+        return it != state.addresses.end() ? &it->second : nullptr;
+    };
+    switch (method) {
+    case 0x157:   // MME_DMA_READ
+    case 0x158: { // MME_DMA_READ_FIFOED
+        if (!front_results || state.addresses.empty()) {
+            return false;
+        }
+        const GPUVAddr source = (GPUVAddr{regs[0x154] & 0x1ffffff} << 32) | regs[0x155];
+        const u64 bytes = u64{(std::min)(value, 0x1000U)} * sizeof(u32);
+        if (bytes == 0 || source > state.max_address || source + bytes <= state.min_address) {
+            return false;
+        }
+        const auto note = [](GPUVAddr, u8& flags) { flags |= QueryFastState::Source; };
+        if (bytes <= 1024) {
+            for (GPUVAddr address = source & ~GPUVAddr{3}; address < source + bytes;
+                 address += sizeof(u32)) {
+                if (u8* const flags = find(address)) {
+                    note(address, *flags);
+                }
+            }
+        } else {
+            for (auto& [address, flags] : state.addresses) {
+                if (address >= source && address < source + bytes) {
+                    note(address, flags);
+                }
+            }
+        }
+        return false;
+    }
+    case 0x54c: { // clear_report_value
+        if (value != static_cast<u32>(Maxwell3D::Regs::ClearReport::ZPassPixelCount)) {
+            return false;
+        }
+        // A real report counts from its reset: keep the resets while real reports go on.
+        if (!front_results || state.real_window > 0) {
+            state.real_window -= state.real_window > 0 ? 1 : 0;
+            return false;
+        }
+        regs[method] = value;
+        return true;
+    }
+    case 0x6c3: { // report_semaphore.query
+        const u32 operation = value & 3;
+        const u32 report = (value >> 23) & 0x1f;
+        const bool reduction = ((value >> 3) & 1) != 0;
+        const bool short_query = ((value >> 28) & 1) != 0;
+        const GPUVAddr address = (GPUVAddr{regs[0x6c0]} << 32) | regs[0x6c1];
+        // ZPASS_PIXEL_CNT (2, 21 64-bit), release or report only.
+        const bool zpass =
+            (report == 2 || report == 21) && (operation == 0 || operation == 2) && !reduction;
+        if (!zpass) {
+            // Something else writes it now: its consumers see that, not a query result.
+            if (!state.addresses.empty()) {
+                state.addresses.erase(address);
+            }
+            return false;
+        }
+        u8& flags = state.Note(address);
+        if (front_results && (flags & QueryFastState::Source) != 0) {
+            const u64 result = state.next_result;
+            state.next_result += 0x1000;
+            if (state.next_result > 0x7ffff000) {
+                state.next_result = 0x100000;
+            }
+            if (short_query) {
+                const u32 word = static_cast<u32>(result);
+                memory.WriteBlockUnsafe(address, &word, sizeof(word));
+                flags |= QueryFastState::FrontWritten | QueryFastState::ShortResult;
+            } else {
+                // The time stamp word after it stays (no system clock on the front).
+                memory.WriteBlockUnsafe(address, &result, sizeof(result));
+                flags = static_cast<u8>((flags | QueryFastState::FrontWritten) &
+                                        ~QueryFastState::ShortResult);
+            }
+            regs[method] = value;
+            return true;
+        }
+        flags =
+            static_cast<u8>((flags | QueryFastState::RealReported) & ~QueryFastState::FrontWritten);
+        state.real_window = QueryFastState::RealWindow;
+        return false;
+    }
+    case 0x556: {                              // render_enable.mode
+        const u32 override_mode = regs[0x651]; // render_enable_override
+        u32 effective = value;
+        if (override_mode == 0 && value >= 2 && value <= 4) {
+            // Conditional (2): the 64-bit count at the address is nonzero; if equal (3) and if
+            // not equal (4) compare it with the one 16 bytes after it.
+            const GPUVAddr address = (GPUVAddr{regs[0x554]} << 32) | regs[0x555];
+            const bool pair = value != 2;
+            if (front_results) {
+                u8* const first = &state.Note(address);
+                *first |= QueryFastState::Source;
+                u8* second = nullptr;
+                if (pair) {
+                    second = &state.Note(address + 16);
+                    *second |= QueryFastState::Source;
+                }
+                const auto front_written = [](const u8* flags) {
+                    return flags == nullptr || (*flags & QueryFastState::FrontWritten) != 0;
+                };
+                if (front_written(first) && front_written(second)) {
+                    const bool narrow = (*first & QueryFastState::ShortResult) != 0 ||
+                                        (second && (*second & QueryFastState::ShortResult) != 0);
+                    u64 values[2]{};
+                    memory.ReadBlockUnsafe(address, &values[0], narrow ? 4 : 8);
+                    if (pair) {
+                        memory.ReadBlockUnsafe(address + 16, &values[1], narrow ? 4 : 8);
+                    }
+                    const bool render = value == 2   ? values[0] != 0
+                                        : value == 3 ? values[0] == values[1]
+                                                     : values[0] != values[1];
+                    effective = render ? 1 : 0;
+                }
+            }
+        }
+        // The back's decision depends only on the override and the mode unless the mode reads
+        // memory: the same pair again changes nothing there.
+        const u64 session = split.Session();
+        const bool known =
+            state.sent_valid && state.sent_session == session && regs[method] == state.last_mode;
+        state.last_mode = value;
+        const bool fixed = override_mode != 0 || effective <= 1;
+        if (known && fixed && effective == state.sent_mode &&
+            override_mode == state.sent_override) {
+            regs[method] = value;
+            return true;
+        }
+        argument = effective;
+        state.sent_valid = fixed;
+        state.sent_mode = effective;
+        state.sent_override = override_mode;
+        state.sent_session = session;
+        return false;
+    }
+    default:
+        return false;
+    }
+}
+
+} // Anonymous namespace
+
 void Maxwell3D::ProcessSyncPoint() {
     if (GetNativeMacroEngine().native_turing) {
         LOG_DEBUG(HW_GPU, "Native 3D syncpoint increment: id={}, raw={:#x}", regs.sync_info.sync_point.Value(), regs.reg_array[MAXWELL3D_REG_INDEX(sync_info)]);
@@ -1128,6 +1344,7 @@ struct Maxwell3D::FrontState {
     bool upload_seen{};
     bool upload_linear{};
     u32 upload_copy_size{};
+    bool query_fast{}; ///< Ocarina of Time: its occlusion query fast path (FrontQueryFast)
     bool oot_macros{}; ///< Ocarina of Time with replacements registered
     bool oot_dump{};   ///< EDEN_NX2_OOT_MACROS_DUMP (diagnostic)
     /// Ocarina macro replacements per macro slot, valid for oot_generation's code and oot_start.
@@ -1267,12 +1484,14 @@ Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSp
         front->control = shadow_state.shadow_ram_control;
         front->skip_same = SkipSameValueWrites() && FrontSkipSame();
         front->split_start = split.Starts();
+        const bool ocarina = Settings::GetCurrentProgramID() == VideoCommon::OotNetwork::ProgramId;
+        front->query_fast = ocarina;
         for (u32 method = 0; method < Regs::NUM_REGS; ++method) {
-            front->plain[method] = !execution_mask[method];
+            front->plain[method] =
+                !execution_mask[method] && !(ocarina && VideoCommon::Nx2QueryFast::Watches(method));
         }
         // The replacements match Ocarina of Time's macro code by hash; only for its program.
-        front->oot_macros = Settings::GetCurrentProgramID() == VideoCommon::OotNetwork::ProgramId &&
-                            OotMacros::HasHandlers();
+        front->oot_macros = ocarina && OotMacros::HasHandlers();
         front->oot_dump = OotMacros::DumpEnabled();
         front->oot_generation.fill(~u64{0});
         front->executing_macro = executing_macro;
@@ -1356,6 +1575,13 @@ void Maxwell3D::FrontWriteFull(VideoCommon::GpuSplit& split, FrontState& fs, u32
         // Draw batches capture whole instance-loop groups, draw.end included, and same-value
         // vertex buffer writes are dropped outside them (IsSkippableSameValue).
         FrontTrackInstanceLoop(fs, method, value);
+    }
+    if (fs.query_fast && VideoCommon::Nx2QueryFast::Watches(method)) [[unlikely]] {
+        // Occlusion queries and render_enable (FrontQueryFast).
+        if (FrontQueryFast(memory_manager, split, this, fs.regs.data(), method, value, argument,
+                           fs.control == Regs::ShadowRamControl::Replay)) {
+            return;
+        }
     }
     if (!execution_mask[method]) {
         // Nothing would change on the back: CallMethod and ConsumeSinkImpl skip same-value state
@@ -2418,7 +2644,9 @@ struct Maxwell3D::OotContext {
         return fs.regs[method];
     }
     [[nodiscard]] bool OcclusionHle() const {
-        return false;
+        // With the query fast path's front results: it then decides the condition from the same
+        // words the macro would read (FrontQueryFast, render_enable).
+        return fs.query_fast;
     }
     void FoldFirstInstance() {
         split.Defer([maxwell3d = &engine] { maxwell3d->draw_manager.FoldFirstInstance(); });
