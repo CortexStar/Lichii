@@ -5,10 +5,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <array>
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
+#include <cstdlib>
 #include <functional>
 #include <mutex>
 #include <span>
@@ -19,6 +21,8 @@
 #include "common/assert.h"
 #include "common/bit_util.h"
 #include "common/div_ceil.h"
+#include "common/logging.h"
+#include "common/cpu_features.h"
 #include "common/thread.h"
 #include "video_core/gpu.h"
 #include "video_core/textures/decoders.h"
@@ -65,11 +69,28 @@ public:
     }
 
 private:
+    /// At most 4 and a quarter of the host threads, and only the physical cores past the 6 the
+    /// guest cores and the GPU threads keep busy: on a 6-core Ryzen 5 5500, 3 workers competed
+    /// with them (no gain, slower movies). EDEN_NX2_UNSWIZZLE_THREADS sets the count (tests).
+    static u32 WorkerCount() {
+        if (const char* const text = std::getenv("EDEN_NX2_UNSWIZZLE_THREADS")) {
+            return (std::min)(static_cast<u32>(std::max(0, std::atoi(text))), 8U);
+        }
+        const u32 logical = std::thread::hardware_concurrency();
+        u32 physical = logical / 2;
+        if (const auto cores = Common::GetProcessorCount(); cores && *cores > 0) {
+            physical = static_cast<u32>(*cores);
+        }
+        const u32 spare = physical > 6 ? physical - 6 : 0;
+        return (std::min)({4U, logical / 4, spare});
+    }
+
     LinePool() {
-        const u32 count = (std::min)(4U, std::thread::hardware_concurrency() / 4);
+        const u32 count = WorkerCount();
         for (u32 i = 0; i < count; ++i) {
             workers.emplace_back([this](std::stop_token stop) { Loop(stop); });
         }
+        LOG_INFO(HW_GPU, "Unswizzle helper threads: {}", count);
     }
 
     ~LinePool() {
@@ -309,6 +330,10 @@ void Swizzle(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixe
 }
 
 } // Anonymous namespace
+
+void PrepareUnswizzleThreads() {
+    [[maybe_unused]] const bool enabled = LinePool::Get().Enabled();
+}
 
 void UnswizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel,
                       u32 width, u32 height, u32 depth, u32 block_height, u32 block_depth,
