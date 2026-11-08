@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <array>
 #include <bit>
+#include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -367,6 +369,16 @@ public:
 
     /// Pop asynchronous downloads
     void PopAsyncFlushes();
+
+    /// Whether GPU data in the range is downloading with a fence not released yet (not in guest
+    /// memory yet). The caller holds the mutex.
+    [[nodiscard]] bool IsDownloadInFlight(DAddr addr, u64 size) const;
+
+    /// Fences whose downloads have reached guest memory so far.
+    [[nodiscard]] u64 LandedDownloads();
+
+    /// Waits until another fence's downloads land (LandedDownloads passes `seen`) or `timeout`.
+    void WaitForLandedDownloads(u64 seen, std::chrono::microseconds timeout);
     void PopAsyncBuffers();
 
     bool DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 amount);
@@ -766,6 +778,11 @@ private:
     /// fence pops. A write to a range after a download was taken removes it from that download
     /// (and every other pending one): its bytes are older than the write.
     std::deque<Common::RangeSet<DAddr>> pending_download_ranges;
+    /// Counts fences whose downloads reached guest memory (PopAsyncBuffers); guest reads that
+    /// found their data downloading wait on landed_cv for it (WaitForLandedDownloads).
+    std::mutex landed_mutex;
+    std::condition_variable landed_cv;
+    u64 landed_downloads = 0;
     PendingCpuWrites pending_cpu_writes;
     std::optional<Async_Buffer> current_buffer;
 

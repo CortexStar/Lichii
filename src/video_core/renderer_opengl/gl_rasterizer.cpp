@@ -548,6 +548,20 @@ VideoCore::RasterizerDownloadArea RasterizerOpenGL::GetFlushArea(DAddr addr, u64
     return new_area;
 }
 
+void RasterizerOpenGL::WaitForPendingDownloads(DAddr addr, u64 size) {
+    // Bounded: the caller flushes the range if its fence never lands.
+    for (u32 attempt = 0; attempt < 200; ++attempt) {
+        const u64 seen = buffer_cache.LandedDownloads();
+        {
+            std::scoped_lock lock{buffer_cache.mutex};
+            if (!buffer_cache.IsDownloadInFlight(addr, size)) {
+                return;
+            }
+        }
+        buffer_cache.WaitForLandedDownloads(seen, std::chrono::milliseconds{1});
+    }
+}
+
 void RasterizerOpenGL::PrepareRegionWrite(DAddr addr, u64 size, VideoCommon::CacheType which) {
     if (addr == 0 || size == 0 || False(which & VideoCommon::CacheType::BufferCache)) {
         return;
