@@ -455,6 +455,7 @@ inline void CountDmaRead(u32 macro) {
 
 inline std::string TopMethods(const std::array<u32, 0x2000>& counts,
                               const std::array<u32, 0x2000>* same, u64 window) {
+    const double window_d = static_cast<double>(window);
     std::array<u32, 0x2000> order;
     for (u32 i = 0; i < order.size(); ++i) {
         order[i] = i;
@@ -466,9 +467,10 @@ inline std::string TopMethods(const std::array<u32, 0x2000>& counts,
     for (size_t i = 0; i < top && counts[order[i]] != 0; ++i) {
         const u32 method = order[i];
         text += fmt::format(" {:#x} {:.0f}/s", method,
-                            static_cast<double>(counts[method]) * 1e9 / window);
+                            static_cast<double>(counts[method]) * 1e9 / window_d);
         if (same != nullptr && (*same)[method] != 0) {
-            text += fmt::format(" ({:.0f} same)", static_cast<double>((*same)[method]) * 1e9 / window);
+            text += fmt::format(" ({:.0f} same)",
+                                static_cast<double>((*same)[method]) * 1e9 / window_d);
         }
         text += ',';
     }
@@ -522,6 +524,8 @@ inline bool Report(const char* thread_name = "GPU thread") {
     const auto cpu_now = Common::CurrentThreadCpuTimeNs();
     const u64 now_ticks = Ticks();
     const u64 window_ticks = (std::max<u64>)(now_ticks - data.window_start_ticks, 1);
+    const double window_d = static_cast<double>(window);
+    const double ticks_d = static_cast<double>(window_ticks);
     // Time in no zone at all is the wall time minus the zones' totals.
     u64 zoned{};
     for (size_t i = 1; i < data.exclusive_ns.size(); ++i) {
@@ -534,25 +538,26 @@ inline bool Report(const char* thread_name = "GPU thread") {
             continue;
         }
         // Per second of wall time: milliseconds spent and calls made.
-        const double ms = static_cast<double>(data.exclusive_ns[i]) * 1000.0 / window_ticks;
-        const double calls = static_cast<double>(data.count[i]) * 1e9 / window;
+        const double ms = static_cast<double>(data.exclusive_ns[i]) * 1000.0 / ticks_d;
+        const double calls = static_cast<double>(data.count[i]) * 1e9 / window_d;
         line += fmt::format(" | {} {:.1f} ms ({:.0f}/s)", zone_names[i], ms, calls);
     }
     line += fmt::format(" | buffer downloads {:.0f} KiB in {:.0f} copies ({:.0f} KiB on pages "
                         "MME DMA reads) | MME DMA reads {:.0f} KiB",
-                        static_cast<double>(data.counters[0]) * 1e9 / 1024.0 / window,
-                        static_cast<double>(data.counters[1]) * 1e9 / window,
-                        static_cast<double>(data.counters[3]) * 1e9 / 1024.0 / window,
-                        static_cast<double>(data.counters[2]) * 1e9 / 1024.0 / window);
+                        static_cast<double>(data.counters[0]) * 1e9 / 1024.0 / window_d,
+                        static_cast<double>(data.counters[1]) * 1e9 / window_d,
+                        static_cast<double>(data.counters[3]) * 1e9 / 1024.0 / window_d,
+                        static_cast<double>(data.counters[2]) * 1e9 / 1024.0 / window_d);
     line += fmt::format(" | 3D register writes {:.0f} ({:.0f} same value)",
-                        static_cast<double>(data.counters[4]) * 1e9 / window,
-                        static_cast<double>(data.counters[5]) * 1e9 / window);
+                        static_cast<double>(data.counters[4]) * 1e9 / window_d,
+                        static_cast<double>(data.counters[5]) * 1e9 / window_d);
     line += fmt::format(" | acquires {:.0f} ({:.0f} waited)",
-                        static_cast<double>(data.counters[6]) * 1e9 / window,
-                        static_cast<double>(data.counters[7]) * 1e9 / window);
+                        static_cast<double>(data.counters[6]) * 1e9 / window_d,
+                        static_cast<double>(data.counters[7]) * 1e9 / window_d);
     if (data.counters[static_cast<size_t>(Counter::RingEntries)] != 0) {
         const auto per_second = [&](Counter counter) {
-            return static_cast<double>(data.counters[static_cast<size_t>(counter)]) * 1e9 / window;
+            return static_cast<double>(data.counters[static_cast<size_t>(counter)]) * 1e9 /
+                   window_d;
         };
         line += fmt::format(" | ring {:.0f} entries {:.0f} words | delta words {:.0f} ({:.0f} "
                             "same on the back) | cb write words {:.0f} | batch repeats {:.0f} | "
@@ -575,7 +580,7 @@ inline bool Report(const char* thread_name = "GPU thread") {
                                per_counter(Counter::DispatchBarrierWar);
         dispatches != 0) {
         const auto rate = [&](Counter counter) {
-            return static_cast<double>(per_counter(counter)) * 1e9 / window;
+            return static_cast<double>(per_counter(counter)) * 1e9 / window_d;
         };
         line += fmt::format(" | dispatch barriers: none {:.0f}, other work {:.0f}, unknown {:.0f}, "
                             "RAW {:.0f}, WAW {:.0f}, WAR {:.0f}",
@@ -587,8 +592,8 @@ inline bool Report(const char* thread_name = "GPU thread") {
     for (size_t i = 0; i < data.drain_count.size(); ++i) {
         if (data.drain_count[i] != 0) {
             drains += fmt::format(" {} {:.1f} ms ({:.0f}/s),", drain_site_names[i],
-                                  static_cast<double>(data.drain_ns[i]) * 1000.0 / window_ticks,
-                                  static_cast<double>(data.drain_count[i]) * 1e9 / window);
+                                  static_cast<double>(data.drain_ns[i]) * 1000.0 / ticks_d,
+                                  static_cast<double>(data.drain_count[i]) * 1e9 / window_d);
         }
     }
     if (!drains.empty()) {
@@ -619,7 +624,7 @@ inline bool Report(const char* thread_name = "GPU thread") {
     }
     if (cpu_now && data.cpu_start_ns && *cpu_now >= *data.cpu_start_ns) {
         line += fmt::format(" | host_cpu_busy_ms_per_s={:.3f} window_wall_ms={:.3f}",
-                            static_cast<double>(*cpu_now - *data.cpu_start_ns) * 1000.0 / window,
+                            static_cast<double>(*cpu_now - *data.cpu_start_ns) * 1000.0 / window_d,
                             static_cast<double>(window) / 1e6);
     } else {
         line += fmt::format(" | host_cpu_busy_ms_per_s=unavailable window_wall_ms={:.3f}",
