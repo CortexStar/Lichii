@@ -4,8 +4,10 @@
 #include <map>
 #include <optional>
 #include <span>
+#include <string>
 #include <catch2/catch_test_macros.hpp>
 #include "common/common_types.h"
+#include "core/arm/guest_functions.h"
 #include "dynarmic/interface/A64/a64.h"
 
 #if defined(_MSC_VER)
@@ -260,6 +262,58 @@ TEST_CASE("CRC32B and CRC32H are exact for every input byte and halfword", "[gue
             const u32 crc = trial == 0 ? 0 : trial == 1 ? ~0U : static_cast<u32>(rng.Next());
             const u64 data = (rng.Next() << 16) | half;
             mismatches += run(Entry + 8, crc, data) != Crc32IsoReference(crc, half, 2);
+        }
+    }
+    CHECK(mismatches == 0);
+}
+namespace {
+
+// MurmurHash3_x86_32 of a NUL-terminated string, built with clang -O2 for aarch64 from the
+// public-domain reference (strlen, 4-byte blocks, tail, finalizer).
+constexpr std::array<u32, 67> MurmurCString{
+    0x12800008, 0x11000508, 0x38684809, 0x35FFFFC9, 0x5285AA2A, 0x5286B269, 0x7100111F, 0x72B993CA,
+    0x72A370E9, 0x54000062, 0x2A1F03EB, 0x1400001A, 0x528D6C8C, 0x2A1F03ED, 0x72BCCA8C, 0x110005AB,
+    0x386D480E, 0x110009AF, 0x386B480B, 0x2A0B21CB, 0x386F480E, 0x11000DAF, 0x2A0E416B, 0x386F480E,
+    0x110021AF, 0x6B0801FF, 0x2A0E616B, 0x1B0A7D6B, 0x138B456B, 0x1B097D6B, 0x4A01016B, 0x138B4D6B,
+    0x0B0B096E, 0x110011AB, 0x2A0B03ED, 0x0B0C01C1, 0x54FFFD69, 0x1200050D, 0x2A1F03EC, 0x710005BF,
+    0x5400006C, 0x3500012D, 0x1400000E, 0x710009BF, 0x8B2B400D, 0x54000060, 0x394009AC, 0x53103D8C,
+    0x394005AD, 0x2A0D218C, 0x386B480B, 0x4A0B018B, 0x1B0A7D6A, 0x138A454A, 0x1B097D49, 0x4A010121,
+    0x4A080028, 0x52994D69, 0x4A484108, 0x72B0BD69, 0x1B097D08, 0x5295C6A9, 0x72B85649, 0x4A483508,
+    0x1B097D08, 0x4A484100, 0xD65F03C0,
+};
+
+} // namespace
+
+TEST_CASE("MurmurHash3X86_32 matches the reference run in the JIT", "[guest_cpu]") {
+    GuestEnvironment env;
+    env.Load(MurmurCString, Function);
+    env.Load({Svc0}, Stop);
+    Dynarmic::A64::Jit jit{BaseConfig(env)};
+    env.jit = &jit;
+    constexpr u64 Text = 0x100000;
+    XorShift rng{12345};
+    u32 mismatches = 0;
+    for (u32 length = 0; length < 200; ++length) {
+        for (int trial = 0; trial < 20; ++trial) {
+            std::string text;
+            for (u32 i = 0; i < length; ++i) {
+                text.push_back(static_cast<char>(1 + rng.Next() % 255));
+            }
+            for (u32 i = 0; i <= length; ++i) {
+                env.data[Text + i] = i < length ? static_cast<u8>(text[i]) : 0;
+            }
+            const u32 seed = static_cast<u32>(rng.Next());
+            jit.SetRegister(0, Text);
+            jit.SetRegister(1, seed);
+            jit.SetRegister(30, Stop);
+            jit.SetPC(Function);
+            jit.Run();
+            Core::MurmurHash3X86_32 hash{seed};
+            // In two pieces: the host function hashes page by page.
+            const auto bytes = std::span{reinterpret_cast<const u8*>(text.data()), text.size()};
+            hash.Update(bytes.first(length / 3));
+            hash.Update(bytes.subspan(length / 3));
+            mismatches += static_cast<u32>(jit.GetRegister(0)) != hash.Finish();
         }
     }
     CHECK(mismatches == 0);

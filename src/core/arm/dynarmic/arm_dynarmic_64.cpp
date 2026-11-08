@@ -313,6 +313,9 @@ std::optional<Dynarmic::A64::HostFunctionEntry> DynarmicCallbacks64::GetHostFunc
     case GuestFunction::Memset:
         function = &HostMemset;
         break;
+    case GuestFunction::MurmurHash3String:
+        function = &HostMurmurHash3String;
+        break;
     }
     return Dynarmic::A64::HostFunctionEntry{function, this};
 }
@@ -373,6 +376,30 @@ bool DynarmicCallbacks64::HostMemset(void* user, const Dynarmic::A64::HostFuncti
         return false;
     }
     std::memset(dst, static_cast<u8>(state.x[1]), size);
+    return true;
+}
+
+bool DynarmicCallbacks64::HostMurmurHash3String(void* user,
+                                                const Dynarmic::A64::HostFunctionState& state) {
+    const auto& self = *static_cast<const DynarmicCallbacks64*>(user);
+    MurmurHash3X86_32 hash{static_cast<u32>(state.x[1])};
+    u64 address = state.x[0];
+    while (true) {
+        // Up to the end of the page: the next page may not be mapped (the guest reads only
+        // up to the terminator).
+        const u64 page_left = Memory::YUZU_PAGESIZE - (address & Memory::YUZU_PAGEMASK);
+        const u8* const bytes = self.HostSpan(address, page_left);
+        if (bytes == nullptr) {
+            return false;
+        }
+        const auto* const end = static_cast<const u8*>(std::memchr(bytes, 0, page_left));
+        hash.Update({bytes, end != nullptr ? static_cast<size_t>(end - bytes) : page_left});
+        if (end != nullptr) {
+            break;
+        }
+        address += page_left;
+    }
+    state.x[0] = hash.Finish();
     return true;
 }
 
