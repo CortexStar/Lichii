@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <atomic>
+#include <cstdlib>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #include <fmt/format.h>
 
@@ -185,7 +187,45 @@ std::optional<LoadWindow> LoadWindowTracker::OnFrame(Clock::time_point now,
     return finished;
 }
 
+namespace {
+// DIAGNOSTIC (do not merge): EDEN_NX2_LOAD_TRACE=1 logs the cumulative host work every 500 ms.
+void StartTrace() {
+    static std::once_flag once;
+    if (std::getenv("EDEN_NX2_LOAD_TRACE") == nullptr) {
+        return;
+    }
+    std::call_once(once, [] {
+        std::thread([] {
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{500});
+                const Counters c = ReadCounters();
+                std::string text = fmt::format("LoadTrace: files {} {:.0f}ms svc {} {:.0f}ms jit "
+                                               "{} {:.0f}ms gpuread {} {:.0f}ms",
+                                               c.file_reads, Ms(c.file_ns), c.service_calls,
+                                               Ms(c.service_ns), c.jit_blocks, Ms(c.jit_ns),
+                                               c.gpu_read_waits, Ms(c.gpu_read_wait_ns));
+#ifdef LOAD_TIMING_HAS_DYNARMIC
+                const auto& d = Dynarmic::A64::compile_diagnostics;
+                text += fmt::format(" tr {:.0f} opt {:.0f} emit {:.0f} insts {} rep_other {} "
+                                    "rep_same {} inval {} {}B cores",
+                                    Ms(d.translate_ns.load()), Ms(d.optimize_ns.load()),
+                                    Ms(d.emit_ns.load()), d.guest_instructions.load(),
+                                    d.other_core_repeats.load(), d.same_core_repeats.load(),
+                                    d.range_invalidations.load(), d.invalidated_bytes.load());
+                for (std::size_t i = 0; i < 6; ++i) {
+                    text += fmt::format(" {}:{}/{:.0f}", i, d.core_blocks[i].load(),
+                                        Ms(d.core_ns[i].load()));
+                }
+#endif
+                LOG_INFO(Core, "{}", text);
+            }
+        }).detach();
+    });
+}
+} // namespace
+
 void BeginBoot() {
+    StartTrace();
     auto& state = GetState();
     std::scoped_lock lock{state.mutex};
     state.boot_start = Clock::now();
