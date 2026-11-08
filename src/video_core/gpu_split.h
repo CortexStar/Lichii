@@ -520,7 +520,14 @@ public:
     /// reads of the words next to it don't wait for it); other writes are tracked by the page.
     void NoteWrite(const void* space, GPUVAddr address, u64 size, bool fine = false) {
         if (front_macros && size != 0) {
-            RecordWrite(space, address, size, fine);
+            RecordWrite(space, address, size, fine ? Grain::Word : Grain::Page);
+        }
+    }
+    /// NoteWrite for a write of at most 512 bytes that reads of other 256-byte granules of its
+    /// page don't wait for (an inline QMD, a small inline upload: QMDs are read by the granule).
+    void NoteGranuleWrite(const void* space, GPUVAddr address, u64 size) {
+        if (front_macros && size != 0) {
+            RecordWrite(space, address, size, Grain::Granule);
         }
     }
     /// The work just sent may write guest memory the front can't bound. `writer`: it is compute
@@ -701,8 +708,9 @@ private:
     std::unordered_set<u64> report_pages;
 
     // Narrow drains: the queued writes with a known destination, indexed by where they write.
-    // Each slot holds the position of the end of the latest work writing its page (4 KiB) or word
-    // (4 bytes, releases and reports); it is done once `consumed` reaches it. Slots are found by
+    // Each slot holds the position of the end of the latest work writing its page (4 KiB), 256-byte
+    // granule (inline QMDs, small inline uploads) or word (4 bytes, releases and reports); it is
+    // done once `consumed` reaches it. Slots are found by
     // a hash in buckets of four; a slot still pending that has to make room raises write_floor,
     // which every read waits for. Writes over more than 64 pages go to a short list.
     struct PageSlot {
@@ -722,12 +730,23 @@ private:
     };
     static constexpr size_t PageBuckets = 2048; ///< 4 slots each
     static constexpr size_t WordBuckets = 2048; ///< 4 slots each
+    static constexpr size_t GranuleBuckets = 1024; ///< 4 slots each
+    static constexpr u64 MaxGranuleBytes = 512;
+    static constexpr GPUVAddr GranuleBits = 8;
     static constexpr size_t MaxHugeWrites = 16;
     static constexpr size_t MaxFineBytes = 64; ///< Larger releases go by the page
     static constexpr size_t MaxSpaces = 4;     ///< Address spaces told apart (the last: the rest)
     static constexpr GPUVAddr PageBits = 12;
     static constexpr GPUVAddr WordBits = 2;
-    void RecordWrite(const void* space, GPUVAddr address, u64 size, bool fine);
+    /// How a recorded write is told apart from the others on its page.
+    enum class Grain : u8 {
+        Page,    ///< Not: every read of the page waits for it
+        Granule, ///< By 256-byte granule (granule_slots), up to MaxGranuleBytes
+        Word,    ///< By the word (word_slots), up to MaxFineBytes
+    };
+    void RecordWrite(const void* space, GPUVAddr address, u64 size, Grain grain);
+    void InsertKeyed(WordSlot* slots, size_t buckets, u64 key);
+    [[nodiscard]] static const WordSlot* FindKeyed(const WordSlot* slots, size_t buckets, u64 key);
     [[nodiscard]] u32 SpaceId(const void* space);
     void InsertPage(u64 key, bool coarse);
     void InsertWord(u64 key);
@@ -791,6 +810,7 @@ private:
     /// The pending write index (RecordWrite).
     std::unique_ptr<PageSlot[]> page_slots;
     std::unique_ptr<WordSlot[]> word_slots;
+    std::unique_ptr<WordSlot[]> granule_slots;
     std::array<HugeWrite, MaxHugeWrites> huge_writes{};
     size_t next_huge{};
     std::array<const void*, MaxSpaces> spaces{};

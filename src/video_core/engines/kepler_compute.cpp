@@ -2246,7 +2246,7 @@ void KeplerCompute::FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& fs
             }
             break;
         }
-        split.NoteWrite(&memory_manager, address, 256);
+        split.NoteGranuleWrite(&memory_manager, address, 256);
         NativeQmdScheduler::Descriptor qmd;
         std::memcpy(qmd.data(), fs.registers.data() + 0xc8, sizeof(qmd));
         if (const auto device = memory_manager.GpuToCpuAddress(address)) {
@@ -2300,7 +2300,8 @@ void KeplerCompute::FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& fs
         std::memcpy(&upload, fs.registers.data() + KEPLER_COMPUTE_REG_INDEX(upload),
                     sizeof(upload));
         const auto [begin, end] = Upload::WriteRange(upload, fs.upload_linear, fs.upload_copy_size);
-        split.NoteWrite(&memory_manager, begin, end - begin);
+        // By the granule when small: reads of a QMD next to it don't wait for it.
+        split.NoteGranuleWrite(&memory_manager, begin, end - begin);
         break;
     }
     default:

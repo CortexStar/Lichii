@@ -63,6 +63,7 @@ struct GpuSplitTestAccess {
         split.front_macros = true;
         split.page_slots = std::make_unique<GpuSplit::PageSlot[]>(GpuSplit::PageBuckets * 4);
         split.word_slots = std::make_unique<GpuSplit::WordSlot[]>(GpuSplit::WordBuckets * 4);
+        split.granule_slots = std::make_unique<GpuSplit::WordSlot[]>(GpuSplit::GranuleBuckets * 4);
     }
     static void SetPositions(GpuSplit& split, u64 written, u64 consumed) {
         split.write_position = written;
@@ -1227,4 +1228,29 @@ TEST_CASE("GpuSplit holds entries from an idle back while the front notes them",
         split.Publish();
         REQUIRE(Access::Published(split) == Access::End(split));
     }
+}
+
+TEST_CASE("GpuSplit narrow drains tell the 256-byte granules of a page apart for small writes",
+          "[video_core][gpu_split]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    VideoCommon::GpuSplit split;
+    Access::InitializeNarrow(split);
+    int space = 0;
+    // An inline QMD at position 10 and one next to it at 20, then a page-granular upload on
+    // another page at 30.
+    Access::SetPositions(split, 10, 0);
+    split.NoteGranuleWrite(&space, 0x10'0000, 0x100);
+    Access::SetPositions(split, 20, 0);
+    split.NoteGranuleWrite(&space, 0x10'0100, 0x100);
+    Access::SetPositions(split, 30, 0);
+    split.NoteWrite(&space, 0x20'0000, 0x100);
+    // A QMD read waits for its own granule's writes only.
+    REQUIRE(Access::Target(split, &space, 0x10'0000, 0x100) == 10);
+    REQUIRE(Access::Target(split, &space, 0x10'0100, 0x100) == 20);
+    REQUIRE(Access::Target(split, &space, 0x10'0200, 0x100) == 0);
+    // A read over both waits for both, a page-granular write for every read of its page.
+    REQUIRE(Access::Target(split, &space, 0x10'00f0, 0x20) == 20);
+    REQUIRE(Access::Target(split, &space, 0x20'0800, 4) == 30);
+    // A larger read waits for every write on its pages.
+    REQUIRE(Access::Target(split, &space, 0x10'0000, 0x1000) == 20);
 }

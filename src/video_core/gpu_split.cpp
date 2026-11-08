@@ -190,6 +190,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     if (front_macros) {
         page_slots = std::make_unique<PageSlot[]>(PageBuckets * 4);
         word_slots = std::make_unique<WordSlot[]>(WordBuckets * 4);
+        granule_slots = std::make_unique<WordSlot[]>(GranuleBuckets * 4);
         queued_releases = std::make_unique<QueuedRelease[]>(ReleaseBuckets * 4);
     }
     ++session;
@@ -243,6 +244,7 @@ void GpuSplit::Stop() {
     queued_releases.reset();
     page_slots.reset();
     word_slots.reset();
+    granule_slots.reset();
     huge_writes = {};
     next_huge = 0;
     spaces = {};
@@ -561,7 +563,11 @@ void GpuSplit::InsertPage(u64 key, bool coarse) {
 }
 
 void GpuSplit::InsertWord(u64 key) {
-    WordSlot* const bucket = &word_slots[HashBucket(key, WordBuckets) * 4];
+    InsertKeyed(word_slots.get(), WordBuckets, key);
+}
+
+void GpuSplit::InsertKeyed(WordSlot* slots, size_t buckets, u64 key) {
+    WordSlot* const bucket = &slots[HashBucket(key, buckets) * 4];
     WordSlot* victim = nullptr;
     for (size_t i = 0; i < 4; ++i) {
         if (bucket[i].key == key) {
@@ -595,7 +601,11 @@ const GpuSplit::PageSlot* GpuSplit::FindPage(u64 key) const {
 }
 
 const GpuSplit::WordSlot* GpuSplit::FindWord(u64 key) const {
-    const WordSlot* const bucket = &word_slots[HashBucket(key, WordBuckets) * 4];
+    return FindKeyed(word_slots.get(), WordBuckets, key);
+}
+
+const GpuSplit::WordSlot* GpuSplit::FindKeyed(const WordSlot* slots, size_t buckets, u64 key) {
+    const WordSlot* const bucket = &slots[HashBucket(key, buckets) * 4];
     for (size_t i = 0; i < 4; ++i) {
         if (bucket[i].key == key) {
             return &bucket[i];
@@ -604,7 +614,8 @@ const GpuSplit::WordSlot* GpuSplit::FindWord(u64 key) const {
     return nullptr;
 }
 
-void GpuSplit::RecordWrite(const void* space, GPUVAddr address, u64 size, bool fine) {
+void GpuSplit::RecordWrite(const void* space, GPUVAddr address, u64 size, Grain grain) {
+    const bool fine = grain == Grain::Word;
     if (page_slots == nullptr) {
         return;
     }
@@ -620,6 +631,16 @@ void GpuSplit::RecordWrite(const void* space, GPUVAddr address, u64 size, bool f
     if (fine && size <= MaxFineBytes) {
         for (GPUVAddr word = address >> WordBits; word <= (end - 1) >> WordBits; ++word) {
             InsertWord((word << 2) | sid);
+        }
+        for (GPUVAddr page = first_page; page <= last_page; ++page) {
+            InsertPage((page << 2) | sid, false);
+        }
+        return;
+    }
+    if (grain == Grain::Granule && size <= MaxGranuleBytes) {
+        for (GPUVAddr granule = address >> GranuleBits; granule <= (end - 1) >> GranuleBits;
+             ++granule) {
+            InsertKeyed(granule_slots.get(), GranuleBuckets, (granule << 2) | sid);
         }
         for (GPUVAddr page = first_page; page <= last_page; ++page) {
             InsertPage((page << 2) | sid, false);
@@ -688,6 +709,13 @@ u64 GpuSplit::PendingWriteTarget(const void* space, GPUVAddr address, u64 size, 
         target = (std::max)(target, slot->coarse);
         const GPUVAddr page_begin = (std::max)(address, page << PageBits);
         const GPUVAddr page_end = (std::min)(end, (page + 1) << PageBits);
+        for (GPUVAddr granule = page_begin >> GranuleBits; granule <= (page_end - 1) >> GranuleBits;
+             ++granule) {
+            if (const WordSlot* const granule_slot =
+                    FindKeyed(granule_slots.get(), GranuleBuckets, (granule << 2) | sid)) {
+                target = (std::max)(target, granule_slot->position);
+            }
+        }
         for (GPUVAddr word = page_begin >> WordBits; word <= (page_end - 1) >> WordBits; ++word) {
             if (const WordSlot* const word_slot = FindWord((word << 2) | sid)) {
                 target = (std::max)(target, word_slot->position);
@@ -724,6 +752,11 @@ bool GpuSplit::WrittenSince(const void* space, GPUVAddr address, u64 position) c
     // A slot replaced since no longer tells: count it as written.
     const PageSlot* const page = FindPage(((address >> PageBits) << 2) | sid);
     if (page == nullptr || page->coarse > position) {
+        return true;
+    }
+    if (const WordSlot* const granule =
+            FindKeyed(granule_slots.get(), GranuleBuckets, ((address >> GranuleBits) << 2) | sid);
+        granule != nullptr && granule->position > position) {
         return true;
     }
     const WordSlot* const word = FindWord(((address >> WordBits) << 2) | sid);
