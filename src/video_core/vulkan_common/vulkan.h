@@ -37,6 +37,10 @@
 #undef False
 #undef None
 #undef True
+// Xlib (VK_USE_PLATFORM_XLIB_KHR): Success and BadValue collide with enumerators such as
+// FileSys::Nup::PackResult::Success in every file that includes this header.
+#undef Success
+#undef BadValue
 
 // "Catch-all" handle for both Android and.. the rest of platforms
 struct VkSurfaceKHR_T;
