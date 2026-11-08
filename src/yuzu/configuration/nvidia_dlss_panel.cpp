@@ -310,8 +310,10 @@ QString PathText(const std::filesystem::path& path) {
 } // Anonymous namespace
 
 NvidiaDlssPanel::NvidiaDlssPanel(QWidget* parent) : QWidget(parent) {
+    setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+
     QVBoxLayout* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(24, 0, 0, 8);
+    layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(6);
 
     QHBoxLayout* status_row = new QHBoxLayout;
@@ -332,15 +334,15 @@ NvidiaDlssPanel::NvidiaDlssPanel(QWidget* parent) : QWidget(parent) {
     folder_button = new QPushButton(Tr("Open Folder"), this);
     QLabel* about = new QLabel(
         QStringLiteral("<a href=\"%1\">%2</a>").arg(QString::fromLatin1(RELEASE_PAGE),
-                                                   Tr("Where do these files come from?")),
+                                                   Tr("NVIDIA releases")),
         this);
     about->setOpenExternalLinks(true);
     about->setToolTip(Tr("NVIDIA's Streamline releases on GitHub. The files are in bin\\x64 of "
                          "the release zip."));
     button_row->addWidget(download_button);
     button_row->addWidget(folder_button);
-    button_row->addStretch(1);
     button_row->addWidget(about);
+    button_row->addStretch(1);
 
     layout->addLayout(status_row);
     layout->addLayout(button_row);
@@ -372,20 +374,19 @@ void NvidiaDlssPanel::Refresh() {
     QString status;
     QString button;
     if (has_loader && has_model) {
-        status = Tr("<b>Ready.</b> Found %1 and %2.")
+        status = Tr("<b>NVIDIA files found.</b> %1 and %2.")
                      .arg(Named(QStringLiteral("NVIDIA Streamline"), files.interposer_version), dlss);
     } else if (has_model) {
         status = Tr("<b>One file needed:</b> NVIDIA's Streamline loader (sl.interposer.dll). "
-                    "%1 will be used. Until then, games use AMD FSR 3.1.")
+                    "%1 will be used after setup.")
                      .arg(dlss);
         button = Tr("Download from NVIDIA (1 MB)");
     } else if (has_loader) {
-        status = Tr("<b>One file needed:</b> NVIDIA DLSS (nvngx_dlss.dll). Until then, games use "
-                    "AMD FSR 3.1.");
+        status = Tr("<b>One file needed:</b> NVIDIA DLSS (nvngx_dlss.dll).");
         button = Tr("Download from NVIDIA (31 MB)");
     } else {
         status = Tr("<b>NVIDIA's files needed:</b> the Streamline loader and DLSS "
-                    "(sl.interposer.dll and nvngx_dlss.dll). Until then, games use AMD FSR 3.1.");
+                    "(sl.interposer.dll and nvngx_dlss.dll).");
         button = Tr("Download from NVIDIA (32 MB)");
     }
     const bool ready = has_loader && has_model;

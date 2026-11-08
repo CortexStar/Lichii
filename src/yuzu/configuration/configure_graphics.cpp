@@ -10,11 +10,13 @@
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
+#include <QGroupBox>
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPixmap>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSlider>
 #include <QStringLiteral>
 #include <QtCore/qobjectdefs.h>
@@ -57,6 +59,16 @@ ConfigureGraphics::ConfigureGraphics(
     RetrieveVulkanDevices();
 
     ui->setupUi(this);
+
+    auto* scroll_area = new QScrollArea(this);
+    auto* content = new QWidget;
+    content->setLayout(ui->verticalLayout_1);
+    scroll_area->setWidgetResizable(true);
+    scroll_area->setFrameShape(QFrame::NoFrame);
+    scroll_area->setWidget(content);
+    auto* page_layout = new QVBoxLayout(this);
+    page_layout->setContentsMargins(0, 0, 0, 0);
+    page_layout->addWidget(scroll_area);
 
     Setup(builder);
 
@@ -216,10 +228,17 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
     api_layout->addWidget(api_grid_widget);
 
     QLayout& graphics_layout = *ui->graphics_widget->layout();
+    auto* upscaling_group = new QGroupBox(tr("Game Upscaling"), ui->graphics_widget);
+    auto* upscaling_layout = new QVBoxLayout(upscaling_group);
 
     std::map<u32, QWidget*> hold_graphics;
     std::vector<QWidget*> hold_api;
     QCheckBox* frame_gen_checkbox = nullptr;
+#ifdef EGLANTINE_STREAMLINE
+    QCheckBox* builtin_dlss_checkbox = nullptr;
+    QCheckBox* nvidia_dlss_checkbox = nullptr;
+    QLabel* upscaling_hint = nullptr;
+#endif
 
     for (const auto setting : Settings::values.linkage.by_category[Settings::Category::Renderer]) {
 #ifndef HAS_RESHADE
@@ -330,19 +349,23 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
 
             hold_graphics.emplace(setting->Id(), widget);
 #endif
+        } else if (setting->Id() == Settings::values.game_dlss_network.Id()) {
+            upscaling_layout->insertWidget(0, widget);
 #ifdef EGLANTINE_STREAMLINE
+            builtin_dlss_checkbox = widget->checkbox;
         } else if (setting->Id() == Settings::values.nvidia_dlss.Id()) {
-            // NVIDIA's files and a download button under the checkbox.
-            QWidget* group = new QWidget(this);
-            QVBoxLayout* group_layout = new QVBoxLayout(group);
-            group_layout->setContentsMargins(0, 0, 0, 0);
-            group_layout->setSpacing(2);
-            group_layout->addWidget(widget);
-            NvidiaDlssPanel* panel = new NvidiaDlssPanel(group);
-            group_layout->addWidget(panel);
-            panel->setVisible(widget->checkbox->isChecked());
-            connect(widget->checkbox, &QCheckBox::toggled, panel, &QWidget::setVisible);
-            hold_graphics.emplace(setting->Id(), group);
+            nvidia_dlss_checkbox = widget->checkbox;
+            upscaling_layout->addWidget(widget);
+            upscaling_hint = new QLabel(
+                tr("NVIDIA Super Resolution takes priority over built-in DLSS when available."),
+                upscaling_group);
+            upscaling_hint->setWordWrap(true);
+            upscaling_hint->hide();
+            upscaling_layout->addWidget(upscaling_hint);
+            auto* panel = new NvidiaDlssPanel(upscaling_group);
+            upscaling_layout->addWidget(panel);
+            panel->setVisible(nvidia_dlss_checkbox->isChecked());
+            connect(nvidia_dlss_checkbox, &QCheckBox::toggled, panel, &QWidget::setVisible);
 #endif
         } else if (setting->Id() == Settings::values.frame_gen.Id()) {
             frame_gen_checkbox = widget->checkbox;
@@ -354,7 +377,22 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
 
     for (const auto& [id, widget] : hold_graphics) {
         graphics_layout.addWidget(widget);
+        if (id == Settings::values.anti_aliasing.Id() && upscaling_layout->count() != 0) {
+            graphics_layout.addWidget(upscaling_group);
+        }
     }
+
+#ifdef EGLANTINE_STREAMLINE
+    if (builtin_dlss_checkbox && nvidia_dlss_checkbox) {
+        const auto update_hint = [builtin_dlss_checkbox, nvidia_dlss_checkbox, upscaling_hint] {
+            upscaling_hint->setVisible(builtin_dlss_checkbox->isChecked() &&
+                                      nvidia_dlss_checkbox->isChecked());
+        };
+        connect(builtin_dlss_checkbox, &QCheckBox::toggled, upscaling_hint, update_hint);
+        connect(nvidia_dlss_checkbox, &QCheckBox::toggled, upscaling_hint, update_hint);
+        update_hint();
+    }
+#endif
 
     // Hide rather than disable, a disabled widget would read as using the global value
     if (frame_gen_checkbox != nullptr) {

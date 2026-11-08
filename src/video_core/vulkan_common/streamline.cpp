@@ -302,14 +302,14 @@ bool Start() {
     if (!state.module) {
         const DlssFiles files = FindDlssFiles();
         if (!files.model.empty() && !IsSignedByNvidia(files.model)) {
-            LOG_WARNING(Render_Vulkan, "DLSS model {} is not signed by NVIDIA; using FSR 3.1",
+            LOG_WARNING(Render_Vulkan, "DLSS model {} is not signed by NVIDIA",
                         Common::FS::PathToUTF8String(files.model));
             return false;
         }
         if (files.interposer.empty()) {
             LOG_WARNING(Render_Vulkan,
-                        "NVIDIA DLSS is on, but sl.interposer.dll (NVIDIA Streamline) is not in "
-                        "{} (the Graphics settings can download it); using FSR 3.1",
+                        "NVIDIA Streamline loader sl.interposer.dll is missing from {} "
+                        "(download it in Graphics settings)",
                         Common::FS::PathToUTF8String(files.folder));
             return false;
         }
@@ -350,7 +350,7 @@ bool Start() {
     const Api& api = state.api;
     if (const sl::Result result = api.init(preferences, sl::kSDKVersion);
         result != sl::Result::eOk) {
-        LOG_ERROR(Render_Vulkan, "NVIDIA Streamline failed to start (result {}); using FSR 3.1",
+        LOG_ERROR(Render_Vulkan, "NVIDIA Streamline failed to start (result {})",
                   static_cast<int>(result));
         return false;
     }
@@ -366,7 +366,7 @@ bool Start() {
     }
     if (requirements.vkNumComputeQueuesRequired != 0 ||
         requirements.vkNumGraphicsQueuesRequired != 0) {
-        LOG_WARNING(Render_Vulkan, "This DLSS wants extra Vulkan queues; using FSR 3.1");
+        LOG_WARNING(Render_Vulkan, "NVIDIA DLSS requires additional Vulkan queues");
         api.shutdown();
         return false;
     }
@@ -428,8 +428,7 @@ bool AttachDevice(VkInstance instance, VkPhysicalDevice physical, VkDevice devic
     if (const sl::Result result = state.api.is_feature_supported(sl::kFeatureDLSS, adapter);
         result != sl::Result::eOk) {
         LOG_WARNING(Render_Vulkan,
-                    "NVIDIA DLSS is not supported on this GPU or driver (Streamline result {}); "
-                    "using FSR 3.1",
+                    "NVIDIA DLSS is not supported on this GPU or driver (Streamline result {})",
                     static_cast<int>(result));
         Stop();
         return false;
