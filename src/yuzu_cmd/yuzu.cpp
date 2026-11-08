@@ -47,6 +47,7 @@
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
+#include "core/load_timing.h"
 #include "core/loader/loader.h"
 #include "frontend_common/config.h"
 #include "input_common/drivers/keyboard.h"
@@ -738,6 +739,7 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     state->system.GetCpuManager().OnGpuReady();
 
     if (Settings::values.use_disk_shader_cache.GetValue()) {
+        const Core::LoadTiming::ScopedPhase phase{"disk shader cache"};
         state->system.Renderer().ReadRasterizer()->LoadDiskResources(
             state->system.GetApplicationProcessProgramID(), std::stop_token{},
             [](VideoCore::LoadCallbackStage, size_t value, size_t total) {});

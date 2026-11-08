@@ -64,6 +64,7 @@
 #include "core/hle/service/set/system_settings_server.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/internal_network/network.h"
+#include "core/load_timing.h"
 #include "core/loader/loader.h"
 #include "core/memory.h"
 #include "core/memory/cheat_engine.h"
@@ -382,6 +383,8 @@ struct System::Impl {
     }
 
     SystemResultStatus Load(System& system, Frontend::EmuWindow& emu_window, const std::string& filepath, Service::AM::FrontendAppletParameters& params) {
+        LoadTiming::BeginBoot();
+        auto phase_start = LoadTiming::Clock::now();
         if (params.launch_type == Service::AM::LaunchType::FrontendInitiated) {
             fs_controller.InitTempStorage();
         }
@@ -392,6 +395,7 @@ struct System::Impl {
                              params.program_index);
         Settings::SetCurrentProgramIsSwitch2(switch2_program);
         Settings::SetAstcRecompressionOverride(std::nullopt);
+        LoadTiming::LogPhase("program detection", phase_start);
 
         // Switch 2 titles size their heap from the total memory and need the 12 GiB layout. Set it
         // as a per-game value, so RestoreGlobalState brings back the configured layout afterwards.
@@ -428,10 +432,12 @@ struct System::Impl {
                  Common::g_cpu_caps.max_frequency, Common::g_cpu_caps.invariant_tsc);
 #endif
 
+        phase_start = LoadTiming::Clock::now();
         const auto kernel_result = InitializeKernel(system);
         if (kernel_result != SystemResultStatus::Success) {
             return kernel_result;
         }
+        LoadTiming::LogPhase("kernel and guest memory", phase_start);
 
         if (params.applet_type == Service::AM::AppletType::Application) {
             current_application_filepath = filepath;
@@ -440,9 +446,11 @@ struct System::Impl {
         const auto file = GetGameFileFromPath(virtual_filesystem, filepath);
 
         // Create the application process
+        phase_start = LoadTiming::Clock::now();
         Loader::ResultStatus load_result{};
         std::vector<u8> control;
         auto process = Service::AM::CreateApplicationProcess(control, app_loader, load_result, system, file, params.program_id, params.program_index);
+        LoadTiming::LogPhase("application process", phase_start);
         if (load_result != Loader::ResultStatus::Success) {
             LOG_CRITICAL(Core, "Failed to load ROM (Error {})!", load_result);
             ShutdownMainProcess();
@@ -475,12 +483,15 @@ struct System::Impl {
         kernel.SetApplicationProcess(process->GetHandle());
 
         // Set up the rest of the system.
+        phase_start = LoadTiming::Clock::now();
         SystemResultStatus init_result{SetupForApplicationProcess(system, emu_window)};
         if (init_result != SystemResultStatus::Success) {
             LOG_CRITICAL(Core, "Failed to initialize system (Error {})!", int(init_result));
             ShutdownMainProcess();
             return init_result;
         }
+        LoadTiming::LogPhase("GPU and services", phase_start);
+        phase_start = LoadTiming::Clock::now();
         // Waiting for GPU before initializing CPU
         cpu_manager.Initialize();
 
@@ -525,6 +536,7 @@ struct System::Impl {
         }
         debug_service = Nx2Debug::MaybeStartService(system, name, params.program_id);
         Nx2Sampler::StartFromEnvironment();
+        LoadTiming::LogPhase("CPU cores and applet start", phase_start);
         return SystemResultStatus::Success;
     }
 

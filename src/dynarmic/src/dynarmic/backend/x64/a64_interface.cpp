@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: 0BSD
  */
 
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -254,13 +255,21 @@ private:
         block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
 
         // JIT Compile
+        const auto compile_start = std::chrono::steady_clock::now();
         const auto get_code = [this](u64 vaddr) { return conf.callbacks->MemoryReadCode(vaddr); };
         // LocationDescriptor ctor() does important ops (like tflags) do not skip
         auto const arch_descriptor = A64::LocationDescriptor{descriptor};
         ir_block.Reset(arch_descriptor);
         A64::Translate(ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
         Optimization::Optimize(ir_block, conf, polyfill_options);
-        return emitter.Emit(ir_block).entrypoint;
+        const CodePtr entrypoint = emitter.Emit(ir_block).entrypoint;
+        compile_statistics.blocks.fetch_add(1, std::memory_order_relaxed);
+        compile_statistics.nanoseconds.fetch_add(
+            static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 std::chrono::steady_clock::now() - compile_start)
+                                 .count()),
+            std::memory_order_relaxed);
+        return entrypoint;
     }
 
     void PerformRequestedCacheInvalidation(HaltReason hr) {
@@ -277,6 +286,7 @@ private:
             if (invalidate_entire_cache) {
                 block_of_code.ClearCache();
                 emitter.ClearCache();
+                compile_statistics.cache_clears.fetch_add(1, std::memory_order_relaxed);
             } else {
                 emitter.InvalidateCacheRanges(invalid_cache_ranges);
             }

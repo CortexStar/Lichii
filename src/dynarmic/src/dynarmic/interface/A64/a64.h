@@ -9,6 +9,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -20,6 +21,15 @@
 
 namespace Dynarmic {
 namespace A64 {
+
+/// Work of every A64 JIT in the process (the x64 backend counts it): basic blocks compiled, the
+/// host time spent compiling them and how often a whole code cache was thrown away.
+struct CompileStatistics {
+    std::atomic<std::uint64_t> blocks{0};
+    std::atomic<std::uint64_t> nanoseconds{0};
+    std::atomic<std::uint64_t> cache_clears{0};
+};
+inline CompileStatistics compile_statistics;
 
 class Jit final {
 public:

@@ -12,6 +12,7 @@
 #include "core/file_sys/errors.h"
 #include "core/hle/service/cmif_serialization.h"
 #include "core/hle/service/filesystem/fsp/fs_i_storage.h"
+#include "core/load_timing.h"
 
 namespace Service::FileSystem {
 
@@ -51,7 +52,9 @@ Result IStorage::Read(
     }
 
     // Read the data from the Storage backend
-    backend->Read(out_bytes.data(), length, offset);
+    const auto read_start = Core::LoadTiming::Clock::now();
+    const std::size_t read = backend->Read(out_bytes.data(), length, offset);
+    Core::LoadTiming::CountFileRead(read, Core::LoadTiming::Clock::now() - read_start);
 
     R_SUCCEED();
 }

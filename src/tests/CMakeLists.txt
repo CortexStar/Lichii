@@ -39,6 +39,7 @@ add_executable(tests
     audio_core/microphone.cpp
     audio_core/hardware_audio_codec.cpp
     core/gpu_dirty_memory.cpp
+    core/load_timing.cpp
     core/memory_acquire.cpp
     core/builtin_patches.cpp
     core/builtin_font_glyphs.cpp
