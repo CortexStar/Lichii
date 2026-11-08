@@ -39,6 +39,7 @@
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_reactive.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 
@@ -266,10 +267,46 @@ struct GPU::Impl {
         gpu_thread.FlushRegion(addr, size, is_async);
     }
 
+    /// A read of GPU-written memory whose downloads are on their way (Nx2Reactive): waits for
+    /// them to land, without the GPU thread. Returns the area once they have, or the last answer
+    /// (not preemtive) when no download covers it anymore or after 16 ms (a flush would wait for
+    /// the same host GPU work); the read then flushes.
+    VideoCore::RasterizerDownloadArea WaitForLanding(DAddr addr, u64 size,
+                                                     VideoCore::RasterizerDownloadArea area) {
+        auto& landing = VideoCommon::Nx2Reactive::GetLanding();
+        VideoCore::RasterizerInterface* const rasterizer = renderer->ReadRasterizer();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{16};
+        landing.waiters.fetch_add(1, std::memory_order_acq_rel);
+        while (true) {
+            const u64 generation = landing.generation.load(std::memory_order_acquire);
+            area = rasterizer->GetFlushArea(addr, size);
+            if (area.preemtive || !area.wait_landing) {
+                break;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                break;
+            }
+            std::unique_lock lock{landing.mutex};
+            landing.cv.wait_until(
+                lock, (std::min)(deadline, now + std::chrono::milliseconds{1}),
+                [&] { return landing.generation.load(std::memory_order_acquire) != generation; });
+        }
+        landing.waiters.fetch_sub(1, std::memory_order_acq_rel);
+        area.wait_landing = false;
+        return area;
+    }
+
     VideoCore::RasterizerDownloadArea OnCPURead(DAddr addr, u64 size) {
         auto raster_area = renderer->ReadRasterizer()->GetFlushArea(addr, size);
         if (raster_area.preemtive) {
             return raster_area;
+        }
+        if (raster_area.wait_landing) {
+            raster_area = WaitForLanding(addr, size, raster_area);
+            if (raster_area.preemtive) {
+                return raster_area;
+            }
         }
         raster_area.preemtive = true;
         // A guest CPU read of GPU-written memory (reactive flushing): count them, they decide
@@ -278,6 +315,35 @@ struct GPU::Impl {
             LOG_INFO(HW_GPU, "CPU read of GPU-written memory [{:#x}, {:#x}) ({} so far)",
                      raster_area.start_address, raster_area.end_address,
                      reads.load(std::memory_order_relaxed));
+        }
+        {
+            // The GPU thread queues the data for a download it submits at once and goes on;
+            // this thread waits for the copy to land. Without a download queued it flushes
+            // right there, as below.
+            bool queued = false;
+            const u64 async_fence = RequestSyncOperation([this, raster_area, &queued]() {
+                InvalidateGPUCache();
+                VideoCore::RasterizerInterface* const rasterizer = renderer->ReadRasterizer();
+                const u64 area_size = raster_area.end_address - raster_area.start_address;
+                queued = rasterizer->QueueFlushRegion(raster_area.start_address, area_size);
+                if (!queued) {
+                    rasterizer->FlushRegion(raster_area.start_address, area_size);
+                }
+            });
+            gpu_thread.TickGPU(is_async);
+            WaitForSyncOperation(async_fence);
+            bool landed = !queued;
+            if (queued) {
+                VideoCore::RasterizerDownloadArea pending = raster_area;
+                pending.preemtive = false;
+                pending.wait_landing = true;
+                landed = WaitForLanding(addr, size, pending).preemtive;
+            }
+            if (landed) {
+                return raster_area;
+            }
+            // Not landed (a newer write or a pending CPU write kept the page GPU-written, or no
+            // copy covered it): flush as before.
         }
         const u64 fence = RequestSyncOperation([this, raster_area]() {
             // Apply collected guest writes before downloading GPU data over guest memory.
