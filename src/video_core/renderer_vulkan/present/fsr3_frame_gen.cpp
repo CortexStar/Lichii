@@ -143,15 +143,6 @@ void CopyImageToImage(vk::CommandBuffer cmdbuf, VkImage source, VkImage destinat
                            0, {}, {}, after);
 }
 
-// EDEN_NX2_NVOF_SCALE: a factor on the hardware flow (-1 flips its direction), for testing.
-float NvofMotionScale() {
-    static const float scale = [] {
-        const char* const value = std::getenv("EDEN_NX2_NVOF_SCALE");
-        return value ? static_cast<float>(std::atof(value)) : 1.0f;
-    }();
-    return scale;
-}
-
 } // anonymous namespace
 
 struct FlowPushConstants {
@@ -182,14 +173,9 @@ Fsr3FrameGen::Fsr3FrameGen(const Device& device, MemoryAllocator& memory_allocat
     : m_allocator{memory_allocator}, m_extent{extent},
       m_flow_extent{(std::max)(1u, extent.width / 2), (std::max)(1u, extent.height / 2)},
       m_format{format} {
-    // EDEN_NX2_NVOF=0 keeps the flow shader on hardware with optical flow.
-    const char* const nvof_setting = std::getenv("EDEN_NX2_NVOF");
-    const bool try_nvof =
-        device.HasOpticalFlow() && (nvof_setting == nullptr || nvof_setting[0] != '0');
-    // EDEN_NX2_FG_ASYNC=0 generates on the graphics queue, which then waits for the flow.
-    const char* const async_setting = std::getenv("EDEN_NX2_FG_ASYNC");
-    if (try_nvof && device.HasFrameGenCompute() &&
-        (async_setting == nullptr || async_setting[0] != '0')) {
+    // The device enables optical flow only when frame_gen_motion asks for it.
+    const bool try_nvof = device.HasOpticalFlow();
+    if (try_nvof && device.HasFrameGenCompute()) {
         m_try_async = true;
         if (device.GetFrameGenComputeFamily() != device.GetGraphicsFamily()) {
             m_shared_families = {device.GetGraphicsFamily(), device.GetFrameGenComputeFamily()};
@@ -545,10 +531,10 @@ void Fsr3FrameGen::Generate(const Device& device, Scheduler& scheduler, VkImage 
         .blend_factor = blend_factor,
         .flow_scale = flow_scale,
         // The hardware flow is in pixels, the shader's in flow texels.
-        .motion_scale_x = m_nvof ? NvofMotionScale() * NvOpticalFlow::FlowToPixels *
+        .motion_scale_x = m_nvof ? NvOpticalFlow::FlowToPixels *
                                        m_nvof->InputScaleX() / static_cast<float>(m_extent.width)
                                  : 1.0f / static_cast<float>(m_flow_extent.width),
-        .motion_scale_y = m_nvof ? NvofMotionScale() * NvOpticalFlow::FlowToPixels *
+        .motion_scale_y = m_nvof ? NvOpticalFlow::FlowToPixels *
                                        m_nvof->InputScaleY() / static_cast<float>(m_extent.height)
                                  : 1.0f / static_cast<float>(m_flow_extent.height),
         .has_backward = m_nvof && m_nvof->HasBackwardFlow() ? 1.0f : 0.0f,
@@ -608,9 +594,9 @@ void Fsr3FrameGen::GenerateAsync(const Device& device, Frame& destination, float
         .render_h = static_cast<float>(m_extent.height),
         .blend_factor = blend_factor,
         .flow_scale = flow_scale,
-        .motion_scale_x = NvofMotionScale() * NvOpticalFlow::FlowToPixels *
+        .motion_scale_x = NvOpticalFlow::FlowToPixels *
                           m_nvof->InputScaleX() / static_cast<float>(m_extent.width),
-        .motion_scale_y = NvofMotionScale() * NvOpticalFlow::FlowToPixels *
+        .motion_scale_y = NvOpticalFlow::FlowToPixels *
                           m_nvof->InputScaleY() / static_cast<float>(m_extent.height),
         .has_backward = m_nvof->HasBackwardFlow() ? 1.0f : 0.0f,
     };

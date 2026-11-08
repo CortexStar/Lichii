@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "common/logging.h"
+#include "common/settings.h"
 #include "video_core/renderer_vulkan/present/nv_optical_flow.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -74,12 +75,9 @@ NvOpticalFlow::NvOpticalFlow(const Device& device_, MemoryAllocator& allocator, 
         !dld.vkCmdOpticalFlowExecuteNV) {
         return;
     }
-    // Above 1920 pixels wide the flow runs on a half-size copy by default: the hardware's cost
-    // grows with the input, and a vector per input pixel there still beats one per 2x2 output
-    // pixels. EDEN_NX2_NVOF_INPUT=full or half overrides.
-    const char* const input_setting = std::getenv("EDEN_NX2_NVOF_INPUT");
-    const bool half_input = input_setting ? std::string{input_setting} == "half"
-                                          : extent.width > 1920;
+    // Above 1920 pixels wide the flow runs on a half-size copy: the hardware's cost grows with
+    // the input, and a vector per input pixel there still beats one per 2x2 output pixels.
+    const bool half_input = extent.width > 1920;
     input_extent = half_input ? VkExtent2D{(std::max)(1U, extent.width / 2),
                                            (std::max)(1U, extent.height / 2)}
                               : extent;
@@ -109,12 +107,9 @@ NvOpticalFlow::NvOpticalFlow(const Device& device_, MemoryAllocator& allocator, 
         return;
     }
 
-    // One vector per 2x2 pixels by default: coarser cells mix a figure's motion with the
-    // background's along its outline. EDEN_NX2_NVOF_GRID=1, 2, 4 or 8 picks another size.
-    u32 wanted_grid = half_input ? 1 : 2;
-    if (const char* value = std::getenv("EDEN_NX2_NVOF_GRID")) {
-        wanted_grid = static_cast<u32>(std::atoi(value));
-    }
+    // One vector per 2x2 output pixels: coarser cells mix a figure's motion with the
+    // background's along its outline.
+    const u32 wanted_grid = half_input ? 1 : 2;
     VkOpticalFlowGridSizeFlagsNV grid{};
     u32 grid_size{};
     const std::array grids{std::pair{VK_OPTICAL_FLOW_GRID_SIZE_1X1_BIT_NV, 1U},
@@ -184,10 +179,7 @@ NvOpticalFlow::NvOpticalFlow(const Device& device_, MemoryAllocator& allocator, 
         input_views[i] = create_view(inputs[i], input_format);
     }
     // Flows: [session] forward (this frame to the last), [2 + session] backward (the reverse).
-    // EDEN_NX2_NVOF_BACKWARD=0 computes the forward flow only.
-    const char* const backward_setting = std::getenv("EDEN_NX2_NVOF_BACKWARD");
-    backward = properties.bidirectionalFlowSupported != VK_FALSE &&
-               (backward_setting == nullptr || backward_setting[0] != '0');
+    backward = properties.bidirectionalFlowSupported != VK_FALSE;
     for (size_t i = 0; i < (backward ? 4U : 2U); ++i) {
         flows[i] = create_image(flow_extent, flow_format, VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                                 VK_OPTICAL_FLOW_USAGE_OUTPUT_BIT_NV);
@@ -212,12 +204,16 @@ NvOpticalFlow::NvOpticalFlow(const Device& device_, MemoryAllocator& allocator, 
         flow_copy_views[i] = create_view(flow_copies[i], VK_FORMAT_R16G16_SNORM);
     }
 
-    // EDEN_NX2_NVOF_PERF=1 (slow, best), 2 (medium, default) or 3 (fast).
-    VkOpticalFlowPerformanceLevelNV level = VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_MEDIUM_NV;
-    if (const char* value = std::getenv("EDEN_NX2_NVOF_PERF"); value && value[0] >= '1' &&
-                                                               value[0] <= '3') {
-        level = static_cast<VkOpticalFlowPerformanceLevelNV>(value[0] - '0');
-    }
+    const VkOpticalFlowPerformanceLevelNV level = [] {
+        switch (Settings::values.frame_gen_flow_quality.GetValue()) {
+        case Settings::FrameGenFlowQuality::Fast:
+            return VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_FAST_NV;
+        case Settings::FrameGenFlowQuality::Best:
+            return VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_SLOW_NV;
+        default:
+            return VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_MEDIUM_NV;
+        }
+    }();
     const VkDevice logical = *device.GetLogical();
     for (size_t i = 0; i < 2; ++i) {
         VkOpticalFlowSessionCreateInfoNV session_info{
