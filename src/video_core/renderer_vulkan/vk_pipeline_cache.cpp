@@ -1155,6 +1155,10 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             return;
         }
 
+        // Captures are portable; the key must identify the driver compiling them now.
+        key.state.driver_id = dynamic_features.driver_id;
+        key.state.driver_version = dynamic_features.driver_version;
+
         const u64 hash = key.Hash();
         if (!disk_pipelines.insert(hash).second) {
             return;
