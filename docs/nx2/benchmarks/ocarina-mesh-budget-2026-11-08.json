@@ -1,0 +1,244 @@
+{
+  "date": "2026-11-08",
+  "game": "The Legend of Zelda: Ocarina of Time",
+  "route": "Select New Game, watch the unskipped intro until player control in Links house",
+  "hardware": {
+    "cpu": "AMD Ryzen 7 9800X3D",
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    "driver": "615.78.08",
+    "os": "Linux 7.3.1-1-cachyos"
+  },
+  "build": {
+    "revision": "6e83fcede3f2a7e54c049c1a2277d8f4c0a7cabf",
+    "type": "Release, non-PGO",
+    "sha256": "bc68b23e00c3fe05d76eec6613c02054483cdbe716b08838e44c29e89b16691c",
+    "same_executable_for_all_arms": true
+  },
+  "method": {
+    "baseline": "Existing 512-candidate full warm-up run from ocarina-intro-2026-11-08.json; not rerun, as requested.",
+    "new_runs": "1024 then 2048 requested limits, one new run each. Both generate the identical 970-candidate file, so these are two independent cold-cache repetitions of the same effective configuration.",
+    "settings": "All three use GPL, no-inline, preload-all, mesh enabled, Always boot warm-up, 8 conventional warm-up workers, one mesh worker, and Wait with no skipped draws.",
+    "input_and_endpoint": {
+      "sequence": {
+        "steps": [
+          {
+            "buttons": [
+              "A"
+            ],
+            "frames": 6
+          },
+          {
+            "frames": 35994
+          }
+        ],
+        "timeout_s": 300
+      },
+      "chunk_presents": 120,
+      "title_prefix": "Plus for 6 presents starting at present 2439, then 3305 neutral presents; one title screenshot before the timed New Game press.",
+      "start": "First present of the A press selecting New Game.",
+      "stop": "First observed creation of slot_00/progress.sav; checked after each 120-present chunk; final endpoint screenshot and subsequent timing read included.",
+      "endpoint_validation": "All three endpoint images show three hearts and Move/Change View prompts with Link standing in his house. A short left-stick movement after each timed run visibly turns Link.",
+      "measurement": "Continuous guest-present intervals, including gaps between client requests; not display scanout or GPU execution time.",
+      "integrity": "Every sample rejects truncated or incomplete timestamp windows; complete interval count matches the endpoint cursor difference."
+    },
+    "only_intended_change": "Mesh recipe count; first 512 records match the baseline byte for byte; compute/graphics recipes and runtime seed unchanged.",
+    "initial_state": "Fresh title saves cloned from the original frozen seed, separate empty NVIDIA caches, original game executable and frozen measurement clients.",
+    "candidate_selection": "Unchanged ranking and validation, at most two distinct mesh contexts per archive variation; duplicate and already-known records excluded. The frozen seed yields only 970 eligible predictions.",
+    "limitations": [
+      "The 1024 and 2048 labels are requested limits, not actual pipeline counts.",
+      "One historical 512 run and two 970 runs cannot establish statistical significance or causal attribution for small differences.",
+      "Guest-present intervals include all loading/emulation work, not only shader compilation.",
+      "No broader context matching or ranking changes were made; increasing coverage beyond 970 requires a different experiment.",
+      "Only this NVIDIA/Linux configuration was measured."
+    ]
+  },
+  "provenance": {
+    "baseline": "../intro-benchmark/after/intro.json",
+    "binary_sha256": "bc68b23e00c3fe05d76eec6613c02054483cdbe716b08838e44c29e89b16691c",
+    "profiles": {
+      "1024": {
+        "requested_candidates": 1024,
+        "actual_candidates": 970,
+        "mesh_sha256": "b5b8bad160ad8ebd1cf2306756284b4f29923c809b0ab3502f514f7ae6fb09ca",
+        "first_512_byte_identical": true,
+        "compute_graphics_byte_identical": true
+      },
+      "2048": {
+        "requested_candidates": 2048,
+        "actual_candidates": 970,
+        "mesh_sha256": "b5b8bad160ad8ebd1cf2306756284b4f29923c809b0ab3502f514f7ae6fb09ca",
+        "first_512_byte_identical": true,
+        "compute_graphics_byte_identical": true
+      }
+    },
+    "initial_saves": "Both new profiles cloned the untouched fresh-save seed used by the 512 run. Title save absent before launch; initial seed file hashes verified.",
+    "initial_save_seed_manifest_sha256": "b2ac781e99868611c94d059145f5ebb1186c383df32cbf5e812c2b0071e25cfb",
+    "measurement_tools_sha256": {
+      "measure_stutters.py": "dcf5cdb1b3a8eb91bbcf2e8f7df22e52873945f9e1bf2fffb7b43202ea113633",
+      "debug_mcp.py": "3a386c748db6d57c44b4051a8cdd0b6ccabd0ad855fc1aa1dbd193009534dc2f"
+    },
+    "baseline_provenance": {
+      "build": "6e83fcede3",
+      "sha256": {
+        "lichii": "bc68b23e00c3fe05d76eec6613c02054483cdbe716b08838e44c29e89b16691c",
+        "vulkan.fork-v54.bin": "c9f9ea169c2c2f3e673800c4b49b0d0c6c348083945c75fd10bb51785b590690",
+        "vulkan_used.fork-v54.bin": "1a6f6da2c982a3ecabd7e2f40e8bb56d23b179b8cba8215c68c24e7f1f462cfe",
+        "warm-compute.bin": "a254598d97502ac5c43515b90b60f2368d6a4ca721bbd00e4321a8b91e4e9d2d",
+        "warm-graphics.bin": "94384a3c77ebcaea54e75b83f6bed3e37258a71ae304e7d604654d456811e301",
+        "warm-compute.count": "ed93b717f8cc10fc0e927cf5924a305744637b0809e9338d6dbb53c5cc792805",
+        "warm-graphics.count": "e078717cac0d964f4188ffbd994252dcbd6929152ab3f063830df4e5967425e5",
+        "warm-mesh.bin": "b71198ad15a16559b80750eafc2ca99df261c2ca4617f7d5d4509aea6f93c460",
+        "warm-mesh.count": "7cd3628ccebc4dddeaf36b7d9d4458a988dae203d8852619052515e4e29aae2c"
+      },
+      "seed": "Frozen historical runtime cache; 6539 records, 938 mesh templates. No pilot data reused.",
+      "saves": "Fresh title save in every arm; all NAND seed file hashes identical.",
+      "driver_cache": "Empty and separate in every measured arm.",
+      "measurement_tools_sha256": {
+        "measure_stutters.py": "dcf5cdb1b3a8eb91bbcf2e8f7df22e52873945f9e1bf2fffb7b43202ea113633",
+        "debug_mcp.py": "3a386c748db6d57c44b4051a8cdd0b6ccabd0ad855fc1aa1dbd193009534dc2f"
+      }
+    },
+    "offline_builder": {
+      "base_revision": "2199bc746f",
+      "change": "CLI-only --mesh-candidates option; candidate selection and gameplay executable unchanged",
+      "sha256": "ac4f197ae024c70d932d2255842392678a4d8c5226c364b73bedc89f3e902fa1"
+    },
+    "logged_renderer_settings_identical": true,
+    "logged_renderer_setting_count": 73
+  },
+  "results": [
+    {
+      "requested_candidate_limit": 512,
+      "actual_candidates": 512,
+      "reused_prior_run": true,
+      "frames": 21060,
+      "duration_ms": 371229.669661,
+      "mean_ms": 17.62723977497626,
+      "fps": 56.730379388133485,
+      "p50_ms": 16.680211,
+      "p90_ms": 20.031069000000002,
+      "p99_ms": 31.9103215,
+      "min_ms": 4.460826,
+      "max_ms": 499.859935,
+      "stutters": 110,
+      "truncated": false,
+      "before_present": 5761,
+      "after_present": 26822,
+      "over_ms": {
+        "33.333333": 110,
+        "50": 24,
+        "100": 12,
+        "250": 2,
+        "500": 0
+      },
+      "excess_over_100ms_ms": 951.968704,
+      "over_100ms_per_minute": 1.9395001500216578,
+      "cold_archive_warmup": {
+        "compute": {
+          "seconds": 22.0,
+          "summary": "Nx2Perf compute_warm: finished, 3434 built, 0 failed, 0 not reached, 22 s"
+        },
+        "graphics": {
+          "seconds": 202.0,
+          "summary": "Nx2Perf graphics_warm: finished, 36200 built, 602 failed, 202 s"
+        },
+        "mesh": {
+          "seconds": 85.4,
+          "summary": "Nx2Perf mesh_warm: finished, 512 built, 0 rejected, 0 driver failed, candidate_build_ms=84838.8, 85.4 s, complete=true cache_ready=true cancelled=false"
+        }
+      },
+      "endpoint_and_movement_verified": true,
+      "all_interval_counts_verified": true,
+      "private_raw_result_sha256": "758bf357b5418472535a95a29842fc04858d1e44ac0c81033a983cc9e6e62b50"
+    },
+    {
+      "requested_candidate_limit": 1024,
+      "actual_candidates": 970,
+      "reused_prior_run": false,
+      "frames": 21181,
+      "duration_ms": 371189.353824,
+      "mean_ms": 17.5246378274869,
+      "fps": 57.06252019836486,
+      "p50_ms": 16.679638,
+      "p90_ms": 19.79152,
+      "p99_ms": 32.61967,
+      "min_ms": 4.773379,
+      "max_ms": 470.776108,
+      "stutters": 152,
+      "truncated": false,
+      "before_present": 5762,
+      "after_present": 26944,
+      "over_ms": {
+        "33.333333": 154,
+        "50": 22,
+        "100": 10,
+        "250": 2,
+        "500": 0
+      },
+      "excess_over_100ms_ms": 977.290248,
+      "over_100ms_per_minute": 1.6164256701297823,
+      "cold_archive_warmup": {
+        "compute": {
+          "seconds": 23.0,
+          "summary": "Nx2Perf compute_warm: finished, 3434 built, 0 failed, 0 not reached, 23 s"
+        },
+        "graphics": {
+          "seconds": 191.0,
+          "summary": "Nx2Perf graphics_warm: finished, 36200 built, 602 failed, 191 s"
+        },
+        "mesh": {
+          "seconds": 249.0,
+          "summary": "Nx2Perf mesh_warm: finished, 970 built, 0 rejected, 0 driver failed, candidate_build_ms=248093.7, 249.0 s, complete=true cache_ready=true cancelled=false"
+        }
+      },
+      "endpoint_and_movement_verified": true,
+      "all_interval_counts_verified": true,
+      "private_raw_result_sha256": "6233c15e9187639632d974107cef27bd0543c13d36f2bdb8fa6e9af93ed1b198"
+    },
+    {
+      "requested_candidate_limit": 2048,
+      "actual_candidates": 970,
+      "reused_prior_run": false,
+      "frames": 20940,
+      "duration_ms": 372498.130657,
+      "mean_ms": 17.788831454489017,
+      "fps": 56.215047208604005,
+      "p50_ms": 16.68126,
+      "p90_ms": 20.980710000000002,
+      "p99_ms": 32.591596100000004,
+      "min_ms": 3.588892,
+      "max_ms": 526.500637,
+      "stutters": 163,
+      "truncated": false,
+      "before_present": 5762,
+      "after_present": 26703,
+      "over_ms": {
+        "33.333333": 164,
+        "50": 30,
+        "100": 11,
+        "250": 2,
+        "500": 1
+      },
+      "excess_over_100ms_ms": 1100.770592,
+      "over_100ms_per_minute": 1.7718209721909572,
+      "cold_archive_warmup": {
+        "compute": {
+          "seconds": 22.0,
+          "summary": "Nx2Perf compute_warm: finished, 3434 built, 0 failed, 0 not reached, 22 s"
+        },
+        "graphics": {
+          "seconds": 199.0,
+          "summary": "Nx2Perf graphics_warm: finished, 36200 built, 602 failed, 199 s"
+        },
+        "mesh": {
+          "seconds": 251.7,
+          "summary": "Nx2Perf mesh_warm: finished, 970 built, 0 rejected, 0 driver failed, candidate_build_ms=250458.2, 251.7 s, complete=true cache_ready=true cancelled=false"
+        }
+      },
+      "endpoint_and_movement_verified": true,
+      "all_interval_counts_verified": true,
+      "private_raw_result_sha256": "07c00474b3b2fb190aeef4a645e35dbbb91ff4ce21c0e822c269617fdc100ba0"
+    }
+  ],
+  "interpretation": "These intro measurements do not justify increasing the default above 512. The two 970-candidate runs had 10 and 11 intervals >100 ms versus 12 at 512, but worst intervals straddled the baseline (470.8 and 526.5 ms versus 499.9 ms), p99 was slightly worse in both (32.6 versus 31.9 ms), and mean guest-present rate also straddled it (57.06 and 56.22 versus 56.73 FPS). Mesh preparation rose from 85.4 s to 249.0 and 251.7 s, about 2.9 times as long. There is no consistent overall improvement in this small sample, and the remaining stall cluster persists. A requested limit of 2048 adds no coverage over 1024 with this seed and selection logic because their generated files are identical. Other gameplay routes may exercise different candidates; expanding beyond the available 970 would require a separate prediction-coverage experiment."
+}
