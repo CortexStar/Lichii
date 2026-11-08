@@ -96,12 +96,14 @@ TEST_CASE("Deleted segment IDs are forgotten before a slot can be reused",
     REQUIRE_FALSE(VideoCommon::MultiRangeSegmentsLive(std::span<const Segment>{graphics}, live));
     REQUIRE_FALSE(VideoCommon::MultiRangeSegmentsLive(std::span<const Segment>{compute}, live));
     std::vector<u64> resolved;
-    REQUIRE(VideoCommon::RefreshMultiRangeSegments(
+    // Assertions inside the callback stay out of the REQUIRE's expression (GCC -Wshadow).
+    const bool refreshed = VideoCommon::RefreshMultiRangeSegments(
         std::span{graphics}, live, [&](u64 address, u32 size) {
             resolved.push_back(address);
             CHECK(size == 16);
             return 2U;
-        }));
+        });
+    REQUIRE(refreshed);
     REQUIRE(resolved == std::vector<u64>{0x2000});
 }
 
