@@ -1,0 +1,232 @@
+{
+  "date": "2026-11-08",
+  "game": "The Legend of Zelda: Ocarina of Time",
+  "checkpoint": "Graveyard autosave",
+  "hardware": {
+    "cpu": "AMD Ryzen 7 9800X3D",
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    "driver": "615.78.08",
+    "os": "Linux 7.3.1-1-cachyos"
+  },
+  "build": {
+    "revision": "9f07c4aeca plus retrospective frame_times diagnostic",
+    "type": "Release, non-PGO",
+    "sha256": "3c390d9ba68c42a8cb24437e812dca32b5689ae78445b03ce5069f9540482ef5",
+    "note": "Same executable for every arm. Subsequent review fixes are not part of this timing comparison."
+  },
+  "method": {
+    "repetitions_per_configuration": 1,
+    "save_snapshots": "identical (file hashes checked)",
+    "runtime_cache_seed_pipelines": 6539,
+    "driver_cache_seed": "empty, separate directory for each configuration",
+    "draw_policy": "Wait; no skipped draws",
+    "measurement": "guest-present intervals, not display scanout or GPU execution time",
+    "warmup": "completed before sampling; reported separately",
+    "order": [
+      "before",
+      "after",
+      "no-mesh"
+    ],
+    "limitations": [
+      "Single pass per configuration; no confidence interval or run-to-run variance estimate.",
+      "The before/after comparison changes the full GPL/no-inline/preload/warm-up settings package; it is not a comparison against an unmodified release binary.",
+      "Scene-loading measurements include loading transitions and work other than shader compilation.",
+      "Cold-driver results do not predict warm-cache startup time.",
+      "AMD/Intel hardware has not been measured."
+    ]
+  },
+  "configurations": {
+    "before": {
+      "gpl": false,
+      "calls_not_inlined": false,
+      "preload_all": false,
+      "archive_warmup": false,
+      "mesh_candidates": 0
+    },
+    "after": {
+      "gpl": true,
+      "calls_not_inlined": true,
+      "preload_all": true,
+      "archive_warmup": true,
+      "mesh_candidates": 512,
+      "cold_warmup_seconds": {
+        "compute": 22,
+        "graphics": 184,
+        "mesh": 82.4
+      }
+    },
+    "no-mesh": {
+      "gpl": true,
+      "calls_not_inlined": true,
+      "preload_all": true,
+      "archive_warmup": true,
+      "mesh_candidates": 0,
+      "cold_warmup_seconds": {
+        "compute": 21,
+        "graphics": 198,
+        "mesh": 0
+      }
+    }
+  },
+  "sequences": {
+    "scene-load": {
+      "steps": [
+        {
+          "buttons": [
+            "A"
+          ],
+          "frames": 6
+        },
+        {
+          "frames": 900
+        }
+      ]
+    },
+    "camera": {
+      "steps": [
+        {
+          "right_stick": [
+            1,
+            0
+          ],
+          "frames": 300
+        },
+        {
+          "right_stick": [
+            -1,
+            0
+          ],
+          "frames": 300
+        },
+        {
+          "right_stick": [
+            0,
+            0.5
+          ],
+          "frames": 90
+        },
+        {
+          "right_stick": [
+            0,
+            -0.5
+          ],
+          "frames": 90
+        },
+        {
+          "frames": 420
+        }
+      ]
+    }
+  },
+  "results": [
+    {
+      "configuration": "before",
+      "sequence": "scene-load",
+      "frames": 906,
+      "p50_ms": 16.7368685,
+      "p99_ms": 125.41604915000046,
+      "max_ms": 2572.652358,
+      "mean_ms": 26.342673078366456,
+      "over_ms": {
+        "33.333333": 32,
+        "50": 24,
+        "100": 12,
+        "250": 5,
+        "500": 3
+      },
+      "excess_over_60hz_ms": 9027.014485333333,
+      "elapsed_seconds": 23.878120089
+    },
+    {
+      "configuration": "before",
+      "sequence": "camera",
+      "frames": 1200,
+      "p50_ms": 16.669034,
+      "p99_ms": 42.35291702999973,
+      "max_ms": 1207.546587,
+      "mean_ms": 20.188434571666665,
+      "over_ms": {
+        "33.333333": 13,
+        "50": 12,
+        "100": 10,
+        "250": 5,
+        "500": 2
+      },
+      "excess_over_60hz_ms": 5323.614946333332,
+      "elapsed_seconds": 24.229275587
+    },
+    {
+      "configuration": "no-mesh",
+      "sequence": "scene-load",
+      "frames": 906,
+      "p50_ms": 16.6677095,
+      "p99_ms": 120.56473495000022,
+      "max_ms": 1301.068161,
+      "mean_ms": 22.406880693156726,
+      "over_ms": {
+        "33.333333": 37,
+        "50": 22,
+        "100": 12,
+        "250": 5,
+        "500": 3
+      },
+      "excess_over_60hz_ms": 5466.959475333333,
+      "elapsed_seconds": 20.302003651
+    },
+    {
+      "configuration": "no-mesh",
+      "sequence": "camera",
+      "frames": 1200,
+      "p50_ms": 16.664546,
+      "p99_ms": 20.672077209999994,
+      "max_ms": 533.928743,
+      "mean_ms": 17.084357908333338,
+      "over_ms": {
+        "33.333333": 3,
+        "50": 1,
+        "100": 1,
+        "250": 1,
+        "500": 1
+      },
+      "excess_over_60hz_ms": 756.8328996666661,
+      "elapsed_seconds": 20.518265507
+    },
+    {
+      "configuration": "after",
+      "sequence": "scene-load",
+      "frames": 906,
+      "p50_ms": 16.6679855,
+      "p99_ms": 101.1038663000003,
+      "max_ms": 1311.665054,
+      "mean_ms": 22.035972470198683,
+      "over_ms": {
+        "33.333333": 30,
+        "50": 22,
+        "100": 10,
+        "250": 4,
+        "500": 3
+      },
+      "excess_over_60hz_ms": 5182.2879256666665,
+      "elapsed_seconds": 19.96700977
+    },
+    {
+      "configuration": "after",
+      "sequence": "camera",
+      "frames": 1200,
+      "p50_ms": 16.667718999999998,
+      "p99_ms": 18.91450141,
+      "max_ms": 526.154035,
+      "mean_ms": 17.05914853833333,
+      "over_ms": {
+        "33.333333": 1,
+        "50": 1,
+        "100": 1,
+        "250": 1,
+        "500": 1
+      },
+      "excess_over_60hz_ms": 667.2824523333327,
+      "elapsed_seconds": 20.477091821
+    }
+  ],
+  "interpretation": "The combined settings package reduced >100 ms camera intervals from 10 to 1 in this single pass. The mesh-disabled control also had 1, so this route does not demonstrate a material additional camera benefit from mesh predictions alone."
+}

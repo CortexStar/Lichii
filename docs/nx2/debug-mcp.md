@@ -176,6 +176,10 @@ report boot preparation separately from gameplay and distinguish guest presents 
 `tools/nx2/measure_stutters.py sequence.json result.json --server 127.0.0.1:6545`
 automates replay and collection, including counts above fixed 50/100/250/500 ms thresholds.
 The sequence file is an `input_sequence` params object. It does not reset saves or caches.
+An [Ocarina cold-driver comparison](benchmarks/ocarina-prewarm-2026-11-08.json) records the
+settings, input sequences and aggregate results for three configurations. It is one pass per
+configuration; the full package improved camera stalls, but that route did not demonstrate
+an additional camera benefit from mesh predictions alone.
 
 **`screenshot`** `{height?, save?, timeout_s?}`. It requests a 16:9 layout from
 `Layout::DefaultFrameLayout`, and the renderer blits the presented framebuffers into it. The
