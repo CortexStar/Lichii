@@ -15,7 +15,7 @@
 
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/memory_tracker_base.h"
-#include "video_core/buffer_cache/usage_tracker.h"
+#include "video_core/buffer_cache/upload_order.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
 #include "video_core/renderer_vulkan/vk_multi_range_buffer.h"
@@ -58,23 +58,22 @@ public:
         return buffer.Location();
     }
 
-    [[nodiscard]] bool IsRegionUsed(u64 offset, u64 size) const noexcept {
-        return tracker.IsUsed(offset, size);
+    /// The bytes that work recorded in the current submission uses, and the newest earlier
+    /// submission whose work used the buffer (BufferCacheRuntime::DecideUploadOrder).
+    [[nodiscard]] const VideoCommon::SubmissionUses& Uses() const noexcept {
+        return uses;
     }
 
     /// TEST (EDEN_NX2_GPU_COST): the newest tick that used any 4 KiB page of the range, 0 when
     /// none did since the trace started.
     [[nodiscard]] u64 NewestUseTick(u64 offset, u64 size) const noexcept;
 
+    /// GPU work recorded now reads or writes [offset, offset + size).
     void MarkUsage(u64 offset, u64 size) noexcept;
 
-    void ResetUsageTracking() noexcept {
-        tracker.Reset();
-    }
-
-    [[nodiscard]] u64 LastUsageTick() const noexcept {
-        return last_usage_tick;
-    }
+    /// An upload recorded now writes [offset, offset + size): uploads of these bytes after it in
+    /// this submission run after it (DecideUploadOrder).
+    void TrackUploadWrite(u64 offset, u64 size) noexcept;
 
     [[nodiscard]] std::span<const u8> Mapped() const noexcept {
         return buffer.IsHostCoherent() ? buffer.Mapped() : std::span<const u8>{};
@@ -96,9 +95,8 @@ private:
     Scheduler* scheduler{};
     vk::Buffer buffer;
     std::vector<BufferView> views;
-    VideoCommon::UsageTracker tracker;
+    VideoCommon::SubmissionUses uses;
     VkDeviceAddress device_address{};
-    u64 last_usage_tick{};
     bool is_null{};
     bool sparse_compatible{};
     /// TEST (EDEN_NX2_GPU_COST): the tick of each 4 KiB page's last use, and the last ranges
@@ -182,16 +180,21 @@ public:
 
     [[nodiscard]] StagingBufferRef DownloadStagingBuffer(size_t size, bool deferred = false);
 
-    bool CanReorderUpload(const Buffer& buffer, std::span<const VideoCommon::BufferCopy> copies);
+    /// Where an upload of `copies` into buffer runs (VideoCommon::DecideUploadOrder): in order
+    /// when work recorded in this submission uses a byte it writes, otherwise in the upload
+    /// command buffer. Tracks the copies as uses of their bytes.
+    [[nodiscard]] VideoCommon::UploadOrder DecideUploadOrder(
+        Buffer& buffer, std::span<const VideoCommon::BufferCopy> copies);
 
     void FreeDeferredStagingBuffer(StagingBufferRef& ref);
 
     void PreCopyBarrier();
 
-    /// location: the caller, which the render pass end and the copy are counted at.
+    /// order: where an upload from the stream buffer runs (DecideUploadOrder); other copies run
+    /// in order. location: the caller, which the render pass end and the copy are counted at.
     void CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
                     std::span<const VideoCommon::BufferCopy> copies, bool barrier,
-                    bool can_reorder_upload = false,
+                    VideoCommon::UploadOrder order = {},
                     std::source_location location = std::source_location::current());
 
     void PostCopyBarrier();

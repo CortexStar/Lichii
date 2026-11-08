@@ -22,6 +22,7 @@
 #include "tests/core/system_test_context.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/memory_tracker_base.h"
+#include "video_core/buffer_cache/upload_order.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/gpu.h"
 #include "video_core/nx2_list_stats.h"
@@ -80,8 +81,9 @@ struct Runtime {
         return submitted_tick + 1;
     }
     void WaitSubmittedTick(u64) {}
-    bool CanReorderUpload(const Buffer&, std::span<VideoCommon::BufferCopy>) const {
-        return false;
+    VideoCommon::UploadOrder DecideUploadOrder(const Buffer&,
+                                               std::span<VideoCommon::BufferCopy>) const {
+        return {};
     }
     Staging DownloadStagingBuffer(u64 size, bool = false) {
         // Kept until the end: read downloads hold theirs past the next request.
@@ -123,7 +125,7 @@ struct Runtime {
         }
     }
     void CopyBuffer(Buffer& dst, Buffer* src, std::span<const VideoCommon::BufferCopy> copies, bool,
-                    bool) {
+                    VideoCommon::UploadOrder) {
         for (const auto& copy : copies) {
             REQUIRE(copy.src_offset + copy.size <= src->bytes.size());
             REQUIRE(copy.dst_offset + copy.size <= dst.bytes.size());
