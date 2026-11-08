@@ -2649,6 +2649,13 @@ private:
                         VideoCore::HostVsync::LastStart(), std::chrono::steady_clock::now(),
                         VblankInterval);
                     std::scoped_lock lk{vsync_state->mutex};
+                    // While the display starts the frames this run is only a check, which can be
+                    // an OS timer tick late: relaxed then, so the timer thread sleeps in the OS for
+                    // it instead of a precise wait (~0.3 ms of monitor wait per vblank). Once it
+                    // starts frames itself, its runs are deadlines again.
+                    if (const auto timer = vsync_state->timer.lock()) {
+                        timer->SetRelaxed(!timer_signals);
+                    }
                     if (timer_signals) {
                         // The game starts its next frame here and samples input then.
                         Common::InputLatency::FrameStart();
@@ -2691,6 +2698,10 @@ private:
                         vsync_hz, objects->movie_rate.load(std::memory_order_relaxed));
                     return std::chrono::nanoseconds{1'000'000'000LL / hz};
                 });
+            {
+                std::scoped_lock lk{m_vsync->mutex};
+                m_vsync->timer = m_vsync_timer;
+            }
             system.CoreTiming().ScheduleLoopingEvent(VblankInterval, VblankInterval, m_vsync_timer);
             if (VideoCore::HostVsync::Enabled()) {
                 // The host's display starts the game's frames: each frame on screen (or taken by
@@ -2714,6 +2725,7 @@ private:
     struct VsyncState {
         std::mutex mutex;
         std::vector<Kernel::KEvent*> events;
+        std::weak_ptr<Core::Timing::EventType> timer; ///< The vsync timer, made relaxed by itself
         Common::DkbFrameTrace::RateLimit trace_rate;
         std::optional<s64> trace_last_callback, trace_min_gap;
         s64 trace_max_late{};
