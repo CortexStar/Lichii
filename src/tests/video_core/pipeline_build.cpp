@@ -4,6 +4,7 @@
 #include <future>
 #include <memory>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -127,6 +128,41 @@ TEST_CASE("Eviction after an inline build leaves a safe queued callback",
     workers.WaitForRequests();
     REQUIRE(evictable);
     REQUIRE(builds == 1);
+}
+
+TEST_CASE("A draw claims a queued worker-only build instead of waiting behind the queue",
+          "[video_core][async_draw][pipeline_build]") {
+    Common::ThreadWorker workers{1, "PipelineTest"};
+    EmissionBudget budget{1};
+    std::promise<void> release, entered;
+    auto gate = release.get_future().share();
+    workers.QueueWork([gate, &entered] {
+        entered.set_value();
+        gate.wait();
+    });
+    entered.get_future().wait();
+    std::atomic<int> builds{};
+    std::thread::id builder;
+    PipelineBuild build{
+        &workers, [reservation = std::shared_ptr{budget.TryAcquire(true)}, &builds, &builder] {
+            builder = std::this_thread::get_id();
+            ++builds;
+        }};
+    auto draw = std::async(std::launch::async, [&] {
+        build.Wait(true);
+        return std::this_thread::get_id();
+    });
+    const bool claimed = draw.wait_for(std::chrono::seconds{5}) == std::future_status::ready;
+    const bool reservation_released = budget.Pending() == 0;
+    release.set_value();
+    const std::thread::id waiter = draw.get();
+    workers.WaitForRequests();
+    REQUIRE(claimed);
+    REQUIRE(reservation_released);
+    REQUIRE(builder == waiter);
+    REQUIRE(builds == 1);
+    REQUIRE(build.IsBuilt());
+    REQUIRE_FALSE(build.Failed());
 }
 
 TEST_CASE("Pipeline destruction drains queued work before owner resources disappear",

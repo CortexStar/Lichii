@@ -855,7 +855,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         // triangles the draw then reads; both use the descriptor set committed here.
         scheduler.RequestOutsideRenderPassOperationContext();
         if (!IsBuilt()) {
-            scheduler.Record([this](vk::CommandBuffer) { build->Wait(!worker_only_build); });
+            scheduler.Record([this](vk::CommandBuffer) { build->Wait(true); });
         }
         scheduler.Record([this, descriptor_data, groups = mesh_groups, capacity = mesh_capacity,
                           task_buffers = mesh_task_buffers,
@@ -988,7 +988,9 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         // Wait for the pipeline to be built
         scheduler.Record([this](vk::CommandBuffer) {
             const auto begin = std::chrono::steady_clock::now();
-            build->Wait(!worker_only_build);
+            // Claim the build here, worker-only builds included: the worker queue is FIFO, so a
+            // held draw otherwise waits behind every pipeline queued before its own.
+            build->Wait(true);
             hold_time_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                        std::chrono::steady_clock::now() - begin)
                                        .count(),
