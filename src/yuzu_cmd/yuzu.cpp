@@ -78,6 +78,7 @@
 // windows.h needs to be included before shellapi.h
 #include <windows.h>
 #include <shellapi.h>
+#include <dbghelp.h>
 #include "common/windows/timer_resolution.h"
 #endif
 
@@ -182,13 +183,11 @@ static LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* exception) {
     }
     PrintAmdBreadcrumbs();
     std::fflush(stderr);
-    struct ExceptionInformation {
-        DWORD thread_id;
-        EXCEPTION_POINTERS* exception_pointers;
-        BOOL client_pointers;
-    };
-    using MiniDumpWriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, int, const ExceptionInformation*,
-                                              const void*, const void*);
+    // dbghelp's own declaration: MINIDUMP_EXCEPTION_INFORMATION is 4-byte packed, and a naturally
+    // aligned copy put ExceptionPointers 4 bytes off, so every dump failed and left an empty file.
+    using MiniDumpWriteDumpFn =
+        BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE, PMINIDUMP_EXCEPTION_INFORMATION,
+                      PMINIDUMP_USER_STREAM_INFORMATION, PMINIDUMP_CALLBACK_INFORMATION);
     const HMODULE dbghelp = LoadLibraryA("dbghelp.dll");
     const auto write = dbghelp ? reinterpret_cast<MiniDumpWriteDumpFn>(
                                      GetProcAddress(dbghelp, "MiniDumpWriteDump"))
@@ -201,11 +200,14 @@ static LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* exception) {
     const HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                                     FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file != INVALID_HANDLE_VALUE) {
-        const ExceptionInformation information{GetCurrentThreadId(), exception, FALSE};
-        // MiniDumpWithThreadInfo; the larger MiniDumpWithIndirectlyReferencedMemory failed on
-        // Eden's address space and left an empty file.
-        const BOOL ok = write(GetCurrentProcess(), GetCurrentProcessId(), file, 0x1000,
-                              &information, nullptr, nullptr);
+        MINIDUMP_EXCEPTION_INFORMATION information{
+            .ThreadId = GetCurrentThreadId(),
+            .ExceptionPointers = exception,
+            .ClientPointers = FALSE,
+        };
+        // Every thread's stack and registers, the modules and the faulting context.
+        const BOOL ok = write(GetCurrentProcess(), GetCurrentProcessId(), file,
+                              MiniDumpWithThreadInfo, &information, nullptr, nullptr);
         const DWORD error = ok ? 0 : GetLastError();
         CloseHandle(file);
         std::fprintf(stderr, ok ? "Crash dump written to %s\n" : "Crash dump to %s failed (%#lx)\n",
