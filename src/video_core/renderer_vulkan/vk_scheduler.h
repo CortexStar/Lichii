@@ -448,7 +448,10 @@ private:
     /// EDEN_DKB_FRAME_TRACE: before each recorded command, a marker that timestamps it in
     /// sampled submissions, so the frame's GPU time can be split by the code that recorded it.
     void RecordSiteMarker(std::source_location location);
+    /// Worker thread, run by a marker: writes its timestamp while a sampled submission records.
     void TraceSite(vk::CommandBuffer cmdbuf, const char* file, u32 line);
+    /// Logs the sampled frame's GPU time by recording site (the 25 most expensive), given each
+    /// submission's begin and end timestamps.
     void ReportSiteTimes(const std::vector<u64>& submission_begin,
                          const std::vector<u64>& submission_end);
     void TraceShader(u64 hash, u32 stage);
