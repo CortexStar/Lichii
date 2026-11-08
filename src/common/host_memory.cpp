@@ -58,6 +58,7 @@
 #include <mutex>
 #include <random>
 #include <utility>
+#include <vector>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -81,7 +82,6 @@ namespace Common {
 thread_local HostMemory::AllocationTestControl* HostMemory::allocation_test_control{};
 
 [[maybe_unused]] constexpr size_t PageAlignment = 0x1000;
-[[maybe_unused]] constexpr int BackingAttempts = 5; // fastmem backing allocation tries (Windows)
 [[maybe_unused]] constexpr size_t HugePageSize = 0x200000;
 
 #ifdef _WIN32
@@ -122,6 +122,56 @@ using PFN_MapViewOfFile3 = _Ret_maybenull_ PVOID(WINAPI*)(
 using PFN_UnmapViewOfFile2 = BOOL(WINAPI*)(_In_ HANDLE Process, _In_ PVOID BaseAddress,
                                            _In_ ULONG UnmapFlags);
 
+// Backing views whose pages are committed on first use. Kernel hand-outs and guest mappings
+// commit their ranges explicitly (HostMemory::CommitBacking); this handler commits what the host
+// touches through the backing view outside those paths (e.g. HLE writes to pages not handed out
+// yet). Kernel-mode accesses (ReadFile into an uncommitted page) fail with ERROR_NOACCESS instead
+// of faulting, which is why the explicit commits come first.
+static std::mutex reserved_backings_mutex;
+static std::vector<std::pair<u8*, size_t>> reserved_backings;
+
+static LONG WINAPI CommitReservedBackingOnFault(PEXCEPTION_POINTERS info) {
+    if (info->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    u8* const address = reinterpret_cast<u8*>(info->ExceptionRecord->ExceptionInformation[1]);
+    u8* begin = nullptr;
+    u8* end = nullptr;
+    {
+        std::scoped_lock lock{reserved_backings_mutex};
+        for (const auto& [base, size] : reserved_backings) {
+            if (address >= base && address < base + size) {
+                begin = base;
+                end = base + size;
+            }
+        }
+    }
+    MEMORY_BASIC_INFORMATION region{};
+    if (begin == nullptr || VirtualQuery(address, &region, sizeof(region)) == 0 || region.State != MEM_RESERVE) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    // Commit the 64 KiB granule around the address, as HostMemory tracks it.
+    const size_t granule_offset = Common::AlignDown(static_cast<size_t>(address - begin), size_t{0x10000});
+    u8* const granule = begin + granule_offset;
+    const size_t length = (std::min)(size_t{0x10000}, static_cast<size_t>(end - granule));
+    if (!VirtualAlloc(granule, length, MEM_COMMIT, PAGE_READWRITE)) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static void RegisterReservedBacking(u8* base, size_t size) {
+    static std::once_flag handler_flag;
+    std::call_once(handler_flag, [] { AddVectoredExceptionHandler(1, CommitReservedBackingOnFault); });
+    std::scoped_lock lock{reserved_backings_mutex};
+    reserved_backings.emplace_back(base, size);
+}
+
+static void UnregisterReservedBacking(u8* base) {
+    std::scoped_lock lock{reserved_backings_mutex};
+    std::erase_if(reserved_backings, [base](const auto& backing) { return backing.first == base; });
+}
+
 template <typename T>
 static void GetFuncAddress(Common::DynamicLibrary& dll, const char* name, T& pfn) {
     if (!dll.GetSymbol(name, &pfn)) {
@@ -159,34 +209,13 @@ public:
             return false;
         }
 
-        // Allocate backing file map. SEC_COMMIT charges all of it to the commit limit up front, and
-        // when the free commit is only just above its size the call fails with
-        // ERROR_NO_SYSTEM_RESOURCES without growing a system-managed page file. The emulator then
-        // runs the whole session without fastmem (Ocarina of Time: 20-25% fewer fps). A private
-        // commit of the same size does grow the page file, so make one, release it and try again.
-        for (int attempt = 1; attempt <= BackingAttempts && !backing_handle; ++attempt) {
-            backing_handle = pfn_CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_WRITE | FILE_MAP_READ, PAGE_READWRITE, SEC_COMMIT, backing_size, nullptr, nullptr, 0);
-            if (backing_handle) {
-                if (attempt > 1) {
-                    LOG_INFO(HW_Memory, "Allocated {} MiB of backing memory on attempt {}", backing_size >> 20, attempt);
-                }
-                break;
-            }
-            const DWORD error = GetLastError();
-            MEMORYSTATUSEX status{};
-            status.dwLength = sizeof(status);
-            GlobalMemoryStatusEx(&status);
-            LOG_WARNING(HW_Memory, "Failed to allocate {} MiB of backing memory (attempt {}, error {}, {} MiB of commit free)",
-                        backing_size >> 20, attempt, error, status.ullAvailPageFile >> 20);
-            if (void* const probe = VirtualAlloc(nullptr, backing_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)) {
-                VirtualFree(probe, 0, MEM_RELEASE);
-            }
-            if (attempt < BackingAttempts) {
-                Sleep(50);
-            }
-        }
+        // Reserve the backing without charging it to the commit limit: one SEC_COMMIT charge of
+        // the whole backing (14 GiB for Switch 2 programs) fails when the free commit is below it,
+        // because a system-managed page file only grows in steps. Commit() charges the ranges the
+        // kernel hands out instead, and those smaller charges grow the page file.
+        backing_handle = pfn_CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_WRITE | FILE_MAP_READ, PAGE_READWRITE, SEC_RESERVE, backing_size, nullptr, nullptr, 0);
         if (!backing_handle) {
-            LOG_CRITICAL(HW_Memory, "Failed to allocate {} MiB of backing memory", backing_size >> 20);
+            LOG_CRITICAL(HW_Memory, "Failed to reserve {} MiB of backing memory, error {}", backing_size >> 20, GetLastError());
             return false;
         }
         // Allocate a virtual memory for the backing file map as placeholder
@@ -203,6 +232,7 @@ public:
             LOG_CRITICAL(HW_Memory, "Failed to map {} MiB of virtual memory", backing_size >> 20);
             return false;
         }
+        RegisterReservedBacking(backing_base, backing_size);
         // Allocate virtual address placeholder
         virtual_base = static_cast<u8*>(pfn_VirtualAlloc2(process, nullptr, virtual_size, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0));
         if (!virtual_base) {
@@ -229,6 +259,20 @@ public:
             LOG_CRITICAL(HW_Memory, "Failed to allocate fallback buffer with size {:#x}, error {}", size, GetLastError());
         }
         return ptr;
+    }
+
+    /// Charges backing pages to the commit limit; all views of them become accessible.
+    bool Commit(size_t host_offset, size_t length) {
+        if (VirtualAlloc(backing_base + host_offset, length, MEM_COMMIT, PAGE_READWRITE)) {
+            return true;
+        }
+        const DWORD error = GetLastError();
+        MEMORYSTATUSEX status{};
+        status.dwLength = sizeof(status);
+        GlobalMemoryStatusEx(&status);
+        LOG_CRITICAL(HW_Memory, "Failed to commit {} KiB of backing memory at {:#x}, error {}, {} MiB of commit free",
+                     length >> 10, host_offset, error, status.ullAvailPageFile >> 20);
+        return false;
     }
 
     void Map(size_t virtual_offset, size_t host_offset, size_t length, MemoryPermission perms) {
@@ -306,6 +350,7 @@ private:
             virtual_base = nullptr;
         }
         if (backing_base) {
+            UnregisterReservedBacking(backing_base);
             if (!pfn_UnmapViewOfFile2(process, backing_base, MEM_PRESERVE_PLACEHOLDER)) {
                 LOG_CRITICAL(HW_Memory, "Failed to unmap backing memory placeholder");
             }
@@ -1048,6 +1093,8 @@ void HostMemory::Map(size_t virtual_offset, size_t host_offset, size_t length, M
     if (length == 0 || !virtual_base || !impl) {
         return;
     }
+    // Views over uncommitted pages fault on access and refuse VirtualProtect.
+    CommitBacking(host_offset, length);
     impl->Map(virtual_offset + virtual_base_offset, host_offset, length, perms);
 #endif
 }
@@ -1155,6 +1202,34 @@ void HostMemory::MarkUsed(size_t physical_offset, size_t length) {
             granules[index].fetch_or(GranuleUsed, std::memory_order_release);
         }
     }
+    CommitBacking(physical_offset, length);
+}
+
+void HostMemory::CommitBacking([[maybe_unused]] size_t physical_offset, [[maybe_unused]] size_t length) {
+#ifdef _WIN32
+    if (length == 0 || !impl) {
+        return;
+    }
+    const size_t last = (physical_offset + length - 1) >> GranuleShift;
+    for (size_t index = physical_offset >> GranuleShift; index <= last;) {
+        if ((granules[index].load(std::memory_order_acquire) & GranuleCommitted) != 0) {
+            ++index;
+            continue;
+        }
+        size_t run_end = index + 1;
+        while (run_end <= last && (granules[run_end].load(std::memory_order_acquire) & GranuleCommitted) == 0) {
+            ++run_end;
+        }
+        const size_t begin = index << GranuleShift;
+        const size_t end = (std::min)(run_end << GranuleShift, impl->backing_size);
+        if (impl->Commit(begin, end - begin)) {
+            for (size_t committed = index; committed < run_end; ++committed) {
+                granules[committed].fetch_or(GranuleCommitted, std::memory_order_release);
+            }
+        }
+        index = run_end;
+    }
+#endif
 }
 
 void HostMemory::MarkDirty(size_t physical_offset, size_t length) {

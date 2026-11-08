@@ -256,3 +256,42 @@ TEST_CASE("HostMemory: Partial sparse middle unmap and check bindings", "[common
     REQUIRE(ptr[0x0000] == 19);
     REQUIRE(ptr[0x3fff] == 12);
 }
+
+TEST_CASE("HostMemory: Backing larger than the commit limit", "[common]") {
+    // Windows reserves the backing and commits only what is handed out or mapped, so a backing
+    // well beyond RAM plus page file still gets a fastmem arena.
+    HostMemory mem(64_GiB, VIRTUAL_SIZE);
+    REQUIRE(mem.BackingBasePointer() != nullptr);
+    REQUIRE(mem.VirtualBasePointer() != nullptr);
+    mem.Map(0x40000, 63_GiB, 0x10000, PERMS, HEAP);
+
+    volatile u8* const data = mem.VirtualBasePointer() + 0x40000;
+    data[0] = 7;
+    data[0xffff] = 8;
+    REQUIRE(mem.BackingBasePointer()[63_GiB] == 7);
+    REQUIRE(mem.BackingBasePointer()[63_GiB + 0xffff] == 8);
+}
+
+TEST_CASE("HostMemory: Backing written before it is handed out or mapped", "[common]") {
+    HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
+    REQUIRE(mem.BackingBasePointer() != nullptr);
+    volatile u8* const backing = mem.BackingBasePointer();
+    backing[0x123456] = 21;
+    REQUIRE(backing[0x123456] == 21);
+
+    mem.Map(0x40000, 0x120000, 0x10000, PERMS, HEAP);
+    REQUIRE(mem.VirtualBasePointer()[0x43456] == 21);
+}
+
+TEST_CASE("HostMemory: Protect a mapping of memory handed out before", "[common]") {
+    HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
+    REQUIRE(mem.BackingBasePointer() != nullptr);
+    mem.MarkUsed(0x200000, 0x20000);
+    mem.BackingBasePointer()[0x200000] = 5;
+    mem.Map(0x40000, 0x200000, 0x20000, PERMS, HEAP);
+    mem.Protect(0x40000, 0x20000, Common::MemoryPermission::Read);
+    REQUIRE(mem.VirtualBasePointer()[0x40000] == 5);
+    mem.Protect(0x40000, 0x20000, PERMS);
+    mem.VirtualBasePointer()[0x5ffff] = 6;
+    REQUIRE(mem.BackingBasePointer()[0x21ffff] == 6);
+}
