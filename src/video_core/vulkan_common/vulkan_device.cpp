@@ -27,6 +27,7 @@
 #include "common/settings_enums.h"
 #include "video_core/vulkan_common/nsight_aftermath_tracker.h"
 #include "video_core/vulkan_common/vma.h"
+#include "video_core/vulkan_common/amd_ffx.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -784,10 +785,41 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     if (host_float16_supported) {
         features.shader_float16_int8.shaderFloat16 = VK_TRUE;
     }
-    logical = vk::Device::Create(physical, queue_cis, ExtensionListForVulkan(loaded_extensions), first_next, dld);
+    auto all_queue_cis = queue_cis;
+    std::vector<std::vector<float>> amd_queue_priorities;
+    AmdFfxFeatures amd_features;
+    if (AmdFfx::Loaded()) {
+        SetupAmdFfx(all_queue_cis, amd_queue_priorities, amd_features, first_next);
+    }
+    // VK_AMD_anti_lag (Anti-Lag 2 and its frame limiter, used by RendererVulkan).
+    if (supported_extensions.contains(VK_AMD_ANTI_LAG_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 query{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                                        .pNext = &anti_lag_features};
+        anti_lag_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ANTI_LAG_FEATURES_AMD;
+        physical.GetFeatures2(query);
+        if (anti_lag_features.antiLag) {
+            loaded_extensions.insert(VK_AMD_ANTI_LAG_EXTENSION_NAME);
+            anti_lag_features.pNext = const_cast<void*>(first_next);
+            first_next = &anti_lag_features;
+        }
+    }
+    logical = vk::Device::Create(physical, all_queue_cis,
+                                 ExtensionListForVulkan(loaded_extensions), first_next, dld);
 
     graphics_queue = logical.GetQueue(graphics_family);
     present_queue = logical.GetQueue(present_family);
+    if (anti_lag_features.antiLag) {
+        anti_lag_update = reinterpret_cast<PFN_vkAntiLagUpdateAMD>(
+            dld.vkGetDeviceProcAddr(*logical, "vkAntiLagUpdateAMD"));
+    }
+    if (frame_gen_queues) {
+        const auto queue = [this](const QueueSlot& slot) {
+            return FrameGenQueue{logical.GetQueue(slot.family, slot.index), slot.family};
+        };
+        frame_gen_present_queue = queue(frame_gen_queues->present);
+        frame_gen_compute_queue = queue(frame_gen_queues->async_compute);
+        frame_gen_acquire_queue = queue(frame_gen_queues->image_acquire);
+    }
 
 #ifdef EGLANTINE_STREAMLINE
     if (streamline_extensions) {
@@ -1990,6 +2022,124 @@ void Device::SetupFamilies(VkSurfaceKHR surface) {
     if (present) {
         present_family = *present;
     }
+    queue_family_present.assign(queue_family_properties.size(), false);
+    for (u32 index = 0; surface && index < static_cast<u32>(queue_family_properties.size());
+         ++index) {
+        queue_family_present[index] = physical.GetSurfaceSupportKHR(index, surface);
+    }
+}
+
+void Device::SetupAmdFfx(std::vector<VkDeviceQueueCreateInfo>& queue_cis,
+                         std::vector<std::vector<float>>& priorities, AmdFfxFeatures& amd,
+                         const void*& first_next) {
+    // The features AMD's FSR 4 provider uses, as AMD's Cauldron sample enables them
+    // (device_vk.cpp:746-892): FP8 and cooperative matrices (FP8 model on RDNA 4), integer dot
+    // products (INT8 model), compute shader derivatives, dynamic rendering. Each only when the
+    // device has it.
+    const auto chain = [&first_next](auto& feature) {
+        feature.pNext = const_cast<void*>(first_next);
+        first_next = &feature;
+    };
+    const bool vk13 = properties.properties.apiVersion >= VK_API_VERSION_1_3;
+    VkPhysicalDeviceFeatures2 query{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    void** next = &query.pNext;
+    const auto add = [&next](auto& feature, VkStructureType type) {
+        feature.sType = type;
+        *next = &feature;
+        next = &feature.pNext;
+    };
+    const bool has_float8 = supported_extensions.contains(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME);
+    const bool has_derivatives =
+        supported_extensions.contains(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+    const bool has_dot = vk13 || supported_extensions.contains(
+                                     VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME);
+    const bool has_dynamic_rendering =
+        vk13 || supported_extensions.contains(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+    if (has_float8) {
+        add(amd.float8, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT);
+    }
+    if (has_derivatives) {
+        add(amd.derivatives, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR);
+    }
+    if (has_dot) {
+        add(amd.integer_dot, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES);
+    }
+    if (has_dynamic_rendering) {
+        add(amd.dynamic_rendering, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES);
+    }
+    physical.GetFeatures2(query);
+    std::string enabled;
+    const auto note = [&enabled](const char* name) {
+        enabled += (enabled.empty() ? "" : ", ") + std::string{name};
+    };
+    if (has_float8 && amd.float8.shaderFloat8) {
+        amd.float8.shaderFloat8CooperativeMatrix &= extensions.cooperative_matrix;
+        loaded_extensions.insert(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME);
+        chain(amd.float8);
+        note("shader_float8");
+    }
+    if (has_derivatives && (amd.derivatives.computeDerivativeGroupQuads ||
+                            amd.derivatives.computeDerivativeGroupLinear)) {
+        loaded_extensions.insert(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+        chain(amd.derivatives);
+        note("compute_shader_derivatives");
+    }
+    if (has_dot && amd.integer_dot.shaderIntegerDotProduct) {
+        if (!vk13) {
+            loaded_extensions.insert(VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME);
+        }
+        chain(amd.integer_dot);
+        note("shader_integer_dot_product");
+    }
+    if (has_dynamic_rendering && amd.dynamic_rendering.dynamicRendering) {
+        if (!vk13) {
+            loaded_extensions.insert(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+        }
+        chain(amd.dynamic_rendering);
+        note("dynamic_rendering");
+    }
+    LOG_INFO(Render_Vulkan, "AMD FSR: device features for AMD's runtime: {}",
+             enabled.empty() ? "none" : enabled);
+
+    // AMD's frame generation swapchain takes present, async compute and image acquire queues of
+    // its own (ffxCreateContextDescFrameGenerationSwapChainVK).
+    if (!AmdFfx::HasFrameGeneration()) {
+        return;
+    }
+    const auto families = physical.GetQueueFamilyProperties();
+    std::vector<QueueFamilyTraits> traits;
+    for (u32 index = 0; index < families.size(); ++index) {
+        traits.push_back({families[index].queueFlags, families[index].queueCount,
+                          index < queue_family_present.size() && queue_family_present[index]});
+    }
+    frame_gen_queues = PlanFrameGenQueues(traits, graphics_family, present_family);
+    if (!frame_gen_queues) {
+        LOG_WARNING(Render_Vulkan, "AMD FSR frame generation: not enough free queues");
+        return;
+    }
+    priorities.resize(families.size());
+    for (u32 family = 0; family < frame_gen_queues->counts.size(); ++family) {
+        const u32 count = frame_gen_queues->counts[family];
+        if (count == 0) {
+            continue;
+        }
+        priorities[family].assign(count, 1.0f);
+        auto it = std::ranges::find(queue_cis, family, &VkDeviceQueueCreateInfo::queueFamilyIndex);
+        if (it == queue_cis.end()) {
+            queue_cis.push_back({.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                                 .queueFamilyIndex = family});
+            it = std::prev(queue_cis.end());
+        }
+        it->queueCount = count;
+        it->pQueuePriorities = priorities[family].data();
+    }
+    const auto& plan = *frame_gen_queues;
+    LOG_INFO(Render_Vulkan,
+             "AMD FSR frame generation queues: present {}.{}, async compute {}.{}, image acquire "
+             "{}.{} (game {}.0)",
+             plan.present.family, plan.present.index, plan.async_compute.family,
+             plan.async_compute.index, plan.image_acquire.family, plan.image_acquire.index,
+             graphics_family);
 }
 
 bool Device::TryReserveCustomBorderColorSamplers(size_t count) const {
