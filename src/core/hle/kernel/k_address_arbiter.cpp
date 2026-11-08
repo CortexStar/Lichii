@@ -22,6 +22,7 @@
 
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
+#include "core/guest_cpu_experiment.h"
 #include "core/hle/kernel/k_address_arbiter.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_scheduler.h"
@@ -174,7 +175,8 @@ bool SpinBeforeWait(KernelCore& kernel, KThread* cur_thread, uint64_t addr, bool
 #if defined(_M_X64) || defined(__x86_64__)
     // Past the first 2 us, wait for a write to the word's line with MONITORX/MWAITX instead of
     // polling (the SMT sibling gets the core), 1 us at a time so an interrupt is still seen.
-    if (Common::g_wall_clock.IsNative() && Common::X64::HasMonitorWait()) {
+    static const bool arb_off = Core::GuestCpuExperimentOff("arb");
+    if (Common::g_wall_clock.IsNative() && Common::X64::HasMonitorWait() && !arb_off) {
         const u64 budget = Common::g_wall_clock.NsToTicks(ArbSpin);
         const u64 poll = Common::g_wall_clock.NsToTicks(std::chrono::microseconds{2});
         const u64 slice = Common::g_wall_clock.NsToTicks(std::chrono::microseconds{1});

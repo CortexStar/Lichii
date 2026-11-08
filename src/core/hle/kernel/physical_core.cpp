@@ -7,10 +7,14 @@
 #include <chrono>
 #include <cstdlib>
 #include "common/nx2_address_wait.h"
+#if defined(_M_X64) || defined(__x86_64__)
+#include <immintrin.h>
+#endif
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/debugger/debugger.h"
+#include "core/guest_cpu_experiment.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_scheduler.h"
 #include "core/hle/kernel/k_thread.h"
@@ -253,6 +257,20 @@ void PhysicalCore::Idle(KernelCore& kernel) {
     }
     // Interrupt stores the flag and wakes the word: stay on the CPU for the spin (PAUSE, then
     // MWAITX on the flag), then sleep in the OS.
+    static const bool idle_off = Core::GuestCpuExperimentOff("idle");
+    if (idle_off) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds{spin_us};
+        while (!m_is_interrupted.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline) {
+#if defined(_M_X64) || defined(__x86_64__)
+            for (int i = 0; i < 8; ++i) {
+                _mm_pause();
+            }
+#endif
+        }
+        Common::Nx2AddressWait::WaitSpinning(m_is_interrupted, 0, std::chrono::nanoseconds{0});
+        return;
+    }
     Common::Nx2AddressWait::WaitSpinning(m_is_interrupted, 0, std::chrono::microseconds{spin_us});
 }
 

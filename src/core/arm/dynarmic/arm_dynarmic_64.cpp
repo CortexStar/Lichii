@@ -25,6 +25,7 @@
 #include "core/arm/dynarmic/dynarmic_exclusive_monitor.h"
 #include "core/arm/dynarmic/window_trace.h"
 #include "core/core_timing.h"
+#include "core/guest_cpu_experiment.h"
 #include "core/hle/kernel/k_process.h"
 #include "dynarmic/interface/A64/config.h"
 
@@ -234,6 +235,12 @@ void DynarmicCallbacks64::ExceptionRaised(u64 pc, Dynarmic::A64::Exception excep
 
 void DynarmicCallbacks64::OnSpinHint(u64 pc) {
 #if defined(_M_X64) || defined(__x86_64__)
+    static const bool spin_off = GuestCpuExperimentOff("spin");
+    if (spin_off) {
+        _mm_pause();
+        _mm_pause();
+        return;
+    }
     switch (m_spin_episode.OnYield(__rdtsc(), m_spin_gap_tsc)) {
     case SpinAction::YieldGuestCore:
         m_parent.m_jit->HaltExecution(GuestYield);
@@ -580,7 +587,7 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
     }
 
     // Small hot guest functions as host code (GetHostFunction) when memory needs no checks.
-    if (page_table != nullptr && !m_cb->m_check_memory_access) {
+    if (page_table != nullptr && !m_cb->m_check_memory_access && !GuestCpuExperimentOff("hostfn")) {
         m_cb->m_page_table = page_table;
     }
 
@@ -721,7 +728,8 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
         // MRS CNTPCT_EL0 in the emitted code: RDTSC and the clock's fixed-point factor, without
         // the callback and its fenced RDTSC (guest code reads the counter ~10^5-10^7 times a
         // second). Only when the counter is the host clock unchanged.
-        if (config.wall_clock_cntpct && m_system.CoreTiming().GuestCounterIsHostClock()) {
+        if (config.wall_clock_cntpct && m_system.CoreTiming().GuestCounterIsHostClock() &&
+            !GuestCpuExperimentOff("cntpct")) {
             config.cntpct_rdtsc_factor = Common::g_wall_clock.CNTPCTRdtscFactor();
             if (CounterPollPauseEnabled()) {
                 // The same ~1.7 us as m_spin_ticks, in TSC ticks.

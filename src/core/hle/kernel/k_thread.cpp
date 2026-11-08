@@ -24,6 +24,7 @@
 #include "common/random.h"
 #include "core/core.h"
 #include "core/cpu_manager.h"
+#include "core/guest_cpu_experiment.h"
 #include "core/hardware_properties.h"
 #include "core/hle/kernel/k_condition_variable.h"
 #include "core/hle/kernel/k_handle_table.h"
@@ -1387,7 +1388,10 @@ namespace Kernel {
         // Block until runnable. HLE service threads wait here for every request: a short spin
         // on the word before sleeping saves the OS wake-up (~5-10 us) of each request that
         // follows the last one closely, on the IPC round trip of the client.
-        Common::Nx2AddressWait::WaitSpinning(m_dummy_thread_runnable, 0, DummyThreadSpin);
+        static const bool svcwait_off = Core::GuestCpuExperimentOff("svcwait");
+        Common::Nx2AddressWait::WaitSpinning(m_dummy_thread_runnable, 0,
+                                             svcwait_off ? std::chrono::microseconds{0}
+                                                         : DummyThreadSpin);
     }
 
     void KThread::DummyThreadEndWait(KernelCore& kernel) {
