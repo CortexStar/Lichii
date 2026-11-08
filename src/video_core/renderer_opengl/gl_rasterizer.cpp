@@ -566,6 +566,8 @@ void RasterizerOpenGL::WaitForPendingDownloads(DAddr addr, u64 size) {
         // SignalOrdering releases the signaled fences without waiting for the others.
         if (attempt % 16 == 0) {
             (void)gpu.RunOnGpuThread([this] { fence_manager.SignalOrdering(); });
+            // The GPU thread may be idle (the guest waits for this data before sending more).
+            gpu.TickGpuThread();
         }
         buffer_cache.WaitForLandedDownloads(seen, std::chrono::milliseconds{1});
     }

@@ -155,6 +155,11 @@ struct GPU::Impl {
         WaitForSyncOperation(fence);
     }
 
+    /// Wakes the GPU thread so it runs queued sync operations (as OnCPURead does after its request).
+    void TickGpuThread() {
+        gpu_thread.TickGPU(is_async);
+    }
+
     /// Tick pending requests within the GPU.
     void TickWork() {
         std::unique_lock lck{sync_request_mutex};
@@ -486,6 +491,10 @@ void GPU::WaitForSyncOperation(u64 fence) {
 
 void GPU::TickWork() {
     impl->TickWork();
+}
+
+void GPU::TickGpuThread() {
+    impl->TickGpuThread();
 }
 
 /// Gets a mutable reference to the Host1x interface
