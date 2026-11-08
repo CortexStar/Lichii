@@ -183,6 +183,7 @@ public:
     void BindSubchannel(Engines::EngineInterface* engine, u32 subchannel_id, Engines::EngineTypes engine_type) {
         subchannels[subchannel_id] = engine;
         subchannel_type[subchannel_id] = engine_type;
+        engine->bound_type = engine_type;
     }
 
     void BindRasterizer(VideoCore::RasterizerInterface* rasterizer);

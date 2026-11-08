@@ -16,6 +16,7 @@
 #endif
 #include <cstring>
 #include <string>
+#include <string_view>
 
 #include "common/dkb_cpu_trace.h"
 #include "common/logging.h"
@@ -47,6 +48,29 @@ void Pause() {
 }
 
 [[maybe_unused]] std::atomic<u32> g_back_thread_id{};
+
+/// TEST: an engine's name, by the class it was bound as (MethodEndingAt).
+[[nodiscard]] std::string_view EngineName(std::optional<Tegra::Engines::EngineTypes> type) {
+    using Tegra::Engines::EngineTypes;
+    if (!type) {
+        return "an unbound engine";
+    }
+    switch (*type) {
+    case EngineTypes::Nv01Timer:
+        return "Nv01Timer";
+    case EngineTypes::KeplerCompute:
+        return "KeplerCompute";
+    case EngineTypes::Maxwell3D:
+        return "Maxwell3D";
+    case EngineTypes::Fermi2D:
+        return "Fermi2D";
+    case EngineTypes::MaxwellDMA:
+        return "MaxwellDMA";
+    case EngineTypes::KeplerMemory:
+        return "KeplerMemory";
+    }
+    return "an engine";
+}
 
 } // Anonymous namespace
 
@@ -116,7 +140,8 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     }
     system = &system_;
     check_owner = std::getenv("EDEN_NX2_SPLIT_CHECK") != nullptr;
-    profile_publishes = Nx2Profile::Enabled(); // TEST
+    profile_publishes = Nx2Profile::Enabled();                      // TEST
+    log_methods = std::getenv("EDEN_NX2_ACQUIRE_STATS") != nullptr; // TEST
     ring = std::make_unique<u64[]>(RingWords);
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
@@ -155,6 +180,7 @@ void GpuSplit::Stop() {
     coarse_sets.fill({});
     published_local = 0;
     publish_held = false;
+    logged_method_count = 0;
     consumed_cache = 0;
     publish_every = PublishEvery;
     front_engine = nullptr;
@@ -503,7 +529,44 @@ void GpuSplit::MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, 
         amount -= piece;
         methods_pending -= piece;
     }
+    if (log_methods) [[unlikely]] {
+        LogMethod(engine, method); // TEST
+    }
     NoteWrites(writes);
+}
+
+void GpuSplit::LogMethod(const Tegra::Engines::EngineInterface* engine, u32 method) {
+    if (!logged_methods) {
+        logged_methods = std::make_unique<SentMethod[]>(LoggedMethods);
+    }
+    logged_methods[logged_method_count++ & (LoggedMethods - 1)] = {write_position,
+                                                                   engine->bound_type, method};
+}
+
+std::string GpuSplit::MethodEndingAt(u64 end) const {
+    if (!logged_methods || logged_method_count == 0) {
+        return {};
+    }
+    // Ends grow with the count: a binary search over the ones kept.
+    u64 low = logged_method_count > LoggedMethods ? logged_method_count - LoggedMethods : 0;
+    u64 high = logged_method_count;
+    while (low < high) {
+        const u64 middle = low + (high - low) / 2;
+        if (logged_methods[middle & (LoggedMethods - 1)].end < end) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    if (low == logged_method_count) {
+        return {};
+    }
+    const SentMethod& sent = logged_methods[low & (LoggedMethods - 1)];
+    if (sent.end != end) {
+        return {};
+    }
+    // Not typeid: without RTTI (MSVC's /GR-) it reads type data the engines don't have.
+    return fmt::format("{} {:#x}", EngineName(sent.engine), sent.method);
 }
 
 void GpuSplit::DeferFunction(std::function<void()>&& func, Writes writes) {

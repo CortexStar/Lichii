@@ -437,6 +437,10 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                 }
                 return true;
             }, [&](const auto& descriptor) { return DispatchNativeCompute(descriptor); });
+        if (VideoCommon::Nx2DrainCheck::g_enabled) [[unlikely]] {
+            // TEST: where this signal's reads end, for the front's QMD view check.
+            VideoCommon::Nx2DrainCheck::NoteQmdSignalEnd(VideoCommon::GpuSplit::OnBackThread());
+        }
         if (error.empty()) {
             LOG_DEBUG(HW_GPU, "Native QMD control action={:#x}, QMD={:#x}", argument, qmd_address);
             return true;
@@ -1664,12 +1668,16 @@ void KeplerCompute::FrontQmdCheck(VideoCommon::GpuSplit& split) {
     }
     split.DeferFunction(
         [predicted = std::move(checks->releases), reads = std::move(checks->reads),
-         table = std::move(checks->table), valued = checks->valued && QmdReleasesLandAtOnce()] {
-            VideoCommon::Nx2DrainCheck::CheckQmdReleases(predicted, reads, valued);
+         table = std::move(checks->table), valued = checks->valued && QmdReleasesLandAtOnce(),
+         after_late = checks->table_after_late, wait_position = checks->wait_position,
+         first_waiting = checks->first_waiting, late = std::move(checks->late)] {
+            VideoCommon::Nx2DrainCheck::CheckQmdReleases(predicted, reads, valued, wait_position,
+                                                         first_waiting);
+            VideoCommon::Nx2DrainCheck::CheckLateQmdReads(late);
             if (table && valued) {
                 const NativeQmdScheduler shared; // The table the engines share
                 VideoCommon::Nx2DrainCheck::NoteQmdTables(table->SameStates(shared),
-                                                          table->StateCount());
+                                                          table->StateCount(), after_late);
             }
         },
         VideoCommon::GpuSplit::Writes::Noted);

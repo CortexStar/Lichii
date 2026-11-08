@@ -3,10 +3,12 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -37,8 +39,10 @@
 // - the releases the front noted for the QMD launches it valued (FrontQmdView), against the ones
 //   the back then ran, compared on the back right after the QMD methods, and the descriptors the
 //   front read for them (from memory, the signal's inline QMD or a queued one) against the ones
-//   the back read. Every 512th time, the front's whole QMD table against the back's. Wrong ones
-//   must stay 0.
+//   the back read; the descriptors the front read for signals it valued late (they waited) against
+//   the ones the back read running them, by their position; whether the back could have run an
+//   entry the front valued when it read memory for it. Every 512th time, and after every signal
+//   valued late, the front's whole QMD table against the back's. Wrong ones must stay 0.
 namespace VideoCommon::Nx2DrainCheck {
 
 // A plain flag: the front checks it at every command list and acquire.
@@ -77,6 +81,15 @@ struct State {
     std::atomic<u32> qmd_reads_logged{};
     std::atomic<u64> qmd_tables{};
     std::atomic<u64> qmd_tables_wrong{};
+    /// Of the tables, those compared right after the front valued signals late; signals valued
+    /// late whose descriptors were compared, those the back read otherwise, and those whose back
+    /// reads were gone (more than LateReadsKept waited); QMD methods the front valued after the
+    /// back could have run them (their entry published).
+    std::atomic<u64> qmd_tables_late{};
+    std::atomic<u64> qmd_late_signals{};
+    std::atomic<u64> qmd_late_wrong{};
+    std::atomic<u64> qmd_late_missing{};
+    std::atomic<u64> qmd_published_early{};
     std::mutex released_mutex;
     std::unordered_set<u64> released; ///< Device addresses of the semaphores the GPU released
     std::chrono::steady_clock::time_point last_report{}; ///< The front's
@@ -165,6 +178,41 @@ inline std::vector<QmdRead>& BackQmdReads() {
     return reads;
 }
 
+/// Where one signal's reads end in BackQmdReads (no QMD lives at that address).
+inline constexpr u64 SignalEnd = ~u64{0};
+
+/// The descriptors the back read for the signals that waited on the front, by the position after
+/// their entry and their place in it, until the front valued them late (the back's thread only).
+inline std::map<std::pair<u64, u32>, std::vector<QmdRead>>& LateBackReads() {
+    static std::map<std::pair<u64, u32>, std::vector<QmdRead>> reads;
+    return reads;
+}
+inline constexpr size_t LateReadsKept = 16384;
+
+/// A signal the front valued late (it waited), at the entry ending at `position`, `index`-th of
+/// the entry's signals, and the descriptors it read for it.
+struct LateQmdRead {
+    u64 position;
+    u32 index;
+    std::vector<QmdRead> reads;
+};
+
+/// The split's back's scheduling ran one signal (KeplerCompute::ProcessNativeMethod).
+inline void NoteQmdSignalEnd(bool on_back) {
+    if (on_back) {
+        BackQmdReads().push_back({SignalEnd, {}});
+    }
+}
+
+/// The front valued a QMD method after its entry was published: the back could have run it.
+inline void NotePublishedEarly() {
+    State& state = Get();
+    state.qmd_published_early.fetch_add(1, std::memory_order_relaxed);
+    if (state.qmd_reads_logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+        LOG_ERROR(HW_GPU, "QMD view check: the front valued a QMD method the back could run");
+    }
+}
+
 /// The split's back runs a release of a QMD launch (KeplerCompute::ProcessNativeMethod).
 inline void NoteQmdRelease(u64 device_address, u32 value, bool on_back) {
     if (on_back) {
@@ -179,31 +227,109 @@ inline void NoteQmdRead(u64 address, const std::array<u32, 64>& words, bool on_b
     }
 }
 
-/// The back compared the front's QMD table with its own at the same place (`same`).
-inline void NoteQmdTables(bool same, size_t states) {
+/// The back compared the front's QMD table with its own at the same place (`same`); `late`: right
+/// after the front valued signals late.
+inline void NoteQmdTables(bool same, size_t states, bool late = false) {
     State& state = Get();
     state.qmd_tables.fetch_add(1, std::memory_order_relaxed);
+    if (late) {
+        state.qmd_tables_late.fetch_add(1, std::memory_order_relaxed);
+    }
     if (!same) {
         state.qmd_tables_wrong.fetch_add(1, std::memory_order_relaxed);
         if (state.qmd_reads_logged.fetch_add(1, std::memory_order_relaxed) < 16) {
-            LOG_ERROR(HW_GPU, "QMD view check: the front's table ({} QMDs) differs from the back's",
-                      states);
+            LOG_ERROR(HW_GPU,
+                      "QMD view check: the front's table ({} QMDs) differs from the back's{}",
+                      states, late ? " after it valued signals late" : "");
         }
+    }
+}
+
+/// The back, after the signals the front valued late: the descriptors it read for them against
+/// the ones it read itself running them.
+inline void CheckLateQmdReads(std::span<const LateQmdRead> late) {
+    State& state = Get();
+    auto& kept = LateBackReads();
+    for (const LateQmdRead& signal : late) {
+        const auto it = kept.find({signal.position, signal.index});
+        if (it == kept.end()) {
+            state.qmd_late_missing.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+        state.qmd_late_signals.fetch_add(1, std::memory_order_relaxed);
+        const auto& back_reads = it->second;
+        bool same = back_reads.size() == signal.reads.size();
+        for (size_t i = 0; same && i < back_reads.size(); ++i) {
+            same = back_reads[i].address == signal.reads[i].address &&
+                   back_reads[i].words == signal.reads[i].words;
+        }
+        if (!same) {
+            state.qmd_late_wrong.fetch_add(1, std::memory_order_relaxed);
+            if (state.qmd_reads_logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+                std::string text;
+                for (size_t i = 0; i < (std::max)(back_reads.size(), signal.reads.size()); ++i) {
+                    const QmdRead* back = i < back_reads.size() ? &back_reads[i] : nullptr;
+                    const QmdRead* front = i < signal.reads.size() ? &signal.reads[i] : nullptr;
+                    text += fmt::format(" | {:#x} by the back, {:#x} by the front",
+                                        back ? back->address : 0, front ? front->address : 0);
+                    for (size_t word = 0; back && front && word < 64; ++word) {
+                        if (back->words[word] != front->words[word]) {
+                            text += fmt::format(", word {} {:#x} for {:#x}", word,
+                                                back->words[word], front->words[word]);
+                            break;
+                        }
+                    }
+                }
+                LOG_ERROR(HW_GPU,
+                          "QMD view check: the back read other descriptors for a signal the "
+                          "front valued late (position {:#x}, signal {}){}",
+                          signal.position, signal.index, text);
+            }
+        }
+        kept.erase(it);
     }
 }
 
 /// The back, right after QMD methods the front sent: what it read and released for them against
 /// what the front read and noted (`front_reads`, `predicted`, in order), or nothing to compare
 /// where the front could not value them (`valued` false).
+/// `wait_position`: the signals of the entry ending there waited on the front from the
+/// `first_waiting`-th on (0: none): their reads are kept for CheckLateQmdReads.
 inline void CheckQmdReleases(std::span<const QmdRelease> predicted,
-                             std::span<const QmdRead> front_reads, bool valued) {
+                             std::span<const QmdRead> front_reads, bool valued,
+                             u64 wait_position = 0, u32 first_waiting = 0) {
     State& state = Get();
     auto& released = BackQmdReleases();
-    auto& back_reads = BackQmdReads();
+    auto& all_reads = BackQmdReads();
+    // By signal: each ends with a SignalEnd.
+    std::vector<QmdRead> back_reads;
+    std::vector<std::vector<QmdRead>> signals(1);
+    size_t ends = 0;
+    for (QmdRead& read : all_reads) {
+        if (read.address == SignalEnd) {
+            signals.emplace_back();
+            ++ends;
+            continue;
+        }
+        back_reads.push_back(read);
+        signals.back().push_back(std::move(read));
+    }
+    signals.resize(ends);
+    all_reads.clear();
     if (!valued) {
         state.qmd_unvalued.fetch_add(1, std::memory_order_relaxed);
         released.clear();
-        back_reads.clear();
+        auto& kept = LateBackReads();
+        if (wait_position != 0) {
+            // Kept from before the split last started over at position 0.
+            kept.erase(kept.lower_bound({wait_position, 0}), kept.end());
+        }
+        for (u32 index = first_waiting; wait_position != 0 && index < signals.size(); ++index) {
+            if (kept.size() >= LateReadsKept) {
+                kept.erase(kept.begin()); // The oldest: the front lost or dropped it
+            }
+            kept.insert_or_assign({wait_position, index}, std::move(signals[index]));
+        }
         return;
     }
     state.qmd_reads.fetch_add(back_reads.size(), std::memory_order_relaxed);
@@ -232,7 +358,6 @@ inline void CheckQmdReleases(std::span<const QmdRelease> predicted,
             LOG_ERROR(HW_GPU, "QMD view check: the back read other descriptors{}", text);
         }
     }
-    back_reads.clear();
     state.qmd_methods.fetch_add(1, std::memory_order_relaxed);
     state.qmd_releases.fetch_add(released.size(), std::memory_order_relaxed);
     bool same = released.size() == predicted.size();
@@ -339,6 +464,11 @@ inline void MaybeReport() {
     const u64 qmd_reads_wrong = take(state.qmd_reads_wrong);
     const u64 qmd_tables = take(state.qmd_tables);
     const u64 qmd_tables_wrong = take(state.qmd_tables_wrong);
+    const u64 qmd_tables_late = take(state.qmd_tables_late);
+    const u64 qmd_late_signals = take(state.qmd_late_signals);
+    const u64 qmd_late_wrong = take(state.qmd_late_wrong);
+    const u64 qmd_late_missing = take(state.qmd_late_missing);
+    const u64 qmd_published_early = take(state.qmd_published_early);
     LOG_INFO(HW_GPU,
              "Drain checks in {:.1f} s: command lists that did not wait for writers sent after the "
              "last sync {}, GPU-written by those writers {} | drained acquires at addresses the "
@@ -346,11 +476,14 @@ inline void MaybeReport() {
              "at addresses never released {}, at released ones {} | semaphore view: acquires "
              "passed {}, suspended {}; polls resumed {}, kept waiting {} | QMD view: methods "
              "valued {} with {} releases, released otherwise than noted {}, with {} descriptors "
-             "read, read otherwise {}; tables compared {}, differing {}; not valued {}",
+             "read, read otherwise {}; valued after the back could run them {}; signals valued "
+             "late {}, read otherwise {}, not compared {}; tables compared {} (after valuing late "
+             "{}), differing {}; not valued {}",
              seconds, unwaited, written, acquires_never, acquires_released, polls_never,
              polls_released, acquire_passes, acquire_waits, poll_passes, poll_waits, qmd_methods,
-             qmd_releases, qmd_wrong, qmd_reads, qmd_reads_wrong, qmd_tables, qmd_tables_wrong,
-             qmd_unvalued);
+             qmd_releases, qmd_wrong, qmd_reads, qmd_reads_wrong, qmd_published_early,
+             qmd_late_signals, qmd_late_wrong, qmd_late_missing, qmd_tables, qmd_tables_late,
+             qmd_tables_wrong, qmd_unvalued);
 }
 
 } // namespace VideoCommon::Nx2DrainCheck
@@ -454,6 +587,18 @@ struct State {
     std::array<u64, static_cast<size_t>(UnplacedKind::Count)> qmd_lost_mappings{};
     std::array<u64, static_cast<size_t>(QmdNote::Count)> qmd_notes{};
     u64 qmd_inline_reads{}; ///< Descriptors read from an inline QMD still queued
+    /// Signals that waited first, by why, and behind one; valued late, and how often the last
+    /// waiting one was; waits that lost the table, by why, and the waiting signals they dropped;
+    /// waiting signals takeovers dropped (the back had run them).
+    std::array<u64, static_cast<size_t>(QmdLost::Count)> qmd_waits{};
+    u64 qmd_behind{};
+    u64 qmd_late{};
+    u64 qmd_caught_up{};
+    std::array<u64, static_cast<size_t>(QmdLost::Count)> qmd_late_lost{};
+    u64 qmd_late_dropped{};
+    u64 qmd_takeover_dropped{};
+    /// Of qmd_waits[Pending]: by what wrote the QMD (FrontQmdView::NoteWaitWriter)
+    std::map<std::string, u64> qmd_wait_writers;
     std::array<u64, static_cast<size_t>(QmdTakeOver::Count)> qmd_syncs{};
     std::chrono::steady_clock::duration qmd_sync_time{};
     std::unordered_map<u64, u8> noted; ///< Releaser bits by word
@@ -503,6 +648,58 @@ inline void NoteQmdSignal(std::optional<QmdLost> lost, UnplacedKind kind = Unpla
         ++state.qmd_lost_unplaced[static_cast<size_t>(kind)];
     } else if (*lost == QmdLost::Mappings) {
         ++state.qmd_lost_mappings[static_cast<size_t>(kind)];
+    }
+}
+
+/// A signal the QMD view could not value at once waits: the first by `why` (`kind`: what sent the
+/// last write that may write anywhere or change the mappings), or behind one (`why` empty).
+inline void NoteQmdWait(std::optional<QmdLost> why, UnplacedKind kind = UnplacedKind::Other) {
+    if (!g_enabled) {
+        return;
+    }
+    State& state = Get();
+    if (!why) {
+        ++state.qmd_behind;
+        return;
+    }
+    ++state.qmd_waits[static_cast<size_t>(*why)];
+    if (*why == QmdLost::Unplaced) {
+        ++state.qmd_lost_unplaced[static_cast<size_t>(kind)];
+    } else if (*why == QmdLost::Mappings) {
+        ++state.qmd_lost_mappings[static_cast<size_t>(kind)];
+    }
+}
+
+/// A signal waits for a write into a QMD by `writer`, still queued.
+inline void NoteQmdWaitWriter(const std::string& writer) {
+    if (g_enabled) {
+        ++Get().qmd_wait_writers[writer];
+    }
+}
+
+/// The QMD view valued a waiting signal late; `caught_up`: none waits now.
+inline void NoteQmdLate(bool caught_up) {
+    if (g_enabled) {
+        State& state = Get();
+        ++state.qmd_late;
+        state.qmd_caught_up += caught_up ? 1 : 0;
+    }
+}
+
+/// The QMD view lost its table valuing a waiting signal late (`why`), dropping `dropped` waiting
+/// signals.
+inline void NoteQmdLateLost(QmdLost why, size_t dropped) {
+    if (g_enabled) {
+        State& state = Get();
+        ++state.qmd_late_lost[static_cast<size_t>(why)];
+        state.qmd_late_dropped += dropped;
+    }
+}
+
+/// A takeover dropped `dropped` waiting signals: the back had run them.
+inline void NoteQmdTakeOverDropped(size_t dropped) {
+    if (g_enabled) {
+        Get().qmd_takeover_dropped += dropped;
     }
 }
 
@@ -644,18 +841,52 @@ inline void MaybeReport() {
         }
         return text.empty() ? text : text + ")";
     };
-    LOG_INFO(HW_GPU,
-             "QMD view in {:.1f} s (EDEN_NX2_ACQUIRE_STATS): signals valued {}; not valued: table "
-             "not synced yet {}, work that may write anywhere queued {}{}, work that may change "
-             "the mappings queued {}{}, QMD on a GPU-written page {}, a write into the QMD queued "
-             "{}, a release of the signal into it {} | descriptors read from an inline QMD still "
-             "queued {} | releases noted exact {}, at least {}, unknown {} | tables taken over "
-             "{} in {:.3f} ms (at a front's start {}, between commands {}, at QMD methods {})",
-             seconds, state.qmd_valued, lost[0], lost[1], kinds(state.qmd_lost_unplaced), lost[5],
-             kinds(state.qmd_lost_mappings), lost[2], lost[3], lost[4], state.qmd_inline_reads,
-             notes[0], notes[1], notes[2], syncs[0] + syncs[1] + syncs[2],
-             std::chrono::duration<double, std::milli>(state.qmd_sync_time).count(), syncs[0],
-             syncs[1], syncs[2]);
+    // The writers a signal waited for most.
+    std::vector<std::pair<u64, std::string>> writers;
+    for (const auto& [writer, count] : state.qmd_wait_writers) {
+        writers.emplace_back(count, writer);
+    }
+    std::sort(writers.rbegin(), writers.rend());
+    std::string by_writer;
+    for (size_t i = 0; i < writers.size() && i < 6; ++i) {
+        by_writer +=
+            fmt::format("{}{} {}", i == 0 ? " (by " : ", ", writers[i].second, writers[i].first);
+    }
+    if (!by_writer.empty()) {
+        by_writer += ")";
+    }
+    const auto& waits = state.qmd_waits;
+    const auto& late_lost = state.qmd_late_lost;
+    const auto index = [](QmdLost why) { return static_cast<size_t>(why); };
+    u64 waited_first = 0;
+    u64 lost_late = 0;
+    for (size_t why = 0; why < waits.size(); ++why) {
+        waited_first += waits[why];
+        lost_late += late_lost[why];
+    }
+    LOG_INFO(
+        HW_GPU,
+        "QMD view in {:.1f} s (EDEN_NX2_ACQUIRE_STATS): signals valued {}, valued late {} "
+        "(caught up {} times) | waited first {} (a write into the QMD queued {}{}, work "
+        "that may write anywhere queued {}{}, a change of the mappings queued {}{}), behind an "
+        "earlier one {}; lost while waiting {} (a QMD written after it {}, the mappings "
+        "changed after it {}, a release into a QMD read late {}, too many waiting {}; {} "
+        "waiting dropped), dropped at takeovers {} | not valued: table not synced yet {}, "
+        "QMD on a GPU-written page {}, a release of the signal into it {} | descriptors read "
+        "from an inline QMD still queued {} | releases noted exact {}, at least {}, unknown "
+        "{} | tables taken over {} in {:.3f} ms (at a front's start {}, between commands {}, "
+        "at QMD methods {})",
+        seconds, state.qmd_valued, state.qmd_late, state.qmd_caught_up, waited_first,
+        waits[index(QmdLost::Pending)], by_writer, waits[index(QmdLost::Unplaced)],
+        kinds(state.qmd_lost_unplaced), waits[index(QmdLost::Mappings)],
+        kinds(state.qmd_lost_mappings), state.qmd_behind, lost_late,
+        late_lost[index(QmdLost::WrittenAfter)], late_lost[index(QmdLost::MappedAfter)],
+        late_lost[index(QmdLost::LateReleasedInto)], late_lost[index(QmdLost::TooMany)],
+        state.qmd_late_dropped, state.qmd_takeover_dropped, lost[index(QmdLost::NotSynced)],
+        lost[index(QmdLost::GpuWritten)], lost[index(QmdLost::ReleasedInto)],
+        state.qmd_inline_reads, notes[0], notes[1], notes[2], syncs[0] + syncs[1] + syncs[2],
+        std::chrono::duration<double, std::milli>(state.qmd_sync_time).count(), syncs[0], syncs[1],
+        syncs[2]);
     auto noted_words = std::move(state.noted);
     state = State{};
     state.noted = std::move(noted_words);

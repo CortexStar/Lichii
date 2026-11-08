@@ -12,6 +12,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
@@ -28,6 +29,7 @@ class MemoryManager;
 
 namespace Tegra::Engines {
 class EngineInterface;
+enum class EngineTypes : u32;
 }
 
 namespace VideoCommon {
@@ -175,6 +177,9 @@ public:
             entry[1] = *segment;
         }
         Commit(words);
+        if (log_methods) [[unlikely]] {
+            LogMethod(engine, method); // TEST
+        }
         NoteWrites(writes);
     }
     void MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, const u32* words,
@@ -188,6 +193,9 @@ public:
         entry[0] = static_cast<u64>(Kind::Method) | IsLast | Direct | (u64{method & 0xffff} << 8) |
                    (u64{argument} << 32);
         Commit(1);
+        if (log_methods) [[unlikely]] {
+            LogMethod(engine, method); // TEST
+        }
         NoteWrites(writes);
     }
 
@@ -330,6 +338,9 @@ public:
         u64 device_address) const;
     /// Whether compute or copy work sent so far is still queued (EDEN_NX2_DRAIN_CHECK).
     [[nodiscard]] bool WritersPending() const;
+    /// TEST (EDEN_NX2_ACQUIRE_STATS): the engine and method of the method entry that ends at
+    /// `end`, among the last LoggedMethods sent, as "KeplerCompute 0x6d"; empty if none.
+    [[nodiscard]] std::string MethodEndingAt(u64 end) const;
     /// Front thread: the ring words sent that the back had not run when it last stored its
     /// position (every 4096 words of a batch and at its end) (EDEN_NX2_LIST_STATS).
     [[nodiscard]] u64 Backlog() const {
@@ -544,6 +555,16 @@ private:
     /// TEST: Commit publishes before publish_every, because the back waits for the words.
     void NoteEarlyPublish();
     void WaitForSpace(size_t words);
+    /// TEST (EDEN_NX2_ACQUIRE_STATS): the engine method entries sent, by the position after them.
+    struct SentMethod {
+        u64 end;
+        std::optional<Tegra::Engines::EngineTypes> engine; ///< The class it was bound as
+        u32 method;
+    };
+    static constexpr size_t LoggedMethods = size_t{1} << 16;
+    /// EDEN_NX2_ACQUIRE_STATS as the split started (MaybeStart).
+    bool log_methods{};
+    void LogMethod(const Tegra::Engines::EngineInterface* engine, u32 method);
     void SelectEngine(Tegra::Engines::EngineInterface* engine) {
         if (engine != front_engine) [[unlikely]] {
             SwitchEngine(engine);
@@ -610,6 +631,8 @@ private:
     bool publish_held{};
     u64 consumed_cache{};
     u64 first_unpublished_ticks{}; ///< TEST: when the first word not published yet was sent
+    std::unique_ptr<SentMethod[]> logged_methods; ///< TEST: see LogMethod
+    u64 logged_method_count{};
     /// Words between publishes: small right after the front waited for the back (Drain,
     /// PublishSoon), while the back may have nothing to do.
     size_t publish_every{PublishEvery};

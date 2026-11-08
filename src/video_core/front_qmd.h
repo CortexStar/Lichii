@@ -9,6 +9,7 @@
 #include <deque>
 #include <memory>
 #include <optional>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -73,6 +74,7 @@ public:
         const auto start = std::chrono::steady_clock::now(); // TEST
         scheduler.CopyStates(back);
         synced = true;
+        Nx2AcquireStats::NoteQmdTakeOverDropped(waiting.size()); // TEST
         ClearWaiting();
         Nx2AcquireStats::NoteQmdSync(where, std::chrono::steady_clock::now() - start);
     }
@@ -91,28 +93,46 @@ public:
 
     /// TEST (EDEN_NX2_DRAIN_CHECK): the releases noted since the last call, the descriptors read
     /// for them, and whether every signal since was valued; every 512th time while the view is
-    /// synced, a copy of its table; nothing if no signal was sent since.
+    /// current, and after it valued signals late, a copy of its table; the position of the entry
+    /// whose signals wait, from the `first_waiting`-th on; the signals valued late since, with
+    /// what they read; nothing if no signal was sent since.
     struct Checks {
         std::vector<Nx2DrainCheck::QmdRelease> releases;
         std::vector<Nx2DrainCheck::QmdRead> reads;
         std::shared_ptr<const Tegra::NativeQmdScheduler> table;
         bool valued;
+        bool table_after_late;
+        u64 wait_position;
+        u32 first_waiting;
+        std::vector<Nx2DrainCheck::LateQmdRead> late;
     };
     [[nodiscard]] std::optional<Checks> TakeChecks() {
         if (!checks_pending) {
             return std::nullopt;
         }
         checks_pending = false;
-        Checks taken{std::move(checks), std::move(check_reads), nullptr, !checks_unvalued};
-        if (taken.valued && Current() && ++table_checks % 512 == 0) {
+        Checks taken{std::move(checks),
+                     std::move(check_reads),
+                     nullptr,
+                     !checks_unvalued,
+                     false,
+                     check_wait_position,
+                     check_first_waiting,
+                     std::move(late_checks)};
+        if (taken.valued && Current() && (table_check_due || ++table_checks % 512 == 0)) {
             auto copy =
                 std::make_shared<Tegra::NativeQmdScheduler>(Tegra::NativeQmdScheduler::OwnTable{});
             copy->CopyStates(scheduler);
             taken.table = std::move(copy);
+            taken.table_after_late = table_check_due;
+            table_check_due = false;
         }
         checks.clear();
         check_reads.clear();
+        late_checks.clear();
         checks_unvalued = false;
+        check_wait_position = 0;
+        check_first_waiting = 0;
         return taken;
     }
 
@@ -129,6 +149,10 @@ public:
     /// Whether the table is the back's as of everything sent: synced, and no signal waits.
     [[nodiscard]] bool Current() const {
         return synced && waiting.empty();
+    }
+    /// TEST: whether the view's table holds the QMD states `other` does.
+    [[nodiscard]] bool SameTable(const Tegra::NativeQmdScheduler& other) const {
+        return scheduler.SameStates(other);
     }
 
     /// LOAD_INLINE_QMD_DATA was just sent: running it, the back writes `qmd` to the QMD at
@@ -153,6 +177,14 @@ public:
         using Lost = Nx2AcquireStats::QmdLost;
         checks_pending = Nx2DrainCheck::g_enabled; // TEST
         const u64 position = split.Position();
+        if (checks_pending) {
+            // TEST: the back must not have run the entry yet, the n-th signal of its entry.
+            if (split.Unpublished() == 0) [[unlikely]] {
+                Nx2DrainCheck::NotePublishedEarly();
+            }
+            entry_signals = position != entry_position ? 0 : entry_signals + 1;
+            entry_position = position;
+        }
         if (synced) {
             CatchUp(split, memory);
         }
@@ -173,6 +205,9 @@ public:
         }
         if (outcome.retry_after) {
             retry_after = *outcome.retry_after;
+            if (Nx2AcquireStats::g_enabled && outcome.lost == Lost::Pending) [[unlikely]] {
+                NoteWaitWriter(split, memory, position, outcome); // TEST
+            }
             Wait(split, position, memory.Id(), address, argument, inline_qmd, outcome.lost);
             return;
         }
@@ -203,6 +238,7 @@ private:
         u32 argument;
         bool has_inline;
         Descriptor inline_qmd;
+        u32 index; ///< TEST: of the signals of its entry
     };
 
     /// How an attempt to value a signal ended: valued, or taken back, to try again once the back
@@ -211,6 +247,7 @@ private:
         bool valued;
         std::optional<u64> retry_after;
         Nx2AcquireStats::QmdLost lost;
+        u64 qmd{}; ///< TEST: the QMD it could not read
     };
 
     /// Signals that wait, at most: a back that far behind leaves the view to its next takeover.
@@ -230,6 +267,39 @@ private:
                                                           : split.LastUnplacedKind();
     }
 
+    /// TEST (EDEN_NX2_ACQUIRE_STATS): what wrote the QMD a signal sent at `position` waits for, as
+    /// it was sent: a release into it the front noted, else the engine method whose entry ends at
+    /// the write's position, else another entry (a CPU function, a deferred call). Logs the first.
+    template <typename Memory>
+    void NoteWaitWriter(const GpuSplit& split, const Memory& memory, u64 position,
+                        const Outcome& outcome) const {
+        const u64 target = *outcome.retry_after;
+        std::string writer;
+        if (const auto device = memory.Device(outcome.qmd)) {
+            for (u64 offset = 0; offset < sizeof(Descriptor) && writer.empty(); offset += 4) {
+                const auto queued = split.QueuedSemaphoreWriteAt(*device + offset);
+                if (queued && queued->position == target) {
+                    writer = fmt::format("a release into word {}", offset / 4);
+                }
+            }
+        }
+        if (writer.empty()) {
+            writer = split.MethodEndingAt(target);
+        }
+        if (writer.empty()) {
+            writer = "another entry";
+        }
+        static u32 logged{};
+        if (logged < 16) {
+            ++logged;
+            LOG_INFO(HW_GPU,
+                     "QMD view: a signal waits for a write into the QMD at {:#x} by {}, sent {} "
+                     "ring words before it; the back is {} words behind",
+                     outcome.qmd, writer, position - target, split.Backlog());
+        }
+        Nx2AcquireStats::NoteQmdWaitWriter(writer);
+    }
+
     /// The signal sent at `position` waits, first (`why`: what it waits for) or behind the others.
     /// None of its releases is noted: they are placed once it is valued.
     void Wait(const GpuSplit& split, u64 position, const void* memory_id, GPUVAddr address,
@@ -237,13 +307,14 @@ private:
               std::optional<Nx2AcquireStats::QmdLost> why) {
         checks_unvalued = true; // TEST
         if (waiting.size() >= MaxWaiting) {
+            Nx2AcquireStats::NoteQmdLateLost(Nx2AcquireStats::QmdLost::TooMany,
+                                             waiting.size()); // TEST
             synced = false;
             ClearWaiting();
             Nx2AcquireStats::NoteQmdSignal(Nx2AcquireStats::QmdLost::NotSynced); // TEST
             return;
         }
-        const auto lost = why.value_or(Nx2AcquireStats::QmdLost::NotSynced); // TEST
-        Nx2AcquireStats::NoteQmdSignal(lost, WhatSent(split, lost));
+        Nx2AcquireStats::NoteQmdWait(why, why ? WhatSent(split, *why) : UnplacedKind::Other);
         WaitingSignal& signal = waiting.emplace_back();
         signal.position = position;
         signal.memory = memory_id;
@@ -252,6 +323,14 @@ private:
         signal.has_inline = inline_qmd != nullptr;
         if (inline_qmd != nullptr) {
             signal.inline_qmd = *inline_qmd;
+        }
+        if (checks_pending) {
+            // TEST: the back keeps what it reads for the signals of this entry from here on.
+            signal.index = entry_signals;
+            if (check_wait_position != position) {
+                check_wait_position = position;
+                check_first_waiting = entry_signals;
+            }
         }
     }
 
@@ -278,12 +357,20 @@ private:
                 return;
             }
             if (!outcome.valued) {
+                Nx2AcquireStats::NoteQmdLateLost(outcome.lost, waiting.size()); // TEST
                 synced = false;
                 ClearWaiting();
                 return;
             }
+            if (Nx2DrainCheck::g_enabled) {
+                // TEST: what it read, for the back to compare (CheckLateQmdReads).
+                late_checks.push_back({first.position, first.index, std::move(late_reads_read)});
+                late_reads_read.clear();
+                table_check_due = table_check_due || waiting.size() == 1;
+            }
             waiting.pop_front();
             retry_after = 0;
+            Nx2AcquireStats::NoteQmdLate(waiting.empty()); // TEST
         }
         // Every signal sent before the reads made late is valued: none of their releases waits.
         late_reads.clear();
@@ -306,6 +393,8 @@ private:
         }
         releases.clear();
         attempt_reads.clear();
+        late_reads_read.clear();                         // TEST
+        const size_t checked_reads = check_reads.size(); // TEST
         std::optional<Outcome> failure;
         const auto read = [&](u64 qmd_address, Descriptor& descriptor) {
             if (!memory.IsMapped(qmd_address, sizeof(descriptor))) {
@@ -327,8 +416,9 @@ private:
                 }
             }
             attempt_reads.push_back(qmd_address);
-            if (checks_pending && !late) {
-                check_reads.push_back({qmd_address, descriptor}); // TEST
+            if (Nx2DrainCheck::g_enabled) {
+                // TEST: what the back reads too.
+                (late ? late_reads_read : check_reads).push_back({qmd_address, descriptor});
             }
             return true;
         };
@@ -347,6 +437,7 @@ private:
         }
         if (failure) {
             scheduler.RollbackAttempt();
+            check_reads.resize(checked_reads); // TEST: tried again later
             return *failure;
         }
         scheduler.CommitAttempt();
@@ -400,7 +491,7 @@ private:
         const Lost lost = target == split.LastUnplacedWrite() ? Lost::Unplaced : Lost::Pending;
         if (target > position) {
             // Sent after the signal (it waited): memory may hold it, the back read what was before.
-            return Outcome{false, std::nullopt, Lost::WrittenAfter};
+            return Outcome{false, std::nullopt, Lost::WrittenAfter, qmd_address};
         }
         if (split.Ran(target)) {
             return std::nullopt;
@@ -411,7 +502,7 @@ private:
             Nx2AcquireStats::NoteQmdInlineRead(); // TEST
             return std::nullopt;
         }
-        return Outcome{false, target, lost};
+        return Outcome{false, target, lost, qmd_address};
     }
 
     /// The last inline QMD sent to the QMD at `device` that the back has not written yet.
@@ -530,6 +621,16 @@ private:
     std::deque<WaitingSignal> waiting;
     u64 retry_after{};
     std::unordered_set<u64> late_reads;
+    /// TEST (EDEN_NX2_DRAIN_CHECK): the entry the last signal came with and its signals before
+    /// it; the entry whose signals wait and the first that waits there, for TakeChecks; what the
+    /// last late attempt read; the signals valued late since TakeChecks; a table copy is due.
+    u64 entry_position{};
+    u32 entry_signals{};
+    u64 check_wait_position{};
+    u32 check_first_waiting{};
+    std::vector<Nx2DrainCheck::QmdRead> late_reads_read;
+    std::vector<Nx2DrainCheck::LateQmdRead> late_checks;
+    bool table_check_due{};
     /// The last inline QMDs sent, oldest first from inline_writes_count on: a back a millisecond
     /// behind has some ten to write, a few times that in long frames.
     std::array<InlineWrite, 256> inline_writes{};
