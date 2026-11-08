@@ -46,6 +46,7 @@ class Device;
 class Framebuffer;
 class GraphicsPipeline;
 class StateTracker;
+class UploadBatch;
 
 struct QueryCacheParams;
 
@@ -235,6 +236,10 @@ public:
         if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
             VideoCommon::GpuSplit::CheckOwner("Scheduler::Record");
         }
+        if (uploads_pending) {
+            // Uploads recorded before this command go before it.
+            FlushUploads();
+        }
         if (pass_barriers.Pending() && state.renderpass == VK_NULL_HANDLE) {
             // Anything recorded outside a render pass may use what the deferred passes wrote.
             RecordRenderPassBarrier();
@@ -245,6 +250,12 @@ public:
         DispatchWork(true);
         (void)chunk->Record(command);
     }
+
+    /// An upload in order: copies into dst after the work recorded before them and before the
+    /// work recorded after them (the barriers of an in-order buffer copy). Uploads with no other
+    /// command between them share one command and one pair of barriers, unless one would write
+    /// bytes another writes, or a buffer another reads. Call outside a render pass.
+    void RecordUpload(VkBuffer src, VkBuffer dst, std::span<const VkBufferCopy> copies);
 
     template <typename T>
         requires std::is_invocable_v<T, vk::CommandBuffer>
@@ -525,6 +536,12 @@ private:
     bool compute_writes_pending{};
     bool graphics_pipeline_missing{};
     std::unique_ptr<CommandPool> command_pool;
+
+    /// RecordUpload's copies not recorded yet; uploads_pending while it holds any.
+    std::unique_ptr<UploadBatch> upload_batch;
+    bool uploads_pending{};
+    /// Records the pending uploads as one command.
+    void FlushUploads();
 
     vk::QueryPool trace_query_pool;
     static constexpr u32 TraceMaxSubmissions = 512;
