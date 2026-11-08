@@ -2967,11 +2967,29 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
 
     // Made where a dropped GPU-written image left stale bytes (MarkStale): nothing to upload.
     // Pages the buffer cache wrote on the GPU may hold data written back since: upload those.
-    if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed) && image.dirty_layers.empty() &&
+    // EXPERIMENT (do not merge): EDEN_NX2_TC_SKIP_STALE=0 uploads these images as before #463,
+    // for the A/B of the tile artefacts under Ocarina's Load menu.
+    static const bool skip_stale = [] {
+        const char* value = std::getenv("EDEN_NX2_TC_SKIP_STALE");
+        return value == nullptr || std::string_view{value} != "0";
+    }();
+    if (skip_stale && Tegra::g_nx2_ampere.load(std::memory_order_relaxed) &&
+        image.dirty_layers.empty() &&
         False(image.flags & (ImageFlagBits::Sparse | ImageFlagBits::SparseLayers |
                              ImageFlagBits::SparseTiles | ImageFlagBits::Unbacked)) &&
         stale_pages.IsAll(image.cpu_addr, image.guest_size_bytes)) {
         if (!Tegra::Nx2MayBeGpuWritten(image.cpu_addr, image.guest_size_bytes)) {
+            if (debug_stats) {
+                static u32 logged{};
+                if (logged++ < 64) {
+                    LOG_INFO(HW_GPU,
+                             "Texture cache: stale upload skipped for {}x{} format {} at {:#x} "
+                             "({} KiB): its contents stay undefined until drawn",
+                             image.info.size.width, image.info.size.height,
+                             static_cast<u32>(image.info.format), image.gpu_addr,
+                             image.guest_size_bytes >> 10);
+                }
+            }
             ++tc_stale_skips;
             tc_stale_skip_bytes += image.guest_size_bytes;
             runtime.TransitionImageLayout(image);
