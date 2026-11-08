@@ -556,8 +556,9 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     SetUnhandledExceptionFilter(WriteCrashDump);
 #endif
     // SDL calls SDL_AppIterate back to back by default, which kept a host core at 100% polling
-    // input; 240 Hz is plenty for input and the key script.
-    SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, "240");
+    // input. 1000 Hz, as the Qt frontend's 1 ms timer: at 240 Hz input waited ~2 ms on average
+    // before the game could see it, which matters on a 240 Hz display.
+    SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, "1000");
     SdlState* state = new SdlState();
     *appstate = state;
 
