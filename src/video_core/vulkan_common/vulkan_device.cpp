@@ -660,8 +660,11 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         }
     }
 
-    if (features.shader_float16_int8.shaderFloat16 && is_intel_windows) {
-        // Intel's compiler crashes when using fp16 on Astral Chain, disable it for the time being.
+    const bool is_intel_discrete =
+        is_intel_windows &&
+        properties.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+    if (features.shader_float16_int8.shaderFloat16 && is_intel_windows && !is_intel_discrete) {
+        // Keep the Astral Chain workaround for Intel integrated GPUs, but allow FP16 on Arc.
         LOG_WARNING(Render_Vulkan, "Intel has broken float16 math");
         features.shader_float16_int8.shaderFloat16 = false;
     }
