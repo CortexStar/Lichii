@@ -24,6 +24,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/oot_network.h"
 #include "video_core/rasterizer_interface.h"
+#include "video_core/hazard_tracker.h"
 #include "video_core/renderer_vulkan/blit_image.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_descriptor_buffer.h"
@@ -321,6 +322,12 @@ private:
     MemoryAllocator& memory_allocator;
     StateTracker& state_tracker;
     Scheduler& scheduler;
+
+    /// Which guest dispatches need the barrier before them.
+    VideoCommon::HazardTracker dispatch_hazards;
+    VideoCommon::HazardTracker::Accesses dispatch_accesses;
+    /// Scheduler::RecordedCommands after the last dispatch's own commands.
+    u64 dispatch_recorded_commands = ~u64{0};
 
     StagingBufferPool staging_pool;
     DescriptorPool descriptor_pool;

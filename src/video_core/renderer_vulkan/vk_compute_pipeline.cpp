@@ -618,6 +618,29 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         }
     }
 
+    image_accesses.clear();
+    {
+        const size_t first_image = Shader::NumDescriptors(info.texture_buffer_descriptors) +
+                                   Shader::NumDescriptors(info.image_buffer_descriptors);
+        const size_t first_storage =
+            first_image + Shader::NumDescriptors(info.texture_descriptors);
+        size_t index = first_storage;
+        const auto note = [&](size_t view_index, bool written) {
+            const ImageView& view{texture_cache.GetImageView(views[view_index].id)};
+            if (!view.IsBuffer()) {
+                image_accesses.push_back({view.ImageHandle(), written});
+            }
+        };
+        for (size_t i = first_image; i < first_storage; ++i) {
+            note(i, false);
+        }
+        for (const auto& desc : info.image_descriptors) {
+            for (u32 i = 0; i < desc.count; ++i, ++index) {
+                note(index, desc.is_written);
+            }
+        }
+    }
+
     std::optional<size_t> shadow_index;
     size_t image_index{Shader::NumDescriptors(info.texture_buffer_descriptors) +
                        Shader::NumDescriptors(info.image_buffer_descriptors) +
@@ -776,7 +799,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
 
     if (!is_built.load(std::memory_order::relaxed)) {
         // Wait for the pipeline to be built
-        scheduler.Record([this](vk::CommandBuffer) {
+        scheduler.RecordForDispatch([this](vk::CommandBuffer) {
             RunBuild(false);
             std::unique_lock lock{build_mutex};
             if (!is_built.load(std::memory_order::relaxed) && build_priority.Await()) {
@@ -889,7 +912,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     if (deferred_bind) {
         *deferred_bind = std::move(bind);
     } else {
-        scheduler.Record(std::move(bind));
+        scheduler.RecordForDispatch(std::move(bind));
     }
     return true;
 }

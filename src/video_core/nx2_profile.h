@@ -166,6 +166,12 @@ enum class Counter : u32 {
     FusedWrites,    ///< Split back: compute writes in Kind::Writes entries (EDEN_NX2_COMPUTE_FUSE)
     MergedUploads,  ///< Split back: inline upload flushes joined to the one before (I2M_MERGE)
     RunDraws,       ///< Split back: draw.end words in Kind::DrawRun entries
+    DispatchNoBarrier,      ///< Guest dispatches recorded without the barrier before them
+    DispatchBarrierOther,   ///< ... with it: other work was recorded since the last dispatch
+    DispatchBarrierUnknown, ///< ... with it: accesses not fully known (indirect, replaced, ...)
+    DispatchBarrierRaw,     ///< ... with it: reads what a dispatch since the barrier wrote
+    DispatchBarrierWaw,     ///< ... with it: writes what a dispatch since the barrier wrote
+    DispatchBarrierWar,     ///< ... with it: writes what a dispatch since the barrier read
     Count,
 };
 
@@ -456,6 +462,25 @@ inline bool Report(const char* thread_name = "GPU thread") {
                             per_second(Counter::CbWriteWords), per_second(Counter::BatchRepeats),
                             per_second(Counter::FusedWrites), per_second(Counter::MergedUploads),
                             per_second(Counter::RunDraws));
+    }
+    const auto per_counter = [&](Counter counter) {
+        return data.counters[static_cast<size_t>(counter)];
+    };
+    if (const u64 dispatches = per_counter(Counter::DispatchNoBarrier) +
+                               per_counter(Counter::DispatchBarrierOther) +
+                               per_counter(Counter::DispatchBarrierUnknown) +
+                               per_counter(Counter::DispatchBarrierRaw) +
+                               per_counter(Counter::DispatchBarrierWaw) +
+                               per_counter(Counter::DispatchBarrierWar);
+        dispatches != 0) {
+        const auto rate = [&](Counter counter) {
+            return static_cast<double>(per_counter(counter)) * 1e9 / window;
+        };
+        line += fmt::format(" | dispatch barriers: none {:.0f}, other work {:.0f}, unknown {:.0f}, "
+                            "RAW {:.0f}, WAW {:.0f}, WAR {:.0f}",
+                            rate(Counter::DispatchNoBarrier), rate(Counter::DispatchBarrierOther),
+                            rate(Counter::DispatchBarrierUnknown), rate(Counter::DispatchBarrierRaw),
+                            rate(Counter::DispatchBarrierWaw), rate(Counter::DispatchBarrierWar));
     }
     std::string drains;
     for (size_t i = 0; i < data.drain_count.size(); ++i) {

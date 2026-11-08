@@ -713,7 +713,7 @@ void Scheduler::TraceComputePipeline(u64 hash) {
     if (!trace_query_pool) {
         return;
     }
-    Record([this, hash](vk::CommandBuffer) {
+    RecordForDispatch([this, hash](vk::CommandBuffer) {
         if (!trace_gpu_recording) {
             return;
         }
@@ -887,6 +887,9 @@ void Scheduler::RecordUpload(VkBuffer src, VkBuffer dst, std::span<const VkBuffe
     }
     upload_batch->Add(src, dst, copies);
     uploads_pending = true;
+    // Recorded with the next command, but it is work recorded now: a dispatch deciding whether
+    // it needs its barrier before that flush must count it (RecordedCommands).
+    ++recorded_commands;
 }
 
 void Scheduler::FlushUploads() {

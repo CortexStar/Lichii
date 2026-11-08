@@ -237,6 +237,9 @@ public:
         if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
             VideoCommon::GpuSplit::CheckOwner("Scheduler::Record");
         }
+        // Before the upload flush below: its own record must not take this command's flag, and it
+        // counts as other work before a dispatch.
+        const bool counted = !std::exchange(next_record_uncounted, false);
         if (uploads_pending) {
             // Uploads recorded before this command go before it.
             FlushUploads();
@@ -245,6 +248,7 @@ public:
             // Anything recorded outside a render pass may use what the deferred passes wrote.
             RecordRenderPassBarrier();
         }
+        recorded_commands += counted ? 1 : 0;
         if (chunk->Record(command)) {
             return;
         }
@@ -274,6 +278,22 @@ public:
             [command = std::move(c)](vk::CommandBuffer cmdbuf, vk::CommandBuffer) {
                 command(cmdbuf);
             });
+    }
+
+    /// Records a command of a guest dispatch that touches no memory but the dispatch's own (its
+    /// binds, the wait for its pipeline, the dispatch and its barrier): RecordedCommands does not
+    /// count it.
+    template <typename T>
+        requires std::is_invocable_v<T, vk::CommandBuffer>
+    void RecordForDispatch(T&& c) {
+        next_record_uncounted = true;
+        Record(std::forward<T>(c));
+    }
+
+    /// Commands recorded so far, except RecordForDispatch's. Unchanged between two dispatches
+    /// means nothing else ran between them.
+    [[nodiscard]] u64 RecordedCommands() const noexcept {
+        return recorded_commands;
     }
 
     /// Whether the recording thread submitted `tick` within 20 ms.
@@ -609,6 +629,8 @@ private:
 
     State state;
     u64 recording_epoch = 0;
+    u64 recorded_commands = 0;
+    bool next_record_uncounted = false;
 
     u32 num_renderpass_images = 0;
     std::array<VkImage, 9> renderpass_images{};
