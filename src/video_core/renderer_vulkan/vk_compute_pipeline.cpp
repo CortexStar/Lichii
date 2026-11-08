@@ -29,6 +29,7 @@
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/shader_handle_program.h"
 #include "video_core/shader_notify.h"
+#include "video_core/vulkan_common/driver_call.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -301,6 +302,7 @@ ComputePipeline::ComputePipeline(
         };
         try {
             const std::array<u64, 1> traced{shader_hash};
+            const DriverCall::ContextScope context{"compute pipeline", shader_hash, traced};
             const bool unoptimized = (flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT) != 0;
             const auto trace_begin = std::chrono::steady_clock::now();
             TracePipelineBuild("BEGIN", "compute", shader_hash, traced, unoptimized);
@@ -346,6 +348,8 @@ ComputePipeline::ComputePipeline(
                     optimized_ci.stage.pNext = &subgroup_size_ci;
                 }
                 const std::array<u64, 1> traced{shader_hash};
+                const DriverCall::ContextScope context{"optimized compute pipeline", shader_hash,
+                                                       traced};
                 const auto begin = std::chrono::steady_clock::now();
                 TracePipelineBuild("BEGIN", "compute", shader_hash, traced, false);
                 try {

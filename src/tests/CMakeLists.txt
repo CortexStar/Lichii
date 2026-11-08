@@ -35,6 +35,8 @@ add_executable(tests
     video_core/host_logic_op.cpp
     video_core/hdr_capture.cpp
     video_core/amd_ffx.cpp
+    video_core/driver_call.cpp
+    video_core/driver_crash.cpp
     video_core/oot_camera.cpp
     video_core/oot_amd_upscaler.cpp
     video_core/present_filters.cpp

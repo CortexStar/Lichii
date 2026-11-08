@@ -305,6 +305,10 @@ add_library(video_core STATIC
     vulkan_common/amd_ffx.cpp
     vulkan_common/amd_ffx.h
     vulkan_common/frame_gen_queues.h
+    vulkan_common/driver_call.cpp
+    vulkan_common/driver_call.h
+    vulkan_common/driver_crash.cpp
+    vulkan_common/driver_crash.h
     vulkan_common/vulkan_device.cpp
     vulkan_common/vulkan_device.h
     vulkan_common/vulkan_instance.cpp

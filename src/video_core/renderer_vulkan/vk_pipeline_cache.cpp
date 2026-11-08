@@ -70,6 +70,7 @@
 #include "video_core/shader_notify.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
 #include "video_core/surface.h"
+#include "video_core/vulkan_common/driver_call.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -2872,6 +2873,8 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     }
     const std::vector<u32> code{EmitSPIRV(profile, program)};
     device.SaveShader(code);
+    const std::array<u64, 1> traced{key.unique_hash};
+    const DriverCall::ContextScope context{"compute shader", key.unique_hash, traced};
     vk::ShaderModule spv_module{BuildShader(device, code)};
 
     // Text log + .spv dump. Same split as the graphics path.

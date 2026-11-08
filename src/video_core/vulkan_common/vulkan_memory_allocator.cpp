@@ -19,6 +19,7 @@
 #include "common/literals.h"
 #include "common/logging.h"
 #include <ranges>
+#include "video_core/vulkan_common/driver_call.h"
 #include "video_core/vulkan_common/vma.h"
 #include "video_core/vulkan_common/unbacked_image_policy.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -248,6 +249,7 @@ vk::Image MemoryAllocator::TryCreateImage(const VkImageCreateInfo &ci, bool dedi
 
 VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedicated,
                                         float priority, vk::Image &image) const {
+    DriverCall::Scope call{"vmaCreateImage", DriverCall::Kind::Image, &ci};
     const VmaAllocationCreateInfo alloc_ci = {
             // Best fit: images freed by the thousand leave holes in the blocks, which new ones
             // should fill before VMA takes another block.
@@ -365,6 +367,7 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
 }
 
 vk::Image MemoryAllocator::CreateUnbackedImage(const VkImageCreateInfo &ci, bool aliased) const {
+    DriverCall::Scope call{"vkCreateImage", DriverCall::Kind::Image, &ci};
     if (ci.imageType == VK_IMAGE_TYPE_1D) {
         return vk::Image{};
     }
@@ -463,6 +466,7 @@ bool MemoryAllocator::CreateBufferInSeparatePool(const VkBufferCreateInfo& ci, M
 }
 
 vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage) const {
+    DriverCall::Scope call{"vmaCreateBuffer", DriverCall::Kind::Buffer, &ci};
     // MESA will do memcpy() if not marked as host cached, so just force mark it for most buffers
     auto const anv_flags = (usage == MemoryUsage::Stream
         && device.GetDriverID() == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA)
@@ -524,6 +528,7 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
     if (min_alignment <= 1) {
         return CreateBuffer(ci, usage);
     }
+    DriverCall::Scope call{"vmaCreateBufferWithAlignment", DriverCall::Kind::Buffer, &ci};
     VkMemoryPropertyFlags anv_flags = 0;
     if (usage == MemoryUsage::Stream &&
         device.GetDriverID() == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA) {

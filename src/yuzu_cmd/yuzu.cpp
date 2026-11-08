@@ -63,6 +63,7 @@
 #include "video_core/renderer_base.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
 #include "video_core/vulkan_common/amd_ffx.h"
+#include "video_core/vulkan_common/driver_call.h"
 #include "yuzu_cmd/emu_window/emu_window_sdl3.h"
 #ifdef HAS_OPENGL
 #include "yuzu_cmd/emu_window/emu_window_sdl3_gl.h"
@@ -127,6 +128,26 @@ static void PrintAmdBreadcrumbs() {
     }
 }
 
+// The Vulkan create call the crashing thread is inside of, with its create info and the guest
+// pipeline it builds (the repro folder for a driver fault is written by the driver crash handler).
+static void PrintDriverCall() {
+    const Vulkan::DriverCall::Record* record = Vulkan::DriverCall::Current();
+    const Vulkan::DriverCall::Context* context = Vulkan::DriverCall::CurrentContext();
+    if (record == nullptr && context == nullptr) {
+        return;
+    }
+    char line[1024];
+    Vulkan::DriverCall::Describe(line, sizeof(line), record, context);
+    const char* repro = Vulkan::DriverCall::FaultArtifact(record);
+    std::fprintf(stderr, "In driver call: %s%s%s\n", line, repro ? " repro: " : "",
+                 repro ? repro : "");
+    if (crash_text != nullptr) {
+        std::fprintf(crash_text, "In driver call: %s%s%s\n", line, repro ? " repro: " : "",
+                     repro ? repro : "");
+        std::fflush(crash_text);
+    }
+}
+
 // abort() and std::terminate end the process without an exception the filter sees.
 static void ReportAbort(const char* what) {
     const char* directory = std::getenv("EDEN_NX2_CRASH_DUMP");
@@ -146,6 +167,7 @@ static void ReportAbort(const char* what) {
         PrintCodeAddress("frame", frames[i]);
     }
     PrintAmdBreadcrumbs();
+    PrintDriverCall();
     std::fflush(stderr);
 }
 
@@ -182,6 +204,7 @@ static LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* exception) {
         PrintCodeAddress("frame", frames[i]);
     }
     PrintAmdBreadcrumbs();
+    PrintDriverCall();
     std::fflush(stderr);
     // dbghelp's own declaration: MINIDUMP_EXCEPTION_INFORMATION is 4-byte packed, and a naturally
     // aligned copy put ExceptionPointers 4 bytes off, so every dump failed and left an empty file.
@@ -616,7 +639,18 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     SetUnhandledExceptionFilter(WriteCrashDump);
     std::signal(SIGABRT, [](int) { ReportAbort("abort()"); });
     std::set_terminate([] {
-        ReportAbort("std::terminate");
+        // An uncaught exception (a vk::Exception names its call, file:line and object).
+        std::string what = "std::terminate";
+        if (const std::exception_ptr exception = std::current_exception()) {
+            try {
+                std::rethrow_exception(exception);
+            } catch (const std::exception& e) {
+                what += std::string{" on uncaught exception: "} + e.what();
+            } catch (...) {
+                what += " on an uncaught non-standard exception";
+            }
+        }
+        ReportAbort(what.c_str());
         std::abort();
     });
 #endif

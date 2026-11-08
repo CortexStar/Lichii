@@ -14,6 +14,8 @@
 
 #include "common/common_types.h"
 #include "common/logging.h"
+#include "video_core/vulkan_common/driver_call.h"
+#include "video_core/vulkan_common/driver_crash.h"
 #include "video_core/vulkan_common/vk_enum_string_helper.h"
 #include "video_core/vulkan_common/vma.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -380,7 +382,12 @@ Exception::Exception(VkResult result_, std::source_location location) : result{r
         file.remove_prefix(win_src + 4);
     }
     message = std::string{string_VkResult(result)} + " at " + std::string{file} + ':' +
-              std::to_string(location.line());
+              std::to_string(location.line()) + " (" +
+              std::string{DriverCall::ShortFunctionName(location.function_name())} + ')';
+    // The driver call the error came from and the object it was creating, when one is marked.
+    if (std::string call = DriverCall::DescribeCurrent(); !call.empty()) {
+        message += " in " + call;
+    }
 }
 
 const char* Exception::what() const noexcept {
@@ -445,6 +452,9 @@ void Destroy(VkDevice device, VkImageView handle, const DeviceDispatch& dld) noe
 }
 
 void Destroy(VkDevice device, VkPipeline handle, const DeviceDispatch& dld) noexcept {
+    if (DriverCrash::Enabled()) {
+        DriverCrash::ForgetPipeline(handle);
+    }
     dld.vkDestroyPipeline(device, handle, nullptr);
 }
 
@@ -477,6 +487,9 @@ void Destroy(VkDevice device, VkSemaphore handle, const DeviceDispatch& dld) noe
 }
 
 void Destroy(VkDevice device, VkShaderModule handle, const DeviceDispatch& dld) noexcept {
+    if (DriverCrash::Enabled()) {
+        DriverCrash::ForgetModule(handle);
+    }
     dld.vkDestroyShaderModule(device, handle, nullptr);
 }
 
@@ -744,6 +757,9 @@ Device Device::Create(VkPhysicalDevice physical_device, Span<VkDeviceQueueCreate
         .pEnabledFeatures = nullptr,
     };
     VkDevice device;
+    // Installs the driver crash handler when EDEN_NX2_CRASH_DUMP is set.
+    static_cast<void>(DriverCrash::Directory());
+    DriverCall::Scope call{"vkCreateDevice", DriverCall::Kind::Other, &ci};
     Check(dispatch.vkCreateDevice(physical_device, &ci, nullptr, &device));
     Load(device, dispatch);
     return Device(device, dispatch);
@@ -757,12 +773,14 @@ Queue Device::GetQueue(u32 family_index, u32 queue_index) const noexcept {
 
 BufferView Device::CreateBufferView(const VkBufferViewCreateInfo& ci) const {
     VkBufferView object;
+    DriverCall::Scope call{"vkCreateBufferView", DriverCall::Kind::Other, &ci};
     Check(dld->vkCreateBufferView(handle, &ci, nullptr, &object));
     return BufferView(object, handle, *dld);
 }
 
 ImageView Device::CreateImageView(const VkImageViewCreateInfo& ci) const {
     VkImageView object;
+    DriverCall::Scope call{"vkCreateImageView", DriverCall::Kind::Other, &ci};
     Check(dld->vkCreateImageView(handle, &ci, nullptr, &object));
     return ImageView(object, handle, *dld);
 }
@@ -778,30 +796,35 @@ Semaphore Device::CreateSemaphore() const {
 
 Semaphore Device::CreateSemaphore(const VkSemaphoreCreateInfo& ci) const {
     VkSemaphore object;
+    DriverCall::Scope call{"vkCreateSemaphore", DriverCall::Kind::Other, &ci};
     Check(dld->vkCreateSemaphore(handle, &ci, nullptr, &object));
     return Semaphore(object, handle, *dld);
 }
 
 Fence Device::CreateFence(const VkFenceCreateInfo& ci) const {
     VkFence object;
+    DriverCall::Scope call{"vkCreateFence", DriverCall::Kind::Other, &ci};
     Check(dld->vkCreateFence(handle, &ci, nullptr, &object));
     return Fence(object, handle, *dld);
 }
 
 DescriptorPool Device::CreateDescriptorPool(const VkDescriptorPoolCreateInfo& ci) const {
     VkDescriptorPool object;
+    DriverCall::Scope call{"vkCreateDescriptorPool", DriverCall::Kind::Other, &ci};
     Check(dld->vkCreateDescriptorPool(handle, &ci, nullptr, &object));
     return DescriptorPool(object, handle, *dld);
 }
 
 RenderPass Device::CreateRenderPass(const VkRenderPassCreateInfo& ci) const {
     VkRenderPass object;
+    DriverCall::Scope call{"vkCreateRenderPass", DriverCall::Kind::Other, &ci};
     Check(dld->vkCreateRenderPass(handle, &ci, nullptr, &object));
     return RenderPass(object, handle, *dld);
 }
 
 RenderPass Device::CreateRenderPass2(const VkRenderPassCreateInfo2& ci) const {
     VkRenderPass object;
+    DriverCall::Scope call{"vkCreateRenderPass2", DriverCall::Kind::Other, &ci};
     Check(dld->vkCreateRenderPass2(handle, &ci, nullptr, &object));
     return RenderPass(object, handle, *dld);
 }
@@ -809,24 +832,28 @@ RenderPass Device::CreateRenderPass2(const VkRenderPassCreateInfo2& ci) const {
 DescriptorSetLayout Device::CreateDescriptorSetLayout(
     const VkDescriptorSetLayoutCreateInfo& ci) const {
     VkDescriptorSetLayout object;
+    DriverCall::Scope call{"vkCreateDescriptorSetLayout", DriverCall::Kind::Other, &ci};
     Check(dld->vkCreateDescriptorSetLayout(handle, &ci, nullptr, &object));
     return DescriptorSetLayout(object, handle, *dld);
 }
 
 PipelineCache Device::CreatePipelineCache(const VkPipelineCacheCreateInfo& ci) const {
     VkPipelineCache cache;
+    DriverCall::Scope call{"vkCreatePipelineCache", DriverCall::Kind::Other, &ci};
     Check(dld->vkCreatePipelineCache(handle, &ci, nullptr, &cache));
     return PipelineCache(cache, handle, *dld);
 }
 
 PipelineLayout Device::CreatePipelineLayout(const VkPipelineLayoutCreateInfo& ci) const {
     VkPipelineLayout object;
+    DriverCall::Scope call{"vkCreatePipelineLayout", DriverCall::Kind::Other, &ci};
     Check(dld->vkCreatePipelineLayout(handle, &ci, nullptr, &object));
     return PipelineLayout(object, handle, *dld);
 }
 
 Pipeline Device::CreateGraphicsPipeline(const VkGraphicsPipelineCreateInfo& ci, VkPipelineCache cache) const {
     VkPipeline object = VK_NULL_HANDLE;
+    DriverCall::Scope call{"vkCreateGraphicsPipelines", DriverCall::Kind::GraphicsPipeline, &ci};
     auto const result = dld->vkCreateGraphicsPipelines(handle, cache, 1, &ci, nullptr, &object);
     // Adreno 5xx drivers do not properly return when a graphics pipeline fails to be created
     // Some (unkown) Mali drivers also do not properly return
@@ -834,30 +861,37 @@ Pipeline Device::CreateGraphicsPipeline(const VkGraphicsPipelineCreateInfo& ci, 
     if (result == VK_INCOMPLETE)
         return Pipeline(object, handle, *dld);
     Check(result);
+    if (DriverCrash::Enabled()) {
+        DriverCrash::RegisterPipeline(object, ci);
+    }
     return Pipeline(object, handle, *dld);
 }
 
 Pipeline Device::CreateComputePipeline(const VkComputePipelineCreateInfo& ci,
                                        VkPipelineCache cache) const {
     VkPipeline object;
+    DriverCall::Scope call{"vkCreateComputePipelines", DriverCall::Kind::ComputePipeline, &ci};
     Check(dld->vkCreateComputePipelines(handle, cache, 1, &ci, nullptr, &object));
     return Pipeline(object, handle, *dld);
 }
 
 Sampler Device::CreateSampler(const VkSamplerCreateInfo& ci) const {
     VkSampler object;
+    DriverCall::Scope call{"vkCreateSampler", DriverCall::Kind::Other, &ci};
     Check(dld->vkCreateSampler(handle, &ci, nullptr, &object));
     return Sampler(object, handle, *dld);
 }
 
 Framebuffer Device::CreateFramebuffer(const VkFramebufferCreateInfo& ci) const {
     VkFramebuffer object;
+    DriverCall::Scope call{"vkCreateFramebuffer", DriverCall::Kind::Other, &ci};
     Check(dld->vkCreateFramebuffer(handle, &ci, nullptr, &object));
     return Framebuffer(object, handle, *dld);
 }
 
 CommandPool Device::CreateCommandPool(const VkCommandPoolCreateInfo& ci) const {
     VkCommandPool object;
+    DriverCall::Scope call{"vkCreateCommandPool", DriverCall::Kind::Other, &ci};
     Check(dld->vkCreateCommandPool(handle, &ci, nullptr, &object));
     return CommandPool(object, handle, *dld);
 }
@@ -865,25 +899,33 @@ CommandPool Device::CreateCommandPool(const VkCommandPoolCreateInfo& ci) const {
 DescriptorUpdateTemplate Device::CreateDescriptorUpdateTemplate(
     const VkDescriptorUpdateTemplateCreateInfo& ci) const {
     VkDescriptorUpdateTemplate object;
+    DriverCall::Scope call{"vkCreateDescriptorUpdateTemplate", DriverCall::Kind::Other, &ci};
     Check(dld->vkCreateDescriptorUpdateTemplate(handle, &ci, nullptr, &object));
     return DescriptorUpdateTemplate(object, handle, *dld);
 }
 
 QueryPool Device::CreateQueryPool(const VkQueryPoolCreateInfo& ci) const {
     VkQueryPool object;
+    DriverCall::Scope call{"vkCreateQueryPool", DriverCall::Kind::Other, &ci};
     Check(dld->vkCreateQueryPool(handle, &ci, nullptr, &object));
     return QueryPool(object, handle, *dld);
 }
 
 ShaderModule Device::CreateShaderModule(const VkShaderModuleCreateInfo& ci) const {
     VkShaderModule object;
+    DriverCall::Scope call{"vkCreateShaderModule", DriverCall::Kind::ShaderModule, &ci};
     Check(dld->vkCreateShaderModule(handle, &ci, nullptr, &object));
+    if (DriverCrash::Enabled()) {
+        DriverCrash::RegisterModule(object, DriverCall::SpirvWords(ci.pCode, ci.codeSize));
+    }
     return ShaderModule(object, handle, *dld);
 }
 
 std::vector<ShaderEXT> Device::CreateShadersEXT(
     std::span<const VkShaderCreateInfoEXT> infos) const {
     std::vector<VkShaderEXT> objects(infos.size());
+    DriverCall::Scope call{"vkCreateShadersEXT", DriverCall::Kind::Shaders, infos.data(),
+                           static_cast<u32>(infos.size())};
     const VkResult result = dld->vkCreateShadersEXT(handle, static_cast<u32>(infos.size()),
                                                     infos.data(), nullptr, objects.data());
     if (result != VK_SUCCESS) {
@@ -911,12 +953,14 @@ Event Device::CreateEvent() const {
     };
 
     VkEvent object;
+    DriverCall::Scope call{"vkCreateEvent", DriverCall::Kind::Other, &ci};
     Check(dld->vkCreateEvent(handle, &ci, nullptr, &object));
     return Event(object, handle, *dld);
 }
 
 SwapchainKHR Device::CreateSwapchainKHR(const VkSwapchainCreateInfoKHR& ci) const {
     VkSwapchainKHR object;
+    DriverCall::Scope call{"vkCreateSwapchainKHR", DriverCall::Kind::Other, &ci};
     Check(dld->vkCreateSwapchainKHR(handle, &ci, nullptr, &object));
     return SwapchainKHR(object, handle, *dld);
 }
@@ -931,6 +975,7 @@ DeviceMemory Device::TryAllocateMemory(const VkMemoryAllocateInfo& ai) const noe
 
 DeviceMemory Device::AllocateMemory(const VkMemoryAllocateInfo& ai) const {
     VkDeviceMemory memory;
+    DriverCall::Scope call{"vkAllocateMemory", DriverCall::Kind::Other, &ai};
     Check(dld->vkAllocateMemory(handle, &ai, nullptr, &memory));
     return DeviceMemory(memory, handle, *dld);
 }

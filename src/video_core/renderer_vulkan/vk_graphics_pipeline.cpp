@@ -42,6 +42,7 @@
 #include "video_core/shader_handle_program.h"
 #include "video_core/shader_notify.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "video_core/vulkan_common/driver_call.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 
 #if defined(__clang__) && defined(NDEBUG)
@@ -546,6 +547,7 @@ GraphicsPipeline::GraphicsPipeline(
     auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics,
                 emit_stages = std::move(emit_stages)] {
         const auto begin = std::chrono::steady_clock::now();
+        const DriverCall::ContextScope context{"graphics pipeline", key.Hash(), key.unique_hashes};
         SCOPE_EXIT {
             if (shader_notify) {
                 shader_notify->MarkShaderComplete();
@@ -2724,6 +2726,8 @@ void GraphicsPipeline::QueueOptimizedLink(VkRenderPass render_pass) {
             }
             state->running = true;
         }
+        const DriverCall::ContextScope context{"optimized link of graphics pipeline", key.Hash(),
+                                               key.unique_hashes};
         vk::Pipeline linked_pipeline;
         try {
             linked_pipeline = LinkLibraries(render_pass, true);
