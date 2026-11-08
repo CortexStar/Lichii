@@ -35,6 +35,7 @@ class GpuSplit;
 
 namespace Tegra {
 class MemoryManager;
+class Nx2AsyncReport;
 }
 
 namespace VideoCore {
@@ -331,6 +332,7 @@ private:
 
     bool DispatchNativeCompute(const NativeQmdScheduler::Descriptor& descriptor);
     void ProcessNativeReportSemaphore(u32 argument);
+    std::shared_ptr<Nx2AsyncReport> MakeFencedReport(GPUVAddr address) const;
     void DescribeNativeResources(const NativeQmdScheduler::Descriptor& qmd);
     /// Texture descriptor that the handle at `offset` in constant buffer 0 selects.
     std::optional<Texture::TICEntry> ConstBuffer0Image(u32 offset) const;

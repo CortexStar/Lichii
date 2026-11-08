@@ -237,6 +237,7 @@ void GpuSplit::Stop() {
     acquire_position = 0;
     write_floor = 0;
     guest_write_position = 0;
+    mapping_position = 0;
     release_barrier = 0;
     queued_releases.reset();
     page_slots.reset();
@@ -829,6 +830,39 @@ void GpuSplit::ForgetRelease(const void* space, GPUVAddr address) {
     if (QueuedRelease* const release = FindRelease(space, address)) {
         release->used = false;
     }
+}
+
+std::optional<u32> GpuSplit::SemaphoreWordAt(const void* space, GPUVAddr address) {
+    const auto* const memory = static_cast<const Tegra::MemoryManager*>(space);
+    // The back reads the syncpoint shim from the syncpoints.
+    if (queued_releases == nullptr || memory->OverlapsSyncpointShim(address, sizeof(u32))) {
+        return std::nullopt;
+    }
+    consumed_cache = consumed.load(std::memory_order_acquire);
+    if (const QueuedRelease* const release = FindRelease(space, address);
+        release != nullptr && release->position >= release_barrier &&
+        !WrittenSince(space, address, release->position)) {
+        if (release->at_least) {
+            return std::nullopt;
+        }
+        // Still queued, or held back by its fence: it lands before the write sent next.
+        const u32 landed =
+            Tegra::g_nx2_semaphore_landed[release->landed_slot].load(std::memory_order_acquire);
+        if (release->sent != 0 && landed - release->landed_base < release->sent) {
+            return release->value;
+        }
+    }
+    // Guest memory, once every write sent there ran and landed.
+    const u64 target = QmdWritesTarget(space, address, sizeof(u32));
+    if (target > consumed_cache) {
+        return std::nullopt;
+    }
+    const auto device = memory->GpuToCpuAddress(address);
+    if (!device || Tegra::Nx2MayBeGpuWritten(*device, sizeof(u32)) ||
+        !Tegra::Nx2AsyncReportsSettled(*device, sizeof(u32))) {
+        return std::nullopt;
+    }
+    return memory->Read<u32>(address);
 }
 
 bool GpuSplit::WaitForQueuedWritesTo(const void* space, GPUVAddr address, u64 size, DrainSite site,

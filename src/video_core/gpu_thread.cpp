@@ -22,11 +22,12 @@
 #include "core/frontend/graphics_context.h"
 #include "video_core/control/scheduler.h"
 #include "video_core/dma_pusher.h"
+#include "video_core/front_qmd.h"
 #include "video_core/gpu.h"
-#include "video_core/gpu_thread.h"
 #include "video_core/gpu_split.h"
-#include "video_core/nx2_profile.h"
+#include "video_core/gpu_thread.h"
 #include "video_core/host1x/host1x.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/renderer_base.h"
 
 namespace VideoCommon::GPUThread {
@@ -103,6 +104,10 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     if (!scheduler.HasPendingChannels()) {
                         continue;
                     }
+                    if (split.Active()) {
+                        // The back is often idle while channels wait.
+                        VideoCommon::FrontQmdView::Get().MaybeTakeOver(split);
+                    }
                     // The CPU usually releases the semaphore soon after: poll for half a
                     // millisecond, then in short sleeps. Ocarina of Time waits here ~330 times a
                     // second and its present waits for the work behind them: with 1 ms sleeps the
@@ -133,6 +138,8 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 break;
             }
             if (split.Active()) {
+                // Between commands the back may have run everything sent.
+                VideoCommon::FrontQmdView::Get().MaybeTakeOver(split);
                 // Only command lists are parsed here; everything else runs on the back thread
                 // in order, and so does the signal that the command ran.
                 auto* const rasterizer_ptr = renderer.ReadRasterizer();
@@ -160,8 +167,13 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 } else {
                     ASSERT(false);
                 }
-                if (!std::holds_alternative<SubmitListCommand>(next.data)) {
-                    // Syncs, maps, flushes and composites write guest memory anywhere.
+                if (std::holds_alternative<GPUTickCommand>(next.data) ||
+                    std::holds_alternative<FlushRegionCommand>(next.data) ||
+                    std::holds_alternative<InvalidateRegionCommand>(next.data)) {
+                    // Syncs and flushes write guest memory only where GPU work wrote.
+                    split.NoteUnboundedWrite(false, VideoCommon::UnboundedCause::GpuThreadSync);
+                } else if (!std::holds_alternative<SubmitListCommand>(next.data)) {
+                    // Maps and composites write guest memory anywhere.
                     split.NoteUnboundedWrite(false, VideoCommon::UnboundedCause::GpuThreadCommand);
                 }
                 split.Defer([state_ptr = &state, fence = next.fence, block = next.block] {

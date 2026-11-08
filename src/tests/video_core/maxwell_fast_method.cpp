@@ -7,7 +7,9 @@
 #include <chrono>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <memory>
+#include <optional>
 #include <random>
 #include <thread>
 #include <vector>
@@ -24,6 +26,7 @@
 #include "tests/core/system_test_context.h"
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/front_qmd.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
@@ -64,6 +67,11 @@ struct GpuSplitTestAccess {
     static void SetPositions(GpuSplit& split, u64 written, u64 consumed) {
         split.write_position = written;
         split.consumed_cache = consumed;
+    }
+    /// SetPositions, with the back's own position too (what Ran reads).
+    static void SetBack(GpuSplit& split, u64 written, u64 consumed) {
+        SetPositions(split, written, consumed);
+        split.consumed.store(consumed, std::memory_order_relaxed);
     }
     static u64 Target(const GpuSplit& split, const void* space, GPUVAddr address, u64 size) {
         return split.PendingWriteTarget(space, address, size, 0);
@@ -985,4 +993,200 @@ TEST_CASE("Maxwell3D's split front sends plain draw runs as one entry the back r
     CHECK(a.base_index == b.base_index);
     CHECK(a.base_instance == b.base_instance);
     CHECK(std::memcmp(&a.index_buffer, &b.index_buffer, sizeof(a.index_buffer)) == 0);
+}
+
+namespace {
+
+using QmdDescriptor = Tegra::NativeQmdScheduler::Descriptor;
+
+// What FrontQmdView told the split about a launch's releases.
+struct QmdNote {
+    enum class Kind { Write, Release, Forget } kind;
+    GPUVAddr address;
+    u64 value; ///< The size of a write, the value of a release
+    bool at_least;
+    bool operator==(const QmdNote&) const = default;
+};
+
+// Guest memory as the back finds it, and the split's answers (FrontQmdView's Memory).
+struct QmdTestMemory {
+    std::map<GPUVAddr, QmdDescriptor> qmds;
+    std::map<GPUVAddr, u64> targets; ///< Per QMD: the position of the last write sent there
+    std::map<GPUVAddr, u32> words;   ///< The words the front knows (GpuSplit::SemaphoreWordAt)
+    std::vector<QmdNote> notes;
+};
+
+struct QmdTestView {
+    QmdTestMemory* state;
+
+    [[nodiscard]] bool IsMapped(GPUVAddr address, u64) const {
+        return address < 0x1000'0000;
+    }
+    void Read(GPUVAddr address, void* data, u64 size) const {
+        QmdDescriptor qmd{};
+        if (const auto it = state->qmds.find(address); it != state->qmds.end()) {
+            qmd = it->second;
+        }
+        std::memcpy(data, qmd.data(), size);
+    }
+    [[nodiscard]] std::optional<u64> Device(GPUVAddr address) const {
+        return address;
+    }
+    [[nodiscard]] bool GpuWritten(u64, u64) const {
+        return false;
+    }
+    [[nodiscard]] u64 WritesTarget(const VideoCommon::GpuSplit&, GPUVAddr address, u64) const {
+        const auto it = state->targets.find(address);
+        return it == state->targets.end() ? 0 : it->second;
+    }
+    [[nodiscard]] std::optional<u32> WordAt(VideoCommon::GpuSplit&, GPUVAddr address) const {
+        const auto it = state->words.find(address);
+        return it == state->words.end() ? std::nullopt : std::optional<u32>{it->second};
+    }
+    void NoteWrite(VideoCommon::GpuSplit&, GPUVAddr address, u64 size) const {
+        state->notes.push_back({QmdNote::Kind::Write, address, size, false});
+    }
+    void NoteRelease(VideoCommon::GpuSplit&, GPUVAddr address, u32 value, bool at_least) const {
+        state->notes.push_back({QmdNote::Kind::Release, address, value, at_least});
+    }
+    void ForgetRelease(VideoCommon::GpuSplit&, GPUVAddr address) const {
+        state->notes.push_back({QmdNote::Kind::Forget, address, 0, false});
+    }
+};
+
+constexpr u32 QmdEnable = 1U << 23;
+constexpr u32 QmdOneWord = 1U << 30;
+constexpr u32 QmdMaximum = 1U << 19;
+constexpr u32 QmdReduction = 1U << 26;
+
+QmdDescriptor MakeTestQmd(u32 dependencies) {
+    QmdDescriptor qmd{};
+    qmd[18] = 0x30;
+    qmd[4] = dependencies << 14;
+    return qmd;
+}
+
+void SetTestRelease(QmdDescriptor& qmd, u32 base, u32 address, u32 flags, u32 payload) {
+    qmd[base] = address;
+    qmd[base + 1] = flags;
+    qmd[base + 2] = payload;
+}
+
+// The back's scheduling of the same signal, on the shared table: what it releases.
+std::vector<std::pair<GPUVAddr, u32>> BackSignal(Tegra::NativeQmdScheduler& back,
+                                                 const QmdTestMemory& memory, GPUVAddr address,
+                                                 u32 argument) {
+    std::vector<std::pair<GPUVAddr, u32>> released;
+    const auto error = back.Signal(
+        address, argument,
+        [&](u64 qmd_address, QmdDescriptor& descriptor) {
+            const auto it = memory.qmds.find(qmd_address);
+            descriptor = it != memory.qmds.end() ? it->second : QmdDescriptor{};
+            return true;
+        },
+        [&](u64 destination, u32 payload, u32) {
+            released.emplace_back(destination, payload);
+            return true;
+        },
+        [](const QmdDescriptor&) { return true; });
+    REQUIRE(error.empty());
+    return released;
+}
+
+} // Anonymous namespace
+
+TEST_CASE("The split front's QMD view notes what launches release as the back runs them",
+          "[video_core][gpu_split][front_qmd]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    VideoCommon::GpuSplit split;
+    Access::SetBack(split, 10, 10);
+    QmdTestMemory memory;
+    const QmdTestView view_memory{&memory};
+    constexpr GPUVAddr qmd_address = 0x7'0000;
+    auto qmd = MakeTestQmd(1);
+    SetTestRelease(qmd, 24, 0x5000, QmdEnable | QmdOneWord, 7);
+    SetTestRelease(qmd, 28, 0x5010, QmdEnable | QmdOneWord | QmdMaximum, 3);
+    SetTestRelease(qmd, 52, 0x5020, QmdEnable | QmdOneWord | QmdReduction, 1); // Add 1
+    memory.qmds[qmd_address] = qmd;
+    memory.words[0x5010] = 5;
+
+    Tegra::NativeQmdScheduler back{Tegra::NativeQmdScheduler::OwnTable{}};
+    VideoCommon::FrontQmdView view;
+    view.TakeOver(back);
+    // Loaded, it waits for its dependency: nothing released, on either side.
+    REQUIRE(view.Signal(split, view_memory, qmd_address, 3, nullptr));
+    REQUIRE(BackSignal(back, memory, qmd_address, 3).empty());
+    REQUIRE(memory.notes.empty());
+    // The decrement runs it: the front notes each release as the back runs it.
+    REQUIRE(view.Signal(split, view_memory, qmd_address, 7, nullptr));
+    const auto released = BackSignal(back, memory, qmd_address, 7);
+    REQUIRE(released ==
+            std::vector<std::pair<GPUVAddr, u32>>{{0x5000, 7}, {0x5010, 3}, {0x5020, 1}});
+    REQUIRE(memory.notes == std::vector<QmdNote>{
+                                {QmdNote::Kind::Write, 0x5000, 4, false},
+                                {QmdNote::Kind::Release, 0x5000, 7, false},
+                                // A maximum with a word the front knows: the maximum.
+                                {QmdNote::Kind::Write, 0x5010, 4, false},
+                                {QmdNote::Kind::Release, 0x5010, 5, false},
+                                // A reduction of a word the front doesn't know: unknown.
+                                {QmdNote::Kind::Write, 0x5020, 4, false},
+                                {QmdNote::Kind::Forget, 0x5020, 0, false},
+                            });
+    // Again, with the reduction's word known and the maximum's not: the sum, and the payload
+    // as a lower bound.
+    memory.notes.clear();
+    memory.words.erase(0x5010);
+    memory.words[0x5020] = 41;
+    REQUIRE(view.Signal(split, view_memory, qmd_address, 3, nullptr));
+    REQUIRE(view.Signal(split, view_memory, qmd_address, 7, nullptr));
+    REQUIRE(memory.notes[3] == QmdNote{QmdNote::Kind::Release, 0x5010, 3, true});
+    REQUIRE(memory.notes[5] == QmdNote{QmdNote::Kind::Release, 0x5020, 42, false});
+}
+
+TEST_CASE("The split front's QMD view reads a QMD only as the back will find it",
+          "[video_core][gpu_split][front_qmd]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    VideoCommon::GpuSplit split;
+    QmdTestMemory memory;
+    const QmdTestView view_memory{&memory};
+    constexpr GPUVAddr loaded = 0x7'0000;
+    constexpr GPUVAddr launched = 0x7'0100;
+    auto first = MakeTestQmd(1);
+    SetTestRelease(first, 24, 0x5000, QmdEnable | QmdOneWord, 1);
+    auto second = MakeTestQmd(0);
+    SetTestRelease(second, 24, 0x5000, QmdEnable | QmdOneWord, 2);
+    memory.qmds[loaded] = first;
+    memory.qmds[launched] = second;
+
+    Tegra::NativeQmdScheduler back{Tegra::NativeQmdScheduler::OwnTable{}};
+    VideoCommon::FrontQmdView view;
+    view.TakeOver(back);
+    Access::SetBack(split, 20, 10);
+    // The QMD's own inline words, written by the back right before it runs the signal.
+    REQUIRE(view.Signal(split, view_memory, launched, 3, &second));
+    // A QMD written by work the back ran: memory holds it.
+    memory.targets[loaded] = 8;
+    REQUIRE(view.Signal(split, view_memory, loaded, 3, nullptr));
+    // A queued inline write of it, the last write sent there: the front reads its words.
+    auto patched = first;
+    patched[26] = 9; // The release's payload
+    Access::SetBack(split, 30, 10);
+    view.NoteInlineWrite(split, loaded, patched);
+    memory.targets[loaded] = 30;
+    Access::SetBack(split, 40, 10);
+    memory.notes.clear();
+    REQUIRE(view.Signal(split, view_memory, loaded, 7, nullptr));
+    REQUIRE(memory.notes[1] == QmdNote{QmdNote::Kind::Release, 0x5000, 9, false});
+    // Another write still queued there: the front can't read it and loses the table.
+    memory.targets[loaded] = 35;
+    REQUIRE_FALSE(view.Signal(split, view_memory, loaded, 3, nullptr));
+    REQUIRE_FALSE(view.Synced());
+    REQUIRE_FALSE(view.Signal(split, view_memory, launched, 3, &second));
+    // A write sent after the signal: the back reads what was before it. Lost as well.
+    // Once the back ran everything sent, the view takes the back's table over.
+    view.MaybeTakeOver(split);
+    REQUIRE_FALSE(view.Synced());
+    Access::SetBack(split, 40, 40);
+    view.MaybeTakeOver(split);
+    REQUIRE(view.Synced());
 }

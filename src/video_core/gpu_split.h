@@ -76,7 +76,10 @@ enum class UnboundedCause : u8 {
     SyncpointAcquire, ///< Puller fence action acquire (forced fence release)
     MemOpB,
     GpSync,           ///< A GP entry's sync bit
-    GpuThreadCommand, ///< GPU thread commands (maps, flushes, syncs)
+    GpuThreadCommand, ///< GPU thread commands (maps, composites, functions)
+    /// GPU thread syncs (TickWork), cache flushes and invalidations: they write guest memory only
+    /// where GPU work wrote, and the releases they land were noted when they were sent
+    GpuThreadSync,
 };
 
 /// Which unbounded position a narrowed front read waits for (GpuSplit::WaitForQueuedWritesTo).
@@ -505,6 +508,9 @@ public:
         if (!BarrierOnly(cause)) {
             guest_write_position = write_position;
         }
+        if (cause == UnboundedCause::GpuThreadCommand) {
+            mapping_position = write_position;
+        }
         // Barriers (WFIs, texture invalidates, MemOpB, GP sync) release no semaphore: they
         // write guest memory only on GPU-written pages (InvalidateGPUCache downloads GPU bytes
         // next to CPU writes), where the narrowed read drains instead, so they don't hold
@@ -518,10 +524,14 @@ public:
     }
     /// A compute dispatch was just sent. The front end runs MME DMA reads in method order
     /// without waiting for earlier grids (barriers come as WFIs, which count as unbounded), so
-    /// dispatches only hold semaphore acquires and the command list reads waiting for writers.
-    void NoteDispatch() {
+    /// dispatches only hold the command list reads waiting for writers, and semaphore acquires
+    /// unless `releases_noted`: the front's QMD view noted what its launches release
+    /// (FrontQmdView), as for any other release.
+    void NoteDispatch(bool releases_noted = false) {
         if (front_macros) {
-            acquire_position = write_position;
+            if (!releases_noted) {
+                acquire_position = write_position;
+            }
             unbounded_writer_position = write_position;
         }
     }
@@ -535,6 +545,7 @@ public:
         case UnboundedCause::MemOpB:
         case UnboundedCause::GpSync:
         case UnboundedCause::ComputeLaunch:
+        case UnboundedCause::GpuThreadSync:
             return true;
         default:
             return false;
@@ -572,6 +583,38 @@ public:
                                                                       GPUVAddr address);
     /// Work that writes `address` of `space` with a value the front doesn't know was just sent.
     void ForgetRelease(const void* space, GPUVAddr address);
+    /// The word at `address` of `space` as a GPU write sent next finds it when it lands (QMD
+    /// reductions and maxima, the compute report's reductions: the back combines them with the
+    /// word when their fence signals, after every write sent before landed): the latest release
+    /// sent there while it may still be held back, else guest memory once the back ran every write
+    /// sent there and it landed. Nothing where the front can't tell.
+    [[nodiscard]] std::optional<u32> SemaphoreWordAt(const void* space, GPUVAddr address);
+
+    /// The end of what was sent so far.
+    [[nodiscard]] u64 Position() const {
+        return write_position;
+    }
+    /// Whether the back ran everything sent before `position`. Guest memory read after it
+    /// returned true holds what the back wrote before `position`.
+    [[nodiscard]] bool Ran(u64 position) {
+        if (consumed_cache >= position) {
+            return true;
+        }
+        consumed_cache = consumed.load(std::memory_order_acquire);
+        return consumed_cache >= position;
+    }
+    /// The end of the last work sent that may change the GPU's mappings (GPU thread functions;
+    /// the maps that unmap caches drain): the back finds the front's mappings once it ran it.
+    [[nodiscard]] u64 MappingPosition() const {
+        return mapping_position;
+    }
+    /// The position the back must have run before guest memory holds, without the GPU caches,
+    /// what it will read at [address, address + size) of `space`: the recorded writes over it,
+    /// and the writes that may land in guest memory anywhere or change the mappings.
+    [[nodiscard]] u64 QmdWritesTarget(const void* space, GPUVAddr address, u64 size) const {
+        return (std::min)(PendingWriteTarget(space, address, size, guest_write_position),
+                          write_position);
+    }
     /// Work sent so far may have written semaphore words with values the front doesn't know: no
     /// release sent before now is predicted any more.
     void NoteReleaseBarrier() {
@@ -694,6 +737,8 @@ private:
     u64 write_floor{};
     /// Unbounded writes that may write guest memory themselves (not BarrierOnly).
     u64 guest_write_position{};
+    /// GPU thread commands that may change the mappings (MappingPosition).
+    u64 mapping_position{};
     /// Releases sent before it are not predicted (NoteReleaseBarrier).
     u64 release_barrier{};
     /// The latest release the front queued per semaphore word, found by a hash in buckets of

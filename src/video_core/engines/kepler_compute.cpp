@@ -15,26 +15,27 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <utility>
 #include <unordered_set>
+#include <utility>
 #include "common/assert.h"
 #include "common/dkb_frame_trace.h"
 #include "common/logging.h"
 #include "common/settings.h"
-#include "shader_recompiler/exception.h"
 #include "core/core.h"
-#include "video_core/gpu_split.h"
-#include "video_core/fire_emblem_upscale.h"
-#include "video_core/nx2_profile.h"
-#include "video_core/nx2.h"
+#include "shader_recompiler/exception.h"
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/engines/kepler_compute.h"
-#include "video_core/engines/native_upscale.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/engines/native_upscale.h"
+#include "video_core/fire_emblem_upscale.h"
+#include "video_core/front_qmd.h"
 #include "video_core/game_dlss_status.h"
-#include "video_core/oot_dlss.h"
+#include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
 #include "video_core/native_query_trace.h"
+#include "video_core/nx2.h"
+#include "video_core/nx2_profile.h"
+#include "video_core/oot_dlss.h"
 #include "video_core/oot_network.h"
 #include "video_core/oot_ultrawide.h"
 #ifdef ARCHITECTURE_x86_64
@@ -102,6 +103,18 @@ void KeplerCompute::ConsumeSinkImpl(Core::System& system) {
     method_sink.clear();
 }
 
+// A semaphore write that lands when its fence signals, counted as an asynchronous report
+// (Tegra::Nx2AsyncReportsSettled) until it did; none at an unmapped address.
+std::shared_ptr<Nx2AsyncReport> KeplerCompute::MakeFencedReport(GPUVAddr address) const {
+    const auto device = memory_manager.GpuToCpuAddress(address);
+    if (!device) {
+        return nullptr;
+    }
+    auto report = std::make_shared<Nx2AsyncReport>(*device);
+    report->Issue();
+    return report;
+}
+
 // SET_REPORT_SEMAPHORE_A-D (0x6c0-0x6c3): address high/low, payload, then operation in bits 1:0
 // (release / acquire / report only / trap), reduction enable bit 3 with the op in bits 11:9, and
 // a one-word (no timestamp) structure in bit 28. NVN2 releases queue syncs from compute this way.
@@ -124,9 +137,19 @@ void KeplerCompute::ProcessNativeReportSemaphore(u32 argument) {
     VideoCommon::GpuSplit::NoteGpuSemaphore(address);
     if ((argument >> 3) & 1) {
         const u32 reduction = (argument >> 9) & 7;
-        rasterizer->SignalFence([this, address, payload, reduction] {
-            memory_manager.Write<u32>(address, ReduceSemaphore(reduction, false,
-                                                               memory_manager.Read<u32>(address), payload));
+        // Lands when its fence signals: the split's front reads the word only once it did
+        // (GpuSplit::SemaphoreWordAt).
+        const auto report = MakeFencedReport(address);
+        rasterizer->SignalFence([this, address, payload, reduction, report] {
+            const u32 value =
+                ReduceSemaphore(reduction, false, memory_manager.Read<u32>(address), payload);
+            memory_manager.Write<u32>(address, value);
+            if (const auto device = memory_manager.GpuToCpuAddress(address)) {
+                Tegra::Nx2SemaphoreWaiters::Get().OnWrite(*device, value);
+            }
+            if (report) {
+                report->Complete();
+            }
         });
         return;
     }
@@ -401,7 +424,8 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                 // The split's front: a page the query cache may hold results for.
                 VideoCommon::GpuSplit::NoteGpuSemaphore(address);
                 if (flags & (1U << 26)) {
-                    rasterizer->SignalFence([this, address, payload, flags] {
+                    const auto report = MakeFencedReport(address);
+                    rasterizer->SignalFence([this, address, payload, flags, report] {
                         const u32 value = ReduceSemaphore((flags >> 20) & 7, (flags >> 24) & 1,
                                                           memory_manager.Read<u32>(address), payload);
                         memory_manager.Write<u32>(address, value);
@@ -417,6 +441,9 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                         }
                         VideoCommon::TraceNativeQuery(1, memory_manager.GetID(), address,
                             memory_manager.GpuToCpuAddress(address).value_or(0), 0, value, 1U << 26);
+                        if (report) {
+                            report->Complete();
+                        }
                     });
                 } else if (four_words) {
                     rasterizer->Query(address, VideoCommon::QueryType::Payload,
@@ -426,11 +453,15 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                     // NVN2 tracks QMD completion with a max release (bit 19) into a word other
                     // releases also advance: a plain write would move it backwards and leave
                     // GEQ acquires waiting forever.
-                    rasterizer->SignalFence([this, address, payload] {
+                    const auto report = MakeFencedReport(address);
+                    rasterizer->SignalFence([this, address, payload, report] {
                         const u32 value = (std::max)(memory_manager.Read<u32>(address), payload);
                         memory_manager.Write<u32>(address, value);
                         if (const auto device = memory_manager.GpuToCpuAddress(address)) {
                             Tegra::Nx2SemaphoreWaiters::Get().OnWrite(*device, value);
+                        }
+                        if (report) {
+                            report->Complete();
                         }
                     });
                 } else {
@@ -1756,9 +1787,63 @@ Texture::TSCEntry KeplerCompute::GetTSCEntry(u32 tsc_index) const {
     return tsc_entry;
 }
 
+namespace {
+
+// An engine's GPU address space as its back reads QMDs and their release words (FrontQmdView).
+struct FrontQmdMemory {
+    const MemoryManager& memory;
+
+    [[nodiscard]] bool IsMapped(GPUVAddr address, u64 size) const {
+        return memory.IsFullyMappedRange(address, size);
+    }
+    void Read(GPUVAddr address, void* data, u64 size) const {
+        memory.ReadBlockUnsafe(address, data, size);
+    }
+    [[nodiscard]] std::optional<u64> Device(GPUVAddr address) const {
+        return memory.GpuToCpuAddress(address);
+    }
+    [[nodiscard]] bool GpuWritten(u64 device, u64 size) const {
+        return Nx2MayBeGpuWritten(device, size);
+    }
+    [[nodiscard]] u64 WritesTarget(const VideoCommon::GpuSplit& split, GPUVAddr address,
+                                   u64 size) const {
+        return split.QmdWritesTarget(&memory, address, size);
+    }
+    [[nodiscard]] std::optional<u32> WordAt(VideoCommon::GpuSplit& split, GPUVAddr address) const {
+        return split.SemaphoreWordAt(&memory, address);
+    }
+    void NoteWrite(VideoCommon::GpuSplit& split, GPUVAddr address, u64 size) const {
+        // Releases are tracked by the word (GpuSplit::NoteWrite's `fine`).
+        split.NoteWrite(&memory, address, size, true);
+    }
+    void NoteRelease(VideoCommon::GpuSplit& split, GPUVAddr address, u32 value,
+                     bool at_least) const {
+        split.NoteRelease(&memory, address, value, at_least);
+    }
+    void ForgetRelease(VideoCommon::GpuSplit& split, GPUVAddr address) const {
+        split.ForgetRelease(&memory, address);
+    }
+};
+
+// The QMD methods: PCAS (0xae-0xb0) and the inline QMD's last word (0x107).
+[[nodiscard]] bool IsQmdMethod(u32 method) {
+    return method == 0xae || method == 0xaf || method == 0xb0 || method == 0x107;
+}
+
+// Whether a PCAS method signals the QMD scheduler, as ProcessNativeMethod filters them.
+[[nodiscard]] bool SignalsQmd(u32 method, u32 argument) {
+    if (method == 0xaf) {
+        return (argument & 2) != 0;
+    }
+    return method == 0xb0 && (argument & 15) != 0 && (argument & 15) != 1;
+}
+
+} // Anonymous namespace
+
 // Split GPU thread with macros on its front half (gpu_split.h, EDEN_NX2_SPLIT=2): the front
 // runs compute macros against its own copy of the native registers (which hold the last value
-// written to each, on the back too) and loads and binds the compute macro code itself.
+// written to each, on the back too) and loads and binds the compute macro code itself. It also
+// runs the QMD scheduling ahead of the back (FrontQmdView), to tell what the launches release.
 struct KeplerCompute::FrontState {
     std::array<u32, 0x1000> registers{};
     std::optional<u32> executing_macro;
@@ -1786,6 +1871,9 @@ KeplerCompute::FrontState& KeplerCompute::Front(VideoCommon::GpuSplit& split) {
         front->bind_pointer = native_bind_pointer;
         front->macro = native_macro;
         front_macros = true;
+        // A new session's or a restarted split's: the QMDs the back scheduled meanwhile, in the
+        // table the engines share. The back is idle, its table the current one.
+        VideoCommon::FrontQmdView::Get().TakeOver(native_qmd);
     }
     return *front;
 }
@@ -1799,6 +1887,8 @@ void KeplerCompute::ReleaseFront() {
     native_macro = front->macro;
     front.reset();
     front_macros = false;
+    // The engines schedule their QMDs on their own again.
+    VideoCommon::FrontQmdView::Get().Lose();
     LOG_INFO(HW_GPU, "GPU thread split stopped: compute macros back on the engine");
 }
 
@@ -1878,7 +1968,8 @@ void KeplerCompute::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuS
                                          u32 method, const u32* base_start, u32 amount,
                                          u32 methods_pending, const GPUVAddr* segment) {
     auto& fs = Front(split);
-    if (method >= 0xe00 && method < fs.registers.size()) {
+    // Macro parameters, and QMD methods: each one is its own signal (FrontNoteWrites).
+    if ((method >= 0xe00 && method < fs.registers.size()) || (IsQmdMethod(method) && amount > 1)) {
         for (u32 i = 0; i < amount; ++i) {
             FrontCallMethod(system, split, method, base_start[i], methods_pending - i <= 1, segment);
         }
@@ -1956,6 +2047,9 @@ void KeplerCompute::FrontQueueWrite(VideoCommon::GpuSplit& split, FrontState& fs
     // method as an unbounded write at the position after the call, which held work would not
     // have reached.
     if (!split.NarrowDrains() || method >= native_plain_methods.size()) {
+        if (IsQmdMethod(method)) {
+            VideoCommon::FrontQmdView::Get().MaybeTakeOver(split);
+        }
         if (direct) {
             split.MacroWrite(this, method, argument);
         } else {
@@ -2018,6 +2112,10 @@ void KeplerCompute::FrontQueueWrite(VideoCommon::GpuSplit& split, FrontState& fs
     }
     // Launches, releases, inline QMDs, macro loads, data words outside macros: the run goes now,
     // then the method is noted at the position after it, as when it was its own entry.
+    if (IsQmdMethod(method)) {
+        // The run holds no signal: the back runs the table the view takes over up to here.
+        VideoCommon::FrontQmdView::Get().MaybeTakeOver(split);
+    }
     split.RunPendingFlush();
     FrontNoteWrites(split, fs, method);
 }
@@ -2112,17 +2210,43 @@ void KeplerCompute::FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& fs
     using VideoCommon::UnboundedCause;
     constexpr u32 exec_upload_method = KEPLER_COMPUTE_REG_INDEX(exec_upload);
     constexpr u32 data_upload_method = KEPLER_COMPUTE_REG_INDEX(data_upload);
+    auto& view = VideoCommon::FrontQmdView::Get();
     switch (method) {
     case 0xae:
     case 0xaf:
-    case 0xb0:
-        split.NoteDispatch();
+    case 0xb0: {
+        // ProcessNativeMethod's QMD scheduling of the QMD at register 0xad.
+        const u32 argument = fs.registers[method];
+        if (SignalsQmd(method, argument)) {
+            const bool valued = view.Signal(split, FrontQmdMemory{memory_manager},
+                                            GPUVAddr{fs.registers[0xad]} << 8, argument, nullptr);
+            split.NoteDispatch(valued);
+        }
         break;
+    }
     case 0x107: {
         // The inline QMD goes to memory, then may launch.
         const GPUVAddr address = ((GPUVAddr{fs.registers[0xc6]} << 32) | fs.registers[0xc7]) << 8;
+        if (!memory_manager.IsFullyMappedRange(address, 256)) {
+            // The back writes and launches nothing either, unless a change of the mappings still
+            // queued maps it.
+            if (!split.Ran(split.MappingPosition())) {
+                view.Lose();
+                split.NoteDispatch(false);
+            }
+            break;
+        }
         split.NoteWrite(&memory_manager, address, 256);
-        split.NoteDispatch();
+        NativeQmdScheduler::Descriptor qmd;
+        std::memcpy(qmd.data(), fs.registers.data() + 0xc8, sizeof(qmd));
+        if (const auto device = memory_manager.GpuToCpuAddress(address)) {
+            view.NoteInlineWrite(split, *device, qmd);
+        }
+        if ((fs.registers[0xa7] & (1U << 24)) != 0 || (fs.registers[0xcc] & (1U << 12)) == 0) {
+            const bool valued =
+                view.Signal(split, FrontQmdMemory{memory_manager}, address, 3, &qmd);
+            split.NoteDispatch(valued);
+        }
         break;
     }
     case 0x6c3: {
@@ -2130,11 +2254,21 @@ void KeplerCompute::FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& fs
         const GPUVAddr address =
             (GPUVAddr{fs.registers[0x6c0] & 0x1ffffff} << 32) | fs.registers[0x6c1];
         const u32 argument = fs.registers[0x6c3];
+        const u32 operation = argument & 3;
+        const bool reduction = ((argument >> 3) & 1) != 0;
+        // A reduction combines the payload with the word when its fence signals.
+        std::optional<u32> base;
+        if ((operation == 0 || operation == 2) && reduction) {
+            base = split.SemaphoreWordAt(&memory_manager, address);
+        }
         // Bit 28: a one-word structure, without the time stamp.
         split.NoteWrite(&memory_manager, address, ((argument >> 28) & 1) != 0 ? 4 : 16, true);
-        const u32 operation = argument & 3;
-        if ((operation == 0 || operation == 2) && ((argument >> 3) & 1) == 0) {
+        if ((operation == 0 || operation == 2) && !reduction) {
             split.NoteRelease(&memory_manager, address, fs.registers[0x6c2]);
+        } else if (base) {
+            split.NoteRelease(
+                &memory_manager, address,
+                ReduceSemaphore((argument >> 9) & 7, false, *base, fs.registers[0x6c2]));
         } else {
             split.ForgetRelease(&memory_manager, address);
         }
