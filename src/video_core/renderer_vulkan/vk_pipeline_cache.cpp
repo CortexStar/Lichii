@@ -743,6 +743,158 @@ bool PreloadAllPipelines() {
     }();
     return all;
 }
+
+/// The attribute mask ShaderCache::MakeShaderInfo gives a cached program: the SPH input map of a
+/// native VertexB program, none for task and mesh programs, all attributes otherwise.
+u64 CachedProgramAttributeMask(const FileEnvironment& env) {
+    const Shader::Stage stage = env.ShaderStage();
+    if (stage == Shader::Stage::VertexB && env.IsNativeProgram()) {
+        std::array<std::array<bool, 4>, Maxwell::NumVertexAttributes> input_generic{};
+        for (size_t index = 0; index < input_generic.size(); ++index) {
+            input_generic[index] = env.SPH().vtg.InputGeneric(index);
+        }
+        return VideoCommon::VertexAttributeMask(input_generic);
+    }
+    if (stage == Shader::Stage::Task || stage == Shader::Stage::Mesh) {
+        return 0;
+    }
+    return ~u64{0};
+}
+
+struct ShaderCacheMigration {
+    u32 source_version{};
+    size_t graphics{};
+    size_t compute{};
+    size_t masked{};
+    size_t merged{};
+    size_t used{};
+};
+
+/// Writes a shader cache of an earlier version (54 or 53, the same record format) as this
+/// version: graphics keys keep only the vertex attribute types their programs read
+/// (KeyedAttributeTypes), as the runtime keys them since version 55, and records whose keys
+/// become equal are written once. The used list is carried over under the new key hashes. The
+/// source files are left for the builds that read them.
+std::optional<ShaderCacheMigration> MigrateShaderCache(const std::filesystem::path& base_dir,
+                                                       const std::filesystem::path& destination,
+                                                       const std::filesystem::path& used_destination,
+                                                       u8 max_used_age) {
+    static constexpr std::array<char, 8> magic{'y', 'u', 'z', 'u', 'c', 'a', 'c', 'h'};
+    std::error_code error;
+    if (std::filesystem::exists(destination, error) || error) {
+        return std::nullopt;
+    }
+    for (const u32 version : VideoCommon::VulkanShaderCacheMigrationSources) {
+        const auto source = VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan", version);
+        if (!VideoCommon::PipelineCacheHeaderMatches(source, magic, version)) {
+            continue;
+        }
+        auto temporary = destination;
+        temporary += ".migrating";
+        ShaderCacheMigration result{.source_version = version};
+        std::unordered_map<u64, u64> new_hashes;
+        try {
+            std::ifstream in(source, std::ios::binary | std::ios::ate);
+            in.exceptions(std::ifstream::failbit);
+            const auto end = in.tellg();
+            in.seekg(static_cast<std::streamoff>(magic.size() + sizeof(u32)));
+            std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+            out.exceptions(std::ofstream::failbit);
+            out.write(magic.data(), magic.size())
+                .write(reinterpret_cast<const char*>(&CACHE_VERSION), sizeof(CACHE_VERSION));
+            std::unordered_set<GraphicsPipelineCacheKey> written;
+            std::vector<char> record;
+            while (in.tellg() != end) {
+                const auto record_begin = in.tellg();
+                u32 num_envs{};
+                in.read(reinterpret_cast<char*>(&num_envs), sizeof(num_envs));
+                std::vector<FileEnvironment> envs(num_envs);
+                for (FileEnvironment& env : envs) {
+                    env.Deserialize(in);
+                }
+                const auto envs_end = in.tellg();
+                const auto copy_environments = [&] {
+                    record.resize(static_cast<size_t>(envs_end - record_begin));
+                    in.seekg(record_begin);
+                    in.read(record.data(), static_cast<std::streamsize>(record.size()));
+                    out.write(record.data(), static_cast<std::streamsize>(record.size()));
+                };
+                if (envs.front().ShaderStage() == Shader::Stage::Compute) {
+                    ComputePipelineCacheKey key;
+                    in.read(reinterpret_cast<char*>(&key), sizeof(key));
+                    const auto record_end = in.tellg();
+                    copy_environments();
+                    in.seekg(record_end);
+                    out.write(reinterpret_cast<const char*>(&key), sizeof(key));
+                    ++result.compute;
+                    continue;
+                }
+                GraphicsPipelineCacheKey key;
+                in.read(reinterpret_cast<char*>(&key), sizeof(key));
+                const auto record_end = in.tellg();
+                const u64 old_hash = key.Hash();
+                if (key.state.dynamic_vertex_input != 0) {
+                    std::array<u64, Maxwell::MaxShaderProgram> masks{};
+                    size_t env_index = 0;
+                    for (size_t stage = 0; stage < key.unique_hashes.size(); ++stage) {
+                        if (key.unique_hashes[stage] != 0 && env_index < envs.size()) {
+                            masks[stage] = CachedProgramAttributeMask(envs[env_index++]);
+                        }
+                    }
+                    const u64 types = VideoCommon::KeyedAttributeTypes(
+                        key.state.attribute_types, key.unique_hashes, masks);
+                    if (types != key.state.attribute_types) {
+                        key.state.attribute_types = types;
+                        ++result.masked;
+                    }
+                }
+                new_hashes.emplace(old_hash, key.Hash());
+                if (!written.insert(key).second) {
+                    ++result.merged;
+                    continue;
+                }
+                copy_environments();
+                in.seekg(record_end);
+                out.write(reinterpret_cast<const char*>(&key), sizeof(key));
+                ++result.graphics;
+            }
+        } catch (const std::exception& e) {
+            LOG_WARNING(Render_Vulkan, "Pipeline cache version {} not migrated: {}", version,
+                        e.what());
+            std::filesystem::remove(temporary, error);
+            continue;
+        }
+        std::filesystem::rename(temporary, destination, error);
+        if (error) {
+            std::filesystem::remove(temporary, error);
+            return std::nullopt;
+        }
+        const auto used_source =
+            VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used", version);
+        if (!std::filesystem::exists(used_destination, error)) {
+            std::unordered_map<u64, u8> used;
+            for (const auto& [hash, age] : LoadUsedPipelines(used_source, max_used_age)) {
+                if (const auto it = new_hashes.find(hash); it != new_hashes.end()) {
+                    const auto [entry, inserted] = used.try_emplace(it->second, age);
+                    if (!inserted) {
+                        entry->second = (std::min)(entry->second, age);
+                    }
+                }
+            }
+            std::ofstream file{used_destination, std::ios::binary | std::ios::trunc};
+            const u32 count = static_cast<u32>(used.size());
+            file.write(reinterpret_cast<const char*>(&UsedPipelinesMagic), sizeof(UsedPipelinesMagic));
+            file.write(reinterpret_cast<const char*>(&count), sizeof(count));
+            for (const auto& [hash, age] : used) {
+                file.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
+                file.write(reinterpret_cast<const char*>(&age), sizeof(age));
+            }
+            result.used = used.size();
+        }
+        return result;
+    }
+    return std::nullopt;
+}
 } // Anonymous namespace
 
 PipelineCache::~PipelineCache() {
@@ -971,6 +1123,21 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan", CACHE_VERSION);
     used_pipelines_filename =
         VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used", CACHE_VERSION);
+    {
+        const auto begin = std::chrono::steady_clock::now();
+        if (const auto migrated = MigrateShaderCache(base_dir, pipeline_cache_filename,
+                                                     used_pipelines_filename,
+                                                     MaxUsedPipelineAge(device))) {
+            LOG_INFO(Render_Vulkan,
+                     "Pipeline cache migrated from version {}: {} graphics ({} keys masked, {} "
+                     "merged), {} compute, {} used pipelines, in {} ms",
+                     migrated->source_version, migrated->graphics, migrated->masked,
+                     migrated->merged, migrated->compute, migrated->used,
+                     std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - begin)
+                         .count());
+        }
+    }
     used_pipelines = LoadUsedPipelines(used_pipelines_filename, MaxUsedPipelineAge(device));
     used_pipelines_saved = std::chrono::steady_clock::now();
     size_t skipped_pipelines = 0;
