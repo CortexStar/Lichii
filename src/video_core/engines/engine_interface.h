@@ -54,6 +54,9 @@ public:
     /// The class DmaPusher::BindSubchannel bound the engine as, if it did: logs name engines by
     /// it, as Lichii builds without RTTI (/GR-, -fno-rtti).
     std::optional<EngineTypes> bound_type;
+    /// Fast draw (nx2_fast_draw.h): the engine reports its own changes (Maxwell3D); a method of any other
+    /// engine ends draw reuse.
+    bool reports_fast_draw_breaks{};
 
 protected:
     virtual void ConsumeSinkImpl(Core::System& system) {

@@ -25,6 +25,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_drain_check.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace Tegra::Engines {
@@ -729,6 +730,8 @@ void Puller::ProcessSemaphoreRelease(DmaPusher& dma_pusher) {
 
 void Puller::ProcessSemaphoreAcquire(DmaPusher& dma_pusher) {
     DrainBack();
+    // The CPU may rewrite what the next draws read once it sees the release this waits for.
+    VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
     u32 word = dma_pusher.memory_manager.Read<u32>(regs.semaphore_address.SemaphoreAddress());
     const auto value = regs.semaphore_acquire;
     while (word != value) {
@@ -785,6 +788,7 @@ void Puller::ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument) {
         }
     } else {
         DrainBack();
+        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
         ReleaseFences(dma_pusher);
         word = dma_pusher.memory_manager.Read<u32>(address);
     }
