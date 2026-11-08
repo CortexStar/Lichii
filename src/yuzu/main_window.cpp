@@ -15,6 +15,7 @@
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "frontend_common/settings_generator.h"
+#include "render/adventure_notes.h"
 #include "render/performance_overlay.h"
 #ifdef HAS_RESHADE
 #include "configuration/configure_post_processing.h"
@@ -1570,6 +1571,7 @@ void MainWindow::ConnectMenuEvents() {
     connect_menu(ui->action_Show_Filter_Bar, &MainWindow::OnToggleFilterBar);
     connect_menu(ui->action_Show_Status_Bar, &MainWindow::OnToggleStatusBar);
     connect_menu(ui->action_Show_Performance_Overlay, &MainWindow::OnTogglePerfOverlay);
+    connect_menu(ui->action_Show_Adventure_Notes, &MainWindow::OnToggleAdventureNotes);
 #ifdef HAS_RESHADE
     connect_menu(ui->action_Post_Processing_Shaders, &MainWindow::OnPostProcessingShaders);
 #else
@@ -2386,6 +2388,13 @@ bool MainWindow::OnShutdownBegin() {
         perf_overlay->deleteLater();
         perf_overlay = nullptr;
     }
+    if (adventure_notes) {
+        adventure_notes->hide();
+        adventure_notes->deleteLater();
+        adventure_notes = nullptr;
+        ui->action_Show_Adventure_Notes->setChecked(false);
+    }
+    ui->action_Show_Adventure_Notes->setEnabled(false);
 
     QtCommon::system->SetShuttingDown(true);
     status_bar_update_timer.stop();
@@ -3426,6 +3435,8 @@ bool MainWindow::ConfirmShutdownGame() {
 void MainWindow::OnLoadComplete() {
     loading_screen->OnLoadComplete();
 
+    ui->action_Show_Adventure_Notes->setEnabled(true);
+
     perf_overlay = new PerformanceOverlay(this);
     perf_overlay->setVisible(ui->action_Show_Performance_Overlay->isChecked());
 
@@ -4265,6 +4276,21 @@ void MainWindow::OnToggleFilterBar() {
 
 void MainWindow::OnToggleStatusBar() {
     statusBar()->setVisible(ui->action_Show_Status_Bar->isChecked());
+}
+
+void MainWindow::OnToggleAdventureNotes() {
+    if (ui->action_Show_Adventure_Notes->isChecked()) {
+        if (!adventure_notes) {
+            adventure_notes = new AdventureNotes(
+                this, QtCommon::system->GetApplicationProcessProgramID());
+            connect(adventure_notes, &AdventureNotes::closed, this, [this]() {
+                ui->action_Show_Adventure_Notes->setChecked(false);
+            });
+        }
+        adventure_notes->show();
+    } else if (adventure_notes) {
+        adventure_notes->hide();
+    }
 }
 
 void MainWindow::OnTogglePerfOverlay() {

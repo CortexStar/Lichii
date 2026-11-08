@@ -63,6 +63,7 @@ class QSlider;
 class QHBoxLayout;
 class WaitTreeWidget;
 class PerformanceOverlay;
+class AdventureNotes;
 #ifdef HAS_RESHADE
 class ConfigurePostProcessing;
 #endif
@@ -409,6 +410,7 @@ private slots:
     void OnToggleFilterBar();
     void OnToggleStatusBar();
     void OnTogglePerfOverlay();
+    void OnToggleAdventureNotes();
 #ifdef HAS_RESHADE
     void OnPostProcessingShaders();
 #endif
@@ -523,6 +525,7 @@ private:
     QTimer emu_terminate_timer;
     OverlayDialog* shutdown_dialog{};
     PerformanceOverlay* perf_overlay = nullptr;
+    AdventureNotes* adventure_notes = nullptr;
 #ifdef HAS_RESHADE
     ConfigurePostProcessing* post_processing_dialog = nullptr;
 #endif
