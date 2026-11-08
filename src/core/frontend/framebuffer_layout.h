@@ -40,5 +40,9 @@ struct FramebufferLayout {
 
 FramebufferLayout DefaultFrameLayout(u32 width, u32 height) noexcept;
 float EmulationAspectRatio(Settings::AspectRatio aspect, float window_aspect_ratio) noexcept;
+/// The 21:9 setting's height / width: a window of a 21:9 panel's own shape (64:27 to 21:9) is
+/// filled, so a game rendering for it (Ocarina's "Ultrawide 21:9" Add-On) is not squeezed; any
+/// other window gets exactly 21:9.
+float UltrawideAspectRatio(float window_aspect_ratio) noexcept;
 
 } // namespace Layout
