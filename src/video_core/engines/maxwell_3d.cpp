@@ -20,13 +20,13 @@
 #include "video_core/dirty_flags.h"
 #include "video_core/draw_class_stats.h"
 #include "video_core/engines/maxwell_3d.h"
-#include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_split.h"
 #include "video_core/macro_hle_oot.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
+#include "video_core/nx2_list_indirect.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2_query_fast.h"
@@ -1534,6 +1534,30 @@ bool FrontSkipSame() {
     return skip;
 }
 
+// GPU-written list words the channel's compute macros left in its data RAM (Nx2ListIndirect):
+// the front runs 3D macros on the words themselves, so a macro at `start` that may read one
+// gets them first, read back from their slots.
+void ConcretizeListWords(VideoCommon::GpuSplit& split, VideoCore::RasterizerInterface* rasterizer,
+                         Nx2ListIndirect::DataRamWords& channel, std::span<u32> data_ram,
+                         const MacroEngine& engine, u32 start) {
+    const auto& reads =
+        channel.reads_3d.Get(engine.native_code, engine.native_code_generation, start);
+    if (!Nx2ListIndirect::MayRead(reads.data_ram_known, reads.data_ram, channel.words)) {
+        return;
+    }
+    const auto release = [&](u32 slot) { Nx2ListIndirect::ReleaseSlot(split, rasterizer, slot); };
+    Nx2ListIndirect::Prune(channel.words, [data_ram](u32 word) { return data_ram[word]; }, release);
+    if (!Nx2ListIndirect::MayRead(reads.data_ram_known, reads.data_ram, channel.words)) {
+        return;
+    }
+    Nx2ListIndirect::ConcretizeDataRam(
+        channel.words, data_ram,
+        [&](std::span<const u32> slots, std::span<u32> words) {
+            Nx2ListIndirect::ReadSlots(split, rasterizer, slots, words);
+        },
+        release);
+}
+
 } // Anonymous namespace
 
 Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSplit& split) {
@@ -1577,6 +1601,18 @@ Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSp
 // split stopped (accuracy settings changed mid-game). Hand the macros back: the front's copy
 // goes stale from now on, and a restart copies the registers again (Front).
 void Maxwell3D::ReleaseFront() {
+    // The macros run on the engine from now on: the data RAM gets the GPU-written list words
+    // its words hold placeholders of (Nx2ListIndirect).
+    if (auto* channel = Nx2ListIndirect::FindChannel(&native_data_ram);
+        channel != nullptr && !channel->words.empty()) {
+        auto& split = VideoCommon::GpuSplit::Get();
+        Nx2ListIndirect::ConcretizeDataRam(
+            channel->words, std::span<u32>{native_data_ram},
+            [&](std::span<const u32> slots, std::span<u32> words) {
+                Nx2ListIndirect::ReadSlots(split, rasterizer, slots, words);
+            },
+            [&](u32 slot) { Nx2ListIndirect::ReleaseSlot(split, rasterizer, slot); });
+    }
     executing_macro = front->executing_macro;
     macro_params = std::move(front->parameters);
     std::memcpy(shadow_state.reg_array.data(), front->shadow.data(), sizeof(front->shadow));
@@ -1898,6 +1934,10 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     VideoCommon::Nx2Profile::CountMethod(method, false);
     {
         VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Macro};
+        if (auto* channel = Nx2ListIndirect::FindChannel(&native_data_ram);
+            channel != nullptr && !channel->words.empty()) {
+            ConcretizeListWords(split, rasterizer, *channel, native_data_ram, engine, start);
+        }
         engine.native_interpreter.active_dram = &native_data_ram;
         // Ocarina of Time's macro replacements (macro_hle_oot.h), looked up again when the code
         // or the binding changed.

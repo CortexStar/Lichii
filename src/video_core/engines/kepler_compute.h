@@ -38,6 +38,10 @@ class MemoryManager;
 class Nx2AsyncReport;
 }
 
+namespace Tegra::Nx2ListIndirect {
+class ComputeFront;
+}
+
 namespace VideoCore {
 class RasterizerInterface;
 }
@@ -252,6 +256,12 @@ public:
         return indirect_compute;
     }
 
+    /// The slot of GPU-written list words (Nx2ListIndirect) the dispatch being made takes its
+    /// group counts from, indirectly: its QMD's grid is the slot's placeholders.
+    std::optional<u32> GetIndirectListSlot() const {
+        return indirect_list_slot;
+    }
+
     bool IsNativeMode() const { return native_mode; }
     bool ProcessGameDlss(u64 program_id, u64 native_key);
     /// Ocarina of Time with anti-aliasing at No sharpening (oot_network.h): true when this
@@ -284,6 +294,10 @@ public:
     /// GpuSplit's back (Kind::Writes): runs a run of writes the front sent as one entry, as the
     /// Method and MacroWrite entries it stands for.
     void BackWrites(Core::System& system, const u64* writes, u32 count);
+    /// The front, at a GPU-written list of `count` words that are all the parameters of the call
+    /// of macro method `method` about to start: whether the call takes the words as the
+    /// placeholders of `slot` (Nx2ListIndirect), the back's copy of them, instead of the words.
+    bool FrontTakeListWords(VideoCommon::GpuSplit& split, u32 method, u32 count, u32 slot);
 
 private:
     struct FrontState;
@@ -440,6 +454,9 @@ private:
     };
     std::vector<UploadInfo> uploads;
     std::optional<GPUVAddr> indirect_compute{};
+    std::optional<u32> indirect_list_slot{};
+    /// The front's GPU-written list words in this engine's macros (Nx2ListIndirect).
+    std::unique_ptr<Nx2ListIndirect::ComputeFront> list_front;
 };
 
 #define ASSERT_REG_POSITION(field_name, position)                                                  \

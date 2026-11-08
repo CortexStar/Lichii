@@ -260,6 +260,11 @@ public:
     /// ReadGpuWrittenCommands for the entry `header` at dma_get, counted in the profile by the
     /// call it continues (Nx2Profile::CountGpuWrittenList).
     bool ReadGpuWrittenListTimed(const CommandListHeader& header, bool* pending);
+    /// A GPU-written list that is all the parameters of the compute macro call about to start,
+    /// on the split with macros on its front: if the call only moves the words where the back can
+    /// take them over (Nx2ListIndirect), puts their placeholders in command_headers instead of
+    /// reading them. The back copies the words at the list's place on the host GPU.
+    bool TakeGpuWrittenListWords(const CommandListHeader& header);
     /// Brings command list words the GPU wrote (still only in host buffers) to guest memory.
     bool FlushGpuWrittenCommands(GPUVAddr address, size_t size);
 

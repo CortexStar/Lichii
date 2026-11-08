@@ -32,30 +32,45 @@ namespace VideoCommon {
 /// Why the split's front waited for its back (EDEN_NX2_GPU_PROFILE counts each).
 enum class DrainSite : u32 {
     Other,
-    FetchDrain,     ///< EDEN_NX2_FETCH_DRAIN: before every entry
-    Acquire,        ///< A semaphore acquire reads the value the back may release
-    SemaphoreFlush, ///< The acquired semaphore is in the buffer cache
-    FenceRelease,   ///< The puller's acquires release the pending fences
-    ListWriters,    ///< GPU-written command lists: the dispatches and copies sent before them
-    ListSync,       ///< Command lists on draw-written pages: the work before the last host sync
-    ListFlush,      ///< Command lists on GPU-written pages: drain and flush the pages
-    MacroDmaRead,   ///< The front's macros read memory (MME DMA)
-    MacroDmaFlush,  ///< Those words are in the buffer cache
-    GpSyncFence,    ///< A GP entry's sync bit (sync_memory_operations)
-    Map,            ///< GPU memory maps before later command reads
-    FrontStart,     ///< The front takes an engine's macros over
-    FrontVerify,    ///< EDEN_NX2_FRONT_VERIFY
+    FetchDrain,         ///< EDEN_NX2_FETCH_DRAIN: before every entry
+    Acquire,            ///< A semaphore acquire reads the value the back may release
+    SemaphoreFlush,     ///< The acquired semaphore is in the buffer cache
+    FenceRelease,       ///< The puller's acquires release the pending fences
+    ListWriters,        ///< GPU-written command lists: the dispatches and copies sent before them
+    ListSync,           ///< Command lists on draw-written pages: the work before the last host sync
+    ListFlush,          ///< Command lists on GPU-written pages: drain and flush the pages
+    MacroDmaRead,       ///< The front's macros read memory (MME DMA)
+    MacroDmaFlush,      ///< Those words are in the buffer cache
+    GpSyncFence,        ///< A GP entry's sync bit (sync_memory_operations)
+    Map,                ///< GPU memory maps before later command reads
+    FrontStart,         ///< The front takes an engine's macros over
+    FrontVerify,        ///< EDEN_NX2_FRONT_VERIFY
     NarrowMacroDmaRead, ///< MacroDmaRead narrowed (WaitForQueuedWritesTo)
     NarrowAcquire,      ///< Acquire narrowed: the queued writes over the word
     NarrowListWriters,  ///< ListWriters narrowed (WaitForWritersTo)
+    ListSlots,          ///< GPU-written list words read back from their slots (Nx2ListIndirect)
     Count,
 };
 
 inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> drain_site_names{
-    "other",       "fetch drain",     "acquire",    "semaphore flush", "fence release",
-    "list writers", "list sync",      "list flush", "macro dma read",  "macro dma flush",
-    "gp sync fence", "map",           "front start", "front verify",   "macro dma read (narrow)",
-    "acquire (narrow)", "list writers (narrow)",
+    "other",
+    "fetch drain",
+    "acquire",
+    "semaphore flush",
+    "fence release",
+    "list writers",
+    "list sync",
+    "list flush",
+    "macro dma read",
+    "macro dma flush",
+    "gp sync fence",
+    "map",
+    "front start",
+    "front verify",
+    "macro dma read (narrow)",
+    "acquire (narrow)",
+    "list writers (narrow)",
+    "list slots",
 };
 
 /// What made the front note an unbounded write (BarrierOnly tells the kinds apart).

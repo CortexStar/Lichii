@@ -463,8 +463,9 @@ struct FrontWaits {
     std::array<u64, static_cast<size_t>(AcquireOutcome::Count)> resumed{};
     std::array<u64, static_cast<size_t>(AcquireOutcome::Count)> resumed_ns{};
     /// GPU-written command lists by the call they continue (engine << 16 | method; 0: a list
-    /// that starts with a method header): count, front wait for their writers (ticks), copies
-    /// the channel suspended for, and the wall time of those suspensions.
+    /// that starts with a method header; engine 4: a compute call that took the words as
+    /// placeholders, Nx2ListIndirect): count, front wait for their writers (ticks), copies the
+    /// channel suspended for, and the wall time of those suspensions.
     struct List {
         u64 count{};
         u64 wait_ticks{};
@@ -548,8 +549,9 @@ inline std::string FrontWaitsLine(u64 window, u64 window_ticks) {
     std::string listed;
     for (size_t i = 0; i < lists.size() && i < 8; ++i) {
         const auto& [key, list] = lists[i];
-        static constexpr std::array<const char*, 4> engines{"header", "3D", "compute", "other"};
-        const u32 engine = (std::min)(key >> 16, 3U);
+        static constexpr std::array<const char*, 5> engines{"header", "3D", "compute", "other",
+                                                            "compute kept on the GPU"};
+        const u32 engine = (std::min)(key >> 16, 4U);
         listed += fmt::format(" {} {:#x} {:.0f}/s wait {:.1f} ms, suspended {:.0f}/s {:.1f} ms,",
                               engines[engine], key & 0xffff,
                               static_cast<double>(list.count) * 1e9 / window_d,
