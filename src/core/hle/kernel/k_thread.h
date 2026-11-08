@@ -989,6 +989,11 @@ public:
     ConditionVariableThreadTree* GetConditionVariableTree() const {
         return m_condvar_tree;
     }
+
+    /// KAddressArbiter's pre-wait spin: how well this thread's spins paid off lately (0-16), and
+    /// a counter that probes again now and then while it is 0. Touched only by the thread itself.
+    u8 m_nx2_arb_spin_credit{8};
+    u8 m_nx2_arb_spin_probe{};
 };
 
 class KScopedDisableDispatch {
