@@ -332,8 +332,9 @@ public:
                 // occluded object drawn instead of hidden (the scene vanished) or a stall (9 -> 22
                 // FPS in Kokiri Forest). The availability word is what decides, not what the copy
                 // writes for an unavailable query, which the Vulkan spec leaves undefined
-                // (approach from Savulska's test on #573). Waiting on the newest query instead
-                // (#679) gave 54 FPS under the Deku tree on an RX 9070 XT, this 56-58.
+                // (approach from Savulska's test on #573). Each run still waits on its newest query
+                // first (#679), so fewer results come in late: steadier frame times in motion on an
+                // RX 9070 XT.
                 const bool resolve_availability = availability_pass.has_value();
                 const VkDeviceSize span_slots = span_end - span_start;
                 const VkDeviceSize availability_offset = base_offset * 2;
@@ -363,8 +364,34 @@ public:
                     }
                     for (const auto& [start, end] : merged) {
                         if (resolve_availability) {
+                            const size_t last = end - 1;
+                            const VkDeviceSize last_offset =
+                                availability_offset + (last - span_start) * 16;
                             cmdbuf.CopyQueryPoolResults(
-                                query_pool, static_cast<u32>(start), static_cast<u32>(end - start),
+                                query_pool, static_cast<u32>(last), 1, availability_buffer,
+                                last_offset, 16,
+                                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT |
+                                    VK_QUERY_RESULT_WAIT_BIT);
+                            if (last == start) {
+                                continue;
+                            }
+                            // Orders the unwaited copy after the waited one.
+                            const VkBufferMemoryBarrier waited_barrier{
+                                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                                .pNext = nullptr,
+                                .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                                .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                .buffer = availability_buffer,
+                                .offset = last_offset,
+                                .size = 16,
+                            };
+                            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                                                   waited_barrier);
+                            cmdbuf.CopyQueryPoolResults(
+                                query_pool, static_cast<u32>(start), static_cast<u32>(last - start),
                                 availability_buffer, availability_offset + (start - span_start) * 16,
                                 16, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
                         } else if (!wait_on_last || end - start == 1) {
