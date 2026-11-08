@@ -2359,6 +2359,15 @@ bool TextureCacheRuntime::OotDlss(Framebuffer* dst_framebuffer, ImageView& input
         output_sampler = dlss_upscaler->PointSampler();
 #endif
     }
+#ifdef _WIN32
+    // AMD frame generation keeps from the real frame what differs from this snapshot: the HUD the
+    // game draws later, and the particles composited next (they have no motion vectors).
+    const bool snapshot_hudless = !hdr && AmdFrameGen::Active() != nullptr && AmdFrameGen::Wanted();
+    if (snapshot_hudless && particles_after) {
+        SnapshotOotHudless(output_image,
+                           VkImageSubresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}, extent);
+    }
+#endif
     if (particles_after &&
         !oot_motion_vectors->CompositeParticles(scheduler, output_view, extent,
                                                 input_color.Handle(Shader::TextureType::Color2D),
@@ -2391,10 +2400,9 @@ bool TextureCacheRuntime::OotDlss(Framebuffer* dst_framebuffer, ImageView& input
         DrawUpscaledOutput(dst_framebuffer, output_view, output_image, output_sampler);
     }
 #ifdef _WIN32
-    // After the tonemap the output is the presented scene up to the HUD: AMD frame generation
-    // compares it with the presented image to find the HUD.
-    if (!hdr && !motion_debug && AmdFrameGen::Active() != nullptr && AmdFrameGen::Wanted()) {
-        SnapshotOotHudless(*dst_framebuffer);
+    // After the tonemap the output is the presented scene up to the HUD.
+    if (snapshot_hudless && !particles_after && !motion_debug) {
+        SnapshotOotHudless(dst_framebuffer->Images()[0], dst_framebuffer->ImageRanges()[0], extent);
     }
 #endif
     static bool logged{};
@@ -2407,10 +2415,9 @@ bool TextureCacheRuntime::OotDlss(Framebuffer* dst_framebuffer, ImageView& input
     return true;
 }
 
-void TextureCacheRuntime::SnapshotOotHudless(const Framebuffer& scene) {
-    const VkImage source = scene.Images()[0];
-    const VkImageSubresourceRange source_range = scene.ImageRanges()[0];
-    const VkExtent2D extent = scene.RenderArea();
+void TextureCacheRuntime::SnapshotOotHudless(VkImage source,
+                                             const VkImageSubresourceRange& source_range,
+                                             VkExtent2D extent) {
     if (!oot_hudless_image || oot_hudless.extent.width != extent.width ||
         oot_hudless.extent.height != extent.height) {
         scheduler.Finish();
@@ -2419,7 +2426,7 @@ void TextureCacheRuntime::SnapshotOotHudless(const Framebuffer& scene) {
             .pNext = nullptr,
             .flags = 0,
             .imageType = VK_IMAGE_TYPE_2D,
-            .format = VK_FORMAT_B10G11R11_UFLOAT_PACK32,
+            .format = VK_FORMAT_R16G16B16A16_SFLOAT,
             .extent = {extent.width, extent.height, 1},
             .mipLevels = 1,
             .arrayLayers = 1,
@@ -2469,24 +2476,26 @@ void TextureCacheRuntime::SnapshotOotHudless(const Framebuffer& scene) {
         };
         cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                0, before);
-        const VkImageCopy copy{
+        // A blit converts: the source is the upscaler's output or the game's B10G11R11 image.
+        const VkOffset3D end{static_cast<s32>(extent.width), static_cast<s32>(extent.height), 1};
+        const VkImageBlit blit{
             .srcSubresource{
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                 .mipLevel = source_range.baseMipLevel,
                 .baseArrayLayer = source_range.baseArrayLayer,
                 .layerCount = 1,
             },
-            .srcOffset = {0, 0, 0},
+            .srcOffsets = {VkOffset3D{0, 0, 0}, end},
             .dstSubresource{
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                 .mipLevel = 0,
                 .baseArrayLayer = 0,
                 .layerCount = 1,
             },
-            .dstOffset = {0, 0, 0},
-            .extent = {extent.width, extent.height, 1},
+            .dstOffsets = {VkOffset3D{0, 0, 0}, end},
         };
-        cmdbuf.CopyImage(source, VK_IMAGE_LAYOUT_GENERAL, target, VK_IMAGE_LAYOUT_GENERAL, copy);
+        cmdbuf.BlitImage(source, VK_IMAGE_LAYOUT_GENERAL, target, VK_IMAGE_LAYOUT_GENERAL, blit,
+                         VK_FILTER_NEAREST);
         const VkMemoryBarrier after{
             .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
             .pNext = nullptr,

@@ -22,6 +22,13 @@ problems where the background moves differently from the particle:
 - a particle in front of a moving character or swaying foliage gets dragged along with it;
 - fast particles (sparks, fairy trails, effects in combat) double or smear between real frames.
 
+## AMD frame generation (2026-11-08)
+
+Step 1 below is how AMD's frame generation handles them: its HUD-less input
+(`AmdFrameGen::ComposeHudless`) is the scene before the particles composite and before the HUD,
+so frame generation finds both as the difference to the presented image and keeps them from the
+real frame (`TextureCacheRuntime::SnapshotOotHudless`).
+
 ## Plan, cheapest first
 
 1. **Treat particles like the HUD.** We already know, per pixel, what the particles added to
