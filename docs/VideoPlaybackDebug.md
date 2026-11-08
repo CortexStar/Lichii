@@ -62,8 +62,13 @@ or log a two-second timeout when the GPU needs more guest work.
 Unset it or set it to `0` for the normal path.
 
 Repeat with the emulator's video-decoder setting on CPU and then GPU.
-Keep the logs separate. AV1 requires an FFmpeg build with an AV1 decoder;
-the existing MSVC/Linux AV1 package selection does not establish MinGW support.
+Keep the logs separate. AV1 on the CPU needs FFmpeg with libdav1d (`Using decoder
+libdav1d`, then `AV1 on the CPU with <n> threads`). AV1 on the GPU needs FFmpeg's
+native `av1` decoder and an AV1 hwaccel (the MinGW package from
+`tools/windows/build-ffmpeg-mingw.sh`): the log shows `Created vulkan decode device`,
+`Using vulkan GPU decoder`, `Using decoder av1` and `decoder for "video/av1" open on
+the GPU`. A GPU decoder that fails logs `GPU decoder for "video/av1" failed, decoding
+on the CPU`. The `frame <n>` lines count late frames dropped and early replies held.
 
 Unset all trace/capture variables after testing. `EDEN_NX2_VDEC_TRACE` is enabled
 by presence, so setting it to `0` does not disable it. Restart after changing

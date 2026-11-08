@@ -30,6 +30,7 @@ Tools for Eden and other subprojects. When adding new scripts please use `#!/bin
 - `find-unused-strings.sh`: Find any unused strings in the Android app (XML -> Kotlin).
 - `cpp-lint.sh`: Homemade dumb C++ linter.
 - `fuzzsettings.cpp`: Fuzz settings files.
+- `windows/build-ffmpeg-mingw.sh`: Cross-builds the MinGW FFmpeg package (libdav1d, AV1 hardware decoding) from Linux with llvm-mingw.
 
 ## Android
 
