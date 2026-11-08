@@ -9,6 +9,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include "common/common_types.h"
 #include "core/arm/guest_functions.h"
+#include "dynarmic/common/fp/fpcr.h"
+#include "dynarmic/common/fp/fpsr.h"
+#include "dynarmic/common/fp/op/FPRecipEstimate.h"
 #include "dynarmic/interface/A64/a64.h"
 
 #if defined(_MSC_VER)
@@ -405,4 +408,58 @@ TEST_CASE("Fmodf matches musl fmodf run in the JIT", "[guest_cpu]") {
         }
         CHECK(mismatches == 0);
     }
+}
+TEST_CASE("Vector FRECPE (single) matches FPRecipEstimate", "[guest_cpu]") {
+    GuestEnvironment env;
+    // frecpe v0.4s, v1.4s; svc #0
+    env.Load({0x4EA1D820, Svc0});
+    Dynarmic::A64::Jit jit{BaseConfig(env)};
+    env.jit = &jit;
+    XorShift rng{4242};
+    u32 mismatches = 0;
+    const auto check = [&](u32 fpcr, const std::array<u32, 4>& lanes) {
+        jit.SetFpcr(fpcr);
+        jit.SetFpsr(0);
+        jit.SetVector(1, {lanes[0] | u64{lanes[1]} << 32, lanes[2] | u64{lanes[3]} << 32});
+        jit.SetPC(Entry);
+        jit.Run();
+        const auto v0 = jit.GetVector(0);
+        Dynarmic::FP::FPSR fpsr{};
+        for (size_t i = 0; i < 4; ++i) {
+            const u32 expected =
+                Dynarmic::FP::FPRecipEstimate<u32>(lanes[i], Dynarmic::FP::FPCR{fpcr}, fpsr);
+            const u32 got = static_cast<u32>(v0[i / 2] >> (32 * (i % 2)));
+            if (got != expected && ++mismatches <= 8) {
+                UNSCOPED_INFO("fpcr " << std::hex << fpcr << " in " << lanes[i] << ": jit " << got
+                                      << ", reference " << expected);
+            }
+        }
+        if ((jit.GetFpsr() & 0x9F) != (fpsr.Value() & 0x9F) && ++mismatches <= 8) {
+            UNSCOPED_INFO("fpsr " << std::hex << jit.GetFpsr() << " vs " << fpsr.Value());
+        }
+    };
+    // The estimate depends on the sign, the exponent and the top 8 fraction bits: every such
+    // class, with random low fraction bits, in all four lanes, under each FPCR mode.
+    for (const u32 fpcr : {0U, 1U << 24, 1U << 25, 3U << 24, 1U << 22}) {
+        for (u32 sign = 0; sign < 2; ++sign) {
+            for (u32 exponent = 0; exponent < 256; ++exponent) {
+                for (u32 prefix = 0; prefix < 256; prefix += 4) {
+                    std::array<u32, 4> lanes{};
+                    for (u32 i = 0; i < 4; ++i) {
+                        lanes[i] = sign << 31 | exponent << 23 | (prefix + i) << 15 |
+                                   (static_cast<u32>(rng.Next()) & 0x7FFF);
+                    }
+                    check(fpcr, lanes);
+                }
+            }
+        }
+        // Lanes mixing fast and slow inputs.
+        for (int trial = 0; trial < 20'000; ++trial) {
+            const u64 a = rng.Next();
+            const u64 b = rng.Next();
+            check(fpcr, {static_cast<u32>(a), static_cast<u32>(a >> 32), static_cast<u32>(b),
+                         static_cast<u32>(b >> 32)});
+        }
+    }
+    CHECK(mismatches == 0);
 }

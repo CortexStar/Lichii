@@ -7,6 +7,7 @@
  */
 
 #include <array>
+#include <bit>
 #include <limits>
 #include <tuple>
 #include <type_traits>
@@ -1504,9 +1505,28 @@ void EmitX64::EmitFPVectorPairedAddLower64(EmitContext& ctx, IR::Inst* inst) {
     });
 }
 
+// FRECPE's 8-bit estimate for each 8-bit fraction prefix (the Arm RecipEstimate pseudocode:
+// a = 2 * (256 + prefix) + 1, b = 2^19 / a, r = (b + 1) / 2), as single-precision fraction bits.
+constexpr std::array<u32, 256> recip_estimate_fraction = [] {
+    std::array<u32, 256> table{};
+    for (u32 prefix = 0; prefix < 256; ++prefix) {
+        const u32 a = (256 + prefix) * 2 + 1;
+        const u32 b = (1U << 19) / a;
+        const u32 r = (b + 1) / 2;
+        table[prefix] = (r & 0xFF) << 15;
+    }
+    return table;
+}();
+
 template<size_t fsize>
 static void EmitRecipEstimate(BlockOfCode& code, EmitContext& ctx, IR::Inst* inst) {
     using FPT = mcl::unsigned_integer_of_size<fsize>;
+
+    const auto fallback_fn = [](VectorArray<FPT>& result, const VectorArray<FPT>& operand, FP::FPCR fpcr, FP::FPSR& fpsr) {
+        for (size_t i = 0; i < result.size(); i++) {
+            result[i] = FP::FPRecipEstimate<FPT>(operand[i], fpcr, fpsr);
+        }
+    };
 
     if constexpr (fsize != 16) {
         if (ctx.HasOptimization(OptimizationFlag::Unsafe_ReducedErrorFP)) {
@@ -1531,11 +1551,64 @@ static void EmitRecipEstimate(BlockOfCode& code, EmitContext& ctx, IR::Inst* ins
         }
     }
 
-    EmitTwoOpFallback(code, ctx, inst, [](VectorArray<FPT>& result, const VectorArray<FPT>& operand, FP::FPCR fpcr, FP::FPSR& fpsr) {
-        for (size_t i = 0; i < result.size(); i++) {
-            result[i] = FP::FPRecipEstimate<FPT>(operand[i], fpcr, fpsr);
+    if constexpr (fsize == 32) {
+        if (code.HasHostFeature(HostFeature::AVX2)) {
+            // Exact without a call when every lane has an exponent of 1-252 (normal input, normal
+            // estimate): sign, exponent 253 - e and the table's fraction, the same integer steps
+            // as FPRecipEstimate, which raises no exception there. Other inputs (zero, denormal,
+            // infinity, NaN, an estimate that is denormal or flushed) take the call.
+            auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+            const bool fpcr_controlled = args[1].GetImmediateU1();
+
+            const Xbyak::Xmm operand = ctx.reg_alloc.UseXmm(code, args[0]);
+            const Xbyak::Xmm result = ctx.reg_alloc.ScratchXmm(code);
+            const Xbyak::Xmm index = ctx.reg_alloc.ScratchXmm(code);
+            const Xbyak::Xmm mask = ctx.reg_alloc.ScratchXmm(code);
+            const Xbyak::Reg64 table = ctx.reg_alloc.ScratchGpr(code);
+
+            SharedLabel bad_values = ctx.GenSharedLabel(), end = ctx.GenSharedLabel();
+
+            // exponent - 1 <= 251 in every lane
+            code.vpsrld(index, operand, 23);
+            code.vpand(index, index, GetVectorOf<32, 0xFF>(code));
+            code.vpcmpeqd(result, result, result);
+            code.vpaddd(index, index, result);
+            code.vpminud(mask, index, GetVectorOf<32, 251>(code));
+            code.vpcmpeqd(mask, mask, index);
+            code.vptest(mask, result);
+            code.jnc(*bad_values, code.T_NEAR);
+
+            // mask is all ones: gather every lane's fraction
+            code.vpsrld(index, operand, 15);
+            code.vpand(index, index, GetVectorOf<32, 0xFF>(code));
+            code.mov(table, std::bit_cast<u64>(recip_estimate_fraction.data()));
+            code.vpxor(result, result, result);
+            code.vpgatherdd(result, code.ptr[table + index * 4], mask);
+            code.vpand(index, operand, GetVectorOf<32, 0x7F800000>(code));
+            code.vmovdqa(mask, GetVectorOf<32, u64{253} << 23>(code));
+            code.vpsubd(mask, mask, index);
+            code.vpor(result, result, mask);
+            code.vpand(index, operand, GetVectorOf<32, 0x80000000>(code));
+            code.vpor(result, result, index);
+
+            code.L(*end);
+
+            ctx.deferred_emits.emplace_back([=, &code, &ctx] {
+                code.L(*bad_values);
+                code.lea(rsp, ptr[rsp - 8]);
+                ABI_PushCallerSaveRegistersAndAdjustStackExcept(code, HostLocXmmIdx(result.getIdx()));
+                EmitTwoOpFallbackWithoutRegAlloc(code, ctx, result, operand, fallback_fn, fpcr_controlled);
+                ABI_PopCallerSaveRegistersAndAdjustStackExcept(code, HostLocXmmIdx(result.getIdx()));
+                code.add(rsp, 8);
+                code.jmp(*end, code.T_NEAR);
+            });
+
+            ctx.reg_alloc.DefineValue(code, inst, result);
+            return;
         }
-    });
+    }
+
+    EmitTwoOpFallback(code, ctx, inst, fallback_fn);
 }
 
 void EmitX64::EmitFPVectorRecipEstimate16(EmitContext& ctx, IR::Inst* inst) {
