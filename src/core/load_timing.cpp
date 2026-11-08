@@ -29,6 +29,8 @@ std::atomic<u64> host_decompressions{0};
 std::atomic<u64> host_decompressed_bytes{0};
 std::atomic<u64> host_decompress_ns{0};
 std::atomic<u64> guest_decompressions{0};
+std::atomic<u64> gpu_read_waits{0};
+std::atomic<u64> gpu_read_wait_ns{0};
 
 struct State {
     std::mutex mutex;
@@ -71,6 +73,10 @@ std::string Describe(const Counters& work) {
             static_cast<double>(work.host_decompressed_bytes) / (1024.0 * 1024.0),
             Ms(work.host_decompress_ns), work.guest_decompressions);
     }
+    if (work.gpu_read_waits != 0) {
+        text += fmt::format(", reads of GPU-written memory {} ({:.0f} ms waiting)",
+                            work.gpu_read_waits, Ms(work.gpu_read_wait_ns));
+    }
     return text;
 }
 
@@ -90,6 +96,8 @@ Counters Counters::operator-(const Counters& rhs) const {
         .host_decompressed_bytes = host_decompressed_bytes - rhs.host_decompressed_bytes,
         .host_decompress_ns = host_decompress_ns - rhs.host_decompress_ns,
         .guest_decompressions = guest_decompressions - rhs.guest_decompressions,
+        .gpu_read_waits = gpu_read_waits - rhs.gpu_read_waits,
+        .gpu_read_wait_ns = gpu_read_wait_ns - rhs.gpu_read_wait_ns,
     };
 }
 
@@ -114,6 +122,11 @@ void CountHostDecompression(u64 bytes, Clock::duration host_time, bool guest_ran
     host_decompress_ns.fetch_add(ToNs(host_time), std::memory_order_relaxed);
 }
 
+void CountGpuReadWait(Clock::duration wait_time) {
+    gpu_read_waits.fetch_add(1, std::memory_order_relaxed);
+    gpu_read_wait_ns.fetch_add(ToNs(wait_time), std::memory_order_relaxed);
+}
+
 Counters ReadCounters() {
     Counters counters{
         .file_reads = file_reads.load(std::memory_order_relaxed),
@@ -125,6 +138,8 @@ Counters ReadCounters() {
         .host_decompressed_bytes = host_decompressed_bytes.load(std::memory_order_relaxed),
         .host_decompress_ns = host_decompress_ns.load(std::memory_order_relaxed),
         .guest_decompressions = guest_decompressions.load(std::memory_order_relaxed),
+        .gpu_read_waits = gpu_read_waits.load(std::memory_order_relaxed),
+        .gpu_read_wait_ns = gpu_read_wait_ns.load(std::memory_order_relaxed),
     };
 #ifdef LOAD_TIMING_HAS_DYNARMIC
     const auto& jit = Dynarmic::A64::compile_statistics;

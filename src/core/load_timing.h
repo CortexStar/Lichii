@@ -29,6 +29,8 @@ struct Counters {
     u64 host_decompressed_bytes{};
     u64 host_decompress_ns{};
     u64 guest_decompressions{};
+    u64 gpu_read_waits{};
+    u64 gpu_read_wait_ns{};
 
     Counters operator-(const Counters& rhs) const;
 };
@@ -40,6 +42,9 @@ void CountServiceCall(Clock::duration handler_time);
 /// A guest decompression call the host served (bytes out, host time), or one it left to the
 /// guest's own decoder (guest_ran).
 void CountHostDecompression(u64 bytes, Clock::duration host_time, bool guest_ran);
+/// A guest read of GPU-written memory that waited for the GPU thread to sync it (reactive
+/// flushing), with the time the reading thread waited.
+void CountGpuReadWait(Clock::duration wait_time);
 Counters ReadCounters();
 
 struct LoadWindow {
