@@ -77,6 +77,11 @@ enabled and the runtime is available; otherwise an enabled temporal selection us
   AMD's recommended bias log2(render / output) - 1 = -1.58 in docked mode (none in handheld).
   Images the GPU wrote (render targets: bloom, blur, reflections, fog) keep the game's own bias.
   `EDEN_NX2_OOT_LOD_BIAS=<bias>` replaces the default, also in handheld; `0` turns it off.
+- FSR 4 (optional): when an FFX API upscaler library loads (`EDEN_NX2_FSR4_LIB`, else
+  `amd_fidelityfx_upscaler_vk.so`/`.dll` in the user folder; e.g. github.com/Astyyyyy/fsr4-vk,
+  built by the user, nothing from AMD ships here), it gets the same inputs, jitter and RCAS
+  setting as FSR 3.1, which stays created and takes over if FSR 4 can't create its context
+  or a dispatch fails. The log names the library and shows `Ocarina FSR 4 evaluated`.
 - #644 (`82494c4820`, `74a2d20c90`, `4352c06bbf`) supplies the backend-neutral effects capture.
   FSR uses its R16F current/history bias as both reactive and transparency/composition masks;
   missing capture uses zero masks, not stale history. The DLSS preset changes were not imported.
