@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <span>
 
@@ -58,7 +59,18 @@ struct BuiltinPatchRecord {
     std::span<const u8> bytes;
     std::span<const u8> original;
     bool executable_padding = false;
+    // EXPERIMENT (do not merge): an environment variable that, set to 0, leaves this record out.
+    const char* experiment = nullptr;
 };
+
+/// Whether a record's experiment switch leaves it out (EDEN_OOT_UW_*=0).
+bool RecordSwitchedOff(const BuiltinPatchRecord& record) {
+    if (record.experiment == nullptr) {
+        return false;
+    }
+    const char* const value = std::getenv(record.experiment);
+    return value != nullptr && std::string_view{value} == "0";
+}
 
 struct BuiltinPatch {
     std::string_view name;
@@ -230,10 +242,15 @@ constexpr std::array<u8, 528> ULTRAWIDE_CAVE{
     0x41, 0xA9, 0x57, 0x58, 0xFC, 0x17, 0x08, 0x00, 0x88, 0x52, 0x28, 0xA4, 0xA8, 0x72, 0x2A,
     0x17, 0x17, 0x17
 };
+// EXPERIMENT (do not merge): EDEN_OOT_UW_SIZE_TABLE=0 leaves out the size table, index and cap
+// records above, to A/B whether Hookshot's picture and scene sites alone make the 3440x1440 frame.
+constexpr const char* SizeTableSwitch = "EDEN_OOT_UW_SIZE_TABLE";
 // The other two world-to-HUD sites (main+0x20C99C, main+0x215FB0) take a frame position from the
 // same projection (main+0x20D890, NDC x times 1920 in the 3840-wide layout grid) as Ivan0xFF's
 // speech bubble site main+0x20C2B0; under the squeezed UI canvas they get the same 1920 / squeeze
 // (2580.0f), through two 3-word caves after the cap cave.
+// EXPERIMENT (do not merge): EDEN_OOT_UW_MARKERS=0 leaves them out.
+constexpr const char* MarkersSwitch = "EDEN_OOT_UW_MARKERS";
 constexpr std::array<u8, 4> ULTRAWIDE_MARKER_ORIGINAL{0x08, 0x9E, 0xA8, 0x52}; // mov w8, 1920.0f
 constexpr std::array<u8, 4> ULTRAWIDE_MARKER_SITE_0{0x61, 0xE7, 0xE8, 0x14};  // b main+0x3C46720
 constexpr std::array<u8, 4> ULTRAWIDE_MARKER_SITE_1{0xDF, 0xC1, 0xE8, 0x14};  // b main+0x3C4672C
@@ -243,14 +260,17 @@ constexpr std::array<u8, 24> ULTRAWIDE_MARKER_CAVES{
     0x08, 0x00, 0x88, 0x52, 0x28, 0xA4, 0xA8, 0x72, 0x20, 0x3E, 0x17, 0x17, // -> main+0x215FB4
 };
 constexpr std::array ULTRAWIDE_RECORDS{
-    BuiltinPatchRecord{0x3F58568, ULTRAWIDE_SIZE, ULTRAWIDE_SIZE_ORIGINAL},
-    BuiltinPatchRecord{0x1087FC0, ULTRAWIDE_NOP, ULTRAWIDE_WIDTH_BRANCH},
-    BuiltinPatchRecord{0x1087EE0, ULTRAWIDE_NOP, ULTRAWIDE_WIDTH_BRANCH},
-    BuiltinPatchRecord{0x6505EC, ULTRAWIDE_CAP_BRANCH, ULTRAWIDE_CAP_ORIGINAL},
-    BuiltinPatchRecord{0x3C46700, ULTRAWIDE_CAP_CAVE, {}, true},
-    BuiltinPatchRecord{0x20C99C, ULTRAWIDE_MARKER_SITE_0, ULTRAWIDE_MARKER_ORIGINAL},
-    BuiltinPatchRecord{0x215FB0, ULTRAWIDE_MARKER_SITE_1, ULTRAWIDE_MARKER_ORIGINAL},
-    BuiltinPatchRecord{0x3C46720, ULTRAWIDE_MARKER_CAVES, {}, true},
+    BuiltinPatchRecord{0x3F58568, ULTRAWIDE_SIZE, ULTRAWIDE_SIZE_ORIGINAL, false, SizeTableSwitch},
+    BuiltinPatchRecord{0x1087FC0, ULTRAWIDE_NOP, ULTRAWIDE_WIDTH_BRANCH, false, SizeTableSwitch},
+    BuiltinPatchRecord{0x1087EE0, ULTRAWIDE_NOP, ULTRAWIDE_WIDTH_BRANCH, false, SizeTableSwitch},
+    BuiltinPatchRecord{0x6505EC, ULTRAWIDE_CAP_BRANCH, ULTRAWIDE_CAP_ORIGINAL, false,
+                       SizeTableSwitch},
+    BuiltinPatchRecord{0x3C46700, ULTRAWIDE_CAP_CAVE, {}, true, SizeTableSwitch},
+    BuiltinPatchRecord{0x20C99C, ULTRAWIDE_MARKER_SITE_0, ULTRAWIDE_MARKER_ORIGINAL, false,
+                       MarkersSwitch},
+    BuiltinPatchRecord{0x215FB0, ULTRAWIDE_MARKER_SITE_1, ULTRAWIDE_MARKER_ORIGINAL, false,
+                       MarkersSwitch},
+    BuiltinPatchRecord{0x3C46720, ULTRAWIDE_MARKER_CAVES, {}, true, MarkersSwitch},
     BuiltinPatchRecord{0x1202EE0, ULTRAWIDE_PICTURE, ULTRAWIDE_PICTURE_ORIGINAL},
     BuiltinPatchRecord{0x31F39F4, ULTRAWIDE_PICTURE, ULTRAWIDE_PICTURE_ORIGINAL},
     BuiltinPatchRecord{0x31F3A00, ULTRAWIDE_SCENE, ULTRAWIDE_SCENE_ORIGINAL},
@@ -946,6 +966,9 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         }
         bool apply = true;
         for (const auto& record : patch.records) {
+            if (RecordSwitchedOff(record)) {
+                continue;
+            }
             if (!fits(nso, record.module_offset, record.bytes.size()) ||
                 !fits(out, record.module_offset, record.bytes.size()) ||
                 !fits(nso, record.module_offset, record.original.size())) {
@@ -989,6 +1012,11 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
             continue;
         }
         for (const auto& record : patch.records) {
+            if (RecordSwitchedOff(record)) {
+                LOG_INFO(Loader, "    - \"{}\": {}+{:#x} left out by {}=0", patch.name, name,
+                         record.module_offset, record.experiment);
+                continue;
+            }
             std::memcpy(out.data() + sizeof(Loader::NSOHeader) + record.module_offset,
                         record.bytes.data(), record.bytes.size());
         }
@@ -1099,8 +1127,9 @@ void PlaceFile(VectorVfsDirectory& root, std::string_view path, std::vector<u8> 
     dir->AddFile(std::make_shared<VectorVfsFile>(std::move(data), std::string{path}));
 }
 
-/// Ocarina at 21:9: its render-target heap grown for the 3440x1440 picture and its HUD's edge
-/// anchors moved to the 21:9 screen's edges, as a RomFS layer; nullptr when neither applies.
+/// Ocarina at 21:9: its render-target heap grown for the 3440x1440 picture, and (unless
+/// EDEN_OOT_UW_HUD_EDGES=0) its HUD's edge anchors moved to the 21:9 screen's edges, as a RomFS
+/// layer; nullptr when neither applies.
 VirtualDir UltrawideLayer(const VirtualDir& romfs) {
     namespace Uw = Core::OotUltrawide;
     auto layer = std::make_shared<VectorVfsDirectory>();
@@ -1119,24 +1148,28 @@ VirtualDir UltrawideLayer(const VirtualDir& romfs) {
     } else {
         LOG_WARNING(Loader, "    RomFS: no {} for \"{}\"", Uw::HeapDefPath, UltrawideAddOn);
     }
-    const auto archive = romfs->GetFileRelative(Uw::LayoutArchivePath);
-    const auto pack = romfs->GetFileRelative(Uw::DictionaryPackPath);
-    const auto pack_data =
-        pack ? Common::Compression::TryDecompressDataZSTD(pack->ReadAllBytes(), 64ULL << 20)
-             : std::nullopt;
-    const auto dictionary =
-        pack_data ? Uw::SarcFile(*pack_data, Uw::LayoutDictionaryName) : std::nullopt;
-    auto anchored = archive && dictionary
-                        ? Uw::AnchorHudToEdges(archive->ReadAllBytes(), *dictionary)
-                        : std::nullopt;
-    if (anchored) {
-        LOG_INFO(Loader, "    RomFS: \"{}\" moves the HUD's edge anchors out by {} units",
-                 UltrawideAddOn, Uw::EdgeShift);
-        PlaceFile(*layer, Uw::LayoutArchivePath, std::move(*anchored));
-        any = true;
-    } else {
-        LOG_WARNING(Loader, "    RomFS: {} is not the layout archive \"{}\" expects",
-                    Uw::LayoutArchivePath, UltrawideAddOn);
+    // EXPERIMENT (do not merge): EDEN_OOT_UW_HUD_EDGES=0 keeps the HUD in the centred 16:9.
+    const char* const edges_switch = std::getenv("EDEN_OOT_UW_HUD_EDGES");
+    if (edges_switch == nullptr || std::string_view{edges_switch} != "0") {
+        const auto archive = romfs->GetFileRelative(Uw::LayoutArchivePath);
+        const auto pack = romfs->GetFileRelative(Uw::DictionaryPackPath);
+        const auto pack_data =
+            pack ? Common::Compression::TryDecompressDataZSTD(pack->ReadAllBytes(), 64ULL << 20)
+                 : std::nullopt;
+        const auto dictionary =
+            pack_data ? Uw::SarcFile(*pack_data, Uw::LayoutDictionaryName) : std::nullopt;
+        auto anchored = archive && dictionary
+                            ? Uw::AnchorHudToEdges(archive->ReadAllBytes(), *dictionary)
+                            : std::nullopt;
+        if (anchored) {
+            LOG_INFO(Loader, "    RomFS: \"{}\" moves the HUD's edge anchors out by {} units",
+                     UltrawideAddOn, Uw::EdgeShift);
+            PlaceFile(*layer, Uw::LayoutArchivePath, std::move(*anchored));
+            any = true;
+        } else {
+            LOG_WARNING(Loader, "    RomFS: {} is not the layout archive \"{}\" expects",
+                        Uw::LayoutArchivePath, UltrawideAddOn);
+        }
     }
     return any ? layer : nullptr;
 }
