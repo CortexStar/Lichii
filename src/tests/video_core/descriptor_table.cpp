@@ -593,7 +593,7 @@ TEST_CASE("Descriptor heap mirror sees every bound id change once", "[descriptor
     REQUIRE(table.Synchronize(0x1000, 255));
     REQUIRE(table.TakeMirrorReset());
     REQUIRE_FALSE(table.TakeMirrorReset());
-    std::vector<Id> heap(256, Id{0});
+    std::vector<Id> heap(256, Id{});
     const auto drain = [&] {
         table.TakeMirrorUpdates([&](u32 index, Id id) {
             REQUIRE(heap[index] != id);
@@ -631,4 +631,20 @@ TEST_CASE("Descriptor heap mirror sees every bound id change once", "[descriptor
     REQUIRE(table.Synchronize(0x1000, 127));
     REQUIRE(table.TakeMirrorReset());
     table.TakeMirrorUpdates([](u32, Id) { FAIL("no updates after a reset"); });
+}
+
+TEST_CASE("Descriptor heap mirror writes entries bound to id 0", "[descriptor_table]") {
+    // Id 0 is the null image view or the null sampler, real entries the heap must hold; a reset
+    // heap holds null descriptors instead, so an entry bound to id 0 is sent once.
+    using Id = Common::SlotId;
+    VideoCommon::DescriptorTable<u64, Id> table;
+    REQUIRE(table.Synchronize(0x1000, 255));
+    REQUIRE(table.TakeMirrorReset());
+    table.Bind(0, Id{0});
+    table.Bind(254, Id{0});
+    std::vector<std::pair<u32, Id>> sent;
+    table.TakeMirrorUpdates([&](u32 index, Id id) { sent.emplace_back(index, id); });
+    REQUIRE(sent == std::vector<std::pair<u32, Id>>{{0, Id{0}}, {254, Id{0}}});
+    table.Bind(0, Id{0});
+    table.TakeMirrorUpdates([](u32, Id) { FAIL("already in the mirror"); });
 }

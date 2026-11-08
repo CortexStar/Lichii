@@ -110,8 +110,10 @@ public:
         //
         descriptors.resize(num_descriptors);
         bound_ids.resize(num_descriptors, Id{0});
-        // A new pool: the heap mirroring it starts over, all null.
-        mirrored_ids.assign(num_descriptors, Id{0});
+        // A new pool: the heap mirroring it starts over, all null descriptors. Id{} (invalid)
+        // stands for that: Id{0} is a real entry (the null image view, the null sampler), which
+        // an entry can be bound to and the mirror then has to write.
+        mirrored_ids.assign(num_descriptors, Id{});
         mirror_queued.assign(read_descriptors.size(), u64{0});
         mirror_queue.clear();
         mirror_reset = true;

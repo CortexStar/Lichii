@@ -1982,7 +1982,7 @@ void TextureCache<P>::TakeMirrorUpdates(bool compute, u64 draw_seq, Func&& func)
         mirror.layout.tsc_stride = sampler_table.current_limit + 1;
         mirror.sampler_pages.Reset(tick);
         mirror.samplers.assign(size_t{mirror.layout.num_classes} * 2,
-                               std::vector<SamplerId>(mirror.layout.tsc_stride, NULL_SAMPLER_ID));
+                               std::vector<SamplerId>(mirror.layout.tsc_stride, SamplerId{}));
         emit(UpdateKind::Reset, Heap::Sampler);
     }
     image_table.TakeMirrorUpdates([&](u32 tic, ImageViewId view_id) {
@@ -2028,7 +2028,7 @@ void TextureCache<P>::TakeMirrorUpdates(bool compute, u64 draw_seq, Func&& func)
         // Classes are appended: the region grows, existing slots stay where they are.
         mirror.layout.num_classes = sampler_classes.Size();
         mirror.samplers.resize(size_t{mirror.layout.num_classes} * 2,
-                               std::vector<SamplerId>(mirror.layout.tsc_stride, NULL_SAMPLER_ID));
+                               std::vector<SamplerId>(mirror.layout.tsc_stride, SamplerId{}));
         emit(UpdateKind::Layout, Heap::Sampler);
     }
     const auto write_sampler = [&](u32 sampler_class, u32 depth_use, u32 tsc, SamplerId id) {
@@ -2056,7 +2056,7 @@ void TextureCache<P>::TakeMirrorUpdates(bool compute, u64 draw_seq, Func&& func)
         }
         for (size_t variant = 0; variant < mirror.samplers.size(); ++variant) {
             const SamplerId held = mirror.samplers[variant][tsc];
-            if (held != NULL_SAMPLER_ID && held != id) {
+            if (held && held != id) {
                 write_sampler(static_cast<u32>(variant / 2), static_cast<u32>(variant % 2), tsc,
                               id);
             }
@@ -2111,7 +2111,7 @@ u64 TextureCache<P>::VerifyMirror(const PoolMirrorState& mirror,
     for (size_t variant = 0; variant < mirror.samplers.size(); ++variant) {
         for (size_t index = 0; index < mirror.samplers[variant].size(); ++index) {
             const SamplerId held = mirror.samplers[variant][index];
-            if (held != NULL_SAMPLER_ID && is_read(tsc, index) &&
+            if (held && is_read(tsc, index) &&
                 tsc.mirrored_ids[index] == tsc.bound_ids[index] && held != tsc.bound_ids[index]) {
                 if (mismatches++ < 32) {
                     LOG_ERROR(HW_GPU,

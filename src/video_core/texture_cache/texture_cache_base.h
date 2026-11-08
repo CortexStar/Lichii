@@ -589,7 +589,7 @@ public:
         /// Logical sampler slot for a plain and a depth-compare use. ~0 when the entry has no
         /// view or the TSC is past the pool.
         std::array<u32, 2> sampler_slots;
-        /// The entry's view (for barriers and feedback checks), NULL_IMAGE_VIEW_ID when none.
+        /// The entry's view (for barriers and feedback checks); the null view (id 0) is a view.
         ImageViewId view;
     };
 

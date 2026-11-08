@@ -250,7 +250,7 @@ enum class UpdateKind : u8 {
     Reset,   ///< New pool: every slot null, every page table empty; read the layout again
     Layout,  ///< Sampler classes were added: the sampler region grew (read the layout again)
     Table,   ///< A page table of `heap` changed (read it again before the next draw)
-    Image,   ///< Image slot `slot` (type `type` of TIC `index`) from `view` (null id: null)
+    Image,   ///< Image slot `slot` (type `type` of TIC `index`) from `view` (id 0: the null view)
     Meta,    ///< meta[index] = meta
     Sampler, ///< Sampler slot `slot`: `sampler` for views of class key `class_key`, depth use
 };
