@@ -101,17 +101,10 @@ void Conductor::VsyncThread(std::stop_token token) {
 
 s64 Conductor::GetNextTicks() const {
     const auto& settings = Settings::values;
-    auto speed_scale = 1.f;
-    if (settings.use_multi_core.GetValue()) {
-        if (settings.use_speed_limit.GetValue()) {
-            // Scales the speed based on speed_limit setting on MC. SC is handled by
-            // SpeedLimiter::DoSpeedLimiting.
-            speed_scale = 100.f / Settings::SpeedLimit();
-        } else {
-            // Run at unlocked framerate.
-            speed_scale = 0.01f;
-        }
-    }
+    // On multi-core the speed limit scales the period here (single core: SpeedLimiter).
+    auto speed_scale = ScreenCompositionSpeedScale(
+        settings.use_multi_core.GetValue(), settings.use_speed_limit.GetValue(),
+        static_cast<float>(Settings::SpeedLimit()), Settings::CurrentProgramIsSwitch2());
 
     // Adjust by speed limit determined during composition.
     speed_scale /= m_compose_speed_scale;
