@@ -21,6 +21,11 @@
 
 #include "common/bit_field.h"
 #include "common/scope_exit.h"
+#include "common/settings.h"
+#include "shader_recompiler/exception.h"
+#include "video_core/gpu_logging/gpu_logging.h"
+#include "video_core/native_verify.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
 #include "video_core/renderer_vulkan/tessellation_stages.h"
@@ -31,15 +36,12 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
+#include "video_core/renderer_vulkan/vk_texture_heap.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/shader_handle_program.h"
 #include "video_core/shader_notify.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/vulkan_common/vulkan_device.h"
-#include "video_core/gpu_logging/gpu_logging.h"
-#include "common/settings.h"
-#include "shader_recompiler/exception.h"
-#include "video_core/nx2_profile.h"
 
 #if defined(__clang__) && defined(NDEBUG)
 #define LAMBDA_FORCEINLINE __attribute__((always_inline))
@@ -393,7 +395,15 @@ GraphicsPipeline::GraphicsPipeline(
                any_written(info.image_descriptors) || any_written(info.image_buffer_descriptors);
     });
 
-    if (library_cache) {
+    heap_mode = texture_cache.GetRuntime().Heap() != nullptr &&
+                device.IsKhrMaintenance5Supported() &&
+                HeapMappings::Eligible(stage_infos, mesh_emulation.has_value());
+    if (heap_mode) {
+        // Textures through the pool-mirroring heaps, everything else by device address: no
+        // descriptor sets, no pipeline layout. Libraries number bindings per stage.
+        heap_layout = HeapMappings::MakeTableLayout(stage_infos, library_cache != nullptr);
+        heap_mappings = HeapMappings::MakeStageMappings(heap_layout);
+    } else if (library_cache) {
         // Graphics pipeline libraries: one set per stage (set index = stage index), plain
         // descriptor sets (a layout has room for one push descriptor set, and the descriptor
         // buffer path is left out).
@@ -757,9 +767,18 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     BindingMisses misses;
     TextureCache::BindingLookup lookup{};
     bool aliased_hit = false;
-    const bool memo_usable = use_bind_memo && binding_kinds.size() == views.size() &&
+    const bool memo_usable = !heap_mode && use_bind_memo && binding_kinds.size() == views.size() &&
                              sampler_handles.size() == num_textures;
-    if (memo_usable) {
+    if (heap_mode) {
+        // The heap holds every resolved pool entry: the draw only writes heap indices.
+        Profile::Scope scope{Profile::Zone::FillImageViews};
+        if (!WriteHeapTables(std::span(views.data(), views.size()),
+                             std::span(sampler_handles.data(), sampler_handles.size()),
+                             via_header_index)) {
+            return false;
+        }
+        samplers.assign(num_textures, VideoCommon::NULL_SAMPLER_ID);
+    } else if (memo_usable) {
         Profile::Scope scope{Profile::Zone::FillImageViews};
         memos.resize(views.size());
         samplers.resize(sampler_handles.size());
@@ -931,7 +950,10 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
 
     {
         Profile::Scope scope{Profile::Zone::DescriptorAcquire};
-        guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
+        if (!heap_mode) {
+            guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries,
+                                           uses_descriptor_buffer);
+        }
     }
 
     if (uses_bank_table) {
@@ -952,8 +974,21 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                 // Libraries: the fragment stage's rescaling bits start at fixed indices.
                 rescaling.Seek(GPL_FRAGMENT_TEXTURE_SCALING_BASE, GPL_FRAGMENT_IMAGE_SCALING_BASE);
             }
-            PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
-                                 rescaling, samplers_it, views_it, record ? &*record : nullptr);
+            if (heap_mode) {
+                for (const auto& desc : stage_infos[stage].texture_descriptors) {
+                    bool is_rescaled{};
+                    for (u32 index = 0; index < desc.count; ++index) {
+                        const size_t element = static_cast<size_t>(views_it - views.data());
+                        is_rescaled |= heap_rescaled[element] != 0;
+                        ++views_it;
+                        ++samplers_it;
+                    }
+                    rescaling.PushTexture(is_rescaled);
+                }
+            } else {
+                PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
+                                     rescaling, samplers_it, views_it, record ? &*record : nullptr);
+            }
         }
         const auto& info{stage_infos[stage]};
         if (info.uses_render_area) {
@@ -1032,7 +1067,195 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         return false;
     }
     Profile::Scope scope{Profile::Zone::ConfigureDraw};
+    if (heap_mode) {
+        return ConfigureHeapDraw(rescaling, render_area);
+    }
     return ConfigureDraw(rescaling, render_area);
+}
+
+bool GraphicsPipeline::WriteHeapTables(std::span<VideoCommon::ImageViewInOut> views,
+                                       std::span<const u32> sampler_handles,
+                                       bool via_header_index) {
+    namespace PoolMirror = VideoCommon::PoolMirror;
+    using ResolvedHandle = TextureCache::ResolvedHandle;
+    TextureHeap* const heap = texture_cache.GetRuntime().Heap();
+    if (heap == nullptr || sampler_handles.size() != views.size()) {
+        static bool warned = false;
+        if (!std::exchange(warned, true)) {
+            LOG_ERROR(Render_Vulkan, "Descriptor heap draw without a usable heap: draw skipped");
+        }
+        return false;
+    }
+    // The raw handle words back (TexturePair is lossless): the mirror decodes them itself.
+    boost::container::small_vector<u32, 96> raw_handles(views.size());
+    for (size_t index = 0; index < views.size(); ++index) {
+        raw_handles[index] = via_header_index
+                                 ? views[index].index
+                                 : (views[index].index | (sampler_handles[index] << 20));
+    }
+    boost::container::small_vector<ResolvedHandle, 96> resolved(views.size());
+    texture_cache.ResolveForDraw(raw_handles, via_header_index, false,
+                                 std::span(resolved.data(), resolved.size()));
+    heap->ApplyMirrorUpdates(texture_cache, false);
+
+    const PoolMirror::Layout& mirror_layout = texture_cache.MirrorLayout(false);
+    const auto image_index = [&](const ResolvedHandle& entry, u32 type,
+                                 const Shader::TextureDescriptor& desc) {
+        const bool uncomparable = desc.is_depth &&
+                                  (entry.meta & PoolMirror::Meta::NO_DEPTH_COMPARE) != 0 &&
+                                  (desc.handle_program != ~0U ||
+                                   (entry.meta & PoolMirror::Meta::UNCOMPARABLE_FORMAT) != 0);
+        if (entry.image_slot == ~0U || uncomparable ||
+            (entry.meta & PoolMirror::Meta::NULL_ENTRY) != 0) {
+            return heap->NullImageIndex();
+        }
+        const u32 slot = entry.image_slot + type * mirror_layout.tic_stride;
+        const u32 physical = texture_cache.MirrorPhysicalPage(false, PoolMirror::Heap::Image,
+                                                              PoolMirror::Layout::ImagePage(slot));
+        return physical == PoolMirror::HeapPageVersions::NO_PAGE
+                   ? heap->NullImageIndex()
+                   : TextureHeap::ImageIndex(physical, slot);
+    };
+    const auto sampler_index = [&](const ResolvedHandle& entry, bool is_depth) {
+        const u32 slot = entry.sampler_slots[is_depth ? 1 : 0];
+        if (slot == ~0U) {
+            return heap->NullSamplerIndex();
+        }
+        const u32 physical = texture_cache.MirrorPhysicalPage(
+            false, PoolMirror::Heap::Sampler, PoolMirror::Layout::SamplerPage(slot));
+        return physical == PoolMirror::HeapPageVersions::NO_PAGE
+                   ? heap->NullSamplerIndex()
+                   : TextureHeap::SamplerIndex(physical, slot);
+    };
+    heap_rescaled.assign(views.size(), 0);
+    heap_table_addresses.fill(0);
+    size_t element = 0;
+    for (u32 stage = 0; stage < NUM_STAGES; ++stage) {
+        const u32 count = heap_layout.stage_elements[stage];
+        if (count == 0) {
+            continue;
+        }
+        const auto [bytes, address] =
+            buffer_cache.runtime.AllocateBankTable(heap_layout.TableBytes(stage));
+        u32* const image_indices = reinterpret_cast<u32*>(bytes.data());
+        u32* const sampler_indices = image_indices + count;
+        heap_table_addresses[stage] = address;
+        u32 index = 0;
+        for (const auto& desc : stage_infos[stage].texture_descriptors) {
+            const u32 type = static_cast<u32>(desc.type);
+            for (u32 i = 0; i < desc.count; ++i, ++index, ++element) {
+                const ResolvedHandle& entry = resolved[element];
+                image_indices[index] = image_index(entry, type, desc);
+                sampler_indices[index] = sampler_index(entry, desc.is_depth);
+                views[element].id = entry.view;
+                if (VideoCommon::NativeVerify::Bindless()) {
+                    VerifyHeapElement(*heap, views[element].index, sampler_handles[element], desc,
+                                      image_indices[index], sampler_indices[index], entry.view);
+                }
+                heap_rescaled[element] = (entry.meta & PoolMirror::Meta::RESCALED) != 0 ? 1 : 0;
+            }
+        }
+    }
+    return true;
+}
+
+void GraphicsPipeline::VerifyHeapElement(const TextureHeap& heap, u32 tic, u32 tsc,
+                                         const Shader::TextureDescriptor& desc, u32 image_index,
+                                         u32 sampler_index, VideoCommon::ImageViewId heap_view) {
+    namespace NativeVerify = VideoCommon::NativeVerify;
+    // What the bound path binds for the same handle (FillImageViews, GetSamplerId, HandleFor).
+    std::array<VideoCommon::ImageViewInOut, 1> bound{VideoCommon::ImageViewInOut{.index = tic}};
+    texture_cache.FillImageViews(bound, false, false);
+    const VideoCommon::ImageViewId view_id = bound[0].id;
+    NativeVerify::Check(NativeVerify::Layer::Bindless, view_id == heap_view,
+                        "TIC {} view {} in the heap, {} bound", tic, heap_view.index,
+                        view_id.index);
+    const ImageView* view = view_id ? &texture_cache.GetImageView(view_id) : nullptr;
+    if (desc.is_depth && view != nullptr && IsUncomparable(*view, desc.handle_program != ~0U)) {
+        view = nullptr;
+    }
+    NativeVerify::Check(NativeVerify::Layer::Bindless,
+                        heap.HoldsImage(image_index, view, desc.type),
+                        "TIC {} type {}: heap image descriptor {} differs from the bound view's",
+                        tic, static_cast<u32>(desc.type), image_index);
+    const VideoCommon::SamplerId sampler_id = texture_cache.GetSamplerId(tsc, false);
+    Sampler& sampler = texture_cache.GetSampler(sampler_id);
+    const VkSampler variant =
+        view_id ? sampler.HandleFor(texture_cache.GetImageView(view_id), desc.is_depth)
+                : sampler.Handle();
+    NativeVerify::Check(NativeVerify::Layer::Bindless,
+                        heap.HoldsSampler(sampler_index, sampler, variant),
+                        "TSC {} (TIC {}, depth {}): heap sampler descriptor {} differs from the "
+                        "bound sampler's",
+                        tsc, tic, desc.is_depth, sampler_index);
+}
+
+bool GraphicsPipeline::ConfigureHeapDraw(const RescalingPushConstant& rescaling,
+                                         const RenderAreaPushConstant& render_area) {
+    TextureHeap* const heap = texture_cache.GetRuntime().Heap();
+    if (heap == nullptr) {
+        return false;
+    }
+    static_assert(HeapMappings::TABLE_PUSH_OFFSET >=
+                  Shader::Backend::SPIRV::PUSH_CONSTANT_LAYOUT_SIZE);
+    // Binding the heaps invalidates descriptor buffer bindings.
+    scheduler.InvalidateDescriptorBuffer();
+    scheduler.RequestDrawRenderpass(texture_cache.GetFramebuffer());
+    if (writes_storage) {
+        scheduler.NoteRenderPassStores();
+    }
+    if (!IsBuilt()) {
+        scheduler.Record([this](vk::CommandBuffer) {
+            const auto begin = std::chrono::steady_clock::now();
+            build->Wait(!worker_only_build || ClaimsWorkerOnlyBuilds());
+            const auto held = std::chrono::steady_clock::now() - begin;
+            hold_time_ns.fetch_add(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(held).count(),
+                std::memory_order::relaxed);
+            if (library_cache) {
+                library_cache->RecordHeldDraw(held);
+            }
+        });
+    }
+    const bool is_rescaling{texture_cache.IsRescaling()};
+    (void)scheduler.UpdateRescaling(is_rescaling, false);
+    const bool bind_pipeline{scheduler.UpdateGraphicsPipeline(this)};
+
+    // The whole push block every draw: push data has no per-range updates to keep.
+    std::array<u8, HeapMappings::PUSH_DATA_SIZE> push{};
+    const auto put = [&push](u32 offset, const void* data, size_t size) {
+        std::memcpy(push.data() + offset, data, size);
+    };
+    put(PAGE_TABLE_OFFSET, &page_table_address, sizeof(page_table_address));
+    put(BANK_TABLE_OFFSET, &bank_table_address, sizeof(bank_table_address));
+    const auto& rescaling_words = rescaling.Data();
+    put(RESCALING_LAYOUT_WORDS_OFFSET, rescaling_words.data(), sizeof(rescaling_words));
+    const f32 config_down_factor{Settings::values.resolution_info.down_factor};
+    const f32 down_factor{is_rescaling ? config_down_factor : 1.0f};
+    put(RESCALING_LAYOUT_DOWN_FACTOR_OFFSET, &down_factor, sizeof(down_factor));
+    if (render_area.uses_render_area) {
+        put(RENDERAREA_LAYOUT_OFFSET, render_area.words.data(), sizeof(render_area.words));
+    }
+    for (u32 stage = 0; stage < NUM_STAGES; ++stage) {
+        put(HeapMappings::TablePushOffset(stage), &heap_table_addresses[stage], sizeof(u64));
+    }
+    const VkBindHeapInfoEXT resource_heap{heap->ResourceHeapBinding()};
+    const VkBindHeapInfoEXT sampler_heap{heap->SamplerHeapBinding()};
+    heap->NoteDraw();
+    scheduler.Record(
+        [this, push, resource_heap, sampler_heap, bind_pipeline](vk::CommandBuffer cmdbuf) {
+            if (bind_pipeline) {
+                scheduler.SetGraphicsPipelineMissing(!pipeline || build->Failed());
+                if (!pipeline || build->Failed()) {
+                    return;
+                }
+                cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline);
+            }
+            cmdbuf.BindResourceHeapEXT(resource_heap);
+            cmdbuf.BindSamplerHeapEXT(sampler_heap);
+            cmdbuf.PushDataEXT(0, push.data(), push.size());
+        });
+    return true;
 }
 
 bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
@@ -1848,6 +2071,7 @@ vk::Pipeline GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .requiredSubgroupSize = GuestWarpSize,
     };
     static_vector<VkPipelineShaderStageCreateInfo, 5> shader_stages;
+    std::array<VkShaderDescriptorSetAndBindingMappingInfoEXT, NUM_STAGES> heap_mapping_infos{};
     for (size_t stage = 0; stage < Maxwell::MaxShaderStage; ++stage) {
         if (!spv_modules[stage]) {
             continue;
@@ -1870,8 +2094,10 @@ vk::Pipeline GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                                      device.IsGuestWarpSizeSupported(stage_flag);
         shader_stages.emplace_back(VkPipelineShaderStageCreateInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .pNext = force_warp_size ? &subgroup_size_ci
-                                     : ExperimentFragmentWave(device, stage_flag),
+            .pNext = ChainHeapMappings(stage,
+                                       force_warp_size ? &subgroup_size_ci
+                                                       : ExperimentFragmentWave(device, stage_flag),
+                                       heap_mapping_infos),
             .flags = 0,
             .stage = stage_flag,
             .module = emulated_vertex ? *mesh_vertex_module : *spv_modules[stage],
@@ -1907,9 +2133,10 @@ vk::Pipeline GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     const bool unoptimized = (flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT) != 0;
     const auto trace_begin = std::chrono::steady_clock::now();
     TracePipelineBuild("BEGIN", "graphics", key.Hash(), key.unique_hashes, unoptimized);
+    const VkPipelineCreateFlags2CreateInfo heap_flags_ci{HeapFlags(flags, nullptr)};
     const VkGraphicsPipelineCreateInfo pipeline_ci{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext = nullptr,
+        .pNext = heap_mode ? &heap_flags_ci : nullptr,
         .flags = flags,
         .stageCount = static_cast<u32>(shader_stages.size()),
         .pStages = shader_stages.data(),
@@ -1926,7 +2153,7 @@ vk::Pipeline GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .pDepthStencilState = &states.depth_stencil_ci,
         .pColorBlendState = &states.color_blend_ci,
         .pDynamicState = &states.dynamic_state_ci,
-        .layout = *pipeline_layout,
+        .layout = heap_mode ? VK_NULL_HANDLE : *pipeline_layout,
         .renderPass = render_pass,
         .subpass = 0,
         .basePipelineHandle = nullptr,
@@ -1969,6 +2196,30 @@ VkPipelineCreateFlags LibraryFlags(const Device& device) {
 }
 } // Anonymous namespace
 
+VkPipelineCreateFlags2CreateInfo GraphicsPipeline::HeapFlags(VkPipelineCreateFlags flags,
+                                                             const void* next) const noexcept {
+    return VkPipelineCreateFlags2CreateInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO,
+        .pNext = next,
+        .flags = VkPipelineCreateFlags2{flags} | VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT,
+    };
+}
+
+const void* GraphicsPipeline::ChainHeapMappings(
+    size_t stage, const void* next,
+    std::array<VkShaderDescriptorSetAndBindingMappingInfoEXT, NUM_STAGES>& infos) const noexcept {
+    if (!heap_mode || stage >= NUM_STAGES) {
+        return next;
+    }
+    infos[stage] = VkShaderDescriptorSetAndBindingMappingInfoEXT{
+        .sType = VK_STRUCTURE_TYPE_SHADER_DESCRIPTOR_SET_AND_BINDING_MAPPING_INFO_EXT,
+        .pNext = next,
+        .mappingCount = static_cast<u32>(heap_mappings[stage].size()),
+        .pMappings = heap_mappings[stage].data(),
+    };
+    return &infos[stage];
+}
+
 std::string GraphicsPipeline::ShaderLibraryKey(GplPart part, const PipelineStates& s,
                                                VkRenderPass render_pass) const {
     GplKeyWriter key_writer;
@@ -1976,6 +2227,8 @@ std::string GraphicsPipeline::ShaderLibraryKey(GplPart part, const PipelineState
     // Same render pass handle = same formats and samples (the render pass cache keeps them).
     key_writer.Add(render_pass);
     key_writer.Add(static_cast<u32>(LibraryFlags(device)));
+    // Heap libraries map their textures and have no set layouts: never shared with set ones.
+    key_writer.Add(static_cast<u32>(heap_mode ? 1 : 0));
     const VkPushConstantRange push_range{DescriptorLayoutBuilder{device}.PushConstantRange()};
     key_writer.Add(push_range.stageFlags);
     key_writer.Add(push_range.offset);
@@ -2082,13 +2335,14 @@ GplLibrary GraphicsPipeline::MakeShaderLibrary(GplPart part, const PipelineState
         .requiredSubgroupSize = GuestWarpSize,
     };
     static_vector<VkPipelineShaderStageCreateInfo, 5> shader_stages;
+    std::array<VkShaderDescriptorSetAndBindingMappingInfoEXT, NUM_STAGES> heap_mapping_infos{};
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
         if (!InPart(part, stage)) {
             continue;
         }
         DescriptorLayoutBuilder builder{device};
         builder.Add(stage_infos[stage], StageFlag(stage_infos[stage], SlotStage(stage)));
-        if (!builder.Empty()) {
+        if (!heap_mode && !builder.Empty()) {
             library.set_layouts.push_back(builder.CreateDescriptorSetLayout(false));
             set_layouts[stage] = *library.set_layouts.back();
         }
@@ -2105,8 +2359,10 @@ GplLibrary GraphicsPipeline::MakeShaderLibrary(GplPart part, const PipelineState
                                      device.IsGuestWarpSizeSupported(stage_flag);
         shader_stages.push_back({
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .pNext = force_warp_size ? &subgroup_size_ci
-                                     : ExperimentFragmentWave(device, stage_flag),
+            .pNext = ChainHeapMappings(stage,
+                                       force_warp_size ? &subgroup_size_ci
+                                                       : ExperimentFragmentWave(device, stage_flag),
+                                       heap_mapping_infos),
             .flags = 0,
             .stage = stage_flag,
             .module = *spv_modules[stage],
@@ -2114,8 +2370,10 @@ GplLibrary GraphicsPipeline::MakeShaderLibrary(GplPart part, const PipelineState
             .pSpecializationInfo = nullptr,
         });
     }
-    library.layout =
-        DescriptorLayoutBuilder{device}.CreateIndependentPipelineLayout(set_layouts, true);
+    if (!heap_mode) {
+        library.layout =
+            DescriptorLayoutBuilder{device}.CreateIndependentPipelineLayout(set_layouts, true);
+    }
     const bool pre_rasterization = part == GplPart::PreRasterization;
     const VkGraphicsPipelineLibraryCreateInfoEXT library_ci{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT,
@@ -2124,10 +2382,13 @@ GplLibrary GraphicsPipeline::MakeShaderLibrary(GplPart part, const PipelineState
             pre_rasterization ? VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT
                               : VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT),
     };
+    const VkPipelineCreateFlags2CreateInfo library_heap_ci{
+        HeapFlags(LibraryFlags(device), &library_ci)};
     library.pipeline = device.GetLogical().CreateGraphicsPipeline(
         {
             .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-            .pNext = &library_ci,
+            .pNext = heap_mode ? static_cast<const void*>(&library_heap_ci)
+                               : static_cast<const void*>(&library_ci),
             .flags = LibraryFlags(device),
             .stageCount = static_cast<u32>(shader_stages.size()),
             .pStages = shader_stages.empty() ? nullptr : shader_stages.data(),
@@ -2141,7 +2402,7 @@ GplLibrary GraphicsPipeline::MakeShaderLibrary(GplPart part, const PipelineState
             .pDepthStencilState = pre_rasterization ? nullptr : &s.depth_stencil_ci,
             .pColorBlendState = nullptr,
             .pDynamicState = &s.dynamic_state_ci,
-            .layout = *library.layout,
+            .layout = heap_mode ? VK_NULL_HANDLE : *library.layout,
             .renderPass = render_pass,
             .subpass = 0,
             .basePipelineHandle = nullptr,
@@ -2172,10 +2433,12 @@ vk::Pipeline GraphicsPipeline::LinkLibraries(VkRenderPass render_pass, bool opti
         flags |= VK_PIPELINE_CREATE_LINK_TIME_OPTIMIZATION_BIT_EXT;
     }
     const auto begin = std::chrono::steady_clock::now();
+    const VkPipelineCreateFlags2CreateInfo link_heap_ci{HeapFlags(flags, &link_ci)};
     vk::Pipeline linked_pipeline = device.GetLogical().CreateGraphicsPipeline(
         {
             .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-            .pNext = &link_ci,
+            .pNext = heap_mode ? static_cast<const void*>(&link_heap_ci)
+                               : static_cast<const void*>(&link_ci),
             .flags = flags,
             .stageCount = 0,
             .pStages = nullptr,
@@ -2188,7 +2451,7 @@ vk::Pipeline GraphicsPipeline::LinkLibraries(VkRenderPass render_pass, bool opti
             .pDepthStencilState = nullptr,
             .pColorBlendState = nullptr,
             .pDynamicState = nullptr,
-            .layout = *pipeline_layout,
+            .layout = heap_mode ? VK_NULL_HANDLE : *pipeline_layout,
             .renderPass = render_pass,
             .subpass = 0,
             .basePipelineHandle = nullptr,
@@ -2220,10 +2483,13 @@ bool GraphicsPipeline::MakeLibraryPipeline(VkRenderPass render_pass) {
         .pNext = nullptr,
         .flags = VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT,
     };
+    const VkPipelineCreateFlags2CreateInfo vertex_input_heap_ci{
+        HeapFlags(LibraryFlags(device), &vertex_input_ci)};
     vertex_input_library = device.GetLogical().CreateGraphicsPipeline(
         {
             .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-            .pNext = &vertex_input_ci,
+            .pNext = heap_mode ? static_cast<const void*>(&vertex_input_heap_ci)
+                               : static_cast<const void*>(&vertex_input_ci),
             .flags = LibraryFlags(device),
             .stageCount = 0,
             .pStages = nullptr,
@@ -2248,10 +2514,13 @@ bool GraphicsPipeline::MakeLibraryPipeline(VkRenderPass render_pass) {
         .pNext = nullptr,
         .flags = VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT,
     };
+    const VkPipelineCreateFlags2CreateInfo fragment_output_heap_ci{
+        HeapFlags(LibraryFlags(device), &fragment_output_ci)};
     fragment_output_library = device.GetLogical().CreateGraphicsPipeline(
         {
             .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-            .pNext = &fragment_output_ci,
+            .pNext = heap_mode ? static_cast<const void*>(&fragment_output_heap_ci)
+                               : static_cast<const void*>(&fragment_output_ci),
             .flags = LibraryFlags(device),
             .stageCount = 0,
             .pStages = nullptr,

@@ -232,6 +232,12 @@ public:
     /// Returns true when the descriptor buffer chunk has to be bound into the command buffer.
     bool UpdateDescriptorBufferChunk(u32 descriptor_chunk);
 
+    /// A descriptor heap was bound (it invalidates descriptor buffer bindings): the next
+    /// descriptor buffer draw binds its chunk again.
+    void InvalidateDescriptorBuffer() noexcept {
+        state.descriptor_buffer_bound = false;
+    }
+
     /// Invalidates current command buffer state except for render passes
     void InvalidateState();
 
