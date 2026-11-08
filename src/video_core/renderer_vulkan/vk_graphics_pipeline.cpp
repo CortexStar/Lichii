@@ -22,6 +22,7 @@
 #include "common/scope_exit.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
+#include "video_core/renderer_vulkan/tessellation_stages.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_frame_dump.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
@@ -1312,7 +1313,8 @@ void GraphicsPipeline::FillStates(PipelineStates& s) const {
     if (!vertex_binding_divisors.empty()) {
         s.vertex_input_ci.pNext = &s.input_divisor_ci;
     }
-    const bool has_tess_stages = spv_modules[1] || spv_modules[2];
+    const bool has_tess_stages = HasTessellationStages(
+        IsMeshPipeline(), static_cast<bool>(spv_modules[1]), static_cast<bool>(spv_modules[2]));
     s.has_tess_stages = has_tess_stages;
     auto input_assembly_topology = MaxwellToVK::PrimitiveTopology(device, key.state.topology);
     if (input_assembly_topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) {
