@@ -73,6 +73,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_debug_control.h"
+#include "video_core/nx2_present_sync.h"
 #include "video_core/nx2_profile.h"
 
 namespace Vulkan {
@@ -763,7 +764,17 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
             }
         }
     }
-    if (Profile::Scope scope{Profile::Zone::Configure}; !pipeline->Configure(is_indexed)) {
+    // Ocarina's UI copy (nx2_present_sync.h): the buffer cache notes the storage UI draws bind.
+    if (Tegra::Nx2UiSnapshotEnabled()) {
+        const auto& hashes = pipeline->ShaderHashes();
+        Tegra::t_nx2_ui_draw = Tegra::Nx2IsUiProgram(hashes[1], hashes[5]);
+    }
+    const bool configured = [&] {
+        Profile::Scope scope{Profile::Zone::Configure};
+        return pipeline->Configure(is_indexed);
+    }();
+    Tegra::t_nx2_ui_draw = false;
+    if (!configured) {
         report_failure("configure failed");
         TraceRenderState(is_indexed, "configure-failed", nullptr);
         return;

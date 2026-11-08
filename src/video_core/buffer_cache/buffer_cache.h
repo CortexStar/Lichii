@@ -26,6 +26,7 @@
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
 #include "video_core/nx2_perf.h"
+#include "video_core/nx2_present_sync.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/texture_cache/util.h"
 
@@ -599,6 +600,11 @@ void BufferCache<P>::DisableGraphicsUniformBuffer(size_t stage, u32 index) {
 
 template <class P>
 void BufferCache<P>::UpdateGraphicsBuffers(bool is_indexed) {
+    // Ocarina's UI copy (nx2_present_sync.h): what the game wrote for its next frame while
+    // uploads took the last present's copy is still to upload.
+    Tegra::Nx2UiSnapshotTick([this](u64 device_addr, u64 size) {
+        memory_tracker.MarkRegionAsCpuModified(device_addr, size);
+    });
     do {
         channel_state->has_deleted_buffers = false;
         DoUpdateGraphicsBuffers(is_indexed);
@@ -1629,7 +1635,11 @@ void BufferCache<P>::BindHostGraphicsStorageBuffers(size_t stage) {
         Buffer& buffer = slot_buffers[binding.buffer_id];
         TouchBuffer(buffer, binding.buffer_id);
         const u32 size = binding.size;
+        // Ocarina's UI copy: the presents copy what UI draws upload from storage they only
+        // read (MappedUploadMemory notes the ranges).
+        Tegra::t_nx2_ui_storage_upload = Tegra::t_nx2_ui_draw && !is_written;
         SynchronizeBuffer(buffer, binding.device_addr, size);
+        Tegra::t_nx2_ui_storage_upload = false;
 
         const u32 offset = buffer.Offset(binding.device_addr);
         buffer.MarkUsage(offset, size);
@@ -2691,7 +2701,14 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
         for (BufferCopy& copy : copies) {
             u8* const src_pointer = staging_pointer.data() + copy.src_offset;
             const DAddr device_addr = buffer.CpuAddr() + copy.dst_offset;
-            device_memory.ReadBlockUnsafe(device_addr, src_pointer, copy.size);
+            // Ocarina's UI copy: this frame's UI data from the present's copy.
+            Tegra::Nx2ReadUploadWithUiSnapshot(
+                device_addr, src_pointer, copy.size, [this](DAddr address, u8* pointer, u64 size) {
+                    device_memory.ReadBlockUnsafe(address, pointer, size);
+                });
+            if (Tegra::t_nx2_ui_storage_upload) {
+                Tegra::Nx2NoteUiStorage(device_addr, copy.size);
+            }
             // Large uploads are mostly geometry the host GPU now has its own copy of: TickFrame
             // marks their guest memory cold (see TextureCache::RefreshContents).
             if (copy.size >= 256_KiB) {
