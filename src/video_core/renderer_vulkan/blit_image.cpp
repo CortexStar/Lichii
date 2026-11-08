@@ -333,6 +333,11 @@ constexpr VkPipelineDepthStencilStateCreateInfo PIPELINE_DEPTH_ONLY_STATE_CREATE
     .maxDepthBounds = 0.0f,
 };
 
+// Blits sample the source with edge clamping, as vkCmdBlitImage and the 2D engine do. A linear
+// blit that scales reads half a texel past the source's edges at the destination's outer texels:
+// with a border colour (opaque white, as here before) those got 25% white at a 2x upscale, the
+// thin white frame around Ocarina of Time's movies (their upscale network is replaced by such a
+// blit).
 template <VkFilter filter>
 inline constexpr VkSamplerCreateInfo SAMPLER_CREATE_INFO{
     .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -341,9 +346,9 @@ inline constexpr VkSamplerCreateInfo SAMPLER_CREATE_INFO{
     .magFilter = filter,
     .minFilter = filter,
     .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-    .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
-    .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
-    .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+    .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+    .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+    .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
     .mipLodBias = 0.0f,
     .anisotropyEnable = VK_FALSE,
     .maxAnisotropy = 0.0f,
