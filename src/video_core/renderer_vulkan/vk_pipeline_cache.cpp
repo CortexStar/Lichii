@@ -998,15 +998,31 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         const auto carried_used =
             VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used", *carried.version);
         std::error_code migration_error;
-        if (std::filesystem::exists(carried_used, migration_error)) {
-            std::filesystem::copy_file(carried_used, used_pipelines_filename,
-                                       std::filesystem::copy_options::overwrite_existing,
-                                       migration_error);
+        if (carried.merged) {
+            // The appended records load only when the used list knows their hashes, so the older
+            // list is unioned into this one instead of the current one being replaced.
+            const bool used_merged = VideoCommon::MergeUsedPipelineCacheFiles(
+                used_pipelines_filename, carried_used, UsedPipelinesMagic);
+            if (used_merged) {
+                LOG_INFO(Render_Vulkan, "Pipeline cache merged from the version {} cache",
+                         *carried.version);
+            } else {
+                LOG_WARNING(Render_Vulkan,
+                            "Pipeline cache records merged from the version {} cache, but its "
+                            "used list could not be merged",
+                            *carried.version);
+            }
         } else {
-            std::filesystem::remove(used_pipelines_filename, migration_error);
+            if (std::filesystem::exists(carried_used, migration_error)) {
+                std::filesystem::copy_file(carried_used, used_pipelines_filename,
+                                           std::filesystem::copy_options::overwrite_existing,
+                                           migration_error);
+            } else {
+                std::filesystem::remove(used_pipelines_filename, migration_error);
+            }
+            LOG_INFO(Render_Vulkan, "Pipeline cache started from the version {} cache",
+                     *carried.version);
         }
-        LOG_INFO(Render_Vulkan, "Pipeline cache started from the version {} cache",
-                 *carried.version);
     } else if (carried.failed) {
         LOG_WARNING(Render_Vulkan, "Couldn't copy the older pipeline cache; this one starts empty");
     }
