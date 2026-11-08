@@ -95,6 +95,25 @@ struct Nx2UiSnapshotState {
         }
     }
 
+    /// Drops every range and copy, so nothing points at a SyncpointManager that is going away.
+    void Reset() {
+        std::scoped_lock lock{mutex};
+        active.store(false, std::memory_order_relaxed);
+        syncpoints.store(nullptr, std::memory_order_relaxed);
+        ranges.clear();
+        copied.clear();
+        data.clear();
+        copied_begin.store(0, std::memory_order_relaxed);
+        copied_end.store(0, std::memory_order_relaxed);
+        pending_remark.clear();
+        remark_now.clear();
+        remark_ready.store(false, std::memory_order_relaxed);
+        patched_uploads = 0;
+        patched_bytes = 0;
+        remarked = 0;
+        compared_bytes = 0;
+    }
+
     /// Whether the GPU thread has passed the copy's present (lock-free).
     bool FrameDone() const {
         const auto* const manager = syncpoints.load(std::memory_order_acquire);
@@ -106,6 +125,14 @@ struct Nx2UiSnapshotState {
 inline Nx2UiSnapshotState g_nx2_ui_snapshot;
 /// Presents so far, as the snapshot ranges count them.
 inline std::atomic<u64> g_nx2_ui_snapshot_present{0};
+
+/// The state is global and outlives an emulation session: VideoCore::CreateGPU resets it before
+/// a session's GPU work starts, and the nx2:vi2 session that presents resets it when it closes.
+inline void Nx2ResetUiSnapshot() {
+    g_nx2_ui_snapshot_enabled.store(false, std::memory_order_relaxed);
+    g_nx2_ui_snapshot.Reset();
+    g_nx2_ui_snapshot_present.store(0, std::memory_order_relaxed);
+}
 
 inline constexpr u64 Nx2UiRangeMaxSize = 4ULL << 20;
 inline constexpr size_t Nx2UiRangeMaxCount = 64;

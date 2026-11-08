@@ -1786,6 +1786,8 @@ public:
         for (auto* event : m_events) {
             m_context.CloseEvent(event);
         }
+        // Its UI copy (TakeUiSnapshot) must not outlive the session's syncpoints.
+        Tegra::Nx2ResetUiSnapshot();
     }
 
 private:
