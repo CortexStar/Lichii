@@ -465,10 +465,8 @@ private:
     void DefineAttributeMemAccess(const Info& info);
     void DefineWriteStorageCasLoopFunction(const Info& info);
     void DefineGlobalMemoryFunctions(const IR::Program& program);
-    void DefineRescalingInput(const Info& info);
-    void DefineRescalingInputPushConstant();
+    void DefinePushConstants(const Info& info);
     void DefineRescalingInputUniformConstant();
-    void DefineRenderArea(const Info& info);
 
     void DefineInputs(const IR::Program& program);
     void DefineOutputs(const IR::Program& program);

@@ -249,9 +249,6 @@ public:
     }
 
     VkPushConstantRange PushConstantRange() const {
-        using Shader::Backend::SPIRV::RenderAreaLayout;
-        using Shader::Backend::SPIRV::RescalingLayout;
-        const u32 size_offset = is_compute ? sizeof(RescalingLayout::down_factor) : 0u;
         return VkPushConstantRange{
             .stageFlags = static_cast<VkShaderStageFlags>(
                 is_compute ? VK_SHADER_STAGE_COMPUTE_BIT
@@ -261,8 +258,7 @@ public:
                                        VK_SHADER_STAGE_MESH_BIT_EXT
                                  : VK_SHADER_STAGE_ALL_GRAPHICS)),
             .offset = 0,
-            .size = static_cast<u32>(sizeof(RescalingLayout)) - size_offset +
-                    static_cast<u32>(sizeof(RenderAreaLayout)),
+            .size = Shader::Backend::SPIRV::PUSH_CONSTANT_LAYOUT_SIZE,
         };
     }
 
