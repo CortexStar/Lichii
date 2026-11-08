@@ -1806,6 +1806,18 @@ void RasterizerVulkan::Clear(u32 layer_count) {
 
 void RasterizerVulkan::DispatchCompute() {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Compute};
+    // A dispatch writing pages the guest reads back (Ocarina of Time: two compute results a
+    // frame) gets their downloads recorded right behind it: a fence of their own, whose
+    // submission waits for the next one (Scheduler::DeferFlush). At the next fence the copies
+    // would queue behind every draw recorded meanwhile, and the read waits for all of them.
+    // After the caches' locks are released. Only this dispatch's writes count: draws' wait for
+    // the next fence.
+    (void)buffer_cache.TakeReadPrefetchQueued();
+    SCOPE_EXIT {
+        if (buffer_cache.TakeReadPrefetchQueued()) {
+            fence_manager.SignalReference();
+        }
+    };
     ++nx2_dispatch_serial;
     FlushWork();
     gpu_memory->FlushCaching();

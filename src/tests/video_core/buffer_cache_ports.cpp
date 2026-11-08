@@ -258,6 +258,14 @@ struct BufferCacheTestAccess {
     static void ListWrite(Cache& cache, BufferId id, DAddr address, u64 size) {
         cache.Nx2NoteListWrite(id, address, size);
     }
+    static void MarkWritten(Cache& cache, BufferId id, DAddr address, u32 size) {
+        cache.MarkWrittenBuffer(id, address, size);
+    }
+    /// The guest CPU read GPU data from [address, address + size) (GetFlushArea).
+    static void ReadByCpu(Cache& cache, DAddr address, u64 size) {
+        cache.RollCpuReadRanges();
+        cache.cpu_read_ranges.Add(address, size);
+    }
     static void UseGpuMemory(Cache& cache, Tegra::MemoryManager& memory) {
         cache.gpu_memory = &memory;
     }
@@ -720,6 +728,20 @@ TEST_CASE("Copy engine clears give command list words back to guest memory", "[b
     REQUIRE(f.cache->Nx2ReadListCopy(0x20840, list, true) == Read::Unknown);
 }
 
+TEST_CASE("Only GPU writes over pages the guest reads ask for downloads right behind them",
+          "[buffer_ports]") {
+    Fixture f;
+    f.memory->EnableNativeTiling();
+    Access::UseGpuMemory(*f.cache, *f.memory);
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    REQUIRE_FALSE(f.cache->TakeReadPrefetchQueued());
+    Access::ReadByCpu(*f.cache, 0x21000, 0x1000);
+    Access::MarkWritten(*f.cache, id, 0x24000, 0x100);
+    REQUIRE_FALSE(f.cache->TakeReadPrefetchQueued());
+    Access::MarkWritten(*f.cache, id, 0x21800, 0x100);
+    REQUIRE(f.cache->TakeReadPrefetchQueued());
+    REQUIRE_FALSE(f.cache->TakeReadPrefetchQueued());
+}
 
 TEST_CASE("Native uniform banks upload directly without overwriting GPU-owned bytes",
           "[buffer_ports]") {

@@ -420,6 +420,12 @@ public:
     /// Front thread, the split drained: the command list page was flushed to guest memory.
     void Nx2NoteListSynced(DAddr page);
 
+    /// GPU thread: whether GPU writes over pages the guest CPU reads were queued for download
+    /// since the last call.
+    [[nodiscard]] bool TakeReadPrefetchQueued() noexcept {
+        return std::exchange(read_prefetch_queued, false);
+    }
+
     void Nx2FlushListPages(std::span<const DAddr> pages);
     /// CPU, inline and copy engine writes of bytes guest memory holds: they reach guest memory,
     /// so a synced page stays synced and the words they cover are guest memory's again, but the
@@ -984,6 +990,7 @@ private:
         }
         const auto queue = [&](DAddr lower, DAddr upper) {
             uncommitted_gpu_modified_ranges.Add(lower, upper - lower);
+            read_prefetch_queued = true;
         };
         cpu_read_ranges.ForEachInRange(device_addr, size, queue);
         cpu_read_ranges_previous.ForEachInRange(device_addr, size, queue);
@@ -1046,6 +1053,8 @@ private:
     Common::RangeSet<DAddr> cpu_read_ranges;
     Common::RangeSet<DAddr> cpu_read_ranges_previous; ///< Read in the previous period only
     u64 cpu_read_epoch{};                             ///< Period of cpu_read_ranges (HotFrames)
+    /// PrefetchCpuReadRanges queued a download since TakeReadPrefetchQueued.
+    bool read_prefetch_queued{};
     bool download_cpu_read_ranges{};
     Common::RangeSet<DAddr> gpu_modified_ranges;
     std::deque<Common::RangeSet<DAddr>> committed_gpu_modified_ranges;
