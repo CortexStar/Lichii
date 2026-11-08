@@ -199,11 +199,19 @@ void DynarmicCallbacks64::ExceptionRaised(u64 pc, Dynarmic::A64::Exception excep
         }
     }
     switch (exception) {
-    case Dynarmic::A64::Exception::WaitForInterrupt:
     case Dynarmic::A64::Exception::WaitForEvent:
+    case Dynarmic::A64::Exception::Yield:
+        // A guest spin-wait hint: give the SMT sibling the core for a moment, as GetCNTPCT does.
+#if defined(_M_X64) || defined(__x86_64__)
+        _mm_pause();
+        _mm_pause();
+#elif defined(__aarch64__)
+        asm volatile("yield");
+#endif
+        return;
+    case Dynarmic::A64::Exception::WaitForInterrupt:
     case Dynarmic::A64::Exception::SendEvent:
     case Dynarmic::A64::Exception::SendEventLocal:
-    case Dynarmic::A64::Exception::Yield:
         LOG_TRACE(Core_ARM, "ExceptionRaised(exception = {}, pc = {:08X}, code = {:08X}, cached = {:08X})", std::size_t(exception), pc, m_memory.Read32(pc), MemoryReadCode(pc).value_or(0));
         return;
     case Dynarmic::A64::Exception::NoExecuteFault:
