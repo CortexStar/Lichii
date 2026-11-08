@@ -1919,6 +1919,23 @@ void Device::ReleaseCustomBorderColorSamplers(size_t count) const {
 }
 
 u64 Device::GetDeviceMemoryUsage() const {
+    // The buffer and texture caches ask every frame; with the budget extension each answer is a
+    // driver and OS query (~0.1-0.5 ms on Windows): answers younger than 50 ms are reused.
+    constexpr s64 reuse_ns = 50'000'000;
+    const s64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
+    const s64 last = memory_usage_time.load(std::memory_order_acquire);
+    if (last != 0 && now - last < reuse_ns) {
+        return memory_usage_value.load(std::memory_order_relaxed);
+    }
+    const u64 usage = QueryDeviceMemoryUsage();
+    memory_usage_value.store(usage, std::memory_order_relaxed);
+    memory_usage_time.store(now, std::memory_order_release);
+    return usage;
+}
+
+u64 Device::QueryDeviceMemoryUsage() const {
     VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{};
     budget.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
     physical.GetMemoryProperties(&budget);
