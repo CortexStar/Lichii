@@ -50,8 +50,9 @@ Hidbus::Hidbus(Core::System& system_)
 
     RegisterHandlers(functions);
 
-    // Register update callbacks
-    hidbus_update_event = Core::Timing::CreateEvent(
+    // Register update callbacks: a poll of the bus devices, so a relaxed event (it may run an OS
+    // timer tick late instead of costing the timer thread a precise wait).
+    hidbus_update_event = Core::Timing::CreateRelaxedEvent(
         "Hidbus::UpdateCallback",
         [this](s64 time,
                std::chrono::nanoseconds ns_late) -> std::optional<std::chrono::nanoseconds> {

@@ -57,13 +57,17 @@ ResourceManager::ResourceManager(Core::System& system_,
     : firmware_settings{settings}, system{system_}, service_context{system_, "hid"} {
     applet_resource = std::make_shared<AppletResource>(system);
 
-    // Register update callbacks
-    npad_update_event = Core::Timing::CreateEvent("HID::UpdatePadCallback",
-                                                  [this](s64 time, std::chrono::nanoseconds ns_late)
-                                                      -> std::optional<std::chrono::nanoseconds> {
-                                                      UpdateNpad(ns_late);
-                                                      return std::nullopt;
-                                                  });
+    // Register update callbacks. The periodic samples are relaxed events: a changed button,
+    // stick or trigger reaches the shared memory at once through npad_input_event, so a sample
+    // only steps the sampling ring and may run an OS timer tick late instead of costing the timer
+    // thread a precise wait (~0.3 ms of monitor wait per sample, 1,000 pad samples a second).
+    npad_update_event = Core::Timing::CreateRelaxedEvent(
+        "HID::UpdatePadCallback",
+        [this](s64 time,
+               std::chrono::nanoseconds ns_late) -> std::optional<std::chrono::nanoseconds> {
+            UpdateNpad(ns_late);
+            return std::nullopt;
+        });
     // A host input change reaches the shared memory now, not up to 1 ms later.
     npad_input_event = Core::Timing::CreateEvent(
         "HID::NpadInputCallback",
@@ -73,21 +77,21 @@ ResourceManager::ResourceManager(Core::System& system_,
             UpdateNpad(ns_late);
             return std::nullopt;
         });
-    default_update_event = Core::Timing::CreateEvent(
+    default_update_event = Core::Timing::CreateRelaxedEvent(
         "HID::UpdateDefaultCallback",
         [this](s64 time,
                std::chrono::nanoseconds ns_late) -> std::optional<std::chrono::nanoseconds> {
             UpdateControllers(ns_late);
             return std::nullopt;
         });
-    mouse_keyboard_update_event = Core::Timing::CreateEvent(
+    mouse_keyboard_update_event = Core::Timing::CreateRelaxedEvent(
         "HID::UpdateMouseKeyboardCallback",
         [this](s64 time,
                std::chrono::nanoseconds ns_late) -> std::optional<std::chrono::nanoseconds> {
             UpdateMouseKeyboard(ns_late);
             return std::nullopt;
         });
-    motion_update_event = Core::Timing::CreateEvent(
+    motion_update_event = Core::Timing::CreateRelaxedEvent(
         "HID::UpdateMotionCallback",
         [this](s64 time,
                std::chrono::nanoseconds ns_late) -> std::optional<std::chrono::nanoseconds> {
@@ -292,7 +296,7 @@ void ResourceManager::InitializeTouchScreenSampler() {
     touch_screen = std::make_shared<TouchScreen>(touch_resource);
     gesture = std::make_shared<Gesture>(touch_resource);
 
-    touch_update_event = Core::Timing::CreateEvent(
+    touch_update_event = Core::Timing::CreateRelaxedEvent(
         "HID::TouchUpdateCallback",
         [this](s64 time,
                std::chrono::nanoseconds ns_late) -> std::optional<std::chrono::nanoseconds> {

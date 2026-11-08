@@ -2958,12 +2958,13 @@ private:
             m_event = m_context.CreateEvent(fmt::format("{}:Ready", GetServiceName()));
             // The client attaches it auto-clearing, so one signal is consumed by the first wait:
             // while the input queue has room, re-signal every 4 ms; a spurious wake only makes it
-            // check again.
+            // check again. A heartbeat, not a deadline: relaxed, so the timer thread sleeps in the
+            // OS for it instead of a precise wait (~0.3 ms of monitor wait per beat).
             {
                 std::scoped_lock lk{m_ready->mutex};
                 m_ready->event = m_event;
             }
-            m_ready_timer = Core::Timing::CreateEvent(
+            m_ready_timer = Core::Timing::CreateRelaxedEvent(
                 "nx2:vdec ready",
                 [ready = m_ready, &kernel = system.Kernel()](
                     s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
