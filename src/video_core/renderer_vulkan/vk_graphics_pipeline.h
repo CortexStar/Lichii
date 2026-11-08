@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <chrono>
 #include <cstring>
 #include <functional>
@@ -233,6 +235,8 @@ public:
     [[nodiscard]] u32 MeshEmulationPayloadStride() const noexcept {
         return mesh_emulation ? mesh_emulation->payload_stride : 0;
     }
+    ~GraphicsPipeline();
+
     GraphicsPipeline& operator=(GraphicsPipeline&&) noexcept = delete;
     GraphicsPipeline(GraphicsPipeline&&) noexcept = delete;
 
@@ -359,6 +363,9 @@ private:
                                  VkRenderPass render_pass) const;
 
     vk::Pipeline LinkLibraries(VkRenderPass render_pass, bool optimized);
+    /// Links the libraries again with link time optimization on the library cache's background
+    /// thread; the draws bind that pipeline once it exists.
+    void QueueOptimizedLink(VkRenderPass render_pass);
 
     /// The library route failed: per-stage sets kept, with a layout a monolithic pipeline takes.
     void FallBackToMonolithic(VkRenderPass render_pass);
@@ -416,6 +423,16 @@ private:
     vk::Pipeline fragment_output_library;
     vk::DescriptorSetLayout fallback_empty_set_layout;
     bool linked{};
+    /// QueueOptimizedLink: the optimized link, bound instead of `pipeline` once built.
+    struct OptimizedLink {
+        std::mutex mutex;
+        std::condition_variable idle;
+        bool cancelled{};
+        bool running{};
+    };
+    std::shared_ptr<OptimizedLink> optimized_link;
+    vk::Pipeline optimized_pipeline;
+    std::atomic<VkPipeline> optimized_handle{VK_NULL_HANDLE};
 
     vk::DescriptorSetLayout descriptor_set_layout;
     DescriptorAllocator descriptor_allocator;

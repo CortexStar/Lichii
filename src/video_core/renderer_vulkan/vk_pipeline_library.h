@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "common/thread_worker.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Vulkan {
@@ -115,6 +116,12 @@ public:
                                                   const Builder& build, u64 name);
 
     void RecordLink(bool optimized, std::chrono::nanoseconds time);
+
+    /// Runs `task` on the low-priority thread that links fast-linked pipelines again with link
+    /// time optimization (GraphicsPipeline::QueueOptimizedLink).
+    void QueueOptimizedLink(std::function<void()> task) {
+        optimize_worker.QueueWork(std::move(task));
+    }
     void RecordHeldDraw(std::chrono::nanoseconds time);
     void RecordFallback();
 
@@ -145,6 +152,8 @@ private:
     std::atomic<u32> fallbacks{};
     std::atomic<u32> logged_builds{};
     std::atomic<size_t> total_libraries{};
+    /// Last member: stopped before the counters its tasks report to are destroyed.
+    Common::ThreadWorker optimize_worker{1, "VkGplOptimize", {}, Common::ThreadPlacement::Background};
     std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
 };
 

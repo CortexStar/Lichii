@@ -1265,7 +1265,9 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             if (!pipeline || build->Failed()) {
                 return;
             }
-            cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline);
+            const VkPipeline optimized = optimized_handle.load(std::memory_order_acquire);
+            cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                optimized != VK_NULL_HANDLE ? optimized : *pipeline);
         }
         const VkShaderStageFlags push_stages =
             mesh_emulation ? VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT
@@ -2253,10 +2255,61 @@ bool GraphicsPipeline::MakeLibraryPipeline(VkRenderPass render_pass) {
             .basePipelineIndex = 0,
         },
         *pipeline_cache);
-    pipeline = LinkLibraries(render_pass, device.LinksGraphicsLibrariesOptimized(
-                                              stage_infos[NUM_STAGES - 1].uses_quad_after_demote));
+    const bool optimized = device.LinksGraphicsLibrariesOptimized(
+        stage_infos[NUM_STAGES - 1].uses_quad_after_demote);
+    pipeline = LinkLibraries(render_pass, optimized);
     linked = true;
+    if (GraphicsLibraryRelinksOptimized(device.GetDriverID(), optimized,
+                                        device.KeepsGraphicsLibraryLinkInfo())) {
+        QueueOptimizedLink(render_pass);
+    }
     return true;
+}
+
+void GraphicsPipeline::QueueOptimizedLink(VkRenderPass render_pass) {
+    // A fast link keeps each library's code as built alone. On AMD's driver that means the
+    // vertex shader's uber fetch (the pre-rasterization library has no vertex input; xgl
+    // pipeline_compiler.cpp enables it for such libraries) and every vertex output the vertex
+    // shader stores, read by the fragment shader or not, written to the attribute ring. A link
+    // with link time optimization compiles the stages together: static vertex input fetches with
+    // the pipeline's formats and unread outputs are dropped. The same libraries and state: the
+    // pipelines are interchangeable, so the draws switch once it is built.
+    optimized_link = std::make_shared<OptimizedLink>();
+    library_cache->QueueOptimizedLink([this, render_pass, state = optimized_link] {
+        {
+            std::scoped_lock lock{state->mutex};
+            if (state->cancelled) {
+                return;
+            }
+            state->running = true;
+        }
+        vk::Pipeline linked_pipeline;
+        try {
+            linked_pipeline = LinkLibraries(render_pass, true);
+        } catch (const vk::Exception& exception) {
+            LOG_ERROR(Render_Vulkan, "Nx2Perf gpl: optimized link of pipeline {:016x} failed: {}",
+                      key.Hash(), exception.what());
+        }
+        {
+            std::scoped_lock lock{state->mutex};
+            if (linked_pipeline && !state->cancelled) {
+                optimized_pipeline = std::move(linked_pipeline);
+                optimized_handle.store(*optimized_pipeline, std::memory_order_release);
+            }
+            state->running = false;
+        }
+        state->idle.notify_all();
+    });
+}
+
+GraphicsPipeline::~GraphicsPipeline() {
+    if (!optimized_link) {
+        return;
+    }
+    // A queued link returns at once; a running one still uses the libraries.
+    std::unique_lock lock{optimized_link->mutex};
+    optimized_link->cancelled = true;
+    optimized_link->idle.wait(lock, [this] { return !optimized_link->running; });
 }
 
 void GraphicsPipeline::FallBackToMonolithic(VkRenderPass render_pass) {
