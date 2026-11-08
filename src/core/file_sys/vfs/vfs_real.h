@@ -96,6 +96,10 @@ public:
     std::size_t Write(const u8* data, std::size_t length, std::size_t offset) override;
     bool Rename(std::string_view name) override;
 
+    std::string GetHostPath() const override {
+        return path;
+    }
+
 private:
 
     RealVfsFilesystem& base;
