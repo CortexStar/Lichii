@@ -50,6 +50,7 @@ add_executable(tests
     core/nso_image_size.cpp
     core/memory_acquire.cpp
     core/builtin_patches.cpp
+    core/oot_ultrawide.cpp
     core/builtin_font_glyphs.cpp
     core/framebuffer_layout.cpp
     core/system_test_context.h
