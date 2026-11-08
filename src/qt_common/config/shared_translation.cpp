@@ -177,8 +177,9 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, ocarina_dlss_mode, tr("NVIDIA DLSS mode in Ocarina of Time:"),
            tr("How much of the game's output resolution Ocarina of Time renders before DLSS "
               "upscales it.\nQuality: 67%.\nBalanced: 58%.\nPerformance: 50%.\nUltra "
-              "Performance: 33%, cheapest for smaller cards.\nNeeds docked mode, the Max "
-              "Resolution add-on and 1x resolution scale.\nTakes effect when the game starts."));
+              "Performance: 33%, cheapest for smaller cards.\nNeeds NVIDIA DLSS on, docked "
+              "mode, the Max Resolution add-on and 1x resolution scale.\nTakes effect when the "
+              "game starts."));
     INSERT(Settings, anti_aliasing, tr("Anti-Aliasing Method:"),
            tr("The anti-aliasing method to use.\nSMAA offers the best quality.\nFXAA "
               "can produce a more stable picture in lower resolutions."));
