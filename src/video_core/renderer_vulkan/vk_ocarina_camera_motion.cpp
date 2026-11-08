@@ -890,7 +890,8 @@ VkImageView OcarinaUpscaler::CompositedView() const {
 bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView target, VkExtent2D extent,
                             VkExtent2D output_extent, VkExtent2D target_extent,
                             const Matrix& current, const Matrix& previous,
-                            const OcarinaActorMesh& mesh, VkImage depth_image, u64 frame) {
+                            const OcarinaActorMesh& mesh, VkImage depth_image, u64 frame,
+                            std::array<f32, 2> jitter) {
     auto& state = *impl;
     if (state.last_frame == frame || state.Failed()) {
         return false;
@@ -993,7 +994,7 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
             .motion_vectors = *resources.motion_view,
             .render_size = extent,
             .upscale_size = output_extent,
-            .jitter = {0.0f, 0.0f},
+            .jitter = jitter,
             .motion_vector_scale = {1.0f, 1.0f},
             .frame_time_ms = elapsed,
             .reset = reset || elapsed > 250.0f,
@@ -1006,9 +1007,11 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
         state.last_evaluation = now;
         static const bool trace = std::getenv("EDEN_NX2_DLSS_CONTRACT_TRACE") != nullptr;
         if (trace || frame % 120 == 0 || reset) {
-            LOG_INFO(Render_Vulkan, "Ocarina FSR 3.1 evaluated frame={} {}x{} -> {}x{} reset={} effects={}",
+            LOG_INFO(Render_Vulkan,
+                     "Ocarina FSR 3.1 evaluated frame={} {}x{} -> {}x{} reset={} effects={} "
+                     "jitter=({:.3f},{:.3f})",
                      frame, extent.width, extent.height, output_extent.width, output_extent.height,
-                     reset || elapsed > 250.0f, bias_view != VK_NULL_HANDLE);
+                     reset || elapsed > 250.0f, bias_view != VK_NULL_HANDLE, jitter[0], jitter[1]);
         }
     }
     // A resize can submit the inputs before recording evaluation, so keep the later tick.
