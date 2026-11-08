@@ -8,9 +8,12 @@
 #include <chrono>
 #include <cstdlib>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include <fmt/format.h>
 
@@ -29,7 +32,9 @@
 // - acquires and polls the semaphore view decides (Puller AskView), verified: the front drains
 //   and reads the word as before anyway, and counts the decisions the drain contradicts. A pass
 //   the drained word does not meet must stay 0; such a pass is corrected (the channel waits), and
-//   a wait the drained word meets ends (counted: a drain would have passed or resumed it).
+//   a wait the drained word meets ends (counted: a drain would have passed or resumed it);
+// - the releases the front noted for the QMD launches it valued (FrontQmdView), against the ones
+//   the back then ran, compared on the back right after the QMD methods. Wrong ones must stay 0.
 namespace VideoCommon::Nx2DrainCheck {
 
 // A plain flag: the front checks it at every command list and acquire.
@@ -54,6 +59,13 @@ struct State {
     /// the drained word met.
     std::array<std::atomic<u64>, 2> view_waits{};
     std::array<std::atomic<u64>, 2> view_waits_met{};
+    /// QMD methods the front valued and the releases compared for them, those that differed,
+    /// and methods it could not value (their releases are not compared).
+    std::atomic<u64> qmd_methods{};
+    std::atomic<u64> qmd_releases{};
+    std::atomic<u64> qmd_wrong{};
+    std::atomic<u64> qmd_unvalued{};
+    std::atomic<u32> qmd_logged{};
     std::mutex released_mutex;
     std::unordered_set<u64> released; ///< Device addresses of the semaphores the GPU released
     std::chrono::steady_clock::time_point last_report{}; ///< The front's
@@ -111,6 +123,71 @@ inline void NoteViewWait(bool poll, bool met_after_drain) {
     if (met_after_drain) {
         state.view_waits_met[poll ? 1 : 0].fetch_add(1, std::memory_order_relaxed);
     }
+}
+
+/// A release of a QMD launch: the word and what it holds once the back ran it, or a value the
+/// front could not tell (`known` false), or that value at least (`at_least`).
+struct QmdRelease {
+    u64 device;
+    u32 value;
+    bool known;
+    bool at_least;
+
+    bool operator==(const QmdRelease&) const = default;
+};
+
+/// The releases the back ran for QMD launches since the last check (the back's thread only).
+inline std::vector<QmdRelease>& BackQmdReleases() {
+    static std::vector<QmdRelease> released;
+    return released;
+}
+
+/// The split's back runs a release of a QMD launch (KeplerCompute::ProcessNativeMethod).
+inline void NoteQmdRelease(u64 device_address, u32 value, bool on_back) {
+    if (on_back) {
+        BackQmdReleases().push_back({device_address, value, true, false});
+    }
+}
+
+/// The back, right after QMD methods the front sent: what it released for them against what the
+/// front noted (`predicted`, in order), or nothing to compare where the front could not value
+/// them (`valued` false).
+inline void CheckQmdReleases(std::span<const QmdRelease> predicted, bool valued) {
+    State& state = Get();
+    auto& released = BackQmdReleases();
+    if (!valued) {
+        state.qmd_unvalued.fetch_add(1, std::memory_order_relaxed);
+        released.clear();
+        return;
+    }
+    state.qmd_methods.fetch_add(1, std::memory_order_relaxed);
+    state.qmd_releases.fetch_add(released.size(), std::memory_order_relaxed);
+    bool same = released.size() == predicted.size();
+    for (size_t i = 0; same && i < released.size(); ++i) {
+        const QmdRelease& note = predicted[i];
+        same = released[i].device == note.device &&
+               (!note.known || (note.at_least ? released[i].value >= note.value
+                                              : released[i].value == note.value));
+    }
+    if (!same) {
+        state.qmd_wrong.fetch_add(1, std::memory_order_relaxed);
+        if (state.qmd_logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+            std::string text;
+            for (const QmdRelease& release : released) {
+                text += fmt::format(" {:#x}={:#x}", release.device, release.value);
+            }
+            text += " | noted";
+            for (const QmdRelease& note : predicted) {
+                text += fmt::format(" {:#x}{}{:#x}", note.device,
+                                    !note.known     ? "=?"
+                                    : note.at_least ? ">="
+                                                    : "=",
+                                    note.value);
+            }
+            LOG_ERROR(HW_GPU, "QMD view check: the back released{}", text);
+        }
+    }
+    released.clear();
 }
 
 /// The front fetches a list without waiting for writers still queued after the last sync.
@@ -181,14 +258,20 @@ inline void MaybeReport() {
     const std::string acquire_waits = waits(false);
     const std::string poll_passes = passes(true);
     const std::string poll_waits = waits(true);
+    const u64 qmd_methods = take(state.qmd_methods);
+    const u64 qmd_releases = take(state.qmd_releases);
+    const u64 qmd_wrong = take(state.qmd_wrong);
+    const u64 qmd_unvalued = take(state.qmd_unvalued);
     LOG_INFO(HW_GPU,
              "Drain checks in {:.1f} s: command lists that did not wait for writers sent after the "
              "last sync {}, GPU-written by those writers {} | drained acquires at addresses the "
              "GPU never released {}, at ones it released {} | drained polls of suspended acquires "
              "at addresses never released {}, at released ones {} | semaphore view: acquires "
-             "passed {}, suspended {}; polls resumed {}, kept waiting {}",
+             "passed {}, suspended {}; polls resumed {}, kept waiting {} | QMD view: methods "
+             "valued {} with {} releases, released otherwise than noted {}; not valued {}",
              seconds, unwaited, written, acquires_never, acquires_released, polls_never,
-             polls_released, acquire_passes, acquire_waits, poll_passes, poll_waits);
+             polls_released, acquire_passes, acquire_waits, poll_passes, poll_waits, qmd_methods,
+             qmd_releases, qmd_wrong, qmd_unvalued);
 }
 
 } // namespace VideoCommon::Nx2DrainCheck
@@ -224,6 +307,25 @@ enum class Releaser : u32 {
     Report3D,      ///< 3D report semaphores
     ReportCompute, ///< Compute report semaphores
     Copy,          ///< Copy engine semaphores
+    Qmd,           ///< QMD launches the front valued (FrontQmdView)
+    Count,
+};
+
+/// Why the front's QMD view could not value a signal (FrontQmdView::Signal).
+enum class QmdLost : u32 {
+    NotSynced,    ///< Its table is not the back's yet (the back has not caught up since)
+    Unplaced,     ///< Work that may write guest memory anywhere (or map) was still queued
+    GpuWritten,   ///< A QMD it read is on a page GPU work wrote
+    Pending,      ///< A write into a QMD it read was still queued
+    ReleasedInto, ///< A release of the same signal writes into a QMD it read
+    Count,
+};
+
+/// What the QMD view noted for a release.
+enum class QmdNote : u32 {
+    Exact,
+    AtLeast, ///< A maximum with a word it can't tell
+    Unknown, ///< A reduction of a word it can't tell
     Count,
 };
 
@@ -252,6 +354,12 @@ struct State {
     u64 wait_ns{};
     u64 wait_max_ns{};
     u64 waits_over_1ms{};
+    u64 passed_by_qmd{}; ///< Of the passes by a queued release, at words QMD launches release
+    u64 qmd_valued{};
+    std::array<u64, static_cast<size_t>(QmdLost::Count)> qmd_lost{};
+    std::array<u64, static_cast<size_t>(QmdNote::Count)> qmd_notes{};
+    u64 qmd_syncs{};
+    std::chrono::steady_clock::duration qmd_sync_time{};
     std::unordered_map<u64, u8> noted; ///< Releaser bits by word
     std::chrono::steady_clock::time_point last_report{};
 };
@@ -283,6 +391,35 @@ inline void NoteRelease(u64 device_address, Releaser releaser) {
     }
 }
 
+/// The QMD view valued a signal (`lost` empty) or not.
+inline void NoteQmdSignal(std::optional<QmdLost> lost) {
+    if (!g_enabled) {
+        return;
+    }
+    State& state = Get();
+    if (lost) {
+        ++state.qmd_lost[static_cast<size_t>(*lost)];
+    } else {
+        ++state.qmd_valued;
+    }
+}
+
+/// The QMD view noted a release so.
+inline void NoteQmdNote(QmdNote note) {
+    if (g_enabled) {
+        ++Get().qmd_notes[static_cast<size_t>(note)];
+    }
+}
+
+/// The QMD view took the back's table over, in `time`.
+inline void NoteQmdSync(std::chrono::steady_clock::duration time) {
+    if (g_enabled) {
+        State& state = Get();
+        ++state.qmd_syncs;
+        state.qmd_sync_time += time;
+    }
+}
+
 /// An acquire of `operation` (Puller GpuSemaphoreOperation) at `device_address`, decided so.
 /// Suspended: whether its word is on a GPU-written page, and the buffer cache held it newer.
 inline void NoteAcquire(u32 operation, Decision decision, u64 device_address, bool waited,
@@ -291,6 +428,12 @@ inline void NoteAcquire(u32 operation, Decision decision, u64 device_address, bo
     ++state.acquires[OperationIndex(operation)][static_cast<size_t>(decision)];
     if (waited) {
         ++state.positioned_waits;
+    }
+    if (decision == Decision::Queued) {
+        const auto it = state.noted.find(device_address & ~u64{3});
+        if (it != state.noted.end() && ((it->second >> static_cast<u32>(Releaser::Qmd)) & 1)) {
+            ++state.passed_by_qmd;
+        }
     }
     if (decision != Decision::Suspended) {
         return;
@@ -365,18 +508,30 @@ inline void MaybeReport() {
     const u64 resumed = resumes[0] + resumes[1] + resumes[2] + resumes[3];
     LOG_INFO(HW_GPU,
              "Acquires in {:.1f} s (EDEN_NX2_ACQUIRE_STATS): equal {}, greater or equal {}, mask "
-             "{}; positioned waits {} | suspended at words on GPU-written pages {} (held newer by "
-             "the buffer cache {}), with releases sent by the puller {}, 3D reports {}, compute "
-             "reports {}, the copy engine {}, none (QMD releases, the CPU) {} | resumed {}: "
+             "{}; positioned waits {}; passed by a queued QMD launch's release {} | suspended at "
+             "words on GPU-written pages {} (held newer by the buffer cache {}), with releases "
+             "sent by the puller {}, 3D reports {}, compute reports {}, the copy engine {}, QMD "
+             "launches the front valued {}, none (other QMD releases, the CPU) {} | resumed {}: "
              "latched {} (payload releases {}, query results {}, QMD reductions {}, QMD maxima {}, "
              "other {}), by memory {}, by a queued release {}, by the drain check {}, after a "
              "flush {} | waited {:.1f} ms, at most {:.3f} ms, over 1 ms {}",
              seconds, by_operation(0), by_operation(1), by_operation(2), state.positioned_waits,
-             state.suspended_gpu_written, state.suspended_flush, noted[0], noted[1], noted[2],
-             noted[3], state.suspended_never_noted, resumed, resumes[0], latches[1], latches[2],
-             latches[3], latches[4], latches[0], resumes[1], resumes[2], resumes[3],
-             state.resumes_after_flush, static_cast<double>(state.wait_ns) / 1e6,
-             static_cast<double>(state.wait_max_ns) / 1e6, state.waits_over_1ms);
+             state.passed_by_qmd, state.suspended_gpu_written, state.suspended_flush, noted[0],
+             noted[1], noted[2], noted[3], noted[4], state.suspended_never_noted, resumed,
+             resumes[0], latches[1], latches[2], latches[3], latches[4], latches[0], resumes[1],
+             resumes[2], resumes[3], state.resumes_after_flush,
+             static_cast<double>(state.wait_ns) / 1e6, static_cast<double>(state.wait_max_ns) / 1e6,
+             state.waits_over_1ms);
+    const auto& lost = state.qmd_lost;
+    const auto& notes = state.qmd_notes;
+    LOG_INFO(HW_GPU,
+             "QMD view in {:.1f} s (EDEN_NX2_ACQUIRE_STATS): signals valued {}; not valued: table "
+             "not synced yet {}, work that may write anywhere queued {}, QMD on a GPU-written page "
+             "{}, a write into the QMD queued {}, a release of the signal into it {} | releases "
+             "noted exact {}, at least {}, unknown {} | tables taken over {} in {:.3f} ms",
+             seconds, state.qmd_valued, lost[0], lost[1], lost[2], lost[3], lost[4], notes[0],
+             notes[1], notes[2], state.qmd_syncs,
+             std::chrono::duration<double, std::milli>(state.qmd_sync_time).count());
     auto noted_words = std::move(state.noted);
     state = State{};
     state.noted = std::move(noted_words);

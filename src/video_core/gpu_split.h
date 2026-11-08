@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -201,7 +202,7 @@ public:
         Commit(2 + payload);
         NoteWrites(writes);
     }
-    void DeferFunction(std::function<void()>&& func);
+    void DeferFunction(std::function<void()>&& func, Writes writes = Writes::Anywhere);
     /// Runs `func` on the back and waits for it: for work on back-owned state, such as a buffer
     /// cache download that records into the Vulkan scheduler. A drained back still submits from
     /// its idle hook, so the front never touches that state itself.
@@ -389,11 +390,21 @@ private:
     }
     u64* ReserveSlow(size_t words);
     void Commit(size_t words) {
+        if (profile_publishes && write_position == published_local) [[unlikely]] {
+            NoteFirstUnpublished(); // TEST
+        }
         write_position += words;
         if (write_position - published_local >= publish_every) {
             Publish();
         }
     }
+    /// TEST (EDEN_NX2_GPU_PROFILE): how long the back waited for work while the front held words
+    /// it could have run (Publish).
+    /// Nx2Profile::Enabled() as the split started (MaybeStart, after VideoCore::CreateGPU read
+    /// the switch).
+    bool profile_publishes{};
+    void NoteFirstUnpublished();
+    void NoteLatePublish();
     void WaitForSpace(size_t words);
     void SelectEngine(Tegra::Engines::EngineInterface* engine) {
         if (engine != front_engine) [[unlikely]] {
@@ -452,6 +463,7 @@ private:
     std::array<u64, size_t{1} << WriteSlotBits> write_positions{};
     u64 published_local{};
     u64 consumed_cache{};
+    u64 first_unpublished_ticks{}; ///< TEST: when the first word not published yet was sent
     /// Words between publishes: small right after the front waited for the back (Drain,
     /// PublishSoon), while the back may have nothing to do.
     size_t publish_every{PublishEvery};
@@ -481,6 +493,8 @@ private:
     /// The front sleeps in Backoff (#161: instead of yielding).
     alignas(128) std::atomic<bool> front_waiting{};
     std::atomic<u32> front_wake{};
+    /// TEST (profile_publishes): when the back last ran out of work, 0 while it runs.
+    alignas(128) std::atomic<u64> back_idle_since{};
     std::jthread back_thread;
 };
 

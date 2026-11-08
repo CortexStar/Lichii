@@ -644,6 +644,7 @@ void DmaPusher::NoteDmaSemaphore(u32 method, u32 argument) {
 }
 
 void DmaPusher::RefreshSnapshot(CommandList& list, u64 now) {
+    VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Resnapshot}; // TEST
     list.snapshot_suspensions = now;
     for (size_t i = 0; i < list.command_lists.size() && i < list.submitted_offsets.size(); ++i) {
         const CommandListHeader& entry = list.command_lists[i];
@@ -653,6 +654,8 @@ void DmaPusher::RefreshSnapshot(CommandList& list, u64 now) {
         }
         memory_manager.ReadBlockUnsafe(entry.addr, list.submitted_words.data() + offset,
                                        entry.size * sizeof(u32));
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::ResnapshotWords,
+                                     entry.size); // TEST
     }
     list.deferred_entries.clear();
 }

@@ -370,11 +370,21 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             [&](u64 address, u32 payload, u32 flags) {
                 const bool four_words = (flags >> 30) == 0;
                 if (!memory_manager.IsFullyMappedRange(address, four_words ? 16 : sizeof(payload))) return false;
+                // TEST (EDEN_NX2_DRAIN_CHECK): what the front's QMD view compares its notes with.
+                const auto checked = [this, address](u32 offset, u32 value) {
+                    if (VideoCommon::Nx2DrainCheck::g_enabled) [[unlikely]] {
+                        if (const auto device = memory_manager.GpuToCpuAddress(address)) {
+                            VideoCommon::Nx2DrainCheck::NoteQmdRelease(
+                                *device + offset, value, VideoCommon::GpuSplit::OnBackThread());
+                        }
+                    }
+                };
                 if (flags & (1U << 26)) {
-                    rasterizer->SignalFence([this, address, payload, flags] {
+                    rasterizer->SignalFence([this, address, payload, flags, checked] {
                         const u32 value = ReduceSemaphore((flags >> 20) & 7, (flags >> 24) & 1,
                                                           memory_manager.Read<u32>(address), payload);
                         memory_manager.Write<u32>(address, value);
+                        checked(0, value);
                         if (const auto device = memory_manager.GpuToCpuAddress(address)) {
                             Tegra::Nx2SemaphoreWaiters::Get().OnWrite(
                                 *device, value, Tegra::Nx2SemaphoreWaiters::Source::QmdReduction);
@@ -393,13 +403,16 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                     rasterizer->Query(address, VideoCommon::QueryType::Payload,
                         VideoCommon::QueryPropertiesFlags::IsAFence | VideoCommon::QueryPropertiesFlags::HasTimeout,
                         payload, 0);
+                    checked(0, payload);
+                    checked(4, 0);
                 } else if (flags & (1U << 19)) {
                     // NVN2 tracks QMD completion with a max release (bit 19) into a word other
                     // releases also advance: a plain write would move it backwards and leave
                     // GEQ acquires waiting forever.
-                    rasterizer->SignalFence([this, address, payload] {
+                    rasterizer->SignalFence([this, address, payload, checked] {
                         const u32 value = (std::max)(memory_manager.Read<u32>(address), payload);
                         memory_manager.Write<u32>(address, value);
+                        checked(0, value);
                         if (const auto device = memory_manager.GpuToCpuAddress(address)) {
                             Tegra::Nx2SemaphoreWaiters::Get().OnWrite(
                                 *device, value, Tegra::Nx2SemaphoreWaiters::Source::QmdMax);
@@ -415,6 +428,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                     }
                     rasterizer->Query(address, VideoCommon::QueryType::Payload,
                         VideoCommon::QueryPropertiesFlags::IsAFence, payload, 0);
+                    checked(0, payload);
                 }
                 return true;
             }, [&](const auto& descriptor) { return DispatchNativeCompute(descriptor); });
@@ -1623,6 +1637,24 @@ void KeplerCompute::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit&
     split.Method(this, method, argument, is_last_call, segment,
                  FrontWrites(native_plain_methods, method));
     FrontNoteWrites(split, fs, method, argument, false);
+    FrontQmdCheck(split);
+}
+
+// TEST (EDEN_NX2_DRAIN_CHECK): has the back compare what it releases for the QMD methods just
+// sent with what the front's QMD view noted for them.
+void KeplerCompute::FrontQmdCheck(VideoCommon::GpuSplit& split) {
+    if (!VideoCommon::Nx2DrainCheck::g_enabled) [[likely]] {
+        return;
+    }
+    auto checks = GetFrontQmd().TakeChecks();
+    if (!checks) {
+        return;
+    }
+    split.DeferFunction(
+        [predicted = std::move(checks->releases), valued = checks->valued] {
+            VideoCommon::Nx2DrainCheck::CheckQmdReleases(predicted, valued);
+        },
+        VideoCommon::GpuSplit::Writes::Noted);
 }
 
 // What the back writes to guest memory running `method` with `argument`, just sent as
@@ -1747,6 +1779,7 @@ void KeplerCompute::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuS
     for (u32 i = 0; i < amount; ++i) {
         FrontNoteWrites(split, fs, method, base_start[i], false);
     }
+    FrontQmdCheck(split);
 }
 
 void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split,
@@ -1772,6 +1805,7 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
         }
         split.MacroWrite(this, address, value, FrontWrites(native_plain_methods, address));
         FrontNoteWrites(split, fs, address, value, true);
+        FrontQmdCheck(split);
         return true;
     };
 #ifdef ARCHITECTURE_x86_64

@@ -116,6 +116,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     }
     system = &system_;
     check_owner = std::getenv("EDEN_NX2_SPLIT_CHECK") != nullptr;
+    profile_publishes = Nx2Profile::Enabled(); // TEST
     ring = std::make_unique<u64[]>(RingWords);
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
@@ -194,9 +195,30 @@ void GpuSplit::WaitForSpace(size_t words) {
     }
 }
 
+void GpuSplit::NoteFirstUnpublished() {
+    first_unpublished_ticks = Nx2Profile::Ticks();
+}
+
+void GpuSplit::NoteLatePublish() {
+    const u64 idle_since = back_idle_since.load(std::memory_order_relaxed);
+    if (idle_since == 0 || first_unpublished_ticks == 0) {
+        return;
+    }
+    // The back could have run the words since it ran out of work or since the first was sent.
+    const u64 since = std::max(idle_since, first_unpublished_ticks);
+    const u64 now = Nx2Profile::Ticks();
+    if (now > since) {
+        Nx2Profile::Add(Nx2Profile::Counter::LatePublishTicks, now - since);
+        Nx2Profile::Add(Nx2Profile::Counter::LatePublishes, 1);
+    }
+}
+
 void GpuSplit::Publish() {
     if (published_local == write_position) {
         return;
+    }
+    if (profile_publishes) [[unlikely]] {
+        NoteLatePublish(); // TEST
     }
     published_local = write_position;
     publish_every = std::min<size_t>(publish_every * 2, PublishEvery);
@@ -417,12 +439,14 @@ void GpuSplit::MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, 
     NoteWrites(writes);
 }
 
-void GpuSplit::DeferFunction(std::function<void()>&& func) {
+void GpuSplit::DeferFunction(std::function<void()>&& func, Writes writes) {
     auto* const heap = new std::function<void()>(std::move(func));
-    Defer([heap] {
-        (*heap)();
-        delete heap;
-    });
+    Defer(
+        [heap] {
+            (*heap)();
+            delete heap;
+        },
+        writes);
 }
 
 size_t GpuSplit::Execute(const u64* entry, size_t words) {
@@ -546,6 +570,16 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         if (available == read_position) {
             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
             const GpuWaitStats::IdleScope idle{GpuWaitStats::g_back_idle_ns};
+            // TEST (profile_publishes): out of work from now until this block ends.
+            struct IdleMark {
+                std::atomic<u64>& since;
+                ~IdleMark() {
+                    since.store(0, std::memory_order_relaxed);
+                }
+            } const idle_mark{back_idle_since};
+            if (profile_publishes) {
+                back_idle_since.store(Nx2Profile::Ticks(), std::memory_order_relaxed);
+            }
             // The front usually sends more within microseconds: spin briefly before sleeping.
             for (u32 spins = 0; spins < 8192 && available == read_position &&
                                 !hook_requested.load(std::memory_order_relaxed) &&

@@ -4,12 +4,14 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <optional>
 #include <vector>
 
 #include "common/common_types.h"
 #include "video_core/gpu_split.h"
 #include "video_core/native_qmd.h"
+#include "video_core/nx2_drain_check.h"
 
 namespace VideoCommon {
 
@@ -37,9 +39,28 @@ public:
     /// the back ran everything sent.
     void Sync(const GpuSplit& split, const Tegra::NativeQmdScheduler& back) {
         if (!synced && split.Ran(split.Position())) [[unlikely]] {
+            const auto start = std::chrono::steady_clock::now(); // TEST
             scheduler.CopyStates(back);
             synced = true;
+            Nx2AcquireStats::NoteQmdSync(std::chrono::steady_clock::now() - start);
         }
+    }
+
+    /// TEST (EDEN_NX2_DRAIN_CHECK): the releases noted since the last call, and whether every
+    /// signal since was valued; nothing if no signal was sent since.
+    struct Checks {
+        std::vector<Nx2DrainCheck::QmdRelease> releases;
+        bool valued;
+    };
+    [[nodiscard]] std::optional<Checks> TakeChecks() {
+        if (!checks_pending) {
+            return std::nullopt;
+        }
+        checks_pending = false;
+        Checks taken{std::move(checks), !checks_unvalued};
+        checks.clear();
+        checks_unvalued = false;
+        return taken;
     }
 
     /// The engines schedule QMDs the front does not see (the split stopped, a front starts).
@@ -58,13 +79,21 @@ public:
     void Signal(GpuSplit& split, const Memory& memory, GPUVAddr address, u32 argument,
                 const Descriptor* inline_qmd) {
         split.NoteCacheWrite(); // The dispatches' shader stores
+        using Lost = Nx2AcquireStats::QmdLost;
+        checks_pending = Nx2DrainCheck::g_enabled; // TEST
         if (!synced) {
             split.NoteAnyWrite();
+            checks_unvalued = true; // TEST
+            Nx2AcquireStats::NoteQmdSignal(Lost::NotSynced);
             return;
         }
         releases.clear();
         // A map still queued may change what the back reads, mapped or not.
         bool exact = split.Ran(split.LastUnplacedWrite());
+        std::optional<Lost> lost; // TEST: why not
+        if (!exact) {
+            lost = Lost::Unplaced;
+        }
         const auto read = [&](u64 qmd_address, Descriptor& descriptor) {
             if (!memory.IsMapped(qmd_address, sizeof(descriptor))) {
                 return false;
@@ -74,12 +103,21 @@ public:
             } else {
                 memory.Read(qmd_address, descriptor.data(), sizeof(descriptor));
                 const auto device = memory.Device(qmd_address);
-                exact = exact && device.has_value() &&
-                        !memory.GpuWritten(*device, sizeof(descriptor)) &&
-                        split.Ran(memory.WritesTarget(split, qmd_address, sizeof(descriptor)));
+                const bool written =
+                    !device.has_value() || memory.GpuWritten(*device, sizeof(descriptor));
+                const bool pending =
+                    !split.Ran(memory.WritesTarget(split, qmd_address, sizeof(descriptor)));
+                if (exact && (written || pending)) {
+                    lost = written ? Lost::GpuWritten : Lost::Pending;
+                }
+                exact = exact && !written && !pending;
             }
             // A release this signal ran before writes into the QMD.
             for (const Release& earlier : releases) {
+                if (exact && earlier.address + 16 > qmd_address &&
+                    earlier.address < qmd_address + sizeof(descriptor)) {
+                    lost = Lost::ReleasedInto;
+                }
                 exact = exact && (earlier.address + 16 <= qmd_address ||
                                   earlier.address >= qmd_address + sizeof(descriptor));
             }
@@ -94,9 +132,11 @@ public:
             return true;
         };
         scheduler.Signal(address, argument, read, release, [](const Descriptor&) { return true; });
+        Nx2AcquireStats::NoteQmdSignal(lost);
         if (!exact) {
             synced = false;
             split.NoteAnyWrite();
+            checks_unvalued = true; // TEST
             return;
         }
         for (const Release& noted : releases) {
@@ -129,22 +169,37 @@ private:
         if (!device) {
             return;
         }
+        // TEST: what was noted (EDEN_NX2_DRAIN_CHECK, EDEN_NX2_ACQUIRE_STATS).
+        const auto check = [this](u64 word, u32 value, bool known, bool at_least) {
+            using Note = Nx2AcquireStats::QmdNote;
+            Nx2AcquireStats::NoteQmdNote(!known     ? Note::Unknown
+                                         : at_least ? Note::AtLeast
+                                                    : Note::Exact);
+            if (checks_pending) {
+                checks.push_back({word, value, known, at_least});
+            }
+        };
+        Nx2AcquireStats::NoteRelease(*device, Nx2AcquireStats::Releaser::Qmd);
         if (reduction) {
             const bool is_signed = ((flags >> 24) & 1) != 0;
-            split.NoteSemaphoreWrite(
-                *device,
-                base ? Tegra::ReduceSemaphore((flags >> 20) & 7, is_signed, *base, payload) : 0,
-                base.has_value());
+            const u32 value =
+                base ? Tegra::ReduceSemaphore((flags >> 20) & 7, is_signed, *base, payload) : 0;
+            split.NoteSemaphoreWrite(*device, value, base.has_value());
+            check(*device, value, base.has_value(), false);
         } else if (four_words) {
             // The payload as 64 bits, a timestamp after it.
             split.NoteSemaphoreWrite(*device, payload, true);
             split.NoteSemaphoreWrite(*device + 4, 0, true);
+            check(*device, payload, true, false);
+            check(*device + 4, 0, true, false);
         } else if (maximum) {
             // Whatever the word held, it holds the payload at least.
-            split.NoteSemaphoreWrite(*device, base ? (std::max)(*base, payload) : payload, true,
-                                     !base.has_value());
+            const u32 value = base ? (std::max)(*base, payload) : payload;
+            split.NoteSemaphoreWrite(*device, value, true, !base.has_value());
+            check(*device, value, true, !base.has_value());
         } else {
             split.NoteSemaphoreWrite(*device, payload, true);
+            check(*device, payload, true, false);
         }
     }
 
@@ -175,6 +230,10 @@ private:
     Tegra::NativeQmdScheduler scheduler{Tegra::NativeQmdScheduler::OwnTable{}};
     std::vector<Release> releases;
     bool synced{};
+    /// TEST (EDEN_NX2_DRAIN_CHECK): see TakeChecks.
+    std::vector<Nx2DrainCheck::QmdRelease> checks;
+    bool checks_pending{};
+    bool checks_unvalued{};
 };
 
 } // namespace VideoCommon
