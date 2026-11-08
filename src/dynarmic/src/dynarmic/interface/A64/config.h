@@ -11,7 +11,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <optional>
 
 #include "dynarmic/interface/halt_reason.h"
@@ -356,6 +355,17 @@ struct UserConfig {
     /// This tells the translator a wall clock will be used, thus allowing it
     /// to avoid writting certain unnecessary code only needed for cycle timers.
     bool wall_clock_cntpct = false;
+
+    /// x64 backend, with wall_clock_cntpct: MRS CNTPCT_EL0 reads the host TSC in the emitted code
+    /// and returns (TSC * *cntpct_rdtsc_factor) >> 64 instead of calling UserCallbacks::GetCNTPCT.
+    /// The factor is read at every access, so the owner may change it.
+    const std::uint64_t* cntpct_rdtsc_factor = nullptr;
+
+    /// With cntpct_rdtsc_factor: the TSC of the previous read is kept here, and a read less than
+    /// cntpct_spin_tsc TSC ticks after it (a guest polling the counter) runs two PAUSEs first, so
+    /// the SMT sibling gets the core. nullptr disables this.
+    std::uint64_t* cntpct_last_tsc = nullptr;
+    std::uint32_t cntpct_spin_tsc = 0;
 
     /// This allows accurately emulating protection fault handlers. If true, we check
     /// for exit after every data memory access by the emulated program.

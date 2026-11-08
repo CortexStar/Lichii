@@ -60,6 +60,10 @@ public:
     /// @returns Whether the clock directly uses the host's hardware clock.
     bool IsNative() const;
 
+    /// @returns The fixed-point factor GetCNTPCT multiplies the TSC by ((TSC * factor) >> 64), for
+    /// code that reads the counter itself; nullptr unless the clock is native x86-64.
+    const u64* CNTPCTRdtscFactor() const;
+
     // @returns Nanoseconds to native ticks
     u64 NsToTicks(std::chrono::nanoseconds ns) const;
 

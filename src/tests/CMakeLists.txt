@@ -223,6 +223,7 @@ target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain
 
 if (TARGET dynarmic::dynarmic)
     target_sources(tests PRIVATE core/window_trace.cpp core/dynarmic_atomic_fallback.cpp)
+    target_sources(tests PRIVATE core/guest_cpu.cpp core/window_trace.cpp)
     target_link_libraries(tests PRIVATE dynarmic::dynarmic)
 endif()
 

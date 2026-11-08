@@ -308,6 +308,12 @@ bool WallClock::IsNative() const {
     return invariant;
 }
 
+const u64* WallClock::CNTPCTRdtscFactor() const {
+    static_assert(sizeof(cntpct_rdtsc_factor) == sizeof(u64) &&
+                  std::atomic<u64>::is_always_lock_free);
+    return invariant ? reinterpret_cast<const u64*>(&cntpct_rdtsc_factor) : nullptr;
+}
+
 u64 WallClock::NsToTicks(std::chrono::nanoseconds ns) const {
     return ns.count() * rdtsc_ns_integer + MultiplyHigh(ns.count(), rdtsc_ns_factor);
 }
@@ -395,6 +401,10 @@ bool WallClock::IsNative() const {
     return true;
 }
 
+const u64* WallClock::CNTPCTRdtscFactor() const {
+    return nullptr;
+}
+
 u64 WallClock::NsToTicks(std::chrono::nanoseconds ns) const {
     return MultiplyHigh(ns.count(), cntfrq_ns_factor);
 }
@@ -431,6 +441,10 @@ s64 WallClock::GetUptime() const {
 
 bool WallClock::IsNative() const {
     return false;
+}
+
+const u64* WallClock::CNTPCTRdtscFactor() const {
+    return nullptr;
 }
 
 u64 WallClock::NsToTicks(std::chrono::nanoseconds ns) const {

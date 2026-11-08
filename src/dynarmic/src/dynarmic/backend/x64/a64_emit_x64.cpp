@@ -9,6 +9,7 @@
 #include "dynarmic/backend/x64/a64_emit_x64.h"
 
 #include <algorithm>
+#include <bit>
 #include <fmt/format.h>
 #include <fmt/ostream.h>
 #include "common/assert.h"
@@ -676,6 +677,11 @@ void A64EmitX64::EmitA64DataMemoryBarrier(A64EmitContext&, IR::Inst*) {
 }
 
 void A64EmitX64::EmitA64InstructionSynchronizationBarrier(A64EmitContext& ctx, IR::Inst*) {
+    if (conf.cntpct_rdtsc_factor) {
+        // ISB orders a later CNTPCT_EL0 read after every earlier instruction. LFENCE does the same
+        // for the inline RDTSC (it does not start until LFENCE and all earlier instructions are done).
+        code.lfence();
+    }
     if (!conf.hook_isb) {
         return;
     }
@@ -691,6 +697,34 @@ void A64EmitX64::EmitA64GetCNTFRQ(A64EmitContext& ctx, IR::Inst* inst) {
 }
 
 void A64EmitX64::EmitA64GetCNTPCT(A64EmitContext& ctx, IR::Inst* inst) {
+    if (conf.wall_clock_cntpct && conf.cntpct_rdtsc_factor) {
+        // CNTPCT_EL0 reads are not ordered against other instructions without an ISB (Arm ARM),
+        // and RDTSC is not ordered against other instructions without an LFENCE: a plain RDTSC
+        // gives the guest the ordering the architecture promises. ISB emits the LFENCE.
+        const Xbyak::Reg64 tsc = ctx.reg_alloc.ScratchGpr(code, HostLoc::RAX);
+        const Xbyak::Reg64 high = ctx.reg_alloc.ScratchGpr(code, HostLoc::RDX);
+        const Xbyak::Reg64 ptr = ctx.reg_alloc.ScratchGpr(code);
+        code.rdtsc();
+        code.shl(high, 32);
+        code.or_(tsc, high);
+        if (conf.cntpct_last_tsc) {
+            const Xbyak::Reg64 delta = ctx.reg_alloc.ScratchGpr(code);
+            Xbyak::Label no_spin;
+            code.mov(ptr, std::bit_cast<u64>(conf.cntpct_last_tsc));
+            code.mov(delta, tsc);
+            code.sub(delta, qword[ptr]);
+            code.mov(qword[ptr], tsc);
+            code.cmp(delta, conf.cntpct_spin_tsc);
+            code.jae(no_spin);
+            code.pause();
+            code.pause();
+            code.L(no_spin);
+        }
+        code.mov(ptr, std::bit_cast<u64>(conf.cntpct_rdtsc_factor));
+        code.mul(qword[ptr]);
+        ctx.reg_alloc.DefineValue(code, inst, high);
+        return;
+    }
     ctx.reg_alloc.HostCall(code, inst);
     if (!conf.wall_clock_cntpct) {
         code.UpdateTicks();

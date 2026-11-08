@@ -251,6 +251,16 @@ u64 DynarmicCallbacks64::GetTicksRemaining() {
     return std::max<s64>(m_parent.m_system.CoreTiming().downcount, 0);
 }
 
+namespace {
+bool CounterPollPauseEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_CNTPCT_PAUSE");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+} // namespace
+
 u64 DynarmicCallbacks64::GetCNTPCT() {
     const u64 ticks = m_parent.m_system.CoreTiming().GetClockTicks();
     // Guest code that waits by polling the counter (title 1's main thread reads it ~17 million
@@ -258,11 +268,7 @@ u64 DynarmicCallbacks64::GetCNTPCT() {
     // GPU thread is often on the other half of that SMT core. Two reads within ~1.7 us of each
     // other are such a loop: pause, which hands the core's resources to the sibling thread for a
     // moment. The guest sees the same counter. EDEN_NX2_CNTPCT_PAUSE=0 turns it off.
-    static const bool pause_spins = [] {
-        const char* value = std::getenv("EDEN_NX2_CNTPCT_PAUSE");
-        return value == nullptr || value[0] != '0';
-    }();
-    if (pause_spins && ticks - m_last_cntpct < m_spin_ticks) {
+    if (CounterPollPauseEnabled() && ticks - m_last_cntpct < m_spin_ticks) {
 #if defined(_M_X64) || defined(__x86_64__)
         _mm_pause();
         _mm_pause();
@@ -508,6 +514,19 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
         // Halt checks on links to lower PCs and on indirect branches instead of every linked
         // branch (multicore only: dynarmic counts no cycles there).
         config.halt_check_on_back_edges = !config.enable_cycle_counting;
+        // MRS CNTPCT_EL0 in the emitted code: RDTSC and the clock's fixed-point factor, without
+        // the callback and its fenced RDTSC (guest code reads the counter ~10^5-10^7 times a
+        // second). Only when the counter is the host clock unchanged.
+        if (config.wall_clock_cntpct && m_system.CoreTiming().GuestCounterIsHostClock()) {
+            config.cntpct_rdtsc_factor = Common::g_wall_clock.CNTPCTRdtscFactor();
+            if (CounterPollPauseEnabled()) {
+                // The same ~1.7 us as m_spin_ticks, in TSC ticks.
+                config.cntpct_last_tsc = &m_cb->m_last_cntpct;
+                config.cntpct_spin_tsc = static_cast<u32>(std::min<u64>(
+                    Common::g_wall_clock.NsToTicks(std::chrono::nanoseconds{1'000'000'000 / 600'000}),
+                    0x7FFF'FFFF));
+            }
+        }
     }
 #endif
     m_jit.emplace(config);
