@@ -340,9 +340,9 @@ struct Values {
 
     // Renderer
     SwitchableSetting<bool> hdr{linkage, false, "hdr", Category::Renderer};
-    SwitchableSetting<u16, true> hdr_reference_white{linkage, 200, 0, 1000, "hdr_reference_white",
+    SwitchableSetting<u16, true> hdr_reference_white{linkage, 0, 0, 1000, "hdr_reference_white",
                                                   Category::Renderer, Specialization::Scalar};
-    SwitchableSetting<u16, true> hdr_peak_luminance{linkage, 300, 80, 10000, "hdr_peak_luminance",
+    SwitchableSetting<u16, true> hdr_peak_luminance{linkage, 0, 0, 10000, "hdr_peak_luminance",
                                                  Category::Renderer, Specialization::Scalar};
     SwitchableSetting<RendererBackend, true> renderer_backend{linkage,
 #if defined(__sun__) || defined(__managarm__)

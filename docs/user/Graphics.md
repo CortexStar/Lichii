@@ -13,10 +13,13 @@ Verifying and maintaining that environment is the user's responsibility. Configu
 it before starting the game.
 
 This feature preserves native HDR output from Switch 2 games that support it. It
-does not add HDR to SDR-only games. Enabling HDR declares that your environment
-supports both HDR10 and scRGB. There are no HDR startup probes: the emulator starts
-with an SDR swapchain and selects HDR output when the game supplies native HDR
-frames.
+does not add HDR to SDR-only games. On Windows the game is told the display runs HDR
+only while Windows HDR is on for the monitor that shows it, with that monitor's peak
+luminance and its SDR content brightness as reference white (HDR Peak Luminance and
+HDR Reference White at 0); on an SDR desktop the game renders SDR. Elsewhere,
+enabling HDR declares that your environment supports both HDR10 and scRGB. The
+emulator starts with an SDR swapchain and selects HDR output when the game supplies
+native HDR frames, and sends HDR10 metadata (BT.2020 primaries, the reported peak).
 
 The emulator selects the requested presentation format when creating the actual
 swapchain; this is not automatic setup or a compatibility workaround. It does

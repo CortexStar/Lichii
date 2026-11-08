@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "common/alignment.h"
+#include "common/display_hdr.h"
 #include "common/div_ceil.h"
 #include "common/dkb_frame_trace.h"
 #include "common/game_presets.h"
@@ -36,6 +37,7 @@
 #include "core/device_memory.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
+#include "core/frontend/emu_window.h"
 #include "core/frontend/framebuffer_layout.h"
 #include "core/perf_stats.h"
 #include "video_core/gpu.h"
@@ -2359,29 +2361,44 @@ private:
         TipcReplyWords(ctx, {60, 0});
     }
 
-    // nn::vi2::QueryDisplayHdrPaperWhite(display name): u16 reference white in nits.
-    // Explicit values are capped at peak; zero selects the Switch 2 calibration default.
-    void QueryDisplayHdrPaperWhite(HLERequestContext& ctx) {
-        if (Settings::values.hdr_reference_white.GetValue() > 0) {
-            TipcReplyWords(ctx, {std::min(Settings::values.hdr_reference_white.GetValue(),
-                                        Settings::values.hdr_peak_luminance.GetValue())});
-        } else {
-            // Switch 2 calibration starts at ceil(peak / 1.5), clamped to 50..300 nits.
-            TipcReplyWords(ctx, {std::clamp<u32>(
-                                    (Settings::values.hdr_peak_luminance.GetValue() * 2U + 2U) / 3U,
-                                    50U, 300U)});
+    // The HDR output the guest is told about: the HDR settings combined with the state of the
+    // monitor showing the game (on Windows: Windows HDR on, the EDID peak, the SDR content
+    // brightness), so an SDR desktop gets an SDR frame and an HDR desktop the game's own HDR.
+    Common::HdrOutput HostHdrOutput() {
+        void* const window =
+            system.GPU().Renderer().GetRenderWindow().GetWindowInfo().render_surface;
+        const auto display = Common::QueryDisplayHdr(window);
+        const bool vulkan =
+            Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Vulkan;
+        const auto output = Common::ResolveHdrOutput(
+            display, Settings::values.hdr.GetValue() && vulkan,
+            Settings::values.hdr_peak_luminance.GetValue(),
+            Settings::values.hdr_reference_white.GetValue());
+        const u64 logged = (u64{output.enabled} << 32) | (u64{output.peak_luminance} << 16) |
+                           output.reference_white;
+        if (logged != m_logged_hdr_output) {
+            m_logged_hdr_output = logged;
+            LOG_INFO(Service,
+                     "nx2:vi2 HDR status: {} peak {} nits, reference white {} nits (display: {})",
+                     output.enabled ? "HDR" : "SDR", output.peak_luminance, output.reference_white,
+                     display ? fmt::format("hdr={} max {} nits, SDR white {} nits",
+                                           display->hdr_enabled, display->max_luminance,
+                                           display->sdr_white_level)
+                             : std::string{"no host query"});
         }
+        return output;
+    }
+
+    // nn::vi2::QueryDisplayHdrPaperWhite(display name): u16 reference white in nits.
+    void QueryDisplayHdrPaperWhite(HLERequestContext& ctx) {
+        TipcReplyWords(ctx, {HostHdrOutput().reference_white});
     }
 
     // Wire reply: u64 output format (1 = SDR, 2 = HDR), u16 peak luminance in nits.
     // MKW's SDK converts these to public formats 0/1 before DefaultDisplay tests for HDR.
-    // HDR is explicitly opt-in; luminance defaults are not host-display calibration.
-    // Reports the Vulkan HDR setting, not host support for individual HDR encodings.
     void QueryDisplayHdrStatus(HLERequestContext& ctx) {
-        const bool hdr_enabled = Settings::values.hdr.GetValue() &&
-                                 Settings::values.renderer_backend.GetValue() ==
-                                     Settings::RendererBackend::Vulkan;
-        TipcReplyWords(ctx, {hdr_enabled ? 2U : 1U, 0, Settings::values.hdr_peak_luminance.GetValue()});
+        const auto output = HostHdrOutput();
+        TipcReplyWords(ctx, {output.enabled ? 2U : 1U, 0, output.peak_luminance});
     }
 
     // 212(u64 layer): u64 bits of the layer's buffer slots that are ready. The client polls it once
@@ -2606,6 +2623,7 @@ private:
     std::shared_ptr<Core::Timing::EventType> m_vsync_timer;
     u64 m_presents{};
     u64 m_shown_layout{}; // image and crop size last logged
+    u64 m_logged_hdr_output{~u64{}}; // HDR status last logged
     std::shared_ptr<std::atomic<bool>> m_capture_pending = std::make_shared<std::atomic<bool>>(false);
 };
 
