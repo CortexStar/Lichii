@@ -73,28 +73,43 @@ constexpr std::array MAX_RESOLUTION_RECORDS{
 
 constexpr std::array<u8, 4> DYNAMIC_FPS_ORIGINAL{0x28, 0x18, 0x20, 0x1E};
 constexpr std::array<u8, 4> DYNAMIC_FPS_CALL{0x4F, 0x7D, 0xD5, 0x94};
-// Dark's routine up to the step computation; the two built-ins differ only in the tail.
-#define DYNAMIC_FPS_ROUTINE_HEAD                                                                      0x28, 0x18, 0x20, 0x1E, 0xCA, 0x92, 0x00, 0xB0, 0x4A, 0x01, 0x38, 0x91, 0x2B, 0xE0, 0x3B,             0xD5, 0x4C, 0x01, 0x40, 0xF9, 0x4B, 0x01, 0x00, 0xF9, 0xCC, 0x02, 0x00, 0xB4, 0x6B, 0x01,         0x0C, 0xCB, 0x0D, 0xE0, 0x3B, 0xD5, 0x4E, 0x01, 0x80, 0xD2, 0xAE, 0x09, 0xCE, 0x9A, 0x7F,         0x01, 0x0E, 0xEB, 0xCB, 0x81, 0x8B, 0x9A, 0x4C, 0x05, 0x40, 0xF9, 0x4C, 0x00, 0x00, 0xB5,         0xEC, 0x03, 0x0B, 0xAA, 0x6E, 0x01, 0x0C, 0xCB, 0x8C, 0x0D, 0x8E, 0x8B, 0x4C, 0x05, 0x00,         0xF9, 0x82, 0x01, 0x23, 0x9E, 0xA3, 0x01, 0x23, 0x9E, 0x42, 0x18, 0x23, 0x1E, 0x42, 0x08
-// The original routine caps the measured delta at CNTFRQ / 20 (50 ms); the head uses /10
-// (100 ms) so Ocarina keeps real speed down to 10 fps.
-constexpr std::array<u8, 120> DYNAMIC_FPS_ROUTINE{
-    DYNAMIC_FPS_ROUTINE_HEAD,
-    // Dark's tail: the smoothed step if it is above original * 1.03, else the original step.
+// Dark's routine up to the step computation; the two built-ins differ only in the tail. The
+// original routine caps the measured delta at CNTFRQ / 20 (50 ms); this head uses /10 (100 ms) so
+// Ocarina keeps real speed down to 10 fps.
+constexpr std::array<u8, 90> DYNAMIC_FPS_HEAD{
+    0x28, 0x18, 0x20, 0x1E, 0xCA, 0x92, 0x00, 0xB0, 0x4A, 0x01, 0x38, 0x91, 0x2B, 0xE0, 0x3B,
+    0xD5, 0x4C, 0x01, 0x40, 0xF9, 0x4B, 0x01, 0x00, 0xF9, 0xCC, 0x02, 0x00, 0xB4, 0x6B, 0x01,
+    0x0C, 0xCB, 0x0D, 0xE0, 0x3B, 0xD5, 0x4E, 0x01, 0x80, 0xD2, 0xAE, 0x09, 0xCE, 0x9A, 0x7F,
+    0x01, 0x0E, 0xEB, 0xCB, 0x81, 0x8B, 0x9A, 0x4C, 0x05, 0x40, 0xF9, 0x4C, 0x00, 0x00, 0xB5,
+    0xEC, 0x03, 0x0B, 0xAA, 0x6E, 0x01, 0x0C, 0xCB, 0x8C, 0x0D, 0x8E, 0x8B, 0x4C, 0x05, 0x00,
+    0xF9, 0x82, 0x01, 0x23, 0x9E, 0xA3, 0x01, 0x23, 0x9E, 0x42, 0x18, 0x23, 0x1E, 0x42, 0x08,
+};
+// Dark's tail: the smoothed step if it is above original * 1.03, else the original step.
+constexpr std::array<u8, 30> DYNAMIC_FPS_TAIL{
     0x21, 0x1E, 0xC3, 0x00, 0x00, 0x1C, 0x03, 0x09, 0x23, 0x1E, 0x40, 0x20, 0x23, 0x1E, 0x4D,
     0x00, 0x00, 0x54, 0x48, 0x40, 0x20, 0x1E, 0xC0, 0x03, 0x5F, 0xD6, 0x0A, 0xD7, 0x83, 0x3F,
 };
-constexpr std::array<u8, 128> FPS_UNLOCK_ROUTINE{
-    DYNAMIC_FPS_ROUTINE_HEAD,
-    // Unlock tail: the smoothed real-time step in 1/60-s units is clamped into [0.02, 6.0] and
-    // always returned, so logic follows real time above 60 fps too (0.5 units/frame at 120 fps)
-    // and down to 10 fps (6.0 matches the 100 ms delta cap). At 60 fps it equals Dark's tail.
-    // 0x5C: ldr s3, +0x78 (0.02f) ; fmaxnm s2, s2, s3 ; 0x64: ldr s3, +0x7c (6.0f) ;
-    // fminnm s2, s2, s3 ; fmov s8, s2 ; ret ; nop ; 0.02f ; 6.0f
-    0x21, 0x1E, 0xE3, 0x00, 0x00, 0x1C, 0x42, 0x68, 0x23, 0x1E, 0xC3, 0x00, 0x00, 0x1C, 0x42,
-    0x78, 0x23, 0x1E, 0x48, 0x40, 0x20, 0x1E, 0xC0, 0x03, 0x5F, 0xD6, 0x1F, 0x20, 0x03, 0xD5,
-    0x0A, 0xD7, 0xA3, 0x3C, 0x00, 0x00, 0xC0, 0x40,
+// Unlock tail: the smoothed real-time step in 1/60-s units is clamped into [0.02, 6.0] and always
+// returned, so logic follows real time above 60 fps too (0.5 units/frame at 120 fps) and down to
+// 10 fps (6.0 matches the 100 ms delta cap). At 60 fps it equals Dark's tail.
+// 0x5C: ldr s3, +0x78 (0.02f) ; fmaxnm s2, s2, s3 ; 0x64: ldr s3, +0x7c (6.0f) ;
+// fminnm s2, s2, s3 ; fmov s8, s2 ; ret ; nop ; 0.02f ; 6.0f
+constexpr std::array<u8, 38> FPS_UNLOCK_TAIL{
+    0x21, 0x1E, 0xE3, 0x00, 0x00, 0x1C, 0x42, 0x68, 0x23, 0x1E, 0xC3, 0x00, 0x00,
+    0x1C, 0x42, 0x78, 0x23, 0x1E, 0x48, 0x40, 0x20, 0x1E, 0xC0, 0x03, 0x5F, 0xD6,
+    0x1F, 0x20, 0x03, 0xD5, 0x0A, 0xD7, 0xA3, 0x3C, 0x00, 0x00, 0xC0, 0x40,
 };
-#undef DYNAMIC_FPS_ROUTINE_HEAD
+template <size_t N, size_t M>
+constexpr std::array<u8, N + M> JoinRoutine(const std::array<u8, N>& head,
+                                            const std::array<u8, M>& tail) {
+    std::array<u8, N + M> out{};
+    std::ranges::copy(head, out.begin());
+    std::ranges::copy(tail, out.begin() + N);
+    return out;
+}
+constexpr auto DYNAMIC_FPS_ROUTINE = JoinRoutine(DYNAMIC_FPS_HEAD, DYNAMIC_FPS_TAIL);
+constexpr auto FPS_UNLOCK_ROUTINE = JoinRoutine(DYNAMIC_FPS_HEAD, FPS_UNLOCK_TAIL);
+static_assert(DYNAMIC_FPS_ROUTINE.size() == 120 && FPS_UNLOCK_ROUTINE.size() == 128);
 constexpr std::array DYNAMIC_FPS_RECORDS{
     BuiltinPatchRecord{0x6E6CC4, DYNAMIC_FPS_CALL, DYNAMIC_FPS_ORIGINAL},
     BuiltinPatchRecord{0x3C46200, DYNAMIC_FPS_ROUTINE, {}, true},
@@ -1222,20 +1237,21 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
         // Name an enabled built-in that contains this one, so unchecking only this one is not
         // mistaken for turning the change off. Whether it applies is only known in PatchNSO (a
         // user mod can make it skip), hence "when it applies".
-        const auto replacing = std::ranges::find_if(BUILTIN_PATCHES, [&](const BuiltinPatch& other) {
-            return other.title_id == title_id && other.replaces == patch.name &&
-                   !is_disabled(other.name);
-        });
-        out.push_back({.enabled = !is_disabled(patch.name),
-                       .name = std::string{patch.name},
-                       .version = replacing != BUILTIN_PATCHES.end()
-                                      ? fmt::format("IPS, replaced by {} when it applies",
-                                                    replacing->name)
-                                      : std::string{"IPS"},
-                       .type = PatchType::Mod,
-                       .program_id = title_id,
-                       .title_id = title_id,
-                       .source = PatchSource::Unknown});
+        const auto replacing =
+            std::ranges::find_if(BUILTIN_PATCHES, [&](const BuiltinPatch& other) {
+                return other.title_id == title_id && other.replaces == patch.name &&
+                       !is_disabled(other.name);
+            });
+        out.push_back(
+            {.enabled = !is_disabled(patch.name),
+             .name = std::string{patch.name},
+             .version = replacing != BUILTIN_PATCHES.end()
+                            ? fmt::format("IPS, replaced by {} when it applies", replacing->name)
+                            : std::string{"IPS"},
+             .type = PatchType::Mod,
+             .program_id = title_id,
+             .title_id = title_id,
+             .source = PatchSource::Unknown});
     }
 
     // DLC

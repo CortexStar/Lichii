@@ -107,8 +107,8 @@ test program is recorded under `~/.capy/work/bananza-compute-tests`.
 First compare the same lava-cave position and camera directions with
 `EDEN_DKB_FRAME_TRACE=1`, `*:Info`, and `EDEN_NX2_GPU_PROFILE` unset. Keep resolution,
 accuracy and speed settings unchanged. Leave `EDEN_DKB_INDIRECT_READBACK`,
-`EDEN_NX2_SWAP_INTERVAL` and `EDEN_NX2_VSYNC_HZ` unset. Setting the last variable to
-zero does not disable its override. Record any other environment overrides.
+`EDEN_NX2_SWAP_INTERVAL` unset and the frame rate limit (Switch 2) at 60 Hz. Record any
+other environment overrides.
 The incoming defaults use split mode 2 and batched fence release; leave
 `EDEN_NX2_SPLIT` and `EDEN_NX2_FENCE_BATCH` unset for that baseline. These changes
 are another reason not to treat the old profile as a post-merge measurement.

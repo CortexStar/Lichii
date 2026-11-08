@@ -10,6 +10,32 @@
 
 namespace Service {
 
+/// The console's display rate: the vsync event's default rate (Settings frame_rate_limit).
+constexpr std::uint32_t ConsoleVsyncHz = 60;
+
+/**
+ * Returns the interval the game's present word asks for, or 0 when it does not pace presents.
+ *
+ * The word only paces while the speed limit is on and the vsync event runs at the console's
+ * 60 Hz. With a faster event (a frame rate limit above 60) the event alone paces the game:
+ * holding Ocarina's swap interval against the word's 60 Hz as well capped it near 57 fps at a
+ * 120 Hz event.
+ *
+ * @param swap_interval Vblanks per frame from the present word (1-4).
+ * @param refresh_rate  Refresh rate from the present word, in Hz.
+ * @param vsync_hz      Rate of the vsync event the game starts frames on.
+ * @param speed_limit   Speed limit in percent, or 0 when the speed limit is off.
+ */
+[[nodiscard]] inline std::chrono::nanoseconds PresentWordInterval(std::uint32_t swap_interval,
+                                                                  std::uint32_t refresh_rate,
+                                                                  std::uint32_t vsync_hz,
+                                                                  std::uint32_t speed_limit) {
+    if (vsync_hz != ConsoleVsyncHz || speed_limit == 0 || refresh_rate == 0) {
+        return std::chrono::nanoseconds{0};
+    }
+    return std::chrono::nanoseconds{100'000'000'000LL * swap_interval / refresh_rate / speed_limit};
+}
+
 /**
  * Returns the interval between paced presents: the vblank the game asked for, lengthened when an
  * explicit FPS limit is below the rate that vblank allows.
