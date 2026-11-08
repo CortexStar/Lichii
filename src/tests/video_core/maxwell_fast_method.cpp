@@ -54,6 +54,20 @@ struct GpuSplitTestAccess {
         return GpuSplit::RingWords - 1;
     }
 
+    /// The narrow drains' write index without a back thread: writes are noted at `position`.
+    static void InitializeNarrow(GpuSplit& split) {
+        split.front_macros = true;
+        split.page_slots = std::make_unique<GpuSplit::PageSlot[]>(GpuSplit::PageBuckets * 4);
+        split.word_slots = std::make_unique<GpuSplit::WordSlot[]>(GpuSplit::WordBuckets * 4);
+    }
+    static void SetPositions(GpuSplit& split, u64 written, u64 consumed) {
+        split.write_position = written;
+        split.consumed_cache = consumed;
+    }
+    static u64 Target(const GpuSplit& split, const void* space, GPUVAddr address, u64 size) {
+        return split.PendingWriteTarget(space, address, size, 0);
+    }
+
     static u64 Execute(GpuSplit& split, u64 position, u64 available) {
         const size_t index = position & GpuSplit::RingMask;
         const size_t size = split.Execute(
@@ -836,4 +850,31 @@ TEST_CASE("Maxwell3D's split front uploads macro code sent as one multi-method r
     const auto& macros = engine.GetNativeMacroEngine();
     REQUIRE(macros.native_write_offset == pointer * 3 + code.size());
     CHECK(std::equal(code.begin(), code.end(), macros.native_code.begin() + pointer * 3));
+}
+
+TEST_CASE("GpuSplit narrow drains wait only for the recorded writes that may overlap a read",
+          "[video_core][gpu_split]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    VideoCommon::GpuSplit split;
+    Access::InitializeNarrow(split);
+    int space_a = 0;
+    int space_b = 0;
+    // A page-granular write (an inline upload) at position 10.
+    Access::SetPositions(split, 10, 0);
+    split.NoteWrite(&space_a, 0x10'0000, 0x40);
+    // A release (word-granular) at position 20, in another page.
+    Access::SetPositions(split, 20, 0);
+    split.NoteWrite(&space_a, 0x20'0010, 4, true);
+
+    // A read in the uploaded page waits for the upload, one in an untouched page for nothing.
+    REQUIRE(Access::Target(split, &space_a, 0x10'0800, 4) == 10);
+    REQUIRE(Access::Target(split, &space_a, 0x30'0000, 4) == 0);
+    // Small reads go by the word: the word next to the release doesn't wait for it.
+    REQUIRE(Access::Target(split, &space_a, 0x20'0010, 4) == 20);
+    REQUIRE(Access::Target(split, &space_a, 0x20'0014, 4) == 0);
+    // Another address space may map the same memory: it waits for every recorded write.
+    REQUIRE(Access::Target(split, &space_b, 0x30'0000, 4) == 20);
+    // Once the back consumed past them, nothing is waited for.
+    Access::SetPositions(split, 30, 25);
+    REQUIRE(Access::Target(split, &space_a, 0x10'0800, 4) <= 25);
 }

@@ -3427,6 +3427,9 @@ private:
     void FrontStateWrite(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 argument);
     void FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split, FrontState& state);
     void FrontTrackInstanceLoop(FrontState& state, u32 method, u32 value);
+    /// Narrow drains (GpuSplit::NarrowDrains): notes the guest memory an executable method just
+    /// sent (`words` data words of it) writes on the back.
+    void FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 words);
     void FrontNoteMemoryWrite(VideoCommon::GpuSplit& split, FrontState& state, u32 method,
                               const u32* words, u32 count);
     /// Whether [address, address + size) maps to [device, device + size) on every page.
