@@ -21,8 +21,12 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include "common/scope_exit.h"
+#ifdef HAS_NCE
 #include "common/settings.h"
+#endif
+#if defined(ARCHITECTURE_arm64) && !defined(__APPLE__)
+#include <random>
+#endif
 
 #if defined(__linux__)
 #include <sys/random.h>
@@ -56,7 +60,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
-#include <random>
 #include <utility>
 #include <vector>
 
