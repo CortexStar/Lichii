@@ -284,6 +284,15 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkCmdSetStencilWriteMask vkCmdSetStencilWriteMask{};
     PFN_vkCmdSetVertexInputEXT vkCmdSetVertexInputEXT{};
     PFN_vkCmdSetViewport vkCmdSetViewport{};
+    PFN_vkCmdSetViewportWithCountEXT vkCmdSetViewportWithCountEXT{};
+    PFN_vkCmdSetScissorWithCountEXT vkCmdSetScissorWithCountEXT{};
+    PFN_vkCmdSetPolygonModeEXT vkCmdSetPolygonModeEXT{};
+    PFN_vkCmdSetRasterizationSamplesEXT vkCmdSetRasterizationSamplesEXT{};
+    PFN_vkCmdSetSampleMaskEXT vkCmdSetSampleMaskEXT{};
+    PFN_vkCmdSetTessellationDomainOriginEXT vkCmdSetTessellationDomainOriginEXT{};
+    PFN_vkCmdSetDepthClipEnableEXT vkCmdSetDepthClipEnableEXT{};
+    PFN_vkCmdSetDepthClipNegativeOneToOneEXT vkCmdSetDepthClipNegativeOneToOneEXT{};
+    PFN_vkCmdSetProvokingVertexModeEXT vkCmdSetProvokingVertexModeEXT{};
     PFN_vkCmdSetColorWriteMaskEXT vkCmdSetColorWriteMaskEXT{};
     PFN_vkCmdSetColorWriteEnableEXT vkCmdSetColorWriteEnableEXT{};
     PFN_vkCmdSetColorBlendEnableEXT vkCmdSetColorBlendEnableEXT{};
@@ -1638,6 +1647,42 @@ public:
 
     void SetScissor(u32 first, Span<VkRect2D> scissors) const noexcept {
         dld->vkCmdSetScissor(handle, first, scissors.size(), scissors.data());
+    }
+
+    void SetViewportWithCount(Span<VkViewport> viewports) const noexcept {
+        dld->vkCmdSetViewportWithCountEXT(handle, viewports.size(), viewports.data());
+    }
+
+    void SetScissorWithCount(Span<VkRect2D> scissors) const noexcept {
+        dld->vkCmdSetScissorWithCountEXT(handle, scissors.size(), scissors.data());
+    }
+
+    void SetPolygonModeEXT(VkPolygonMode mode) const noexcept {
+        dld->vkCmdSetPolygonModeEXT(handle, mode);
+    }
+
+    void SetRasterizationSamplesEXT(VkSampleCountFlagBits samples) const noexcept {
+        dld->vkCmdSetRasterizationSamplesEXT(handle, samples);
+    }
+
+    void SetSampleMaskEXT(VkSampleCountFlagBits samples, u32 mask) const noexcept {
+        dld->vkCmdSetSampleMaskEXT(handle, samples, &mask);
+    }
+
+    void SetTessellationDomainOriginEXT(VkTessellationDomainOrigin origin) const noexcept {
+        dld->vkCmdSetTessellationDomainOriginEXT(handle, origin);
+    }
+
+    void SetDepthClipEnableEXT(bool enable) const noexcept {
+        dld->vkCmdSetDepthClipEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
+    }
+
+    void SetDepthClipNegativeOneToOneEXT(bool enable) const noexcept {
+        dld->vkCmdSetDepthClipNegativeOneToOneEXT(handle, enable ? VK_TRUE : VK_FALSE);
+    }
+
+    void SetProvokingVertexModeEXT(VkProvokingVertexModeEXT mode) const noexcept {
+        dld->vkCmdSetProvokingVertexModeEXT(handle, mode);
     }
 
     void SetBlendConstants(const float blend_constants[4]) const noexcept {
