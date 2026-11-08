@@ -63,6 +63,25 @@ using VideoCore::Surface::PixelFormatFromRenderTargetFormat;
 
 constexpr size_t NUM_STAGES = Maxwell::MaxShaderStage;
 
+// EXPERIMENT (do not merge): EDEN_NX2_EXP_FRAG_WAVE=32 or 64 requires that subgroup size for
+// fragment shaders without warp operations, instead of the driver's choice.
+const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT* ExperimentFragmentWave(
+    const Device& device, VkShaderStageFlagBits stage) {
+    static const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT wave = [] {
+        const char* value = std::getenv("EDEN_NX2_EXP_FRAG_WAVE");
+        return VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT,
+            .pNext = nullptr,
+            .requiredSubgroupSize = value != nullptr ? static_cast<u32>(std::atoi(value)) : 0U,
+        };
+    }();
+    if (stage != VK_SHADER_STAGE_FRAGMENT_BIT || wave.requiredSubgroupSize == 0 ||
+        !device.IsExtSubgroupSizeControlSupported() || !device.IsGuestWarpSizeSupported(stage)) {
+        return nullptr;
+    }
+    return &wave;
+}
+
 // The stage of a program: task and mesh programs sit in the vertex and tessellation slots.
 VkShaderStageFlagBits StageFlag(const Shader::Info& info, VkShaderStageFlagBits slot_stage) {
     if (info.is_task) {
@@ -1733,7 +1752,8 @@ vk::Pipeline GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                                      device.IsGuestWarpSizeSupported(stage_flag);
         shader_stages.emplace_back(VkPipelineShaderStageCreateInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .pNext = force_warp_size ? &subgroup_size_ci : nullptr,
+            .pNext = force_warp_size ? &subgroup_size_ci
+                                     : ExperimentFragmentWave(device, stage_flag),
             .flags = 0,
             .stage = stage_flag,
             .module = emulated_vertex ? *mesh_vertex_module : *spv_modules[stage],
@@ -1967,7 +1987,8 @@ GplLibrary GraphicsPipeline::MakeShaderLibrary(GplPart part, const PipelineState
                                      device.IsGuestWarpSizeSupported(stage_flag);
         shader_stages.push_back({
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .pNext = force_warp_size ? &subgroup_size_ci : nullptr,
+            .pNext = force_warp_size ? &subgroup_size_ci
+                                     : ExperimentFragmentWave(device, stage_flag),
             .flags = 0,
             .stage = stage_flag,
             .module = *spv_modules[stage],
