@@ -719,8 +719,10 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
     if (!controller->IsConnected()) {
         throw std::runtime_error{"neither player 1 nor the handheld controller is connected"};
     }
-    const int timeout = Param<int>(
-        params, "timeout_s", static_cast<int>(total_frames / 20 + total_ms / 1000 + 10), 1, 900);
+    // How long the game may present nothing while a frames step waits for presents. A slow game
+    // (a load at 1 fps) keeps the input going as long as frames still come; only a game that
+    // stopped presenting ends it. ms steps run on wall time and never stall.
+    const int stall_timeout = Param<int>(params, "timeout_s", 10, 1, 900);
     const u64 start = g_nx2_present_count.load(std::memory_order_relaxed) + 1;
     const auto script = std::make_shared<InputScript>(steps, start);
     controller->SetInputInjector([script] {
@@ -730,7 +732,7 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         controller->SetInputInjector({});
     };
     const auto begin = std::chrono::steady_clock::now();
-    const auto deadline = begin + std::chrono::seconds{timeout};
+    PresentStall stall{g_nx2_present_count.load(std::memory_order_relaxed), SteadyNs()};
     // Evidence that the steps reached the guest: each step's start is logged (the log line's time
     // is on the game log's clock) with the present count and how many times the npad state the
     // guest reads had changed by then (Service::HID::PublishedPadChanges).
@@ -758,10 +760,13 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
             LOG_INFO(Debug, "Debug server client left during input; input released");
             throw std::runtime_error{"the client disconnected; input released"};
         }
-        if (std::chrono::steady_clock::now() >= deadline) {
+        const u64 stalled_ns = stall.StalledNs(present, SteadyNs());
+        if (steps[step].frames != 0 &&
+            stalled_ns >= static_cast<u64>(stall_timeout) * 1'000'000'000) {
             throw std::runtime_error{fmt::format(
-                "step {} of {} was still running after {} s (paused or loading?); input released",
-                step, steps.size(), timeout)};
+                "step {} of {} waits for frames, but the game presented none for {} s (last "
+                "present {}); input released",
+                step, steps.size(), stall_timeout, present)};
         }
         std::this_thread::sleep_for(1ms);
     }
@@ -1163,6 +1168,16 @@ size_t InputScript::Step(u64 present, u64 now_ns) {
     std::scoped_lock lock{mutex};
     Advance(present, now_ns);
     return index;
+}
+
+PresentStall::PresentStall(u64 present, u64 now_ns) : last_present{present}, last_ns{now_ns} {}
+
+u64 PresentStall::StalledNs(u64 present, u64 now_ns) {
+    if (present != last_present) {
+        last_present = present;
+        last_ns = now_ns;
+    }
+    return now_ns > last_ns ? now_ns - last_ns : 0;
 }
 
 Service::Service(System& system, std::string title, u64 program_id, const Endpoint& endpoint,

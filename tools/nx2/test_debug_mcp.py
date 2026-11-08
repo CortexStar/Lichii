@@ -135,13 +135,18 @@ class AdapterTest(unittest.TestCase):
         self.assertIn("0x5000 is not mapped", unmapped["content"][0]["text"])
 
     def test_input_waits_as_long_as_the_emulator(self):
-        self.assertEqual(debug_mcp.default_timeout("input", {"frames": 600}), 40)
+        # timeout_s of an input call is the stall window; the answer comes after every awaited
+        # frame, each of which may take up to that window.
+        self.assertEqual(debug_mcp.default_timeout("input", {"frames": 600}), 10)
+        self.assertEqual(debug_mcp.answer_wait("input", {"frames": 600}), 601 * 10 + 30)
         sequence = {"steps": [{"frames": 300}, {"frames": 300, "buttons": ["A"]}]}
-        self.assertEqual(debug_mcp.default_timeout("input_sequence", sequence), 40)
+        self.assertEqual(debug_mcp.answer_wait("input_sequence", sequence), 601 * 10 + 30)
         timed = {"steps": [{"frames": 300}, {"ms": 2500, "right_stick": [1, 0]}]}
-        self.assertEqual(debug_mcp.default_timeout("input_sequence", timed), 27)
-        self.assertEqual(debug_mcp.default_timeout("input", {"ms": 600000}), 610)
-        self.assertEqual(debug_mcp.default_timeout("input", {"frames": 36000}), 900)
+        self.assertEqual(debug_mcp.answer_wait("input_sequence", timed), 2 + 301 * 10 + 30)
+        self.assertEqual(debug_mcp.answer_wait("input", {"ms": 600000}), 600 + 10 + 30)
+        self.assertEqual(debug_mcp.answer_wait("input", {"frames": 40, "timeout_s": 2}),
+                         41 * 2 + 30)
+        self.assertEqual(debug_mcp.answer_wait("status", {}), 35)
         self.assertEqual(debug_mcp.default_timeout("status", {}), 5)
         result = self.call("input_sequence", sequence)
         self.assertFalse(result["isError"])

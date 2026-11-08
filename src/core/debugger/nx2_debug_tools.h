@@ -132,6 +132,20 @@ private:
     u64 step_ns{};
 };
 
+/// How long the present count has not moved: an input call waits for frames as long as the game
+/// still presents, however slowly, and gives up only on a game that stopped presenting.
+class PresentStall {
+public:
+    PresentStall(u64 present, u64 now_ns);
+
+    /// Nanoseconds since the count last changed (0 on the call that sees it change).
+    [[nodiscard]] u64 StalledNs(u64 present, u64 now_ns);
+
+private:
+    u64 last_present;
+    u64 last_ns;
+};
+
 /// Guest-present intervals within [begin_ns, end_ns], using only retained ring timestamps.
 [[nodiscard]] nlohmann::json ReadFrameTimes(u64 before, u64 after, u64 begin_ns, u64 end_ns,
                                           double refresh_hz);

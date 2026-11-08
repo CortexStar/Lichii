@@ -537,6 +537,23 @@ TEST_CASE("Debug input ms steps follow wall time whatever the frame rate",
     REQUIRE(script.Step(5001, 1160 * MS) == 3);
 }
 
+TEST_CASE("Debug input waits for a slow game and gives up only when presents stop",
+          "[core][nx2_debug_server]") {
+    constexpr u64 S = 1'000'000'000;
+    Core::Nx2Debug::PresentStall stall{100, 0};
+    REQUIRE(stall.StalledNs(100, 3 * S) == 3 * S);
+    // One present every 2 s (a load at 0.5 fps) keeps the stall short however long it runs.
+    for (u64 k = 1; k <= 30; ++k) {
+        REQUIRE(stall.StalledNs(100 + k, (3 + 2 * k) * S) == 0);
+        REQUIRE(stall.StalledNs(100 + k, (4 + 2 * k) * S) == S);
+    }
+    // No present any more: the stall grows with the clock.
+    REQUIRE(stall.StalledNs(130, 75 * S) == 12 * S);
+    // A clock read before the last change is no stall.
+    REQUIRE(stall.StalledNs(131, 80 * S) == 0);
+    REQUIRE(stall.StalledNs(131, 79 * S) == 0);
+}
+
 TEST_CASE("Debug input mixes frame and ms steps", "[core][nx2_debug_server]") {
     constexpr u64 MS = 1'000'000;
     std::vector<Core::Nx2Debug::InputStep> steps(3);

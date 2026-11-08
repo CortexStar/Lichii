@@ -222,8 +222,8 @@ TOOLS = [
                        "'frames' presented frames or 'ms' milliseconds of wall time (exactly one) "
                        "from the next present on, then releases; returns when done. Buttons are "
                        "added to the owner's; a given stick replaces the owner's. Fails and "
-                       "releases when the step does not end within timeout_s (default frames / 20 "
-                       "+ ms / 1000 + 10).",
+                       "releases when the game presents no frame for timeout_s (default 10) while "
+                       "a frames step waits; a slow game only makes the call longer.",
         "inputSchema": {
             "type": "object",
             "properties": {**{
@@ -243,7 +243,9 @@ TOOLS = [
                        "frames or its 'ms' milliseconds of wall time, so a camera pan or walk "
                        "replays identically for an A/B test ('ms' for a game that runs in real "
                        "time at any frame rate). A step without buttons or sticks leaves the "
-                       "owner's input alone. At most 1000 steps, 36000 frames and 600000 ms.",
+                       "owner's input alone. At most 1000 steps, 36000 frames and 600000 ms. "
+                       "Fails and releases when the game presents no frame for timeout_s "
+                       "(default 10) while a frames step waits.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -331,11 +333,24 @@ def default_timeout(name, params):
     if name == "sample":
         return int(params.get("seconds", 10)) + 90
     if name in ("input", "input_sequence"):
+        return INPUT_STALL_S
+    return 5
+
+
+INPUT_STALL_S = 10  # RunInput's timeout_s default: seconds without a present while frames wait
+
+
+def answer_wait(name, params):
+    """Seconds the adapter waits for the emulator's answer. An input call's timeout_s is a stall
+    window, not its length: the call lasts its ms steps plus up to timeout_s per awaited frame (a
+    game at 1 fps still advances), so the wait covers the longest call the emulator can make."""
+    stall = max(int(params.get("timeout_s", default_timeout(name, params))), 1)
+    if name in ("input", "input_sequence"):
         steps = params.get("steps", []) if name == "input_sequence" else [params]
         frames = sum(int(step.get("frames", 0)) for step in steps)
         ms = sum(int(step.get("ms", 0)) for step in steps)
-        return min(frames // 20 + ms // 1000 + 10, 900)
-    return 5
+        return ms // 1000 + (frames + 1) * stall + 30
+    return stall + 30
 
 
 def text(value):
@@ -355,8 +370,7 @@ class Adapter:
             return self.capture_image(arguments)
         params = dict(arguments)
         index = params.pop("index", False)
-        timeout = max(int(params.get("timeout_s", default_timeout(name, params))), 1) + 30
-        result = self.emulator.call(name, params, timeout)
+        result = self.emulator.call(name, params, answer_wait(name, params))
         if name == "screenshot":
             png = result.pop("png_base64", None)
             return result, base64.b64decode(png) if png else None

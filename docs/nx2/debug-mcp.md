@@ -353,11 +353,15 @@ input call that outlasts the measurement (a camera pan released by disconnecting
 
 Release: the injector returns nothing from the end of the last step on, so the input ends on its
 exact frame even before the handler removes it. The handler removes it on every exit path
-(`SCOPE_EXIT`): when the steps are done; on timeout, when frames stop for `timeout_s` (default
-`frames / 20 + 10`, at most 900); when the game shuts down; and when the client disconnects. The
+(`SCOPE_EXIT`): when the steps are done; on a stall, when a `frames` step waits and the game
+presents nothing for `timeout_s` (default 10, at most 900; `PresentStall`); when the game shuts
+down; and when the client disconnects. A slow game is no stall: a load at 1 fps stretches a
+40-frame press to 40 s, and the call waits for it, so a caller's press lands on the frames it
+names at any frame rate (a fixed total timeout aborted presses during slow loads). The
 transport gives every handler a `ClientGone` probe, a non-blocking peek at the request's socket
 (`nx2_debug_server.cpp`), which the wait polls every 2 ms. The adapter waits as long as the
-emulator's default timeout, so it does not drop a long sequence early.
+longest call the emulator can make (the `ms` steps plus `timeout_s` for every awaited frame), so
+it does not drop a long sequence early.
 
 Use it when the owner has put the controller down: injected buttons add to whatever the owner
 presses. For an A/B test, run the same `input_sequence` from the same spot under each variant
