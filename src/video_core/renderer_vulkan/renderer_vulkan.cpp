@@ -15,6 +15,7 @@
 #include <fmt/ranges.h>
 
 #include "common/display_hdr.h"
+#include "common/dkb_cpu_trace.h"
 #include "common/logging.h"
 #include <ranges>
 #include "common/scope_exit.h"
@@ -233,6 +234,10 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     }
 
     RenderScreenshot(framebuffers);
+    const bool overlay = VideoCore::PerfOverlay::Enabled();
+    if (overlay) {
+        perf_overlay_stats.OnFrame(std::chrono::steady_clock::now());
+    }
     const auto acquiring = trace ? std::chrono::steady_clock::now()
                                  : std::chrono::steady_clock::time_point{};
     Frame* frame = present_manager.GetRenderFrame();
@@ -268,10 +273,20 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
         }
     }
 
+    std::optional<PerfOverlayInput> overlay_input;
+    if (overlay) {
+        if (const auto now = std::chrono::steady_clock::now(); perf_overlay_stats.RefreshDue(now)) {
+            RefreshPerfOverlay(now, hdr_output);
+        }
+        overlay_input =
+            PerfOverlayInput{.stats = &perf_overlay_stats, .white_nits = perf_overlay_white};
+    }
+
     scheduler.RequestOutsideRenderPassOperationContext();
     blit_swapchain.DrawToFrame(device, rasterizer, frame, framebuffers,
-                              render_window.GetFramebufferLayout(),
-                              present_manager.SwapchainImageCount(), output_format, hdr_output);
+                               render_window.GetFramebufferLayout(),
+                               present_manager.SwapchainImageCount(), output_format, hdr_output,
+                               overlay_input ? &*overlay_input : nullptr);
 
 #ifdef HAS_LSFG
     if (hdr_output) {
@@ -293,7 +308,7 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     }
 #endif
 
-    if (trace) {
+    if (trace || overlay) {
         scheduler.MarkFrameEnd(++trace_frame);
     }
     frame->ready_tick = scheduler.Flush(*frame->render_ready);
@@ -330,6 +345,36 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
         }
         trace_last_frame = entered;
     }
+}
+
+void RendererVulkan::RefreshPerfOverlay(std::chrono::steady_clock::time_point now,
+                                        bool hdr_output) {
+    using Common::DkbCpuTrace::Role;
+    const auto snapshot = Common::DkbCpuTrace::ReadSnapshot();
+    const auto cpu_ns = [&snapshot](Role role) {
+        const auto& thread = snapshot.threads[static_cast<size_t>(role)];
+        return thread.active ? thread.cpu_ns : std::nullopt;
+    };
+    // HDR text takes the brightness the game was told for its HUD (nx2:vi2's reference white).
+    perf_overlay_white =
+        hdr_output ? static_cast<f32>(
+                         Common::ResolveHdrOutput(Common::DisplayHdrMonitor::Instance().Current(),
+                                                  Settings::HdrMode::On,
+                                                  Settings::values.hdr_peak_luminance.GetValue(),
+                                                  Settings::values.hdr_reference_white.GetValue())
+                             .reference_white)
+                   : 0.0f;
+    perf_overlay_stats.Refresh(now, {
+                                        .generated_frames = GetFrameGenStatus().generated_frames,
+                                        .threads =
+                                            {
+                                                .front = cpu_ns(Role::GpuCommand),
+                                                .back = cpu_ns(Role::GpuBack),
+                                                .worker = cpu_ns(Role::VulkanWorker),
+                                            },
+                                        .gpu_frame_ms = scheduler.GpuFrameMs(),
+                                        .white_nits = perf_overlay_white,
+                                    });
 }
 
 void RendererVulkan::Report() const {

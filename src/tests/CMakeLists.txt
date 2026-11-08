@@ -95,6 +95,7 @@ add_executable(tests
     video_core/ampere_trap_guards.cpp
     video_core/async_draw_policy.cpp
     video_core/draw_debug_switches.cpp
+    video_core/perf_overlay.cpp
     video_core/async_shader_emission.cpp
     video_core/pipeline_build.cpp
     video_core/oot_network.cpp
