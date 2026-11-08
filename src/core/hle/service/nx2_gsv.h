@@ -3059,6 +3059,12 @@ private:
         return system.CoreTiming().GetPauseEndTime().count() / 1000;
     }
 
+    // How early a frame may be written: half a frame, so a client drawing at the movie's rate
+    // is never held back by jitter (m_mutex held).
+    u64 EarlyTolerance() const {
+        return m_frame_interval / 2;
+    }
+
     // Games such as Ocarina of Time show one decoded frame per frame they draw and never skip
     // one, while the movie's audio plays in real time: below the movie's frame rate the picture
     // falls further behind the sound. Drop decoded frames a later frame has already overtaken
@@ -3167,10 +3173,38 @@ private:
                 }
                 continue;
             }
+            // A client drawing faster than the movie plays shows its current frame again until
+            // the clock reaches the next one. Hold that frame back before it is written: writing
+            // advances the syncpoint the client acquires on, and an image it then finds empty
+            // (213 answered "no frame") left Ocarina's title movie black.
+            bool write{};
             if (!m_decoded.empty() && !m_free.empty() && !DropOvertakenFrames()) {
+                const auto hold =
+                    m_clock.HoldUs(HostTimeUs(), m_decoded.front().pts,
+                                   PauseEndUs(), EarlyTolerance());
+                if (hold) {
+                    ++m_frames_held;
+                    if (m_frames_held <= 5 || (m_frames_held % 600) == 0) {
+                        LOG_INFO(Service,
+                                 "{} holds frame pts {} us for {} us: the client acquires faster "
+                                 "than the movie plays ({} holds)",
+                                 GetServiceName(), m_decoded.front().pts, *hold, m_frames_held);
+                    }
+                    if (m_inputs.Empty() || m_decoded.size() >= MaxDecodedAhead) {
+                        m_cv.wait_for(lk, std::chrono::microseconds{static_cast<s64>(*hold)},
+                                      [&] { return m_quit || m_flush; });
+                        continue;
+                    }
+                    // Decode the next input meanwhile.
+                } else {
+                    write = true;
+                }
+            }
+            if (write) {
                 m_dropped_in_a_row = 0;
                 Decoded frame = std::move(m_decoded.front());
                 m_decoded.pop_front();
+                m_clock.Wrote(HostTimeUs(), frame.pts, PauseEndUs());
                 const u32 image = m_free.front();
                 m_free.pop_front();
                 std::optional<Fence> fence;
@@ -3202,17 +3236,17 @@ private:
                 if (!m_stream_start) {
                     m_stream_start = {written_us, frame.pts};
                 }
-                if (m_frames_out == 1 || (m_frames_out % 600) == 0 || frame.end) {
+                if (m_frames_out <= 5 || (m_frames_out % 600) == 0 || frame.end) {
                     // How far the frames written lag their timestamps since the stream's first.
                     const s64 behind_us =
                         (written_us - m_stream_start->first) -
                         (static_cast<s64>(frame.pts) - static_cast<s64>(m_stream_start->second));
                     LOG_INFO(Service,
                              "{} frame {} ({}x{}, pts {} us{}) in image {}, {} late dropped, "
-                             "{} ms behind",
+                             "{} early holds, {} ms behind",
                              GetServiceName(), m_frames_out, width, height, frame.pts,
                              frame.end ? ", end of stream" : "", image, m_frames_dropped,
-                             behind_us / 1000);
+                             m_frames_held, behind_us / 1000);
                 }
                 if (frame.end) {
                     m_stream_start.reset();
@@ -3479,7 +3513,8 @@ private:
     u64 m_frames_out{};
     u64 m_decoded_frames{};
     u64 m_frames_dropped{};
-    Nx2MovieClock m_clock;
+    u64 m_frames_held{};   ///< Times the next frame was held back because it was early
+    Nx2MovieClock m_clock; ///< Host time of the frames the client shows (us)
     u64 m_frame_interval{16667}; ///< us, from consecutive decoded frames
     u64 m_last_decoded_pts{};
     u32 m_dropped_in_a_row{};
