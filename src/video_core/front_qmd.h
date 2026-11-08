@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <cstdlib>
 #include <deque>
 #include <memory>
 #include <optional>
@@ -73,6 +74,15 @@ public:
     /// The back ran everything sent and runs nothing (the split drained, or it waits for work):
     /// takes over the table `back` shares with the other engines. What waits, the back ran.
     void TakeOver(const Tegra::NativeQmdScheduler& back) {
+        // EXPERIMENT (do not merge): EDEN_NX2_QMD_VIEW=0 never takes a table over, so every QMD
+        // signal holds semaphore acquires as before the view.
+        static const bool view_off = [] {
+            const char* const value = std::getenv("EDEN_NX2_QMD_VIEW");
+            return value != nullptr && value[0] == '0';
+        }();
+        if (view_off) {
+            return;
+        }
         scheduler.CopyStates(back);
         synced = true;
         ClearWaiting();

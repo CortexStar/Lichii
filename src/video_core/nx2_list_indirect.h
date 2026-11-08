@@ -41,7 +41,11 @@ namespace Tegra::Nx2ListIndirect {
 
 /// Whether the front takes GPU-written compute list words as placeholders (a plain flag: checked
 /// at every GPU-written list).
-inline bool g_enabled = true;
+/// EXPERIMENT (do not merge): EDEN_NX2_LIST_INDIRECT=0 reads every such list on the front again.
+inline bool g_enabled = [] {
+    const char* const value = std::getenv("EDEN_NX2_LIST_INDIRECT");
+    return value == nullptr || value[0] != '0';
+}();
 
 /// Slots the back keeps snapshots of list words in, and the words a slot holds.
 inline constexpr u32 SlotCount = 4096;
