@@ -351,12 +351,35 @@ void EmitMeshPrologue(EmitContext& ctx) {
             // A task that culls all its threads never writes the mesh workgroup count, and the
             // payload starts undefined. Intel's garbage there launches enough workgroups to lose
             // the device. The as-compute path zeroes the whole region in the prologue instead.
-            // Every invocation writes the same word, so this must be an atomic store: concurrent
-            // plain stores are a data race even when they write the same value. SPV_EXT_mesh_shader
-            // allows atomics on TaskPayloadWorkgroupEXT, and WorkgroupMemory semantics cover it.
-            ctx.OpAtomicStore(PayloadWord(ctx, ctx.Const(1U)),
-                              ctx.Const(static_cast<u32>(spv::Scope::Workgroup)),
-                              ctx.u32_zero_value, ctx.u32_zero_value);
+            // Every invocation writing the same word would race (the Vulkan memory model has no
+            // same-value exception) and #615's reporter bisected an NVIDIA driver-compiler
+            // crash to the atomic-plus-barrier block, so one elected invocation stores the
+            // zero and the barrier after the join orders it for every reader. The branch makes
+            // the entry block's label stop being the real predecessor of later blocks, so the
+            // entry block's definition is re-pointed to the merge label for the deferred phi
+            // parents that reference it. All three local id components are tested so the
+            // elected invocation is unique for any workgroup dimensions, not only when y and
+            // z are 1.
+            const Id local_id{ctx.OpLoad(ctx.U32[3], ctx.local_invocation_id)};
+            Id is_first{};
+            for (const u32 component : {0U, 1U, 2U}) {
+                const Id axis{ctx.OpCompositeExtract(ctx.U32[1], local_id, component)};
+                const Id axis_zero{ctx.OpIEqual(ctx.U1, axis, ctx.u32_zero_value)};
+                is_first = Sirit::ValidId(is_first) ? ctx.OpLogicalAnd(ctx.U1, is_first, axis_zero)
+                                                    : axis_zero;
+            }
+            const Id first_invocation{is_first};
+            const Id then_label{ctx.OpLabel()};
+            const Id merge_label{ctx.OpLabel()};
+            ctx.OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+            ctx.OpBranchConditional(first_invocation, then_label, merge_label);
+            ctx.AddLabel(then_label);
+            ctx.OpStore(PayloadWord(ctx, ctx.Const(1U)), ctx.u32_zero_value);
+            ctx.OpBranch(merge_label);
+            ctx.AddLabel(merge_label);
+            if (ctx.entry_block != nullptr) {
+                ctx.entry_block->SetDefinition(merge_label);
+            }
             Barrier(ctx);
             return;
         }
