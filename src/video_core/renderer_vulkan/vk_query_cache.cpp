@@ -332,14 +332,9 @@ public:
                 // occluded object drawn instead of hidden (the scene vanished) or a stall (9 -> 22
                 // FPS in Kokiri Forest). The availability word is what decides, not what the copy
                 // writes for an unavailable query, which the Vulkan spec leaves undefined
-                // (approach from Savulska's test on #573).
-                // EDEN_NX2_QUERY_AVAILABILITY=0 (local A/B only, not for the PR): #679's copy
-                // that waits on the newest query instead.
-                static const bool use_availability = [] {
-                    const char* const text = std::getenv("EDEN_NX2_QUERY_AVAILABILITY");
-                    return text == nullptr || text[0] != '0';
-                }();
-                const bool resolve_availability = availability_pass.has_value() && use_availability;
+                // (approach from Savulska's test on #573). Waiting on the newest query instead
+                // (#679) gave 54 FPS under the Deku tree on an RX 9070 XT, this 56-58.
+                const bool resolve_availability = availability_pass.has_value();
                 const VkDeviceSize span_slots = span_end - span_start;
                 const VkDeviceSize availability_offset = base_offset * 2;
                 const VkBuffer availability_buffer =
