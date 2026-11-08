@@ -4500,12 +4500,17 @@ ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::ImageViewI
         .components = swizzle_mapping,
         .subresourceRange = MakeSubresourceRange(aspect_mask, HostRange(image, info.range)),
     };
+    heap_view_base = create_info;
+    heap_view_base.pNext = nullptr;
+    heap_view_usage = clamped_view_usage;
+    heap_astc_decode = view_next == &astc_decode_mode;
     const auto create = [&](TextureType tex_type, std::optional<u32> num_layers) {
         VkImageViewCreateInfo ci{create_info};
         ci.viewType = ImageViewType(tex_type);
         if (num_layers) {
             ci.subresourceRange.layerCount = *num_layers;
         }
+        heap_view_layers[static_cast<size_t>(tex_type)] = ci.subresourceRange.layerCount;
         vk::ImageView handle = device->GetLogical().CreateImageView(ci);
         if (device->HasDebuggingToolAttached()) {
             handle.SetObjectNameEXT(VideoCommon::Name(*this, gpu_addr).c_str());
@@ -4650,6 +4655,29 @@ VkImageView ImageView::StorageView(Shader::TextureType texture_type,
 
 bool ImageView::IsRescaled() const noexcept {
     return (*slot_images)[image_id].IsRescaled();
+}
+
+bool ImageView::HeapViewCreateInfo(Shader::TextureType texture_type, HeapViewInfo& out) const {
+    const size_t index = static_cast<size_t>(texture_type);
+    if (index >= heap_view_layers.size() || heap_view_layers[index] == 0 || !image_views[index]) {
+        return false;
+    }
+    out.usage = VkImageViewUsageCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+        .pNext = nullptr,
+        .usage = heap_view_usage,
+    };
+    out.astc_decode = VkImageViewASTCDecodeModeEXT{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_ASTC_DECODE_MODE_EXT,
+        .pNext = &out.usage,
+        .decodeMode = VK_FORMAT_R8G8B8A8_UNORM,
+    };
+    out.create_info = heap_view_base;
+    out.create_info.pNext = heap_astc_decode ? static_cast<const void*>(&out.astc_decode)
+                                             : static_cast<const void*>(&out.usage);
+    out.create_info.viewType = ImageViewType(texture_type);
+    out.create_info.subresourceRange.layerCount = heap_view_layers[index];
+    return true;
 }
 
 vk::ImageView ImageView::MakeView(VkFormat vk_format, VkImageAspectFlags aspect_mask,
@@ -4889,7 +4917,6 @@ VkSampler Sampler::Emplace(VariantKey key) {
     if (key.drop_compare) {
         create_info.compareEnable = VK_FALSE;
     }
-    create_info.pNext = chain;
     if (key.force_nearest) {
         create_info.magFilter = VK_FILTER_NEAREST;
         create_info.minFilter = VK_FILTER_NEAREST;
@@ -4903,11 +4930,93 @@ VkSampler Sampler::Emplace(VariantKey key) {
     if (!custom_border) {
         create_info.borderColor = ConvertBorderColor(color);
     }
+    // Heap descriptors name a custom border color by a registered index.
+    RegisteredBorderColor border_index;
+    if (custom_border && device_ptr->IsExtDescriptorHeapSupported()) {
+        u32 index = 0;
+        if (device_ptr->GetLogical().RegisterCustomBorderColorEXT(border_ci, &index) ==
+            VK_SUCCESS) {
+            border_index = RegisteredBorderColor{*device_ptr, index};
+        } else {
+            static bool warned = false;
+            if (!std::exchange(warned, true)) {
+                LOG_WARNING(Render_Vulkan,
+                            "No custom border color index left for heap sampler descriptors");
+            }
+        }
+    }
+    const bool reduction = has_minmax_reduction && !key.drop_reduction;
+    VkSamplerCreateInfo created = create_info;
+    created.pNext = chain;
     variants.push_back(Variant{
         .key = key,
-        .sampler = device_ptr->GetLogical().CreateSampler(create_info),
+        .sampler = device_ptr->GetLogical().CreateSampler(created),
+        .create_info = create_info,
+        .custom_border = custom_border,
+        .reduction = reduction,
+        .color = color,
+        .border_index = std::move(border_index),
     });
     return *variants.back().sampler;
+}
+
+Sampler::RegisteredBorderColor::~RegisteredBorderColor() {
+    if (device_ptr != nullptr) {
+        device_ptr->GetLogical().UnregisterCustomBorderColorEXT(value);
+    }
+}
+
+Sampler::RegisteredBorderColor& Sampler::RegisteredBorderColor::operator=(
+    RegisteredBorderColor&& rhs) noexcept {
+    if (this != &rhs) {
+        if (device_ptr != nullptr) {
+            device_ptr->GetLogical().UnregisterCustomBorderColorEXT(value);
+        }
+        device_ptr = std::exchange(rhs.device_ptr, nullptr);
+        value = rhs.value;
+    }
+    return *this;
+}
+
+bool Sampler::HeapSamplerCreateInfo(VkSampler variant, HeapSamplerInfo& out) const {
+    const auto it = std::ranges::find_if(
+        variants, [variant](const Variant& candidate) { return *candidate.sampler == variant; });
+    if (it == variants.end()) {
+        return false;
+    }
+    out.border = VkSamplerCustomBorderColorCreateInfoEXT{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT,
+        .pNext = nullptr,
+        .customBorderColor = std::bit_cast<VkClearColorValue>(it->color),
+        .format = VK_FORMAT_UNDEFINED,
+    };
+    out.border_index = VkSamplerCustomBorderColorIndexCreateInfoEXT{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_INDEX_CREATE_INFO_EXT,
+        .pNext = &out.border,
+        .index = it->border_index.Index(),
+    };
+    out.mapping = VkSamplerBorderColorComponentMappingCreateInfoEXT{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_BORDER_COLOR_COMPONENT_MAPPING_CREATE_INFO_EXT,
+        .pNext = it->border_index.Valid() ? static_cast<const void*>(&out.border_index)
+                                          : static_cast<const void*>(&out.border),
+        .components{it->key.swizzle[0], it->key.swizzle[1], it->key.swizzle[2], it->key.swizzle[3]},
+        .srgb = VK_FALSE,
+    };
+    const void* chain = nullptr;
+    if (it->custom_border) {
+        chain = it->key.HasSwizzle() ? static_cast<const void*>(&out.mapping) : out.mapping.pNext;
+    }
+    out.reduction = VkSamplerReductionModeCreateInfoEXT{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO_EXT,
+        .pNext = chain,
+        .reductionMode = reduction_mode,
+    };
+    if (it->reduction) {
+        chain = &out.reduction;
+    }
+    out.create_info = it->create_info;
+    out.create_info.pNext = chain;
+    return true;
 }
 
 VkSampler Sampler::HandleFor(const ImageView& image_view, bool is_depth) {

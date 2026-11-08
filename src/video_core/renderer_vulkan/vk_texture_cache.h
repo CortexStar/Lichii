@@ -732,6 +732,20 @@ public:
         return *image_views[static_cast<size_t>(texture_type)];
     }
 
+    /// VK_EXT_descriptor_heap writes image descriptors from the view's create info, not its
+    /// handle: the create info of one view type and the structures it chains.
+    struct HeapViewInfo {
+        VkImageViewCreateInfo create_info;
+        VkImageViewUsageCreateInfo usage;
+        VkImageViewASTCDecodeModeEXT astc_decode;
+    };
+
+    /// Fills `out` with what this view's `texture_type` view was created from (pNext pointing
+    /// into `out`). False when the view has no such view type: a null descriptor, as Handle()
+    /// gives VK_NULL_HANDLE there.
+    [[nodiscard]] bool HeapViewCreateInfo(Shader::TextureType texture_type,
+                                          HeapViewInfo& out) const;
+
     [[nodiscard]] VkImage ImageHandle() const noexcept {
         return image_handle;
     }
@@ -789,6 +803,12 @@ private:
     const SlotVector<Image>* slot_images = nullptr;
 
     std::array<vk::ImageView, Shader::NUM_TEXTURE_TYPES> image_views;
+    /// HeapViewCreateInfo: the shared part of the sampled views' create infos, and per view type
+    /// the layer count it was created with (0: not created).
+    VkImageViewCreateInfo heap_view_base{};
+    VkImageUsageFlags heap_view_usage{};
+    bool heap_astc_decode{};
+    std::array<u32, Shader::NUM_TEXTURE_TYPES> heap_view_layers{};
     std::optional<StorageViews> storage_views;
     vk::ImageView typeless_storage_view;
     vk::ImageView depth_view;
@@ -849,6 +869,20 @@ public:
         return base_ci;
     }
 
+    /// VK_EXT_descriptor_heap writes sampler descriptors from create infos: the one a variant
+    /// handle (as HandleFor returns) was created from, and the structures it chains.
+    struct HeapSamplerInfo {
+        VkSamplerCreateInfo create_info;
+        VkSamplerReductionModeCreateInfoEXT reduction;
+        VkSamplerBorderColorComponentMappingCreateInfoEXT mapping;
+        VkSamplerCustomBorderColorCreateInfoEXT border;
+        VkSamplerCustomBorderColorIndexCreateInfoEXT border_index;
+    };
+
+    /// Fills `out` with what `variant` was created from (pNext pointing into `out`). False when
+    /// `variant` is not one of this sampler's.
+    [[nodiscard]] bool HeapSamplerCreateInfo(VkSampler variant, HeapSamplerInfo& out) const;
+
 private:
     struct VariantKey {
         bool reduce_anisotropy;
@@ -866,9 +900,40 @@ private:
         }
     };
 
+    /// A custom border color registered for heap descriptors, released with its variant.
+    class RegisteredBorderColor {
+    public:
+        RegisteredBorderColor() = default;
+        RegisteredBorderColor(const Device& device, u32 index)
+            : device_ptr{&device}, value{index} {}
+        ~RegisteredBorderColor();
+        RegisteredBorderColor(const RegisteredBorderColor&) = delete;
+        RegisteredBorderColor& operator=(const RegisteredBorderColor&) = delete;
+        RegisteredBorderColor(RegisteredBorderColor&& rhs) noexcept
+            : device_ptr{std::exchange(rhs.device_ptr, nullptr)}, value{rhs.value} {}
+        RegisteredBorderColor& operator=(RegisteredBorderColor&& rhs) noexcept;
+
+        [[nodiscard]] bool Valid() const noexcept {
+            return device_ptr != nullptr;
+        }
+        [[nodiscard]] u32 Index() const noexcept {
+            return value;
+        }
+
+    private:
+        const Device* device_ptr = nullptr;
+        u32 value = 0;
+    };
+
     struct Variant {
         VariantKey key;
         vk::Sampler sampler;
+        /// HeapSamplerCreateInfo: what it was created from (pNext left out) and its chain.
+        VkSamplerCreateInfo create_info{};
+        bool custom_border{};
+        bool reduction{};
+        std::array<float, 4> color{};
+        RegisteredBorderColor border_index;
     };
 
     static constexpr size_t MAX_VARIANTS = 32;
