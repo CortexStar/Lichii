@@ -1042,15 +1042,85 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
                to->IsBlockLinear();
     };
     std::optional<Texture::TICEntry> input, output;
-    input = image(0x90);
-    output = image(0xa0);
-    if (!upscale_pair(input, output)) {
-        input = image(0x328);
-        output = image(0x348);
+    bool rgb9e5_pair = false;
+    // Ocarina's pair is looked for first: its constant buffer can hold stale handles at title 4's
+    // and Fortune's Weave's slots (a 128x72 B10G11R11 image at +0x328 with a 1920x1080 one at
+    // +0x348), which those checks took for an upscale and blitted a near-black frame.
+    {
+        // Ocarina of Time's gameplay network reads the frame packed as RGB9E5, each channel the
+        // square root of the tonemapped value, and writes a B10G11R11 image at least as wide. Its constant buffer keeps stale handles (a bloom level
+        // at +0xa0) that the scan below pairs with the output, so this pair goes first: the widest
+        // B10G11R11 image when nothing in the pass is wider, from the widest RGB9E5 image of the
+        // same aspect at most 4x narrower.
+        const u32 limit = (std::min)(cbuf.size.Value(), 0x200U);
+        u32 widest = 0;
+        boost::container::small_vector<Texture::TICEntry, 8> outputs;
+        for (u32 offset = 0; offset + 4 <= limit; offset += 4) {
+            const auto tic = memory_manager.Read<u32>(cbuf_address + offset) != 0 ? image(offset)
+                                                                                     : std::nullopt;
+            if (!tic || tic->Address() == 0 || !tic->IsBlockLinear()) continue;
+            // Only the pair's own formats count: the constant buffer also keeps stale handles of
+            // other passes (a 2560x1440 A8B8G8R8 image from the title network at +0xb8, for one),
+            // and one wider than the output used to reject the pair, leaving the output black.
+            if (tic->format == Texture::TextureFormat::B10G11R11 ||
+                tic->format == Texture::TextureFormat::E5B9G9R9) {
+                widest = (std::max)(widest, tic->Width());
+            }
+            if (tic->format == Texture::TextureFormat::B10G11R11) {
+                outputs.push_back(*tic);
+            }
+            if (tic->format == Texture::TextureFormat::E5B9G9R9 &&
+                (!input || tic->Width() > input->Width())) {
+                input = tic;
+            }
+        }
+        // Ocarina's gameplay network keeps its input at cbuf0+0xc0 and its output at +0xd0. Other
+        // B10G11R11 handles in the buffer can be as wide (the scene target the packed frame
+        // aliases, an item-get pass's target), and picking one of them left the presented output
+        // black for seconds. Use those slots when they hold such a pair.
+        if (const auto slot_in = image(0xc0), slot_out = image(0xd0);
+            slot_in && slot_out && slot_in->format == Texture::TextureFormat::E5B9G9R9 &&
+            slot_out->format == Texture::TextureFormat::B10G11R11 && slot_in->Address() != 0 &&
+            slot_out->Address() != 0 && slot_in->Address() != slot_out->Address() &&
+            slot_in->IsBlockLinear() && slot_out->IsBlockLinear()) {
+            input = slot_in;
+            outputs.clear();
+            outputs.push_back(*slot_out);
+            widest = (std::max)(slot_in->Width(), slot_out->Width());
+        }
+        // Otherwise the widest B10G11R11 image that is not the input's own memory (the packed
+        // frame aliases the scene's render target; a blit onto itself leaves the output black).
+        for (const Texture::TICEntry& candidate : outputs) {
+            if (input && candidate.Address() == input->Address()) continue;
+            if (!output || candidate.Width() > output->Width()) {
+                output = candidate;
+            }
+        }
+        rgb9e5_pair = [&] {
+            if (!input || !output || output->Width() != widest || input->Width() > widest ||
+                4 * input->Width() < widest) {
+                return false;
+            }
+            const u64 cross_a = u64{input->Width()} * output->Height();
+            const u64 cross_b = u64{output->Width()} * input->Height();
+            return (std::max)(cross_a, cross_b) - (std::min)(cross_a, cross_b) <= cross_b / 50;
+        }();
+        if (!rgb9e5_pair) {
+            input.reset();
+            output.reset();
+        }
     }
-    if (!upscale_pair(input, output)) {
-        input.reset();
-        output.reset();
+    if (!rgb9e5_pair) {
+        input = image(0x90);
+        output = image(0xa0);
+        if (!upscale_pair(input, output)) {
+            input = image(0x328);
+            output = image(0x348);
+        }
+        if (!upscale_pair(input, output)) {
+            input.reset();
+            output.reset();
+        }
     }
     if (!input) {
         for (u32 first = 0x80; first < 0x120 && !input; first += 4) {
@@ -1120,8 +1190,9 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
                  known->second ? "decodes sRGB like the program" : "plain copy");
     }
     const Fermi2D::Config config{
-        .operation = known->second ? Fermi2D::Operation::SrcCopySrgbToLinear
-                                  : Fermi2D::Operation::SrcCopy,
+        .operation = rgb9e5_pair      ? Fermi2D::Operation::SrcCopySquare
+                     : known->second ? Fermi2D::Operation::SrcCopySrgbToLinear
+                                     : Fermi2D::Operation::SrcCopy,
         .filter = Fermi2D::Filter::Bilinear,
         .must_accelerate = true,
         .dst_x0 = 0,
