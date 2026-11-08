@@ -78,6 +78,7 @@ public:
         u32 value;
         u32 operation;
         std::chrono::steady_clock::time_point since;
+        std::chrono::steady_clock::time_point last_fences; ///< When it last released fences
         bool reported;
         /// GpuSplit::LastWriterPosition when the acquire was sent: compute and copy work before
         /// it may release the word without the front's knowing (QMD releases).

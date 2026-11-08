@@ -12,6 +12,7 @@
 #include <cstring>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "common/scope_exit.h"
@@ -128,6 +129,13 @@ DmaPusher::DmaPusher(Core::System& system_, MemoryManager& memory_manager_, Cont
 
 DmaPusher::~DmaPusher() = default;
 
+bool DmaPusher::CanResumeAcquire() {
+    if (pending_list_tick) {
+        return rasterizer->IsGpuTickDone(*pending_list_tick);
+    }
+    return puller.CanResumeAcquire(*this);
+}
+
 void DmaPusher::DispatchCalls() {
     // The sub-index is kept: a channel suspended on a semaphore resumes inside its command list.
     dma_state.is_last_call = true;
@@ -155,6 +163,19 @@ bool DmaPusher::Step() {
     if (!ib_enable || dma_pushbuffer.empty()) {
         return false;
     }
+    // Waiting for the GPU's copy of a command list this channel reads next (ReadGpuWrittenCommands).
+    if (pending_list_tick) {
+        if (!rasterizer->IsGpuTickDone(*pending_list_tick)) {
+            return false;
+        }
+        pending_list_tick.reset();
+        resumed_list_read = true;
+    }
+    // Only for the entry that suspended: an acquire still waiting, the safe-read path or a stopped
+    // split must not leave it set for a later list (which would then skip its writer wait).
+    SCOPE_EXIT {
+        resumed_list_read = false;
+    };
     const u64 suspensions_before = suspensions.load(std::memory_order_relaxed);
     if (!puller.ResumeAcquire(*this)) {
         return false;
@@ -346,7 +367,14 @@ bool DmaPusher::Step() {
             const std::span<const CommandHeader> commands{command_headers.data(), header.size};
             command_resume_offset +=
                 ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
-        } else if (ReadGpuWrittenCommands(dma_state.dma_get, static_cast<u32>(header.size))) {
+        } else if (bool pending = false;
+                   ReadGpuWrittenCommands(dma_state.dma_get, static_cast<u32>(header.size),
+                                          &pending) ||
+                   pending) {
+            if (pending) {
+                // Parsed again once the GPU copied the list; other channels run meanwhile.
+                return false;
+            }
             const std::span<const CommandHeader> commands{command_headers.data(), header.size};
             RecordParsedEntry(header, commands);
             Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Copy);
@@ -819,7 +847,7 @@ void DmaPusher::CheckUnwaitedWriters(GPUVAddr address, size_t size) {
         VideoCommon::GpuSplit::Writes::Noted);
 }
 
-bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count) {
+bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count, bool* pending) {
     // The pages are marked as command list pages: from the next write on, the buffer cache copies
     // them to host memory right after the dispatch or copy that writes them and submits. The
     // front then waits only for the back to run that work and for the GPU to finish the copy, not
@@ -847,7 +875,11 @@ bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count) {
     // list is ordered before the fetch only by a host-level wait between them, so the front waits
     // for the work before the last one, not for compute and copy work sent after it.
     auto& split = VideoCommon::GpuSplit::Get();
-    if (split.Active()) {
+    // Resuming after the copy's tick: the back ran the list's writers before the suspension
+    // (this wait ran then), and waiting again would wait for the other channels' work queued
+    // meanwhile too.
+    const bool resumed = std::exchange(resumed_list_read, false);
+    if (split.Active() && !resumed) {
         split.WaitForSyncedWriters(VideoCommon::DrainSite::ListCopies);
     }
     bool past_sync = !split.Active();
@@ -869,7 +901,9 @@ bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count) {
             const bool stats = Nx2ListStats::g_enabled && split.Active();
             const u64 backlog = stats ? split.Backlog() : 0;
             const u64 unpublished = stats ? split.Unpublished() : 0;
-            where = rasterizer->ReadGpuWrittenCommandList(*device, part, past_sync);
+            u64 tick = 0;
+            u64* const pending_tick = pending != nullptr ? &tick : nullptr;
+            where = rasterizer->ReadGpuWrittenCommandList(*device, part, past_sync, pending_tick);
             const bool after_sync = where == GpuWrittenList::NeedsSync;
             if (where == GpuWrittenList::NeedsSync) {
                 const auto wait_start = Nx2CmdPageDiag::g_enabled
@@ -880,7 +914,14 @@ bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count) {
                     Nx2CmdPageDiag::NoteSyncWait(std::chrono::steady_clock::now() - wait_start);
                 }
                 past_sync = true;
-                where = rasterizer->ReadGpuWrittenCommandList(*device, part, true);
+                where = rasterizer->ReadGpuWrittenCommandList(*device, part, true, pending_tick);
+            }
+            if (where == GpuWrittenList::Pending) {
+                // The copy is still on the GPU: the channel waits for it without blocking the
+                // others (Step parses this entry again once IsGpuTickDone).
+                pending_list_tick = tick;
+                *pending = true;
+                return false;
             }
             if (Nx2CmdPageDiag::g_enabled) {
                 auto& diag = Nx2CmdPageDiag::Get();

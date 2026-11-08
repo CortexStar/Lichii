@@ -59,8 +59,8 @@ void Scheduler::Push(GPU& gpu, s32 channel, CommandList&& entries) {
 }
 
 bool Scheduler::ResumePending(GPU& gpu) {
+    bool any_progress = false;
     // Running one channel can release the semaphore another waits for: retry until none moves.
-    bool resumed = false;
     for (bool progress = true; progress;) {
         progress = false;
         for (const auto& state : pending_channels) {
@@ -69,7 +69,7 @@ bool Scheduler::ResumePending(GPU& gpu) {
             // pending: resuming it again counted as progress forever and the GPU thread never
             // reached its stop request (closing the game hung).
             if (!dma_pusher.system.IsPoweredOn()) {
-                return resumed;
+                return any_progress;
             }
             if (!dma_pusher.HasPendingAcquire()) {
                 continue;
@@ -91,14 +91,14 @@ bool Scheduler::ResumePending(GPU& gpu) {
             BindChannel(gpu, state->bind_id);
             dma_pusher.DispatchCalls();
             progress = true;
-            resumed = true;
+            any_progress = true;
         }
     }
     std::erase_if(pending_channels, [](const auto& state) {
         return !state->payload->dma_pusher.HasPendingAcquire();
     });
     any_pending.store(!pending_channels.empty(), std::memory_order_release);
-    return resumed;
+    return any_progress;
 }
 
 void Scheduler::DeclareChannel(std::shared_ptr<ChannelState> new_channel) {

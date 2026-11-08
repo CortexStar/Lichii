@@ -658,13 +658,14 @@ void Maxwell3D::CallConstBufferWords(Core::System& system, const u32* methods,
 }
 
 void Maxwell3D::CallMethodSlow(Core::System& system, u32 method, u32 method_argument, bool is_last_call) {
-    // It is an error to write to a register other than the current macro's ARG register before
-    // it has finished execution.
-    if (executing_macro != 0 && method != executing_macro + 1) {
+    // Every word of a macro register run is a parameter of the macro it started, whichever macro
+    // register it writes (as on the split front, FrontCallMethod). Only a write to an ordinary
+    // register before the macro has all its parameters is an error.
+    if (executing_macro != 0 && method < MacroRegistersStart) {
         DumpRecentWrites(method);
     }
     if (executing_macro != 0) {
-        ASSERT(method == executing_macro + 1);
+        ASSERT(method >= MacroRegistersStart);
     }
     RecordWrite(method, method_argument, 1, is_last_call ? 1 : 2);
 
@@ -1063,6 +1064,10 @@ struct Maxwell3D::FrontState {
     /// A method the draw manager handles was sent since the back last ran DrawDeferred: only
     /// then can it have a deferred instanced draw to issue at the end of a macro.
     bool draw_pending{true};
+    /// The back holds state writes in its method sink, which its next executable method consumes
+    /// (issuing a deferred draw a changed one ends). Front() consumes it before copying the state.
+    bool sink_pending{};
+    u32 split_start{}; ///< GpuSplit::Starts() when this copy was made
     bool skip_same{}; ///< SkipSameValueWrites() && FrontSkipSame(), read once
     /// The back's draw manager is in an instance loop (DrawMode::Instance): draw.end does nothing.
     bool instance_loop{};
@@ -1333,6 +1338,12 @@ void ConcretizeListWords(VideoCommon::GpuSplit& split, VideoCore::RasterizerInte
 } // Anonymous namespace
 
 Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSplit& split) {
+    // Copied during an earlier start: while the split was stopped, state writes went to the
+    // method sink without reaching it (they hand the front back only once consumed).
+    if (front && front->split_start != split.Starts()) [[unlikely]] {
+        split.Drain(VideoCommon::DrainSite::FrontStart); // The engine's state is the back's.
+        ReleaseFront();
+    }
     if (!front) [[unlikely]] {
         // Copy the back's state and take the macros over while it is idle (state writes it
         // still holds in its method sink first).
@@ -1343,6 +1354,7 @@ Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSp
         std::memcpy(front->shadow.data(), shadow_state.reg_array.data(), sizeof(front->shadow));
         front->control = shadow_state.shadow_ram_control;
         front->skip_same = SkipSameValueWrites() && FrontSkipSame();
+        front->split_start = split.Starts();
         front->executing_macro = executing_macro;
         front->parameters = std::move(macro_params);
         macro_params.clear();
@@ -1459,9 +1471,12 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
     }
     using Writes = VideoCommon::GpuSplit::Writes;
     if (from_macro) {
+        // Direct writes consume the sink first.
         split.MacroWrite(this, method, argument, Writes::Noted);
+        fs.sink_pending = false;
     } else {
         split.Method(this, method, argument, is_last_call, nullptr, Writes::Noted);
+        fs.sink_pending = !execution_mask[method];
     }
     // A write the back only keeps for later (its method sink) runs nothing there yet.
     if (from_macro || execution_mask[method]) {
@@ -1606,6 +1621,7 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
     }
     split.MultiMethod(this, method, base_start, amount, methods_pending, nullptr,
                       VideoCommon::GpuSplit::Writes::Noted);
+    fs.sink_pending = false; // The back consumes the sink before a run.
     FrontNoteWrites(split, fs, method, amount);
     if (method == MAXWELL3D_REG_INDEX(report_semaphore.query) && amount != 0) {
         FrontNoteReport(split, fs);
@@ -1794,6 +1810,7 @@ bool Maxwell3D::FrontRunOnBack(Core::System& system, VideoCommon::GpuSplit& spli
         },
         // Its writes (BackWritable) touch registers and the caches, not guest memory.
         fs.parameters, VideoCommon::GpuSplit::Writes::Caches);
+    fs.sink_pending = false; // The back macro consumes the sink before it runs.
     const u64 position = split.Position();
     fs.back_last = position;
     const bool tracked = fs.control == Regs::ShadowRamControl::Track ||
@@ -1977,7 +1994,10 @@ bool Maxwell3D::FrontSkipsLoopWrite(FrontState& fs, u32 method, u32 value, bool 
     default:
         return false;
     }
-    if (!fs.skip_same || !shadow_kept || fs.regs[method] != value) {
+    // Sent while state writes wait in the back's sink: it consumes them at the next executable
+    // method, and a changed one ends a deferred draw that must issue before the next engine's work
+    // (a compute dispatch after a dropped vertex_buffer.count would otherwise run first).
+    if (!fs.skip_same || fs.sink_pending || !shadow_kept || fs.regs[method] != value) {
         return false;
     }
     // Instance loop methods flush no deferred draw, and the draw manager ignores these: DrawEnd

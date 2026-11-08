@@ -618,7 +618,6 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
     const VkFramebuffer framebuffer_handle = framebuffer->Handle();
     const VkExtent2D render_area = framebuffer->RenderArea();
     state.renderpass = renderpass;
-    state.clear_variant = false;
     state.framebuffer = framebuffer_handle;
     state.render_area = render_area;
 
@@ -696,9 +695,6 @@ void Scheduler::RealizeDeferredClear() {
         dc.color_clear_mask, dc.depth_stencil, color_discard_mask, depth_stencil_discard);
     EndRenderPass();
     BeginRenderPassImpl(dc.framebuffer, renderpass, clear_values.data(), count);
-    // Without discards, the variant only clears instead of loading: its store ops, layouts and
-    // attachments are the framebuffer's own.
-    state.clear_variant = color_discard_mask == 0 && !depth_stencil_discard;
 }
 
 bool Scheduler::DeferColorClear(const Framebuffer* framebuffer, u32 rt_slot,
@@ -746,12 +742,15 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_lo
     const VkRenderPass renderpass = framebuffer->RenderPass();
     const VkFramebuffer framebuffer_handle = framebuffer->Handle();
     const VkExtent2D render_area = framebuffer->RenderArea();
-    // A deferred clear's pass serves the draws after its first one too: ending it there and
-    // beginning the framebuffer's own pass stored the attachments only to load them back (about
-    // 9 render passes a frame in Ocarina of Time).
-    if (state.renderpass != VK_NULL_HANDLE &&
-        (renderpass == state.renderpass || state.clear_variant) &&
-        framebuffer_handle == state.framebuffer && render_area.width == state.render_area.width &&
+    // A draw continues the active pass whenever the same framebuffer and area are bound. The
+    // render-pass *variant* (a deferred clear's loadOp=CLEAR form) is only meaningful at begin -
+    // loadOps are applied once, and the base/variant passes are render-pass-compatible (only
+    // loadOp/storeOp differ). Comparing the exact handle here made every draw after a deferred
+    // clear restart the pass and re-LOAD what was just CLEARed (~118 MB of attachment traffic per
+    // world-target turn). The framebuffer handle already fixes the attachment structure and key,
+    // so it is the correct identity to compare.
+    if (state.renderpass && framebuffer_handle == state.framebuffer &&
+        render_area.width == state.render_area.width &&
         render_area.height == state.render_area.height) {
         return;
     }
@@ -1318,7 +1317,6 @@ void Scheduler::EndRenderPass(std::source_location cause)
         }, cause, RecordSite::PassEnd, site_flags);
 
         state.renderpass = VkRenderPass{};
-        state.clear_variant = false;
         num_renderpass_images = 0;
     }
 
