@@ -5566,13 +5566,15 @@ void MainWindow::OnLanguageChanged(const QString& locale) {
     if (UISettings::values.language.GetValue() != std::string("en"))
         qApp->removeTranslator(&translator);
 
+    UISettings::values.language = locale.toStdString();
+    LoadTranslation();
+
+    // After the new translator is in: renamed before it, the sizes stayed in English.
     QList<QAction*> actions = game_size_actions->actions();
     for (size_t i = 0; i < default_game_icon_sizes.size(); i++) {
         actions.at(i)->setText(GetTranslatedGameIconSize(i));
     }
 
-    UISettings::values.language = locale.toStdString();
-    LoadTranslation();
     ui->retranslateUi(this);
     multiplayer_state->retranslateUi();
     UpdateWindowTitle();
