@@ -79,6 +79,7 @@ add_library(hid_core STATIC
     resources/mouse/mouse_types.h
     resources/npad/npad.cpp
     resources/npad/npad.h
+    resources/npad/npad_input_publish.h
     resources/npad/npad_data.cpp
     resources/npad/npad_data.h
     resources/npad/npad_resource.cpp
