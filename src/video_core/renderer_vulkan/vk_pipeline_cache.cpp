@@ -42,6 +42,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/memory_manager.h"
+#include "video_core/native_verify.h"
 #include "video_core/nx2_bindmemo_stats.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/pipeline_cache_files.h"
@@ -700,6 +701,10 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     // Constant buffers by device address from each draw's bank table (same requirements).
     profile.uniforms_by_address = device.SupportsGpuPageTable();
     host_info.uniforms_by_address = profile.uniforms_by_address;
+    VideoCommon::NativeVerify::SetActive(VideoCommon::NativeVerify::Layer::Storage,
+                                         profile.gpu_page_table);
+    VideoCommon::NativeVerify::SetActive(VideoCommon::NativeVerify::Layer::Uniforms,
+                                         profile.uniforms_by_address);
     LOG_INFO(Render_Vulkan,
              "Storage and global memory through the GPU page table: {}, constant buffers by "
              "device address: {}",

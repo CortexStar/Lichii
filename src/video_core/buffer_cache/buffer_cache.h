@@ -109,6 +109,11 @@ void BufferCache<P>::RunGarbageCollector(bool aggressive_gc) {
 
 template <class P>
 void BufferCache<P>::TickFrame() {
+    if (NativeVerify::Enabled(NativeVerify::Layer::Storage) ||
+        NativeVerify::Enabled(NativeVerify::Layer::Uniforms)) {
+        // Every 10 s, also when no draw ran a check (a layer that never runs shows 0 checks).
+        NativeVerify::Report();
+    }
     // Homebrew console apps don't create or bind any channels, so this will be nullptr.
     if (!channel_state) {
         return;

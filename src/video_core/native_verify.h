@@ -80,7 +80,12 @@ void Check(Layer layer, bool same, fmt::format_string<Args...> format, Args&&...
     return Enabled(Layer::Barriers);
 }
 
-/// Logs each enabled layer's line once 10 s passed since the last one. Any thread.
+/// Whether the device runs `layer` at all (the GPU page table needs buffer device addresses, ...).
+/// An enabled layer that is off says so in its line instead of reporting 0 checks silently.
+void SetActive(Layer layer, bool active);
+
+/// Logs the line of each enabled layer counted through Check (storage, uniforms) once 10 s
+/// passed since the last one, 0 checks included. Any thread.
 void Report();
 
 } // namespace VideoCommon::NativeVerify

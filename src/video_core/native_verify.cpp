@@ -37,6 +37,14 @@ Counters& CountersOf(Layer layer) {
     return counters[static_cast<size_t>(layer)];
 }
 
+namespace {
+std::array<std::atomic<bool>, static_cast<size_t>(Layer::Count)> active_layers{};
+} // namespace
+
+void SetActive(Layer layer, bool active) {
+    active_layers[static_cast<size_t>(layer)].store(active, std::memory_order_relaxed);
+}
+
 void Report() {
     using Clock = std::chrono::steady_clock;
     static std::mutex mutex;
@@ -50,15 +58,19 @@ void Report() {
         return;
     }
     last = now;
-    for (size_t index = 0; index < layer_names.size(); ++index) {
-        const auto layer = static_cast<Layer>(index);
+    // The other layers log their own lines (texture cache, scheduler).
+    for (const Layer layer : {Layer::Storage, Layer::Uniforms}) {
         if (!Enabled(layer)) {
             continue;
         }
+        const size_t index = static_cast<size_t>(layer);
         Counters& counters = CountersOf(layer);
-        LOG_INFO(HW_GPU, "Native verify {} (10 s): {} checks, {} differences", layer_names[index],
+        LOG_INFO(HW_GPU, "Native verify {} (10 s): checks {}, differences {}{}", layer_names[index],
                  counters.checks.exchange(0, std::memory_order_relaxed),
-                 counters.differences.exchange(0, std::memory_order_relaxed));
+                 counters.differences.exchange(0, std::memory_order_relaxed),
+                 active_layers[index].load(std::memory_order_relaxed)
+                     ? ""
+                     : " (layer off on this device)");
     }
 }
 
