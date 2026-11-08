@@ -40,9 +40,6 @@ namespace Tegra::Engines {
 /// First register id that is actually a Macro call.
 constexpr u32 MacroRegistersStart = 0xE00;
 
-// EDEN_NX2_3D_METHODS: log the first write to each 3D register (finds methods Eden doesn't model).
-static const bool g_trace_first_method_writes = std::getenv("EDEN_NX2_3D_METHODS") != nullptr;
-
 Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)
     : draw_manager()
     , memory_manager{memory_manager_}
@@ -59,7 +56,7 @@ Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)
     for (size_t i = 0; i < execution_mask.size(); i++)
         execution_mask[i] = IsMethodExecutable(u32(i));
     fast_maxwell3d = !record_write_history &&
-                     !g_trace_first_method_writes && !VideoCommon::Nx2Profile::Enabled();
+                     !trace_first_method_writes && !VideoCommon::Nx2Profile::Enabled();
 }
 
 Maxwell3D::~Maxwell3D() = default;
@@ -655,7 +652,7 @@ void Maxwell3D::CallMethodSlow(Core::System& system, u32 method, u32 method_argu
         ProcessMacro(system, method, &method_argument, 1, is_last_call);
         return;
     }
-    if (g_trace_first_method_writes) [[unlikely]] {
+    if (trace_first_method_writes) [[unlikely]] {
         TraceFirstMethodWrite(method, method_argument);
     }
 
