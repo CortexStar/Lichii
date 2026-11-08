@@ -247,6 +247,11 @@ public:
     /// since. False when not all are current (or the list isn't GPU-written): the caller drains,
     /// flushes and reads guest memory.
     bool ReadGpuWrittenCommands(GPUVAddr address, u32 count);
+    /// A GPU-written list that is all the parameters of the compute macro call about to start,
+    /// on the split with macros on its front: if the call only moves the words where the back can
+    /// take them over (Nx2ListIndirect), puts their placeholders in command_headers instead of
+    /// reading them. The back copies the words at the list's place on the host GPU.
+    bool TakeGpuWrittenListWords(const CommandListHeader& header);
     /// EDEN_NX2_LIST_VERIFY: reads the list ReadGpuWrittenCommands just read again as before
     /// (Nx2ListStats) and leaves the words read last in command_headers.
     void VerifyGpuWrittenCommands(GPUVAddr address, u32 count);

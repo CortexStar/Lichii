@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -1794,9 +1795,10 @@ void RasterizerVulkan::DispatchCompute() {
         }
     };
     const auto indirect_address = kepler_compute->GetIndirectComputeAddress();
+    const auto list_slot = kepler_compute->GetIndirectListSlot();
 #ifdef EGLANTINE_STREAMLINE
     const bool can_replace = OcarinaDlssEnabled() && pipeline->CanReplaceOcarinaUpscale() &&
-                             !indirect_address && !frame_dump.Capturing();
+                             !indirect_address && !list_slot && !frame_dump.Capturing();
 #else
     constexpr bool can_replace = false;
 #endif
@@ -1842,6 +1844,41 @@ void RasterizerVulkan::DispatchCompute() {
                               {qmd.grid_dim_x, qmd.grid_dim_y, qmd.grid_dim_z},
                               {qmd.block_dim_x, qmd.block_dim_y, qmd.block_dim_z},
                               indirect_address, indirect_grid);
+    }
+    if (list_slot) {
+        // The grid is GPU-written list words (Nx2ListIndirect): the host GPU copied them into the
+        // slot at the list's place, and dispatches from there.
+        auto& slots = buffer_cache_runtime.Nx2Slots();
+        if (!slots.Held(*list_slot)) [[unlikely]] {
+            LOG_ERROR(Render_Vulkan, "Nx2 list slot {} dispatched without a hold", *list_slot);
+            return;
+        }
+        const auto [args_buffer, args_offset] = slots.DispatchArguments(*list_slot);
+        scheduler.RequestOutsideRenderPassOperationContext();
+        scheduler.NoteComputeWrites();
+        scheduler.TraceComputePipeline(pipeline->ShaderHash());
+        scheduler.Record([this, pipeline, byte_addressed_shadow, indirect_buffer = args_buffer,
+                          indirect_offset = args_offset](vk::CommandBuffer cmdbuf) {
+            RecordDispatchBarrier(cmdbuf);
+            if (!pipeline->IsBound()) {
+                return;
+            }
+            if (byte_addressed_shadow) {
+                TextureCacheRuntime::CopyByteAddressedShadow(cmdbuf, *byte_addressed_shadow, false);
+            }
+            scheduler.TraceGpuWork(cmdbuf, pipeline->ShaderHash(), 0, {}, [&] {
+                cmdbuf.DispatchIndirect(indirect_buffer, indirect_offset);
+            });
+            if (byte_addressed_shadow) {
+                TextureCacheRuntime::CopyByteAddressedShadow(cmdbuf, *byte_addressed_shadow, true);
+            }
+        });
+        buffer_cache.NoteWorkRecorded(true);
+        SubmitNx2ListCopies();
+#ifdef EGLANTINE_STREAMLINE
+        TryOcarinaDlss(*pipeline, false); // As after a direct dispatch
+#endif
+        return;
     }
     if (indirect_address) {
         // DispatchIndirect
@@ -2004,6 +2041,52 @@ VideoCore::RasterizerInterface::GpuWrittenList RasterizerVulkan::ReadGpuWrittenC
 
 void RasterizerVulkan::NoteGpuWrittenCommandListSynced(DAddr page) {
     buffer_cache.Nx2NoteListSynced(page);
+}
+
+bool RasterizerVulkan::Nx2ListSlotsSupported() const {
+    // A direct dispatch skips a grid over the device's limits; an indirect one must not get one.
+    // The slot's height and depth are 16 bits, and a width over 31 bits is no culling result.
+    const std::array<u32, 3> max_dim{device.GetMaxComputeWorkGroupCount()};
+    const bool fits = max_dim[0] >= 0x7fffffffU && max_dim[1] >= 0xffffU && max_dim[2] >= 0xffffU;
+    if (static std::atomic<bool> logged{}; !fits && !logged.exchange(true)) {
+        LOG_WARNING(Render_Vulkan,
+                    "Nx2 list indirect off: the device dispatches at most {}x{}x{} groups",
+                    max_dim[0], max_dim[1], max_dim[2]);
+    }
+    return Tegra::Nx2ListIndirect::g_enabled && fits;
+}
+
+std::optional<u32> RasterizerVulkan::Nx2AcquireListSlot() {
+    return buffer_cache_runtime.Nx2Slots().Acquire();
+}
+
+void RasterizerVulkan::Nx2ReleaseListSlot(u32 slot) {
+    buffer_cache_runtime.Nx2Slots().Release(slot);
+}
+
+void RasterizerVulkan::Nx2SnapshotListWords(DAddr device_addr, u32 count, u32 slot) {
+    // The words as GPU work sent before the list left them: the buffer cache's, its CPU writes
+    // applied (as a dispatch reading them finds them).
+    gpu_memory->FlushCaching();
+    std::scoped_lock lock{buffer_cache.mutex};
+    const auto [buffer, offset] =
+        buffer_cache.ObtainCPUBuffer(device_addr, count * static_cast<u32>(sizeof(u32)),
+                                     VideoCommon::ObtainBufferSynchronize::FullSynchronize,
+                                     VideoCommon::ObtainBufferOperation::DoNothing);
+    buffer_cache_runtime.Nx2Slots().Snapshot(buffer->Handle(), offset, count, slot);
+}
+
+void RasterizerVulkan::Nx2NoteOwedListWord(DAddr device_addr, u32 value) {
+    buffer_cache_runtime.Nx2Slots().NoteOwed(device_addr, value,
+                                             device_memory.Read<u32>(device_addr));
+}
+
+void RasterizerVulkan::Nx2NoteInlineQmdGrid(DAddr device_addr, u32 x, u32 y, u32 z) {
+    buffer_cache_runtime.Nx2Slots().NoteInlineQmdGrid(device_addr, x, y, z);
+}
+
+void RasterizerVulkan::Nx2ReadListSlots(std::span<const u32> slots, std::span<u32> words) {
+    buffer_cache_runtime.Nx2Slots().Read(slots, words);
 }
 
 void RasterizerVulkan::FlushGpuWrittenCommandListPages(std::span<const DAddr> pages) {

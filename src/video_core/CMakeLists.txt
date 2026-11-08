@@ -122,6 +122,7 @@ add_library(video_core STATIC
     nx2_debug_control.h
     nx2_drain_check.h
     nx2_entry_check.h
+    nx2_list_indirect.h
     nx2_list_stats.h
     nx2_profile.h
     nx2_perf.h
@@ -177,6 +178,8 @@ add_library(video_core STATIC
     renderer_vulkan/framebuffer_limits.h
     renderer_vulkan/maxwell_to_vk.cpp
     renderer_vulkan/maxwell_to_vk.h
+    renderer_vulkan/nx2_list_slots.cpp
+    renderer_vulkan/nx2_list_slots.h
     renderer_vulkan/pipeline_build.h
     renderer_vulkan/pipeline_build_trace.h
     renderer_vulkan/pipeline_helper.h
