@@ -64,6 +64,20 @@ enum class Zone : u32 {
     ListGpuWait,
     AcquirePoll, ///< TEST: a suspended acquire's poll (CanResumeAcquire in ResumePending)
     Resnapshot,  ///< TEST: command lists copied again at a resume (DmaPusher::RefreshSnapshot)
+    // TEST: fine zones, EDEN_NX2_GPU_PROFILE=2 only (FineScope): they split the zones above.
+    CbBind,          ///< Of method: constant buffer binds (Maxwell3D::ProcessCBBind)
+    CbUpload,        ///< Of method: constant buffer words written to memory
+    QueryReport,     ///< Of method: report semaphores (Maxwell3D::ProcessQueryGet)
+    CounterReset,    ///< Of method: counter resets (Maxwell3D::ProcessCounterReset)
+    RenderEnable,    ///< Of method: render enable conditions (Maxwell3D::ProcessQueryCondition)
+    Sink,            ///< State writes held for the next executable method (ConsumeSinkImpl)
+    MacroEnd,        ///< A front macro's end on the back (Maxwell3D::FinishFrontMacro)
+    DrawSetup,       ///< Of draw: after the pipeline lookup, before Configure (cache locks)
+    DrawQueries,     ///< Of draw: query and transform feedback state before recording
+    TickWork,        ///< Of draw and compute: the sync operations after them (GPU::TickWork)
+    UniformBuffers,  ///< Of bind stage buffers: the uniform buffers
+    GeometryBuffers, ///< Of update buffers: index and vertex buffer binds
+    StorageBindings, ///< Of read handles: storage buffer addresses from constant buffers
     Count,
 };
 
@@ -76,19 +90,36 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "configure draw", "dynamic state", "draw record", "texture upload", "fence",
     "fence skipped", "method", "split drain", "split wait",
     "writer wait", "list submit wait", "list GPU wait", "acquire poll", "resnapshot",
+    "cb bind", "cb upload", "query report", "counter reset", "render enable", "sink",
+    "macro end", "draw setup", "draw queries", "tick work", "uniform buffers",
+    "geometry buffers", "storage bindings",
 };
+static_assert(zone_names.back() != nullptr, "a zone without a name");
 
 // A plain flag: Enabled() runs several times per method write (no guard to check).
 inline bool g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
+
+/// TEST: EDEN_NX2_GPU_PROFILE=2 adds the fine zones (FineScope) and counters (FineCounter), at
+/// the cost of more time stamp reads: =1 keeps the zones runs compare with.
+[[nodiscard]] inline bool FineSwitchSet() {
+    const char* value = std::getenv("EDEN_NX2_GPU_PROFILE");
+    return value != nullptr && value[0] == '2';
+}
+inline bool g_fine = FineSwitchSet();
 
 /// Called by VideoCore::CreateGPU: static initialization runs before the frontend loads
 /// nx2_switches.txt, so a switch set only there takes effect from that point on.
 inline void ReadSwitch() {
     g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
+    g_fine = FineSwitchSet();
 }
 
 inline bool Enabled() {
     return g_enabled;
+}
+
+inline bool Fine() {
+    return g_fine;
 }
 
 // Nanoseconds; from the host's own counter where the wall clock reads it directly (the zones
@@ -108,7 +139,27 @@ inline u64 Ticks() {
 #endif
 }
 
+/// TEST: amounts counted with EDEN_NX2_GPU_PROFILE=2, logged per second in a line of their own.
+enum class FineCounter : u32 {
+    UniformRebinds,  ///< Small uniform buffers bound again from the same stream allocation
+    UniformStreamed, ///< Small uniform buffers copied into the stream buffer
+    UniformCached,   ///< Uniform buffers bound from their host buffer
+    UniformOther,    ///< Uniform buffers bound otherwise (root tables, OpenGL, fallbacks)
+    UniformBytes,    ///< Bytes of the uniform buffers bound (all paths)
+    StorageBinds,    ///< Graphics storage buffers bound
+    TextureHandles,  ///< Graphics texture handles read
+    Count,
+};
+
+inline constexpr std::array<const char*, static_cast<size_t>(FineCounter::Count)>
+    fine_counter_names{
+        "uniform rebinds", "uniform streamed", "uniform cached",  "uniform other",
+        "uniform bytes",   "storage binds",    "texture handles",
+    };
+static_assert(fine_counter_names.back() != nullptr, "a fine counter without a name");
+
 struct ThreadData {
+    std::array<u64, static_cast<size_t>(FineCounter::Count)> fine_counters{}; ///< TEST
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
     std::array<u64, 12> counters{}; ///< See Counter
@@ -128,7 +179,10 @@ inline thread_local ThreadData t_data;
 
 class Scope {
 public:
-    explicit Scope(Zone zone_) : zone{zone_}, enabled{Enabled()} {
+    explicit Scope(Zone zone_) : Scope{zone_, Enabled()} {}
+
+    /// A zone timed only if `on` (a profiled run's choice, such as Fine()).
+    Scope(Zone zone_, bool on) : zone{zone_}, enabled{on} {
         if (!enabled) {
             return;
         }
@@ -160,6 +214,12 @@ private:
     bool enabled;
     u64 start{};
     u64 parent_child_ns{};
+};
+
+/// TEST: a fine zone (EDEN_NX2_GPU_PROFILE=2).
+class FineScope : public Scope {
+public:
+    explicit FineScope(Zone zone_) : Scope{zone_, Fine()} {}
 };
 
 /// The ticks two time stamp reads in a row take: what a timed entry measures on top of its own
@@ -333,6 +393,13 @@ inline void Add(Counter counter, u64 amount) {
     }
 }
 
+/// TEST: EDEN_NX2_GPU_PROFILE=2 only.
+inline void AddFine(FineCounter counter, u64 amount) {
+    if (Fine()) [[unlikely]] {
+        t_data.fine_counters[static_cast<size_t>(counter)] += amount;
+    }
+}
+
 /// The front waited for the back since `start` (Ticks) for `site`.
 inline void AddDrain(DrainSite site, u64 start) {
     if (Enabled()) {
@@ -422,6 +489,20 @@ inline void Report(const char* thread_name = "GPU thread") {
                             static_cast<double>(window) / 1e6);
     }
     LOG_INFO(HW_GPU, "{} per second:{}", thread_name, line);
+    if (Fine()) {
+        // TEST: the fine counters.
+        std::string fine;
+        for (size_t i = 0; i < data.fine_counters.size(); ++i) {
+            if (data.fine_counters[i] != 0) {
+                fine += fmt::format(" {} {:.0f},", fine_counter_names[i],
+                                    static_cast<double>(data.fine_counters[i]) * 1e9 / window);
+            }
+        }
+        if (!fine.empty()) {
+            fine.pop_back();
+            LOG_INFO(HW_GPU, "{} fine counters per second:{}", thread_name, fine);
+        }
+    }
     if (const std::string methods = TopMethods(t_method_count, &t_method_same, window); !methods.empty()) {
         LOG_INFO(HW_GPU, "{} methods per second:{}", thread_name, methods);
     }

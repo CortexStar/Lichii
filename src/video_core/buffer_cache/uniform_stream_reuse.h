@@ -76,6 +76,7 @@ public:
 
     std::array<std::array<Slot, NumSlots>, NumStages> slots{};
     std::array<u8, MaxBytes> scratch{};
+    u64 rebinds{}; ///< TEST: allocations bound again (EDEN_NX2_GPU_PROFILE=2 counts them)
 };
 
 template <class Ref>
@@ -121,6 +122,7 @@ template <class Runtime, class DeviceMemory>
     const bool same_bytes = slot.size == size && std::memcmp(slot.bytes.data(), guest, size) == 0;
     if (same_bytes && slot.tick == runtime.CurrentTick()) {
         runtime.RebindStreamUniform(slot.ref, size);
+        ++reuse.rebinds;
         return true;
     }
     if (!same_bytes) {
