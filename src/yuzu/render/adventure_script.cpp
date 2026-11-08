@@ -146,7 +146,8 @@ std::vector<u64> SearchHeap(const std::vector<u8>& pattern, const std::atomic<bo
     }
     const u64 start = GetInteger(process->GetPageTable().GetHeapRegionStart());
     const u64 end = start + process->GetPageTable().GetHeapRegionSize();
-    constexpr u64 Slice = u64{256} << 20;
+    // Small slices: a stopping game or panel ends the search within a few milliseconds.
+    constexpr u64 Slice = u64{16} << 20;
     for (u64 at = start; at < end && hits.size() < 64; at += Slice) {
         if (stopping.load(std::memory_order_relaxed) || RunningGame() == nullptr) {
             break;
@@ -199,11 +200,14 @@ QJSValue NotesHost::memory(const QString& address, int size) {
 
 QJSValue NotesHost::search(const QString& pattern) {
     if (search_job.valid()) {
-        if (pattern != search_pattern ||
-            search_job.wait_for(std::chrono::seconds{0}) != std::future_status::ready) {
+        if (search_job.wait_for(std::chrono::seconds{0}) != std::future_status::ready) {
             return QJSValue{QJSValue::NullValue};
         }
         const std::vector<u64> hits = search_job.get();
+        if (pattern != search_pattern) {
+            // A finished search for another pattern: drop it and start this one.
+            return search(pattern);
+        }
         QJSValue result = engine->newArray(static_cast<uint>(hits.size()));
         for (size_t i = 0; i < hits.size(); ++i) {
             result.setProperty(static_cast<quint32>(i),
@@ -345,6 +349,12 @@ bool NotesScript::Load(const QString& path, const QStringList& library_dirs, QSt
     if (game.isError() || !engine->globalObject().property(QStringLiteral("read")).isCallable() ||
         folder.isEmpty() || file.isEmpty()) {
         error = QStringLiteral("A module needs game, with folder and file, and a read function");
+        return false;
+    }
+    // Plain names only: a module reads its own game's save and nothing else.
+    if (!PlainName(folder) || folder == QStringLiteral(".") || !PlainName(file) ||
+        file == QStringLiteral(".")) {
+        error = QStringLiteral("A module's folder and file must be plain names");
         return false;
     }
     return true;

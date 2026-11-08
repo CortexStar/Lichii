@@ -2376,6 +2376,15 @@ bool MainWindow::OnShutdownBegin() {
     Settings::values.use_speed_limit.SetValue(true);
     Settings::values.current_speed_mode = Settings::SpeedMode::Standard;
 
+    // Before the shutdown guard, and deleted now rather than later: the panel's module stops
+    // following the game, and a heap search it started ends, before the game's memory goes away.
+    if (adventure_notes) {
+        delete adventure_notes;
+        adventure_notes = nullptr;
+        ui->action_Show_Adventure_Notes->setChecked(false);
+    }
+    ui->action_Show_Adventure_Notes->setEnabled(false);
+
     if (QtCommon::system->IsShuttingDown()) {
         status_bar_update_timer.stop();
         connect(QtCommon::emu_thread.get(), &QThread::finished, this,
@@ -2388,14 +2397,6 @@ bool MainWindow::OnShutdownBegin() {
         perf_overlay->deleteLater();
         perf_overlay = nullptr;
     }
-    if (adventure_notes) {
-        adventure_notes->hide();
-        adventure_notes->deleteLater();
-        adventure_notes = nullptr;
-        ui->action_Show_Adventure_Notes->setChecked(false);
-    }
-    ui->action_Show_Adventure_Notes->setEnabled(false);
-
     QtCommon::system->SetShuttingDown(true);
     status_bar_update_timer.stop();
     LOG_INFO(Frontend, "Shutdown requested; waiting for emulation thread");
