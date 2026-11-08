@@ -287,16 +287,6 @@ bool DmaPusher::Step() {
     return true;
 }
 
-// EDEN_NX2_SEM_WATCH=<gpu address>: log every method whose argument is the low word of an
-// address in the 16 bytes there (finds the engine and method that release a semaphore).
-static const u32 g_semaphore_watch = [] {
-    const char* value = std::getenv("EDEN_NX2_SEM_WATCH");
-    return value ? static_cast<u32>(std::strtoull(value, nullptr, 16)) : 0U;
-}();
-
-// EDEN_NX2_PB_CHECK also keeps the last parsed entries, for DumpCurrentEntry.
-static const bool g_record_parsed_entries = std::getenv("EDEN_NX2_PB_CHECK") != nullptr;
-
 size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_t word_offset) {
     for (size_t index = 0; index < commands.size();) {
         // Data word of methods command
@@ -316,7 +306,7 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
             if (!dma_state.non_incrementing && !dma_increment_once &&
                 dma_state.method >= non_puller_methods &&
                 !VideoCommon::GpuSplit::Get().Active() &&
-                g_semaphore_watch == 0) {
+                semaphore_watch == 0) {
                 auto subchannel = subchannels[dma_state.subchannel];
                 if (subchannel != nullptr) {
                     const size_t available = std::min<size_t>(dma_state.method_count, commands.size() - index);
@@ -437,7 +427,7 @@ void DmaPusher::SetState(const CommandHeader& command_header) {
 
 
 void DmaPusher::WatchArgument(u32 method, u32 argument) const {
-    const u32 watch = g_semaphore_watch;
+    const u32 watch = semaphore_watch;
     if ((argument & ~0xfU) == watch) {
         LOG_INFO(HW_GPU, "Semaphore watch: channel {} subchannel {} method {:#x} argument {:#x}",
                  channel_state.bind_id, dma_state.subchannel, method, argument);
@@ -452,7 +442,7 @@ bool DmaPusher::WantsSegment() const {
 }
 
 void DmaPusher::CallMethod(u32 argument) {
-    if (g_semaphore_watch != 0) [[unlikely]] {
+    if (semaphore_watch != 0) [[unlikely]] {
         WatchArgument(dma_state.method, argument);
     }
     auto& split = VideoCommon::GpuSplit::Get();
@@ -513,7 +503,7 @@ void DmaPusher::CallMethod(u32 argument) {
 }
 
 void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
-    if (g_semaphore_watch != 0) [[unlikely]] {
+    if (semaphore_watch != 0) [[unlikely]] {
         for (u32 i = 0; i < num_methods; ++i) {
             WatchArgument(dma_state.method + (dma_state.non_incrementing ? 0 : i), base_start[i]);
         }
@@ -810,7 +800,7 @@ void DmaPusher::CheckSubmitHash(const CommandListHeader& header, u64 submit_hash
 
 void DmaPusher::RecordParsedEntry(const CommandListHeader& header,
                                   std::span<const CommandHeader> commands) {
-    if (!g_record_parsed_entries) {
+    if (!record_parsed_entries) {
         return;
     }
     u64 hash = 0xcbf29ce484222325ULL;
