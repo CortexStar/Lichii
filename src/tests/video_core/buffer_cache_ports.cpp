@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -35,6 +36,8 @@ struct Buffer : VideoCommon::BufferBase {
 
     void MarkUsage(u64 offset, u64 size) {
         REQUIRE(offset + size <= bytes.size());
+        ++usage_marks;
+        last_usage = {offset, size};
     }
     std::span<u8> Mapped() {
         return host_mapped ? std::span{bytes} : std::span<u8>{};
@@ -44,6 +47,8 @@ struct Buffer : VideoCommon::BufferBase {
     }
 
     std::vector<u8> bytes;
+    u32 usage_marks{};
+    std::pair<u64, u64> last_usage{};
     bool host_mapped{};
     u64 tick{};
 };
@@ -231,6 +236,9 @@ struct BufferCacheTestAccess {
     }
     static void NextFrame(Cache& cache) {
         cache.native_bank_ranges_this_frame.Clear();
+    }
+    static void MarkUsed(Cache& cache, DAddr address, u64 size) {
+        cache.MarkUsed(address, size);
     }
     static u32 CpuMarks(Cache& cache) {
         return cache.memory_tracker.cpu_marks;
@@ -632,6 +640,19 @@ TEST_CASE("Overlapping native uniform bank windows upload each byte once a frame
     Access::Uniform(*f.cache, channel, id, 0x20040, 0x10000);
     REQUIRE(f.runtime.upload_bytes == 0x10100 + 0x100);
     REQUIRE(data[0x4321] == 0x99);
+}
+
+TEST_CASE("Marking a use reaches only an existing buffer that holds the range", "[buffer_ports]") {
+    Fixture f;
+    Access::MarkUsed(*f.cache, 0x20000, 8);
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    const u32 before = Access::Get(*f.cache, id).usage_marks;
+    Access::MarkUsed(*f.cache, 0x24010, 8);
+    REQUIRE(Access::Get(*f.cache, id).usage_marks == before + 1);
+    REQUIRE(Access::Get(*f.cache, id).last_usage == std::pair<u64, u64>{0x4010, 8});
+    Access::MarkUsed(*f.cache, 0x2fffc, 8);
+    Access::MarkUsed(*f.cache, 0x40000, 8);
+    REQUIRE(Access::Get(*f.cache, id).usage_marks == before + 1);
 }
 
 TEST_CASE("Downloads keep CPU writes collected and not yet applied", "[buffer_ports]") {
