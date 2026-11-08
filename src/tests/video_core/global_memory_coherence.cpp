@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
+#include <limits>
+#include <optional>
 #include <map>
 #include <set>
 #include <span>
@@ -487,6 +490,182 @@ TEST_CASE("Global loads do not emit unused atomic helpers", "[shader][spirv][glo
     GlobalAtomicProgram fixture{true, 4, false};
     const auto code = Backend::SPIRV::EmitSPIRV(fixture.profile, fixture.program);
     CHECK(Instructions(code, 234).empty());
+}
+
+TEST_CASE("Native global resolver reuses its selected offset without changing routing",
+          "[shader][spirv][storage_buffer][global_atomic][global_resolver]") {
+    GlobalAtomicProgram fixture{true};
+    const auto code = Backend::SPIRV::EmitSPIRV(fixture.profile, fixture.program);
+    struct Op {
+        u32 opcode;
+        std::vector<u32> args;
+    };
+    std::map<u32, Op> definitions;
+    std::map<u32, u64> constants;
+    std::map<u32, u32> bindings;
+    std::vector<Op> current_function, resolver;
+    bool in_function = false;
+    for (size_t i = 5; i < code.size();) {
+        const u32 count = code[i] >> 16;
+        REQUIRE(count > 0);
+        REQUIRE(i + count <= code.size());
+        const Op op{code[i] & 0xffff, {code.begin() + i + 1, code.begin() + i + count}};
+        if (op.opcode == 43) { // OpConstant
+            REQUIRE((op.args.size() == 3 || op.args.size() == 4));
+            constants[op.args[1]] = op.args[2] |
+                (op.args.size() == 4 ? u64{op.args[3]} << 32 : u64{0});
+        }
+        if (op.opcode == 71 && op.args.size() == 3 && op.args[1] == 33) {
+            bindings[op.args[0]] = op.args[2];
+        }
+        switch (op.opcode) {
+        case 65:  // OpAccessChain
+        case 113: // OpUConvert
+        case 130: // OpISub
+        case 166: // OpLogicalOr
+        case 167: // OpLogicalAnd
+        case 169: // OpSelect
+        case 170: // OpIEqual
+        case 172: // OpUGreaterThan
+        case 174: // OpUGreaterThanEqual
+        case 176: // OpULessThan
+        case 194: // OpShiftRightLogical
+            REQUIRE(op.args.size() >= 3);
+            definitions.emplace(op.args[1], op);
+            break;
+        }
+        if (op.opcode == 54) {
+            current_function.clear();
+            in_function = true;
+        }
+        if (in_function) {
+            current_function.push_back(op);
+        }
+        if (op.opcode == 56) {
+            if (std::ranges::any_of(current_function, [](const Op& instruction) {
+                    return instruction.opcode == 234; // OpAtomicIAdd
+                })) {
+                REQUIRE(resolver.empty());
+                resolver = current_function;
+            }
+            in_function = false;
+        }
+        i += count;
+    }
+    REQUIRE_FALSE(resolver.empty());
+    std::vector<u32> bases, conditions, pointers;
+    u32 address_id{}, shared_offset{};
+    size_t subtractions{};
+    for (const auto& op : resolver) {
+        if (op.opcode == 55 && address_id == 0) { // First parameter is the address.
+            address_id = op.args[1];
+        }
+        if (op.opcode == 130) {
+            REQUIRE(op.args[2] == address_id);
+            ++subtractions;
+        }
+        if (op.opcode == 174 && op.args[2] == address_id) {
+            bases.push_back(op.args[3]);
+        }
+        if (op.opcode == 250) {
+            conditions.push_back(op.args[0]);
+        }
+        if (op.opcode == 234) {
+            pointers.push_back(op.args[2]);
+        }
+    }
+    // The selected offset is shared by every access branch.
+    REQUIRE(bases.size() == 3);
+    CHECK(subtractions == bases.size());
+    REQUIRE(conditions.size() == bases.size());
+    REQUIRE(pointers.size() == bases.size());
+    for (const u32 pointer : pointers) {
+        const auto& access = definitions.at(pointer);
+        REQUIRE(access.opcode == 65);
+        const auto& index = definitions.at(access.args.back());
+        REQUIRE(index.opcode == 194);
+        const u32 offset = index.args[2];
+        if (shared_offset == 0) {
+            shared_offset = offset;
+        }
+        CHECK(offset == shared_offset);
+        const auto& convert = definitions.at(offset);
+        REQUIRE(convert.opcode == 113);
+        CHECK(definitions.at(convert.args[2]).opcode == 169U);
+    }
+
+    struct Scenario {
+        u64 address;
+        std::array<u64, 3> bases;
+    };
+    const std::array scenarios{
+        Scenario{0x2408, {0x1000, 0x2000, 0x3000}},
+        Scenario{0x200c, {0x1000, 0x2000, 0x2000}}, // Equal bases keep the first candidate.
+        Scenario{0x800, {0x1000, 0x2000, 0x3000}},  // No candidate at or below the address.
+        Scenario{0x100002044, {0x100001000, 0x100002000, 0x200000000}},
+        Scenario{0x100003008, {0x1000, 0x2000, 0x3000}}, // Preserve U32 offset truncation.
+        Scenario{4, {0, 0x1000, 0x2000}},
+        Scenario{0, {0, 0, 0}},
+        Scenario{0, {0x1000, 0, 0}}, // The first eligible candidate can have a zero base.
+        Scenario{std::numeric_limits<u64>::max(), {0, 0x1000, ~u64{0}}},
+        Scenario{0x100000001, {0x100000000, 0, 0xffffffff00000000}},
+        Scenario{std::numeric_limits<u64>::max(), {0, 0, 0}}, // Preserve sentinel exclusion.
+    };
+    for (const auto& scenario : scenarios) {
+        CAPTURE(scenario.address, scenario.bases);
+        auto values = constants;
+        values[address_id] = scenario.address;
+        for (size_t i = 0; i < bases.size(); ++i) {
+            values[bases[i]] = scenario.bases[i];
+        }
+        // Evaluate the arithmetic emitted by production, supplying already-loaded bases.
+        std::function<u64(u32)> evaluate = [&](u32 id) -> u64 {
+            if (const auto it = values.find(id); it != values.end()) {
+                return it->second;
+            }
+            const auto& op = definitions.at(id);
+            const auto& a = op.args;
+            u64 result{};
+            switch (op.opcode) {
+            case 113: result = static_cast<u32>(evaluate(a[2])); break;
+            case 130: result = evaluate(a[2]) - evaluate(a[3]); break;
+            case 166: result = evaluate(a[2]) || evaluate(a[3]); break;
+            case 167: result = evaluate(a[2]) && evaluate(a[3]); break;
+            case 169: result = evaluate(a[2]) ? evaluate(a[3]) : evaluate(a[4]); break;
+            case 170: result = evaluate(a[2]) == evaluate(a[3]); break;
+            case 172: result = evaluate(a[2]) > evaluate(a[3]); break;
+            case 174: result = evaluate(a[2]) >= evaluate(a[3]); break;
+            case 176: result = evaluate(a[2]) < evaluate(a[3]); break;
+            case 194: result = evaluate(a[2]) >> evaluate(a[3]); break;
+            default: FAIL("Unexpected resolver arithmetic opcode " << op.opcode);
+            }
+            values[id] = result;
+            return result;
+        };
+        // Independent reference: the greatest eligible base, with stable first-on-tie order.
+        std::optional<size_t> expected;
+        for (size_t i = 0; i < scenario.bases.size(); ++i) {
+            const u64 base = scenario.bases[i];
+            if (base <= scenario.address && scenario.address - base != ~u64{0} &&
+                (!expected || base > scenario.bases[*expected])) {
+                expected = i;
+            }
+        }
+        std::optional<size_t> selected;
+        for (size_t i = 0; i < conditions.size(); ++i) {
+            if (!evaluate(conditions[i])) {
+                continue;
+            }
+            REQUIRE_FALSE(selected.has_value());
+            selected = i;
+            REQUIRE(expected.has_value());
+            const auto& access = definitions.at(pointers[i]);
+            CHECK(bindings.at(access.args[2]) == 2 + *expected);
+            CHECK(evaluate(access.args.back()) ==
+                  (static_cast<u32>(scenario.address - scenario.bases[*expected]) >> 2));
+        }
+        CHECK(selected == expected);
+    }
 }
 
 TEST_CASE("Global unsigned atomic max routes buffers and returns the old value",
