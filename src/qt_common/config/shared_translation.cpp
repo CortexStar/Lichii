@@ -331,9 +331,10 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Prepares predicted mesh shaders to reduce first-visit stutters. Benefits vary by "
               "game and GPU; it can add startup time or background CPU work.\n"
               "Uses the 'Prepare shaders before the game starts' timing setting and requires "
-              "prepared shader data. Does not skip draws or effects.\n"
+              "prepared shader data. Uses mesh shader libraries when shader libraries are "
+              "enabled and supported. Does not skip draws or effects.\n"
               "Takes effect after restarting the game. Turning it off stops future mesh "
-              "prewarming; existing caches are kept."));
+              "prewarming and mesh shader libraries; existing caches are kept."));
     INSERT(Settings, shader_warm_threads, tr("Shader warm-up threads:"),
            tr("CPU threads the shader warm-up uses (low priority). More threads finish the "
               "warm-up sooner but leave less CPU to the game while it runs.\nTakes "

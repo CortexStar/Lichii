@@ -536,6 +536,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
       use_asynchronous_shaders{Settings::values.use_asynchronous_shaders.GetValue()},
       use_vulkan_pipeline_cache{Settings::values.use_vulkan_driver_pipeline_cache.GetValue() &&
                                 !DriverCachesPipelines(device_)},
+      mesh_warm_enabled{Settings::values.use_mesh_shader_warmup.GetValue()},
       num_pipeline_workers{device.HasBrokenParallelShaderCompiling() ? 1ULL
                                                                      : GetTotalPipelineWorkers()},
       emission_budget{num_pipeline_workers},
@@ -1796,7 +1797,7 @@ void PipelineCache::StartGraphicsWarm(u64 title_id) {
 }
 
 void PipelineCache::StartMeshWarm(u64 title_id) {
-    if (!Settings::values.use_mesh_shader_warmup.GetValue()) {
+    if (!mesh_warm_enabled) {
         return;
     }
     if (mesh_warm_thread.joinable() || !device.IsExtMeshShaderSupported()) {
@@ -1833,10 +1834,11 @@ void PipelineCache::StartMeshWarm(u64 title_id) {
         dynamic_flags |= u32{dynamic_capabilities[i]} << i;
     }
     const auto configuration =
-        fmt::format("mesh2-{}-{}-{}-{}-{}-{}-{}-{}", dynamic_flags, u32(device.GetDriverID()),
+        fmt::format("mesh3-{}-{}-{}-{}-{}-{}-{}-{}-{}", dynamic_flags, u32(device.GetDriverID()),
                     profile.supported_spirv, profile.need_fastmath_off,
                     profile.ignore_nan_fp_comparisons, profile.support_native_ndc,
-                    profile.support_cooperative_hmma, profile.support_cooperative_hmma_16x16x16);
+                    profile.support_cooperative_hmma, profile.support_cooperative_hmma_16x16x16,
+                    device.IsExtGraphicsPipelineLibrarySupported());
     const bool native_cache = DriverCachesPipelines(device);
     std::error_code cache_error;
     if ((native_cache || (use_vulkan_pipeline_cache &&
@@ -1853,6 +1855,8 @@ void PipelineCache::StartMeshWarm(u64 title_id) {
                                      before_start, native_cache](std::stop_token stop) {
         Common::SetCurrentThreadName("VkMeshWarm");
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+        GraphicsPipelineLibraryCache::SetNoRetainOnThisThread(true);
+        SCOPE_EXIT { GraphicsPipelineLibraryCache::SetNoRetainOnThisThread(false); };
         SCOPE_EXIT {
             mesh_warm_active.store(false, std::memory_order_release);
         };
@@ -1942,8 +1946,8 @@ void PipelineCache::StartMeshWarm(u64 title_id) {
                 pools.ReleaseContents();
                 const auto build_begin = std::chrono::steady_clock::now();
                 try {
-                    // Synchronous, monolithic and transient. No runtime cache, used list or
-                    // transferable cache receives speculative metadata or this pipeline.
+                    // Synchronous and transient; shared libraries are released after each build.
+                    // No draw cache or transferable cache receives speculative metadata.
                     // Descriptor-set fallback creates pool banks even without a draw. Keep
                     // them local to this record; the synchronous pipeline dies before its pool.
                     DescriptorPool transient_descriptors{device, scheduler};
@@ -2811,11 +2815,12 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                 storage_buffers, set_limit);
         }
     }
-    // Graphics pipeline libraries (EDEN_NX2_GPL). Left on the monolithic route: task and mesh
-    // pipelines, transform feedback, a static rasterizer discard, and stages whose texture or
+    // Graphics pipeline libraries (EDEN_NX2_GPL). Left on the monolithic route: mesh emulation,
+    // transform feedback, a static rasterizer discard, and stages whose texture or
     // image counts do not fit the split rescaling bits.
     const bool use_libraries = [&] {
-        if (!device.IsExtGraphicsPipelineLibrarySupported() || key.state.xfb_enabled != 0) {
+        if (!device.IsExtGraphicsPipelineLibrarySupported() || key.state.xfb_enabled != 0 ||
+            mesh_emulation) {
             return false;
         }
         if (key.state.extended_dynamic_state_2 == 0 &&
@@ -2831,7 +2836,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                 continue;
             }
             const Shader::IR::Program& program{programs[index]};
-            if (program.stage == Shader::Stage::Task || program.stage == Shader::Stage::Mesh) {
+            if (!mesh_warm_enabled &&
+                (program.stage == Shader::Stage::Task || program.stage == Shader::Stage::Mesh)) {
                 return false;
             }
             const bool fragment = index + 1 == Maxwell::MaxShaderProgram;
