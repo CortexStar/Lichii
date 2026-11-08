@@ -4,7 +4,10 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <utility>
+
 #include "common/display_hdr.h"
+#include "common/input_latency.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/frontend/emu_window.h"
@@ -661,6 +664,7 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
     }
 
     // Present
+    Common::InputLatency::RecordPresent(std::exchange(frame->input_ns, 0));
     swapchain.Present(render_semaphore);
 }
 

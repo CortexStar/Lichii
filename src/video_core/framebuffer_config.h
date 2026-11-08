@@ -47,6 +47,9 @@ struct FramebufferConfig {
     u32 layer_stack_mask{Service::Nvnflinger::DefaultLayerStackMask};
     ColorSpace color_space{ColorSpace::RGB709};
     u16 linear_unit_luminance{}; // Nits per linear 1.0; typically 80 for scRGB (observed in MKW's SDK).
+    /// The button change the guest frame of this image sampled (Common::InputLatency; steady
+    /// clock ns, 0 for none).
+    u64 input_ns{};
 };
 
 Common::Rectangle<f32> NormalizeCrop(const FramebufferConfig& framebuffer, u32 texture_width,
