@@ -116,7 +116,7 @@ NvOpticalFlow::NvOpticalFlow(const Device& device_, MemoryAllocator& allocator, 
                            std::pair{VK_OPTICAL_FLOW_GRID_SIZE_2X2_BIT_NV, 2U},
                            std::pair{VK_OPTICAL_FLOW_GRID_SIZE_4X4_BIT_NV, 4U},
                            std::pair{VK_OPTICAL_FLOW_GRID_SIZE_8X8_BIT_NV, 8U}};
-    for (const auto [bit, size] : grids) {
+    for (const auto& [bit, size] : grids) {
         // The wanted size, else the next coarser one supported.
         if (size >= wanted_grid && (properties.supportedOutputGridSizes & bit) != 0) {
             grid = bit;
@@ -227,7 +227,9 @@ NvOpticalFlow::NvOpticalFlow(const Device& device_, MemoryAllocator& allocator, 
             .outputGridSize = grid,
             .hintGridSize = 0,
             .performanceLevel = level,
-            .flags = backward ? VK_OPTICAL_FLOW_SESSION_CREATE_BOTH_DIRECTIONS_BIT_NV : 0U,
+            .flags = backward ? VkOpticalFlowSessionCreateFlagsNV{
+                                    VK_OPTICAL_FLOW_SESSION_CREATE_BOTH_DIRECTIONS_BIT_NV}
+                              : VkOpticalFlowSessionCreateFlagsNV{},
         };
         vk::Check(dld.vkCreateOpticalFlowSessionNV(logical, &session_info, nullptr, &sessions[i]));
         // Session i computes the flow from input i (this frame) to the other input (the last).
