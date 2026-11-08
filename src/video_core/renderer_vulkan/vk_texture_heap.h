@@ -40,7 +40,8 @@ public:
     /// Before the first write into a physical page the mirror mapped fresh: copy `copy_from`
     /// into it, or fill it with null descriptors when there is nothing to copy. False when the
     /// page is past the heap's capacity (the heap is no longer usable).
-    bool PreparePage(VideoCommon::PoolMirror::Heap heap, u32 physical, u32 copy_from);
+    bool PreparePage(VideoCommon::PoolMirror::Heap heap, u32 physical, u32 copy_from,
+                     bool reserved = false);
 
     /// Image slot `logical_slot` in `physical`: the descriptor of `view`'s `type` view, or a null
     /// descriptor when it has none (as the bound path's null-view fallback).
@@ -90,6 +91,21 @@ public:
     /// read).
     void NoteDraw() noexcept {
         ++draw_seq;
+    }
+
+    /// EDEN_NX2_NATIVE_VERIFY=bindless: whether the heap holds at `index` exactly the descriptor
+    /// WriteImage would write for `view`'s `type` view (or a null descriptor).
+    [[nodiscard]] bool HoldsImage(u32 index, const ImageView* view, Shader::TextureType type) const;
+    /// Likewise for the sampler descriptor of `sampler`'s `variant`.
+    [[nodiscard]] bool HoldsSampler(u32 index, const Sampler& sampler, VkSampler variant) const;
+
+    /// Heap indices of a null image and a default sampler descriptor: each heap's last page is
+    /// kept null and never handed to the mirror.
+    [[nodiscard]] u32 NullImageIndex() const noexcept {
+        return (images.capacity_pages - 1) * VideoCommon::PoolMirror::IMAGE_SLOTS_PER_PAGE;
+    }
+    [[nodiscard]] u32 NullSamplerIndex() const noexcept {
+        return (samplers.capacity_pages - 1) * VideoCommon::PoolMirror::SAMPLER_SLOTS_PER_PAGE;
     }
 
     [[nodiscard]] VkBindHeapInfoEXT ResourceHeapBinding() const noexcept;

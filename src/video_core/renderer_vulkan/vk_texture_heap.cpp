@@ -105,6 +105,11 @@ TextureHeap::TextureHeap(const Device& device_, MemoryAllocator& memory_allocato
     const VkHostAddressRangeEXT null_sampler_range{null_sampler.data(), null_sampler.size()};
     device.GetLogical().WriteSamplerDescriptorsEXT(default_sampler, &null_sampler_range);
     usable = true;
+    // The last page of each heap stays null: draws point elements without an entry there.
+    usable = PreparePage(PoolMirror::Heap::Image, images.capacity_pages - 1,
+                         PoolMirror::HeapPageVersions::NO_PAGE, true) &&
+             PreparePage(PoolMirror::Heap::Sampler, samplers.capacity_pages - 1,
+                         PoolMirror::HeapPageVersions::NO_PAGE, true);
     LOG_INFO(Render_Vulkan, "Descriptor heap: {} MiB texture heap, {} MiB sampler heap",
              (VkDeviceSize{IMAGE_HEAP_PAGES} * PoolMirror::PAGE_SIZE) >> 20,
              (VkDeviceSize{SAMPLER_HEAP_PAGES} * PoolMirror::PAGE_SIZE) >> 20);
@@ -116,15 +121,16 @@ u8* TextureHeap::PageHost(const HeapBuffer& heap, u32 physical) const noexcept {
     return heap.host + size_t{physical} * PoolMirror::PAGE_SIZE;
 }
 
-bool TextureHeap::PreparePage(PoolMirror::Heap heap, u32 physical, u32 copy_from) {
+bool TextureHeap::PreparePage(PoolMirror::Heap heap, u32 physical, u32 copy_from, bool reserved) {
     if (heap == PoolMirror::Heap::Meta) {
         // Meta words are read on the CPU only (index tables, rescaling bits).
         return true;
     }
     HeapBuffer& target = heap == PoolMirror::Heap::Image ? images : samplers;
-    if (!usable || physical >= target.capacity_pages ||
-        (copy_from != PoolMirror::HeapPageVersions::NO_PAGE &&
-         copy_from >= target.capacity_pages)) {
+    // The mirror's pages end before the reserved null page.
+    const u32 limit = reserved ? target.capacity_pages : target.capacity_pages - 1;
+    if (!usable || physical >= limit ||
+        (copy_from != PoolMirror::HeapPageVersions::NO_PAGE && copy_from >= limit)) {
         if (usable) {
             LOG_ERROR(Render_Vulkan, "Descriptor heap: page {} past the {} pages of the {} heap",
                       physical, target.capacity_pages,
@@ -191,6 +197,46 @@ void TextureHeap::WriteSampler(u32 physical, u32 logical_slot, const Sampler& sa
     }
     const VkHostAddressRangeEXT range{host, PoolMirror::SAMPLER_DESCRIPTOR_SIZE};
     device.GetLogical().WriteSamplerDescriptorsEXT(sampler_info.create_info, &range);
+}
+
+bool TextureHeap::HoldsImage(u32 index, const ImageView* view, Shader::TextureType type) const {
+    if (!usable || index / PoolMirror::IMAGE_SLOTS_PER_PAGE >= images.capacity_pages) {
+        return false;
+    }
+    std::array<u8, PoolMirror::IMAGE_DESCRIPTOR_SIZE> expected{null_image};
+    ImageView::HeapViewInfo view_info{};
+    if (view != nullptr && view->HeapViewCreateInfo(type, view_info)) {
+        const VkImageDescriptorInfoEXT image_info{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_DESCRIPTOR_INFO_EXT,
+            .pNext = nullptr,
+            .pView = &view_info.create_info,
+            .layout = VK_IMAGE_LAYOUT_GENERAL,
+        };
+        const VkResourceDescriptorInfoEXT info{
+            .sType = VK_STRUCTURE_TYPE_RESOURCE_DESCRIPTOR_INFO_EXT,
+            .pNext = nullptr,
+            .type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            .data = {.pImage = &image_info},
+        };
+        const VkHostAddressRangeEXT range{expected.data(), expected.size()};
+        device.GetLogical().WriteResourceDescriptorsEXT(info, &range);
+    }
+    return std::memcmp(images.host + size_t{index} * PoolMirror::IMAGE_DESCRIPTOR_SIZE,
+                       expected.data(), expected.size()) == 0;
+}
+
+bool TextureHeap::HoldsSampler(u32 index, const Sampler& sampler, VkSampler variant) const {
+    if (!usable || index / PoolMirror::SAMPLER_SLOTS_PER_PAGE >= samplers.capacity_pages) {
+        return false;
+    }
+    std::array<u8, PoolMirror::SAMPLER_DESCRIPTOR_SIZE> expected{null_sampler};
+    Sampler::HeapSamplerInfo sampler_info{};
+    if (sampler.HeapSamplerCreateInfo(variant, sampler_info)) {
+        const VkHostAddressRangeEXT range{expected.data(), expected.size()};
+        device.GetLogical().WriteSamplerDescriptorsEXT(sampler_info.create_info, &range);
+    }
+    return std::memcmp(samplers.host + size_t{index} * PoolMirror::SAMPLER_DESCRIPTOR_SIZE,
+                       expected.data(), expected.size()) == 0;
 }
 
 VkBindHeapInfoEXT TextureHeap::ResourceHeapBinding() const noexcept {
