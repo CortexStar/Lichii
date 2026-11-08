@@ -1,5 +1,5 @@
 <!--
-# SPDX-FileCopyrightText: Copyright 2025 Lichii Project
+# SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # SPDX-FileCopyrightText: 2018 yuzu Emulator Project
@@ -20,7 +20,7 @@ Visit the [official Lichii website](https://lichii.zortos.me) to find games and 
 
 ## Downloads and setup
 
-Published builds belong on this fork's [releases page](https://github.com/zortos293/Lichii/releases).
+Download Lichii only from this repository's [releases page](https://github.com/zortos293/Lichii/releases). Lichii has no other download site: archives offered elsewhere, such as lichii.org, are not built by this project, and one has been reported to install malware ([#545](https://github.com/zortos293/Lichii/issues/545)).
 
 On Windows, extract the entire build archive and run **lichii.exe**. Only use games and system files you have legally obtained. Games, keys and firmware are not included.
 

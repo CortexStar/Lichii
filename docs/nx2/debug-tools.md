@@ -20,7 +20,9 @@ Rules of use:
 | Video playback | `LICHII_NX2_VDEC_TRACE=1`, `LICHII_NX2_VDEC_DUMP=<dir>` | Decoder submit, decode and composite trace; decoded frames. |
 | Performance and frame pacing | `LICHII_NX2_GPU_PROFILE=1`, `LICHII_DKB_FRAME_TRACE=1` | GPU thread time per second by zone; per-present interval, CPU and fence timing. |
 | Command corruption or pop-in | `LICHII_NX2_PB_CHECK=1`; A/B with `LICHII_NX2_PB_SNAPSHOT=0` or `LICHII_NX2_FETCH_DRAIN=1` | How many pushbuffer entries change between submit and parse. |
-| Split GPU thread races | `LICHII_NX2_SPLIT_CHECK=1` | Reports scheduler use from the wrong thread. |
+| Split GPU thread races | `LICHII_NX2_SPLIT_CHECK=1`; A/B with `LICHII_NX2_SPLIT_VERIFY=1`, `LICHII_NX2_SPLIT_SKIP=0` | Reports scheduler use from the wrong thread. `_VERIFY` compares front/back state every 4096 macro calls; `_SKIP=0` also sends same-value register writes. |
+| Texture-cache paging or out-of-memory (`thresholds:` log, OOM margins) | `LICHII_NX2_TC_EXPECTED_MIB=<n>`, `LICHII_NX2_TC_CRITICAL_MIB=<n>` | Raise the collector's thresholds (capped at the device budget). The `Texture cache thresholds:` Info line shows the applied values. |
+| Frame pacing (one frame ahead vs. in-step) | `LICHII_NX2_FRAMES_AHEAD=0` or `1`; `LICHII_NX2_VSYNC_HZ=<rate>` | Forces the frame-wait policy, or overrides the vsync rate (also set by the frame-rate-limit slider). `nx2:vi2 vsync rate: {} Hz` logs the applied value. |
 | Upscaler and DLSS contracts | `LICHII_NX2_DLSS_CONTRACT_TRACE=1` | Inputs and outputs of replaced upscaler networks. |
 | Service calls | `LICHII_NX2_IPC_TRACE=1` | IPC command trace. |
 | Unmapped device reads (`Unmapped Device ReadBlock`) | `LICHII_NX2_READBLOCK_TRACE=1` | Every read of unmapped device memory, one line per read with its first unmapped address, unmapped byte count and caller (`file:line`). Without it only the first 16 are logged. |

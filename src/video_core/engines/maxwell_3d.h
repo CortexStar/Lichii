@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
@@ -26,6 +26,7 @@
 #include "video_core/engines/engine_upload.h"
 #include "video_core/gpu.h"
 #include "video_core/macro.h"
+#include "video_core/nx2_perf.h"
 #include "video_core/textures/texture.h"
 #include "video_core/engines/maxwell_3d.h"
 
@@ -3310,12 +3311,8 @@ private:
     void CallMacroMethod(Core::System& system, u32 method, std::span<const u32> parameters);
 
     /// Whether state register writes that keep the register's value are dropped (CallMethod).
-    static bool SkipSameValueWrites() {
-        static const bool skip = [] {
-            const char* value = std::getenv("LICHII_NX2_SKIP_SAME");
-            return value == nullptr || value[0] != '0';
-        }();
-        return skip;
+    bool SkipSameValueWrites() const {
+        return skip_same_value_writes;
     }
 
     /// Handles writes to the macro uploading register.
@@ -3378,6 +3375,17 @@ private:
         recent_writes[recent_write_index++ % recent_writes.size()] = {method, argument, amount, pending};
     }
     void DumpRecentWrites(u32 method);
+    // LICHII_NX2_3D_METHODS: log the first write to each 3D register (finds methods Eden doesn't
+    // model). Read per engine, not at static initialization, which runs before the frontend
+    // loads nx2_switches.txt.
+    const bool trace_first_method_writes = std::getenv("LICHII_NX2_3D_METHODS") != nullptr;
+    // LICHII_NX2_SKIP_SAME and LICHII_NX2_PERF_VERIFY, read per engine like the switch above. Every
+    // method checks them, so they are members rather than statics with a guard on the hot path.
+    const bool skip_same_value_writes = [] {
+        const char* value = std::getenv("LICHII_NX2_SKIP_SAME");
+        return value == nullptr || value[0] != '0';
+    }();
+    const bool perf_verify = VideoCommon::Nx2Perf::Verify();
     /// Parameters that have been submitted to the macro call so far.
     std::vector<u32> macro_params;
 
