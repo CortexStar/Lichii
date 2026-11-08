@@ -31,9 +31,10 @@ is reached. Little of it is ever written to disk: what runs out is the limit, no
 1. Open *System Properties* → *Advanced* → *Performance: Settings* → *Advanced* → *Virtual
    memory: Change*.
 2. Clear *Automatically manage paging file size for all drives*, select the drive for the page
-   file (usually `C:`), choose *Custom size*, and enter the *Initial size* and *Maximum size* in
-   MB so that RAM plus page file is at least 48 GB (on 16 GB of RAM, a 32 GB page file:
-   `32768`). Click *Set*, then *OK*, and reboot.
+   file (usually `C:`), and choose *Custom size*. Enter an *Initial size* in MB so that RAM plus
+   page file is at least 48 GB (on 16 GB of RAM, a 32 GB page file: `32768`), and a *Maximum
+   size* at least that large (`49152` or more; don't lower an existing maximum). Click *Set*,
+   then *OK*, and reboot.
 3. Check *Task Manager* → *Performance* → *Memory* → *Committed* (used / limit) while the game
    runs. The *Commit size* of the emulator in the *Details* tab doesn't include guest memory, so
    use the system-wide figure.
