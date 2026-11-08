@@ -20,8 +20,12 @@ vk::SurfaceKHR CreateSurface(
 #ifdef _WIN32
     if (window_info.type == Core::Frontend::WindowSystemType::Windows) {
         const HWND hWnd = static_cast<HWND>(window_info.render_surface);
+        // The module that registered the window's class (VUID-VkWin32SurfaceCreateInfoKHR-
+        // hinstance-01307: a valid HINSTANCE, never null).
+        const auto hinstance =
+            reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hWnd, GWLP_HINSTANCE));
         const VkWin32SurfaceCreateInfoKHR win32_ci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
-                                                   nullptr, 0, nullptr, hWnd};
+                                                   nullptr, 0, hinstance, hWnd};
         const auto vkCreateWin32SurfaceKHR = reinterpret_cast<PFN_vkCreateWin32SurfaceKHR>(
             dld.vkGetInstanceProcAddr(*instance, "vkCreateWin32SurfaceKHR"));
         if (!vkCreateWin32SurfaceKHR ||
