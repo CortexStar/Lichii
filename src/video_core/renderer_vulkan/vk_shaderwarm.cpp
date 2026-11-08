@@ -113,6 +113,17 @@ bool TaskMeshIrCacheEnabled() {
     return enabled;
 }
 
+// EDEN_NX2_PRECOMPILE_POINTER_VARIANTS=0: no second record with unmapped storage pointers (on by
+// default: games first use many programs while a pointer is still null, the runtime then rebuilds
+// with it mapped, and a record only serves the answers it was made with).
+bool PointerVariantsEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_PRECOMPILE_POINTER_VARIANTS");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
 // EDEN_NX2_IR_CACHE_COMPUTE=0: compute programs neither use nor fill the translation cache (on by
 // default; records only apply to a launch they match, see ComputeLaunchMatches).
 bool ComputeIrCacheEnabled() {
@@ -951,7 +962,8 @@ void PipelineCache::RunPrecompile(std::filesystem::path pack_path, std::stop_tok
     std::atomic<size_t> gs_built{};
     std::atomic<size_t> done{}, built{}, cached{}, lowering_failed{}, translation_failed{},
         broken{}, verify_failed{}, const_rule_checked{}, const_rule_matched{}, gpl_built{},
-        gpl_skipped{}, gpl_failed{}, retried_as_task_mesh{}, task_mesh_built{};
+        gpl_skipped{}, gpl_failed{}, retried_as_task_mesh{}, task_mesh_built{},
+        pointer_variants_built{};
     std::atomic<u64> gpl_ns{};
     const bool gpl = device.IsGplEnabled();
     std::atomic<u64> translate_ns{}, raw_bytes{};
@@ -1105,13 +1117,17 @@ void PipelineCache::RunPrecompile(std::filesystem::path pack_path, std::stop_tok
             }
             // A generic pack doesn't know task and mesh programs from vertex programs (same
             // header): a vertex program that reads or writes the stage buffer is tried as both.
-            std::vector<Shader::Stage> attempts{stage.stage};
+            // Each attempt: the stage kind, and whether constant-buffer storage pointers are taken
+            // as mapped (a record that asked gets a second, unmapped-pointer variant, below).
+            std::vector<std::pair<Shader::Stage, bool>> attempts{{stage.stage, true}};
             for (size_t attempt = 0; attempt < attempts.size(); ++attempt) {
-                const Shader::Stage stage_kind = attempts[attempt];
+                const Shader::Stage stage_kind = attempts[attempt].first;
+                const bool pointers_mapped = attempts[attempt].second;
                 std::optional<VideoCommon::PrecompileEnvironment> env;
                 try {
                     env.emplace(stage.blob, stage.const_offset, stage.const_size, stage_kind,
                                 default_texture_bound, env_launch);
+                    env->SetPointersMapped(pointers_mapped);
                 } catch (const std::exception& exception) {
                     fail(lowering_failed, "lowering: " + ShortReason(exception.what()));
                     continue;
@@ -1126,7 +1142,7 @@ void PipelineCache::RunPrecompile(std::filesystem::path pack_path, std::stop_tok
                     stage_kind == Shader::Stage::Task || stage_kind == Shader::Stage::Mesh;
                 const u64 unique_hash = mesh_stage ? TaskMeshRecordHash(*env->Analyze(), stage_kind)
                                                    : *env->Analyze();
-                if (ir_cache.Contains(unique_hash)) {
+                if (pointers_mapped && ir_cache.Contains(unique_hash)) {
                     ++cached;
                     if (compute) {
                         for (const auto& record : ir_cache.Find(unique_hash)) {
@@ -1160,12 +1176,13 @@ void PipelineCache::RunPrecompile(std::filesystem::path pack_path, std::stop_tok
                         std::string_view{exception.what()}.find(
                             "Stage buffer access outside task and mesh") != std::string_view::npos) {
                         ++retried_as_task_mesh;
-                        attempts.push_back(Shader::Stage::Task);
-                        attempts.push_back(Shader::Stage::Mesh);
+                        attempts.push_back({Shader::Stage::Task, true});
+                        attempts.push_back({Shader::Stage::Mesh, true});
                         continue;
                     }
                     fail(translation_failed, "translation: " + ShortReason(exception.what()) +
-                                                 (attempt != 0 ? " (as task/mesh)" : ""));
+                                                 (stage_kind != stage.stage ? " (as task/mesh)" : "") +
+                                                 (pointers_mapped ? "" : " (unmapped pointers)"));
                     continue;
                 }
                 translate_ns += static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -1255,6 +1272,11 @@ void PipelineCache::RunPrecompile(std::filesystem::path pack_path, std::stop_tok
                 raw_bytes += record.program.size();
                 ir_cache.Append(record);
                 ++built;
+                if (!pointers_mapped) {
+                    ++pointer_variants_built;
+                } else if (PointerVariantsEnabled() && !env->StoragePointerAnswers().empty()) {
+                    attempts.push_back({stage_kind, false});
+                }
                 if (mesh_stage) {
                     ++task_mesh_built;
                 }
@@ -1321,6 +1343,11 @@ void PipelineCache::RunPrecompile(std::filesystem::path pack_path, std::stop_tok
                  "NX2PC task/mesh: {} built ({} vertex-slot programs that use the stage buffer "
                  "tried as task and mesh)",
                  task_mesh_built.load(), retried_as_task_mesh.load());
+    }
+    if (pointer_variants_built.load() != 0) {
+        LOG_INFO(Render_Vulkan,
+                 "NX2PC pointer variants: {} records with unmapped storage pointers",
+                 pointer_variants_built.load());
     }
     if (gs_built.load() != 0) {
         LOG_INFO(Render_Vulkan, "NX2PC geometry: {} stages translated", gs_built.load());

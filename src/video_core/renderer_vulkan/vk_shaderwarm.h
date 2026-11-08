@@ -27,6 +27,8 @@ namespace Vulkan::Nx2 {
 [[nodiscard]] bool RuntimePipelineLog();
 /// EDEN_NX2_IR_CACHE_TASKMESH=1: task/mesh stages in the translation cache (off by default).
 [[nodiscard]] bool TaskMeshIrCacheEnabled();
+/// EDEN_NX2_PRECOMPILE_POINTER_VARIANTS=0: no unmapped-storage-pointer variant records (on by default).
+[[nodiscard]] bool PointerVariantsEnabled();
 /// EDEN_NX2_IR_CACHE_COMPUTE=0: no compute stages in the translation cache (on by default).
 [[nodiscard]] bool ComputeIrCacheEnabled();
 /// EDEN_NX2_CS_LOG=1: one line per compute pipeline built (precompile and run time) with its launch
