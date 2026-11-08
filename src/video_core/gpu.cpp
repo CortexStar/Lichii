@@ -546,6 +546,12 @@ void GPU::ForEachPendingCpuWrite(const std::function<void(DAddr, size_t)>& callb
     impl->ForEachPendingCpuWrite(callback);
 }
 
+void GPU::CollectHandoffWrite(DAddr addr, u64 size) {
+    // The last manager is kept for the handoff (core.cpp). Its writers all hold the buffer cache's
+    // lock, so it has one producer at a time, like a core's.
+    impl->system.GetGPUDirtyMemoryManager().back().Collect(addr, size);
+}
+
 void GPU::OnCommandListEnd() {
     impl->OnCommandListEnd();
 }

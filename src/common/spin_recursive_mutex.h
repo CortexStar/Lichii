@@ -37,6 +37,7 @@ public:
         }
         owner.store(self, std::memory_order_relaxed);
         depth = 1;
+        RunOwnerHook();
     }
 
     bool try_lock() {
@@ -53,10 +54,14 @@ public:
         }
         owner.store(self, std::memory_order_relaxed);
         depth = 1;
+        RunOwnerHook();
         return true;
     }
 
     void unlock() {
+        if (depth == 1) {
+            RunOwnerHook();
+        }
         if (--depth != 0) {
             return;
         }
@@ -66,7 +71,22 @@ public:
         }
     }
 
+    /// fn(context) runs on the owner right after each outermost lock and right before each
+    /// outermost unlock (the rasterizer applies the guest write traps queued meanwhile,
+    /// VideoCommon::Nx2WriteHandoff). Set it before other threads use the mutex, clear it before
+    /// the context goes away.
+    void SetOwnerHook(void (*fn)(void*), void* context) {
+        hook_context.store(context, std::memory_order_relaxed);
+        hook.store(fn, std::memory_order_release);
+    }
+
 private:
+    void RunOwnerHook() {
+        if (const auto fn = hook.load(std::memory_order_acquire)) {
+            fn(hook_context.load(std::memory_order_relaxed));
+        }
+    }
+
     // About 10 microseconds of spinning before sleeping.
     static constexpr int SpinCount = 1024;
 
@@ -99,6 +119,8 @@ private:
     std::atomic<std::uint32_t> state{0}; ///< 0 free, 1 held, 2 held with sleepers
     std::atomic<std::thread::id> owner{};
     std::uint32_t depth{}; ///< Recursion depth, touched only by the owner
+    std::atomic<void (*)(void*)> hook{};
+    std::atomic<void*> hook_context{};
 };
 
 } // namespace Common

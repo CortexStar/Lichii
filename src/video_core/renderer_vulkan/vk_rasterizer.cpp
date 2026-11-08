@@ -437,9 +437,33 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
     VideoCommon::GpuSplit::Get().SetIdleHook(
         [](void* argument) { static_cast<Scheduler*>(argument)->FlushDeferred(); },
         &scheduler);
+    // Whoever takes or releases the buffer cache's lock first applies the guest write traps
+    // queued while it was held, as each trap would have once it got the lock (OnCPUWrite).
+    buffer_cache.mutex.SetOwnerHook(
+        [](void* argument) {
+            auto& self = *static_cast<RasterizerVulkan*>(argument);
+            self.write_handoff.Drain([&self](DAddr addr, u64 size) {
+                if (!self.buffer_cache.OnCPUWrite(addr, size)) {
+                    return;
+                }
+                // Part of it is GPU-modified: collect those parts, 2 KiB at a time, as the
+                // traps would have (OnCPUWrite has no effect when it returns true).
+                constexpr u64 page_size = VideoCommon::Nx2WriteHandoff::PageSize;
+                for (DAddr page = addr; page < addr + size;) {
+                    const DAddr page_end =
+                        (std::min)(addr + size, Common::AlignDown(page, page_size) + page_size);
+                    if (self.buffer_cache.OnCPUWrite(page, page_end - page)) {
+                        self.gpu.CollectHandoffWrite(page, page_end - page);
+                    }
+                    page = page_end;
+                }
+            });
+        },
+        this);
 }
 
 RasterizerVulkan::~RasterizerVulkan() {
+    buffer_cache.mutex.SetOwnerHook(nullptr, nullptr);
     VideoCommon::GpuSplit::Get().SetIdleHook(nullptr, nullptr);
     scheduler.WaitWorker();
     scheduler.Finish();
@@ -2120,7 +2144,12 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
                                      texture_area->end_address - texture_area->start_address);
         return *texture_area;
     }
-    if (buffer_cache.FlushesOnCpuRead()) {
+    // And pages never GPU-written or read-trapped (with Ampere's GPU-write marks) need no look
+    // into the buffer cache, whose lock the back holds through each draw: a clean area.
+    const bool skip_buffers = Tegra::g_nx2_ampere.load(std::memory_order_relaxed) &&
+                              !device_memory.MayHaveArmedReadTraps(addr, size) &&
+                              !Tegra::Nx2MayBeGpuWritten(addr, size);
+    if (!skip_buffers && buffer_cache.FlushesOnCpuRead()) {
         std::scoped_lock lock{buffer_cache.mutex};
         auto area = buffer_cache.GetFlushArea(addr, size);
         if (area) {
@@ -2237,24 +2266,55 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
             query_cache.InvalidateRegion(addr, size);
         }
     }
-    if (any(pipeline_cache.page_filter)) {
+    // Shaders marked by an earlier CPU write are removed here as before.
+    if (any(pipeline_cache.page_filter) || pipeline_cache.HasPendingRemovals()) {
         pipeline_cache.InvalidateRegions(sequences);
     }
 }
 
 bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
     DEBUG_ASSERT(addr != 0 || size != 0);
+    // Guest write traps skip the texture cache's lock and the shader cache where their page
+    // filters prove nothing was ever registered (as InnerInvalidation).
+    // The GPU thread holds the buffer cache's lock through each draw. On pages the GPU never
+    // wrote (Ampere's marks) the answer is "not GPU-modified", so the trap returns false either
+    // way; its buffer part (WriteMemory) is queued for the lock's holder, which applies it before
+    // anyone else uses the buffer cache (the constructor's owner hook). Pages with images or
+    // shaders keep the usual path.
+    const bool handoff = Tegra::g_nx2_ampere.load(std::memory_order_relaxed) &&
+                         !Tegra::Nx2MayBeGpuWritten(addr, size) &&
+                         !texture_cache.page_filter.Any(addr, size) &&
+                         !pipeline_cache.page_filter.Any(addr, size);
+    if (handoff && !buffer_cache.mutex.try_lock()) {
+        if (write_handoff.Push(addr, size)) {
+            // The GPU may have marked the page meanwhile, before the queue was visible: then it
+            // may also download over it before a holder sees the queue. Wait for the holder as
+            // before; taking the lock applies the queue.
+            if (Tegra::Nx2MayBeGpuWritten(addr, size)) {
+                std::scoped_lock lock{buffer_cache.mutex};
+            }
+            if (pipeline_cache.HasPendingRemovals()) {
+                pipeline_cache.InvalidateRegion(addr, size);
+            }
+            return false;
+        }
+        buffer_cache.mutex.lock();
+    } else if (!handoff) {
+        buffer_cache.mutex.lock();
+    }
     {
-        std::scoped_lock lock{buffer_cache.mutex};
+        std::unique_lock lock{buffer_cache.mutex, std::adopt_lock};
         if (buffer_cache.OnCPUWrite(addr, size)) {
             return true;
         }
     }
-    {
+    if (texture_cache.page_filter.Any(addr, size)) {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.WriteMemory(addr, size);
     }
-    pipeline_cache.InvalidateRegion(addr, size);
+    if (pipeline_cache.page_filter.Any(addr, size) || pipeline_cache.HasPendingRemovals()) {
+        pipeline_cache.InvalidateRegion(addr, size);
+    }
     return false;
 }
 
