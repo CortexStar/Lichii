@@ -595,8 +595,13 @@ if (EGLANTINE_NGX_SDK AND NOT ENABLE_NVIDIA_DLSS AND CMAKE_SYSTEM_NAME STREQUAL 
         "${EGLANTINE_NGX_SDK}/lib/Linux_x86_64/libnvsdk_ngx.a" ${CMAKE_DL_LIBS})
     # The rest of the renderer only sees the Streamline interface (vulkan_common/streamline.h).
     target_compile_definitions(video_core PUBLIC EGLANTINE_STREAMLINE EGLANTINE_NGX)
-    file(GLOB NGX_DLSS_MODEL "${EGLANTINE_NGX_SDK}/lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.*")
-    file(COPY ${NGX_DLSS_MODEL} DESTINATION "${CMAKE_BINARY_DIR}/bin")
+    # Off for release builds that must not ship NVIDIA's DLSS model; users then put it in the
+    # streamline folder themselves.
+    option(EGLANTINE_NGX_COPY_MODEL "Copy NVIDIA's libnvidia-ngx-dlss.so.* next to the binary" ON)
+    if (EGLANTINE_NGX_COPY_MODEL)
+        file(GLOB NGX_DLSS_MODEL "${EGLANTINE_NGX_SDK}/lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.*")
+        file(COPY ${NGX_DLSS_MODEL} DESTINATION "${CMAKE_BINARY_DIR}/bin")
+    endif()
     message(STATUS "NVIDIA DLSS through NGX: ${EGLANTINE_NGX_SDK}")
 endif()
 
