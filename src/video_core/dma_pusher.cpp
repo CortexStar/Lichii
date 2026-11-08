@@ -34,6 +34,7 @@
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
 #include "video_core/nx2_drain_check.h"
+#include "video_core/nx2_entry_check.h"
 #include "video_core/nx2_list_stats.h"
 #include "video_core/rasterizer_interface.h"
 
@@ -296,7 +297,8 @@ bool DmaPusher::Step() {
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
         }
-        if (VideoCommon::Nx2DrainCheck::g_enabled && !gpu_written) [[unlikely]] {
+        if (VideoCommon::Nx2DrainCheck::g_enabled && !gpu_written && waits_for_writers)
+            [[unlikely]] {
             CheckUnwaitedWriters(dma_state.dma_get, size_t{header.size} * sizeof(u32));
         }
         // Resume and GPU-written entries need live words, even after a flush cleared dirty state.
@@ -311,6 +313,16 @@ bool DmaPusher::Step() {
             gpu_written,
             use_safe && memory_manager.IsMemoryDirty(dma_state.dma_get,
                                                      header.size * sizeof(u32)));
+        if (Nx2EntryCheck::Any() && !gpu_written && !use_safe) [[unlikely]] {
+            Nx2EntryCheck::NoteEntry(
+                *this, header,
+                submitted ? std::span<const CommandHeader>{command_list.submitted_words.data() +
+                                                               command_list.submitted_offsets
+                                                                   [dma_pushbuffer_subindex],
+                                                           header.size}
+                          : std::span<const CommandHeader>{},
+                !waits_for_writers, command_entry && waits_for_writers);
+        }
         if (submitted) {
             const std::span<const CommandHeader> commands{
                 command_list.submitted_words.data() +
