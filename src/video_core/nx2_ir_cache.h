@@ -28,6 +28,11 @@ namespace VideoCommon::Nx2IrCache {
 /// IR::Program <-> bytes. Deserialize throws Shader::LogicError on malformed data and checks every
 /// instruction's use count against the serialized one.
 [[nodiscard]] std::vector<u8> SerializeProgram(const Shader::IR::Program& program);
+struct Record;
+/// Decompresses a found record's program into record.program (no-op when already there); false
+/// when it is damaged.
+[[nodiscard]] bool LoadProgram(Record& record);
+
 [[nodiscard]] Shader::IR::Program DeserializeProgram(std::span<const u8> data,
                                                      Shader::ObjectPool<Shader::IR::Inst>& inst_pool,
                                                      Shader::ObjectPool<Shader::IR::Block>& block_pool);
@@ -58,6 +63,10 @@ struct Record {
     std::vector<TextureCheck> texture_checks;
     std::vector<u8> answers;                          ///< GenericEnvironment::SerializeAnswers
     std::vector<u8> program;                          ///< SerializeProgram (uncompressed)
+    /// As read by StageCache::Find: the program still compressed (LoadProgram fills `program`), so
+    /// a lookup among many variant records decompresses only the one whose answers match.
+    std::vector<u8> compressed_program;
+    u32 raw_program_size{};
 };
 
 class StageCache {

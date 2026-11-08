@@ -675,16 +675,28 @@ std::vector<Record> StageCache::Find(u64 unique_hash) {
             if (r.offset + compressed_size != bytes.size()) {
                 continue;
             }
-            const std::span<const u8> compressed{bytes.data() + r.offset, compressed_size};
-            record.program = Common::Compression::DecompressDataZSTD(compressed);
-            if (record.program.size() != raw_size) {
-                continue;
-            }
+            record.compressed_program.assign(bytes.begin() + static_cast<std::ptrdiff_t>(r.offset),
+                                             bytes.end());
+            record.raw_program_size = raw_size;
             result.push_back(std::move(record));
         } catch (const Shader::Exception&) {
         }
     }
     return result;
+}
+
+bool LoadProgram(Record& record) {
+    if (!record.program.empty() || record.compressed_program.empty()) {
+        return !record.program.empty();
+    }
+    record.program = Common::Compression::DecompressDataZSTD(record.compressed_program);
+    if (record.program.size() != record.raw_program_size) {
+        record.program.clear();
+        return false;
+    }
+    record.compressed_program.clear();
+    record.compressed_program.shrink_to_fit();
+    return true;
 }
 
 void StageCache::Append(const Record& record) {

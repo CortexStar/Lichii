@@ -233,16 +233,20 @@ std::optional<Shader::ReplaceConstant> PrecompileEnvironment::GetReplaceConstBuf
 }
 
 bool PrecompileEnvironment::IsCbufStorageBufferPointer(u32 index, u32 offset) {
-    storage_pointer_types.emplace(MakeCbufKey(index, offset), u8{pointers_mapped});
-    return pointers_mapped;
+    const u64 key = MakeCbufKey(index, offset);
+    const bool mapped = std::ranges::find(unmapped_pointers, key) == unmapped_pointers.end();
+    storage_pointer_types.emplace(key, u8{mapped});
+    return mapped;
 }
 
 bool PrecompileEnvironment::IsCbufIndirectStorageBufferPointer(u32 index, u32 offset,
                                                                u32 indirect) {
     // As for direct pointers: a pointer table entry is taken as a mapped address (no GPU memory
     // to look into). Recorded, so the runtime re-asks it with the live table.
-    storage_pointer_types.emplace(MakeIndirectCbufKey(index, offset, indirect), u8{pointers_mapped});
-    return pointers_mapped;
+    const u64 key = MakeIndirectCbufKey(index, offset, indirect);
+    const bool mapped = std::ranges::find(unmapped_pointers, key) == unmapped_pointers.end();
+    storage_pointer_types.emplace(key, u8{mapped});
+    return mapped;
 }
 
 u32 PrecompileEnvironment::TextureBoundBuffer() const {

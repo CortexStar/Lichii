@@ -70,10 +70,10 @@ public:
     }
 
     /// The answer to "is this constant buffer word a mapped storage buffer address" (direct and
-    /// pointer-table): true by default; false makes the variant for pointers that are still null
-    /// when the game first uses the program (the runtime rebuilds when they become mapped, so games
-    /// use both).
-    void SetPointersMapped(bool mapped) noexcept { pointers_mapped = mapped; }
+    /// pointer-table, keys as StoragePointerAnswers): true except for the keys given here, which
+    /// make a variant for pointers that are still null when the game first uses the program (the
+    /// runtime rebuilds when they become mapped, so games use several combinations).
+    void SetUnmappedPointers(std::vector<u64> keys) { unmapped_pointers = std::move(keys); }
     [[nodiscard]] bool TextureBoundUsed() const noexcept { return texture_bound_used; }
     [[nodiscard]] bool ViewportUsed() const noexcept { return viewport_used; }
     [[nodiscard]] u32 ConstOffset() const noexcept { return const_offset; }
@@ -86,7 +86,7 @@ private:
     u32 const_size{};
     u32 derived_const_offset{};
     mutable bool texture_bound_used{};
-    bool pointers_mapped{true};
+    std::vector<u64> unmapped_pointers;
     bool viewport_used{};
     std::array<u32, 6> last_handle_source{};
     bool has_handle_source{};

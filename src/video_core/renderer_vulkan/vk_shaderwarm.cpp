@@ -113,15 +113,25 @@ bool TaskMeshIrCacheEnabled() {
     return enabled;
 }
 
-// EDEN_NX2_PRECOMPILE_POINTER_VARIANTS=1: also a record with every storage pointer unmapped. Off by
-// default: on OoT's check route it added 32,988 records (file 0.75 -> 1.4 GB) and matched none of
-// the rejected stages, whose live pointers are a mix of mapped and null.
+// EDEN_NX2_PRECOMPILE_POINTER_VARIANTS=0: no pointer variant records. On by default: a stage that
+// asks whether constant-buffer storage pointers are mapped gets a record for every mapped/null
+// combination (OoT's check route: most cached stages rejected at run time had some of them null;
+// one all-null variant matched none of those).
 bool PointerVariantsEnabled() {
     static const bool enabled = [] {
         const char* value = std::getenv("EDEN_NX2_PRECOMPILE_POINTER_VARIANTS");
-        return value != nullptr && value[0] == '1';
+        return value == nullptr || value[0] != '0';
     }();
     return enabled;
+}
+
+// EDEN_NX2_PRECOMPILE_POINTER_MAX (default 6): up to this many pointers, all 2^n combinations.
+size_t PointerVariantsMax() {
+    static const size_t max = [] {
+        const char* value = std::getenv("EDEN_NX2_PRECOMPILE_POINTER_MAX");
+        return value ? std::min<size_t>(10, std::strtoull(value, nullptr, 0)) : size_t{6};
+    }();
+    return max;
 }
 
 // EDEN_NX2_IR_CACHE_COMPUTE=0: compute programs neither use nor fill the translation cache (on by
@@ -657,26 +667,42 @@ bool PipelineCache::TryCachedTranslation(ShaderPools& pools, u64 unique_hash,
         return false;
     }
     std::vector<VideoCommon::Nx2IrCache::Record> records = ir_cache.Find(unique_hash);
+    const char* mismatch = nullptr;
+    int mismatch_stage = 0;
+    SCOPE_EXIT {
+        // Reached with mismatch set only when no record was used (a used one returns true first
+        // and clears it).
+        if (mismatch == nullptr) {
+            return;
+        }
+        Nx2Stats::Get().ir_env_mismatches.fetch_add(1, std::memory_order_relaxed);
+        // EDEN_NX2_IR_MISMATCH_LOG=1: which precompile default the live state contradicts (the
+        // last record's, when there are variants).
+        static const bool log_mismatch = [] {
+            const char* value = std::getenv("EDEN_NX2_IR_MISMATCH_LOG");
+            return value != nullptr && value[0] == '1';
+        }();
+        if (log_mismatch) {
+            LOG_INFO(Render_Vulkan, "NX2PC mismatch {:016x} (stage {}): {} [{} records]",
+                     unique_hash, mismatch_stage, mismatch, records.size());
+        }
+    };
     for (VideoCommon::Nx2IrCache::Record& record : records) {
         try {
             if (record.stage != env.ShaderStage()) {
                 continue;
             }
             if (const char* const why = RecordMismatch(record, env)) {
-                Nx2Stats::Get().ir_env_mismatches.fetch_add(1, std::memory_order_relaxed);
-                // EDEN_NX2_IR_MISMATCH_LOG=1: which precompile default the live state contradicts.
-                static const bool log_mismatch = [] {
-                    const char* value = std::getenv("EDEN_NX2_IR_MISMATCH_LOG");
-                    return value != nullptr && value[0] == '1';
-                }();
-                if (log_mismatch) {
-                    LOG_INFO(Render_Vulkan, "NX2PC mismatch {:016x} (stage {}): {}", unique_hash,
-                             static_cast<int>(record.stage), why);
-                }
+                // Counted and logged once per lookup, below, when no record (variant) matches.
+                mismatch = why;
+                mismatch_stage = static_cast<int>(record.stage);
                 continue;
             }
             const bool mesh_stage{record.stage == Shader::Stage::Task ||
                                   record.stage == Shader::Stage::Mesh};
+            if (!VideoCommon::Nx2IrCache::LoadProgram(record)) {
+                continue;
+            }
             Shader::IR::Program program{VideoCommon::Nx2IrCache::DeserializeProgram(
                 record.program, pools.inst, pools.block)};
             if (!ComputeLaunchMatches(program, env)) {
@@ -722,6 +748,7 @@ bool PipelineCache::TryCachedTranslation(ShaderPools& pools, u64 unique_hash,
                     }
                     env.AdoptAnswers(record.answers);
                     out = std::move(program);
+                    mismatch = nullptr;
                     return true;
                 }
                 Shader::RuntimeInfo runtime_info{};
@@ -749,6 +776,7 @@ bool PipelineCache::TryCachedTranslation(ShaderPools& pools, u64 unique_hash,
             }
             env.AdoptAnswers(record.answers);
             out = std::move(program);
+            mismatch = nullptr;
             return true;
         } catch (const std::exception& exception) {
             static std::atomic<u32> logged{};
@@ -983,8 +1011,12 @@ void PipelineCache::RunPrecompile(std::filesystem::path pack_path, std::stop_tok
         }
         try {
             gpl_pools.ReleaseContents();
+            VideoCommon::Nx2IrCache::Record loaded{record};
+            if (!VideoCommon::Nx2IrCache::LoadProgram(loaded)) {
+                return;
+            }
             Shader::IR::Program program{VideoCommon::Nx2IrCache::DeserializeProgram(
-                record.program, gpl_pools.inst, gpl_pools.block)};
+                loaded.program, gpl_pools.inst, gpl_pools.block)};
             const bool fragment = record.stage == Shader::Stage::Fragment;
             if ((fragment && (program.info.loads.Legacy() ||
                               program.info.texture_descriptors.size() >
@@ -1043,8 +1075,12 @@ void PipelineCache::RunPrecompile(std::filesystem::path pack_path, std::stop_tok
         try {
             const auto build_begin = Nx2Stats::Clock::now();
             cs_pools.ReleaseContents();
+            VideoCommon::Nx2IrCache::Record loaded{record};
+            if (!VideoCommon::Nx2IrCache::LoadProgram(loaded)) {
+                return;
+            }
             Shader::IR::Program program{VideoCommon::Nx2IrCache::DeserializeProgram(
-                record.program, cs_pools.inst, cs_pools.block)};
+                loaded.program, cs_pools.inst, cs_pools.block)};
             program.workgroup_size = launch.workgroup;
             program.shared_memory_size = launch.shared_memory;
             if (!program.info.uses_local_memory) {
@@ -1119,15 +1155,20 @@ void PipelineCache::RunPrecompile(std::filesystem::path pack_path, std::stop_tok
             // header): a vertex program that reads or writes the stage buffer is tried as both.
             // Each attempt: the stage kind, and whether constant-buffer storage pointers are taken
             // as mapped (a record that asked gets a second, unmapped-pointer variant, below).
-            std::vector<std::pair<Shader::Stage, bool>> attempts{{stage.stage, true}};
+            struct Attempt {
+                Shader::Stage stage;
+                std::vector<u64> unmapped; ///< storage pointer keys answered "not mapped"
+                bool variant;              ///< a pointer variant of a record made just before
+            };
+            std::vector<Attempt> attempts{{stage.stage, {}, false}};
             for (size_t attempt = 0; attempt < attempts.size(); ++attempt) {
-                const Shader::Stage stage_kind = attempts[attempt].first;
-                const bool pointers_mapped = attempts[attempt].second;
+                const Shader::Stage stage_kind = attempts[attempt].stage;
+                const bool pointers_mapped = !attempts[attempt].variant;
                 std::optional<VideoCommon::PrecompileEnvironment> env;
                 try {
                     env.emplace(stage.blob, stage.const_offset, stage.const_size, stage_kind,
                                 default_texture_bound, env_launch);
-                    env->SetPointersMapped(pointers_mapped);
+                    env->SetUnmappedPointers(attempts[attempt].unmapped);
                 } catch (const std::exception& exception) {
                     fail(lowering_failed, "lowering: " + ShortReason(exception.what()));
                     continue;
@@ -1176,8 +1217,8 @@ void PipelineCache::RunPrecompile(std::filesystem::path pack_path, std::stop_tok
                         std::string_view{exception.what()}.find(
                             "Stage buffer access outside task and mesh") != std::string_view::npos) {
                         ++retried_as_task_mesh;
-                        attempts.push_back({Shader::Stage::Task, true});
-                        attempts.push_back({Shader::Stage::Mesh, true});
+                        attempts.push_back({Shader::Stage::Task, {}, false});
+                        attempts.push_back({Shader::Stage::Mesh, {}, false});
                         continue;
                     }
                     fail(translation_failed, "translation: " + ShortReason(exception.what()) +
@@ -1275,7 +1316,31 @@ void PipelineCache::RunPrecompile(std::filesystem::path pack_path, std::stop_tok
                 if (!pointers_mapped) {
                     ++pointer_variants_built;
                 } else if (PointerVariantsEnabled() && !env->StoragePointerAnswers().empty()) {
-                    attempts.push_back({stage_kind, false});
+                    // Every mapped/null combination of the pointers this stage asked about (live
+                    // they are a mix: some still null when the game first uses the program), up to
+                    // EDEN_NX2_PRECOMPILE_POINTER_MAX pointers; beyond that each one null alone,
+                    // and all null.
+                    std::vector<u64> keys;
+                    for (const auto& [key, mapped] : env->StoragePointerAnswers()) {
+                        keys.push_back(key);
+                    }
+                    std::ranges::sort(keys);
+                    if (keys.size() <= PointerVariantsMax()) {
+                        for (u32 mask = 1; mask < (1U << keys.size()); ++mask) {
+                            std::vector<u64> unmapped;
+                            for (size_t bit = 0; bit < keys.size(); ++bit) {
+                                if ((mask >> bit) & 1) {
+                                    unmapped.push_back(keys[bit]);
+                                }
+                            }
+                            attempts.push_back({stage_kind, std::move(unmapped), true});
+                        }
+                    } else {
+                        for (const u64 key : keys) {
+                            attempts.push_back({stage_kind, {key}, true});
+                        }
+                        attempts.push_back({stage_kind, keys, true});
+                    }
                 }
                 if (mesh_stage) {
                     ++task_mesh_built;
