@@ -632,70 +632,110 @@ bool StageCache::Contains(u64 unique_hash) const {
 }
 
 std::vector<Record> StageCache::Find(u64 unique_hash) {
+    // The checks and answers lead each record and are small; the compressed program (most of the
+    // record, ~10 KB median for OoT) is read only for the record a lookup uses (LoadProgram). A stage
+    // with many pointer variants used to read every variant's program here, on the GPU thread.
+    constexpr u64 HeaderReadSize = 2048; // OoT: header median 140 bytes, p99 1.1 KB
     std::vector<Record> result;
     std::scoped_lock lock{mutex};
     const auto it = index.find(unique_hash);
     if (!is_open || it == index.end()) {
         return result;
     }
+    std::vector<u8> bytes;
     for (const u64 offset : it->second) {
         file.clear();
         file.seekg(static_cast<std::streamoff>(offset + sizeof(u32)));
         u32 record_size{};
         file.read(reinterpret_cast<char*>(&record_size), sizeof(record_size));
-        std::vector<u8> bytes(record_size - 8);
+        if (!file || record_size < 16) {
+            file.clear();
+            continue;
+        }
+        const u64 body_size = record_size - 8; // after the magic and the size
+        bytes.resize(static_cast<size_t>((std::min)(body_size, HeaderReadSize)));
         file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
         if (!file) {
             file.clear();
             continue;
         }
-        try {
-            Reader r{bytes};
-            Record record;
-            record.unique_hash = r.Get<u64>();
-            record.stage = r.Get<Shader::Stage>();
-            const u32 flags = r.Get<u32>();
-            record.texture_bound_used = (flags & 1) != 0;
-            record.viewport_used = (flags & 2) != 0;
-            record.local_memory_used = (flags & 4) != 0;
-            record.texture_bound = r.Get<u32>();
-            record.viewport_transform_state = r.Get<u32>();
-            record.local_memory_size = r.Get<u32>();
-            for (u32 n = r.Get<u32>(); n > 0; --n) {
-                const u64 key = r.Get<u64>();
-                record.storage_pointers.emplace_back(key, r.Get<u8>());
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            try {
+                Reader r{bytes};
+                Record record;
+                record.unique_hash = r.Get<u64>();
+                record.stage = r.Get<Shader::Stage>();
+                const u32 flags = r.Get<u32>();
+                record.texture_bound_used = (flags & 1) != 0;
+                record.viewport_used = (flags & 2) != 0;
+                record.local_memory_used = (flags & 4) != 0;
+                record.texture_bound = r.Get<u32>();
+                record.viewport_transform_state = r.Get<u32>();
+                record.local_memory_size = r.Get<u32>();
+                for (u32 n = r.Get<u32>(); n > 0; --n) {
+                    const u64 key = r.Get<u64>();
+                    record.storage_pointers.emplace_back(key, r.Get<u8>());
+                }
+                for (u32 n = r.Get<u32>(); n > 0; --n) {
+                    record.texture_checks.push_back(r.Get<Record::TextureCheck>());
+                }
+                record.answers.resize(r.Get<u32>());
+                r.GetBytes(record.answers.data(), record.answers.size());
+                record.raw_program_size = r.Get<u32>();
+                record.compressed_size = r.Get<u32>();
+                if (r.offset + record.compressed_size != body_size) {
+                    break; // not a record this build wrote
+                }
+                record.program_offset = offset + 8 + r.offset;
+                result.push_back(std::move(record));
+                break;
+            } catch (const Shader::Exception&) {
+                if (bytes.size() == body_size) {
+                    break;
+                }
+                // Checks and answers longer than the first read: read the whole record.
+                bytes.resize(static_cast<size_t>(body_size));
+                file.clear();
+                file.seekg(static_cast<std::streamoff>(offset + 8));
+                file.read(reinterpret_cast<char*>(bytes.data()),
+                          static_cast<std::streamsize>(bytes.size()));
+                if (!file) {
+                    file.clear();
+                    break;
+                }
             }
-            for (u32 n = r.Get<u32>(); n > 0; --n) {
-                record.texture_checks.push_back(r.Get<Record::TextureCheck>());
-            }
-            record.answers.resize(r.Get<u32>());
-            r.GetBytes(record.answers.data(), record.answers.size());
-            const u32 raw_size = r.Get<u32>();
-            const u32 compressed_size = r.Get<u32>();
-            if (r.offset + compressed_size != bytes.size()) {
-                continue;
-            }
-            record.compressed_program.assign(bytes.begin() + static_cast<std::ptrdiff_t>(r.offset),
-                                             bytes.end());
-            record.raw_program_size = raw_size;
-            result.push_back(std::move(record));
-        } catch (const Shader::Exception&) {
         }
     }
     return result;
 }
 
-bool LoadProgram(Record& record) {
-    if (!record.program.empty() || record.compressed_program.empty()) {
-        return !record.program.empty();
+bool StageCache::LoadProgram(Record& record) {
+    if (!record.program.empty()) {
+        return true;
     }
-    record.program = Common::Compression::DecompressDataZSTD(record.compressed_program);
+    if (record.compressed_size == 0) {
+        return false;
+    }
+    std::vector<u8> compressed(record.compressed_size);
+    {
+        std::scoped_lock lock{mutex};
+        if (!is_open) {
+            return false;
+        }
+        file.clear();
+        file.seekg(static_cast<std::streamoff>(record.program_offset));
+        file.read(reinterpret_cast<char*>(compressed.data()),
+                  static_cast<std::streamsize>(compressed.size()));
+        if (!file) {
+            file.clear();
+            return false;
+        }
+    }
+    record.program = Common::Compression::DecompressDataZSTD(compressed);
     if (record.program.size() != record.raw_program_size) {
         record.program.clear();
         return false;
     }
-    record.compressed_program.clear();
-    record.compressed_program.shrink_to_fit();
     return true;
 }
 

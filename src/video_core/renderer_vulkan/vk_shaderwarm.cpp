@@ -707,7 +707,7 @@ bool PipelineCache::TryCachedTranslation(ShaderPools& pools, u64 unique_hash,
             }
             const bool mesh_stage{record.stage == Shader::Stage::Task ||
                                   record.stage == Shader::Stage::Mesh};
-            if (!VideoCommon::Nx2IrCache::LoadProgram(record)) {
+            if (!ir_cache.LoadProgram(record)) {
                 continue;
             }
             Shader::IR::Program program{VideoCommon::Nx2IrCache::DeserializeProgram(
@@ -1019,7 +1019,7 @@ void PipelineCache::RunPrecompile(std::filesystem::path pack_path, std::stop_tok
         try {
             gpl_pools.ReleaseContents();
             VideoCommon::Nx2IrCache::Record loaded{record};
-            if (!VideoCommon::Nx2IrCache::LoadProgram(loaded)) {
+            if (!ir_cache.LoadProgram(loaded)) {
                 return;
             }
             Shader::IR::Program program{VideoCommon::Nx2IrCache::DeserializeProgram(
@@ -1083,7 +1083,7 @@ void PipelineCache::RunPrecompile(std::filesystem::path pack_path, std::stop_tok
             const auto build_begin = Nx2Stats::Clock::now();
             cs_pools.ReleaseContents();
             VideoCommon::Nx2IrCache::Record loaded{record};
-            if (!VideoCommon::Nx2IrCache::LoadProgram(loaded)) {
+            if (!ir_cache.LoadProgram(loaded)) {
                 return;
             }
             Shader::IR::Program program{VideoCommon::Nx2IrCache::DeserializeProgram(

@@ -31,7 +31,6 @@ namespace VideoCommon::Nx2IrCache {
 struct Record;
 /// Decompresses a found record's program into record.program (no-op when already there); false
 /// when it is damaged.
-[[nodiscard]] bool LoadProgram(Record& record);
 
 [[nodiscard]] Shader::IR::Program DeserializeProgram(std::span<const u8> data,
                                                      Shader::ObjectPool<Shader::IR::Inst>& inst_pool,
@@ -63,9 +62,11 @@ struct Record {
     std::vector<TextureCheck> texture_checks;
     std::vector<u8> answers;                          ///< GenericEnvironment::SerializeAnswers
     std::vector<u8> program;                          ///< SerializeProgram (uncompressed)
-    /// As read by StageCache::Find: the program still compressed (LoadProgram fills `program`), so
-    /// a lookup among many variant records decompresses only the one whose answers match.
-    std::vector<u8> compressed_program;
+    /// As read by StageCache::Find: where the compressed program is in the file (LoadProgram
+    /// reads and decompresses it into `program`). A lookup among many variant records reads only
+    /// their checks and answers, and the program of the one whose answers match.
+    u64 program_offset{};
+    u32 compressed_size{};
     u32 raw_program_size{};
 };
 
@@ -83,6 +84,9 @@ public:
 
     /// Every record for the stage (decompressed), empty when none.
     [[nodiscard]] std::vector<Record> Find(u64 unique_hash);
+    /// Reads and decompresses a record's program (from Find) into record.program. False when the
+    /// file can't be read or the data doesn't decompress to the recorded size.
+    [[nodiscard]] bool LoadProgram(Record& record);
 
     /// Thread safe. Appends and indexes the record.
     void Append(const Record& record);
