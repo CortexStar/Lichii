@@ -160,9 +160,6 @@ public:
             func();
         }
         fences.push(std::move(new_fence));
-        if (should_flush) {
-            rasterizer.FlushCommands();
-        }
         if constexpr (can_async_check) {
             guard.unlock();
             cv.notify_all();
