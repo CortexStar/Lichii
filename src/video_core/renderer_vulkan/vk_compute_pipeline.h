@@ -11,6 +11,7 @@
 #include <functional>
 #include <mutex>
 #include <span>
+#include <thread>
 
 #include <boost/container/small_vector.hpp>
 
@@ -132,6 +133,12 @@ private:
     std::condition_variable build_condvar;
     std::mutex build_mutex;
     std::atomic_bool is_built{false};
+
+    /// OptimizesInBackground: the optimized pipeline, bound instead of `pipeline` once built.
+    vk::Pipeline optimized_pipeline;
+    std::atomic<VkPipeline> optimized_handle{VK_NULL_HANDLE};
+    /// Last member: joined before anything the background build uses is destroyed.
+    std::jthread optimizer;
 };
 
 } // namespace Vulkan

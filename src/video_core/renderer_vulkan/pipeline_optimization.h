@@ -21,4 +21,12 @@ inline bool BuildsUnoptimized(VkDriverId driver_id, u64 shader_hash) {
            std::ranges::find(amd_proprietary, shader_hash) != amd_proprietary.end();
 }
 
+/// Whether a pipeline BuildsUnoptimized gives is built again with optimization on a background
+/// thread and used once that is done: only where the optimizer takes seconds, not minutes (the
+/// intro shaders took 6 and 18 minutes of a core).
+inline bool OptimizesInBackground(VkDriverId driver_id, u64 shader_hash) {
+    // Runs every frame in Kokiri Forest; the optimizer takes 1.3-4 s.
+    return BuildsUnoptimized(driver_id, shader_hash) && shader_hash == 0xe0a992208d87eeb8ULL;
+}
+
 } // namespace Vulkan

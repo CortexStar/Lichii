@@ -26,3 +26,11 @@ TEST_CASE("Only known AMD proprietary shaders disable pipeline optimization",
         CHECK_FALSE(Vulkan::BuildsUnoptimized(VK_DRIVER_ID_AMD_PROPRIETARY, hash));
     }
 }
+
+TEST_CASE("Only shaders the optimizer takes seconds on are optimized in the background",
+          "[video_core][vulkan][pipeline_optimization]") {
+    CHECK(Vulkan::OptimizesInBackground(VK_DRIVER_ID_AMD_PROPRIETARY, 0xe0a992208d87eeb8ULL));
+    CHECK_FALSE(Vulkan::OptimizesInBackground(VK_DRIVER_ID_AMD_PROPRIETARY, 0xeff3ccbe1438679dULL));
+    CHECK_FALSE(Vulkan::OptimizesInBackground(VK_DRIVER_ID_AMD_PROPRIETARY, 0xf9ea14a22394f5b1ULL));
+    CHECK_FALSE(Vulkan::OptimizesInBackground(VK_DRIVER_ID_MESA_RADV, 0xe0a992208d87eeb8ULL));
+}
