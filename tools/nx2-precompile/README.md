@@ -84,6 +84,40 @@ the values the translation read: constant buffer values, texture types and forma
 locations. A recipe is made for one game version and one cache version, and is built again when
 either changes. Making the same recipe twice gives the same file.
 
+### Making a recipe for a game
+
+One person does this per game version and cache version; everyone else only needs the recipe.
+
+1. Build Lichii and the tool with `-DENABLE_DEBUG_TOOLS=ON` (targets `yuzu` and `nx2-precompile`).
+   Check `nx2-precompile cache-version` against the Lichii build players will use; they must match.
+   Install Python 3.11 or newer (no packages needed).
+2. Play the game in Lichii for a while, with the NVIDIA cache size set as above. Every pipeline the
+   game builds is recorded in the title's disk cache, `cache/shader/<title id>/vulkan.fork-v<N>.bin`
+   in Lichii's user folder. These recorded pipelines are what the tools learn render states and
+   storage-pointer facts from, so the more varied the play (areas, menus, cutscenes, effects), the
+   better the predictions for the rest of the game. One long session works; caches from several
+   sessions or players, in different folders, work better. Copy each cache out before the next
+   session if you want to keep them apart.
+3. Run the pipeline from the game's `.nup` (or an unpacked RomFS folder) and the caches, for example
+   in Git Bash on Windows:
+
+   ```
+   NX2_GAME="D:/Games/Game [title][v131072].nup" NX2_OUT=out NX2_TOOL=path/to/nx2-precompile.exe \
+       bash tools/nx2-precompile/run_pipeline.sh session1/vulkan.fork-v54.bin session2/vulkan.fork-v54.bin
+   ```
+
+   About 8 minutes for Ocarina of Time. It writes `out/precompiled.fork-v<N>.nx2prep` and
+   `out/game.nx2recipe` (`NX2_RECIPE` names another), and ends with the audit, which must report
+   0 pieces of code.
+4. Optionally test it: start from an empty shader folder, prepare the recipe in Lichii (right-click
+   the game, "Prepare Precompiled Shaders from Recipe..."), boot, play somewhere new, then run
+   `analyze_session.sh` on that session's cache and log to see what still compiled at runtime.
+5. Share the recipe, named after the game and its version (for example
+   `Ocarina of Time v131072.nx2recipe`). A new game update or a Lichii build with another cache
+   version needs the steps again. For a new cache version, the caches recorded under older ones
+   can still be learned from (the Ocarina of Time file for v54 was built from v52 and v53 caches);
+   only the precompiled file must be built by a tool of the new version.
+
 `run_pipeline.sh CACHE.bin...` runs the whole chain from the game (`NX2_GAME`, its `.nup`) and the
 disk caches recorded while playing it; see the script's header for the other variables. It needs
 Python 3.11 or newer and nothing else; no keys are needed for a `.nup`. `extract` writes
