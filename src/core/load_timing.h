@@ -25,6 +25,10 @@ struct Counters {
     u64 jit_blocks{};
     u64 jit_ns{};
     u64 jit_cache_clears{};
+    u64 host_decompressions{};
+    u64 host_decompressed_bytes{};
+    u64 host_decompress_ns{};
+    u64 guest_decompressions{};
 
     Counters operator-(const Counters& rhs) const;
 };
@@ -33,6 +37,9 @@ struct Counters {
 void CountFileRead(u64 bytes, Clock::duration host_time);
 /// One service request, with the time its handler ran.
 void CountServiceCall(Clock::duration handler_time);
+/// A guest decompression call the host served (bytes out, host time), or one it left to the
+/// guest's own decoder (guest_ran).
+void CountHostDecompression(u64 bytes, Clock::duration host_time, bool guest_ran);
 Counters ReadCounters();
 
 struct LoadWindow {

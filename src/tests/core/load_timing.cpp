@@ -104,4 +104,8 @@ TEST_CASE("Counters subtract field by field", "[core][load_timing]") {
     REQUIRE(d.jit_blocks == 5);
     REQUIRE(d.jit_cache_clears == 1);
     REQUIRE(d.service_calls == 0);
+    const Counters c{.host_decompressions = 7, .host_decompressed_bytes = 900};
+    const Counters e{.host_decompressions = 3, .host_decompressed_bytes = 100};
+    REQUIRE((c - e).host_decompressions == 4);
+    REQUIRE((c - e).host_decompressed_bytes == 800);
 }

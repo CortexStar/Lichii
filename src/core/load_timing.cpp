@@ -25,6 +25,10 @@ std::atomic<u64> file_bytes{0};
 std::atomic<u64> file_ns{0};
 std::atomic<u64> service_calls{0};
 std::atomic<u64> service_ns{0};
+std::atomic<u64> host_decompressions{0};
+std::atomic<u64> host_decompressed_bytes{0};
+std::atomic<u64> host_decompress_ns{0};
+std::atomic<u64> guest_decompressions{0};
 
 struct State {
     std::mutex mutex;
@@ -60,6 +64,13 @@ std::string Describe(const Counters& work) {
         text += fmt::format(", JIT {} blocks in {:.0f} ms, {} code cache clears", work.jit_blocks,
                             Ms(work.jit_ns), work.jit_cache_clears);
     }
+    if (work.host_decompressions != 0 || work.guest_decompressions != 0) {
+        text += fmt::format(
+            ", host zstd {} calls ({:.1f} MiB out in {:.0f} ms), {} left to the game's decoder",
+            work.host_decompressions,
+            static_cast<double>(work.host_decompressed_bytes) / (1024.0 * 1024.0),
+            Ms(work.host_decompress_ns), work.guest_decompressions);
+    }
     return text;
 }
 
@@ -75,6 +86,10 @@ Counters Counters::operator-(const Counters& rhs) const {
         .jit_blocks = jit_blocks - rhs.jit_blocks,
         .jit_ns = jit_ns - rhs.jit_ns,
         .jit_cache_clears = jit_cache_clears - rhs.jit_cache_clears,
+        .host_decompressions = host_decompressions - rhs.host_decompressions,
+        .host_decompressed_bytes = host_decompressed_bytes - rhs.host_decompressed_bytes,
+        .host_decompress_ns = host_decompress_ns - rhs.host_decompress_ns,
+        .guest_decompressions = guest_decompressions - rhs.guest_decompressions,
     };
 }
 
@@ -89,6 +104,16 @@ void CountServiceCall(Clock::duration handler_time) {
     service_ns.fetch_add(ToNs(handler_time), std::memory_order_relaxed);
 }
 
+void CountHostDecompression(u64 bytes, Clock::duration host_time, bool guest_ran) {
+    if (guest_ran) {
+        guest_decompressions.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    host_decompressions.fetch_add(1, std::memory_order_relaxed);
+    host_decompressed_bytes.fetch_add(bytes, std::memory_order_relaxed);
+    host_decompress_ns.fetch_add(ToNs(host_time), std::memory_order_relaxed);
+}
+
 Counters ReadCounters() {
     Counters counters{
         .file_reads = file_reads.load(std::memory_order_relaxed),
@@ -96,6 +121,10 @@ Counters ReadCounters() {
         .file_ns = file_ns.load(std::memory_order_relaxed),
         .service_calls = service_calls.load(std::memory_order_relaxed),
         .service_ns = service_ns.load(std::memory_order_relaxed),
+        .host_decompressions = host_decompressions.load(std::memory_order_relaxed),
+        .host_decompressed_bytes = host_decompressed_bytes.load(std::memory_order_relaxed),
+        .host_decompress_ns = host_decompress_ns.load(std::memory_order_relaxed),
+        .guest_decompressions = guest_decompressions.load(std::memory_order_relaxed),
     };
 #ifdef LOAD_TIMING_HAS_DYNARMIC
     const auto& jit = Dynarmic::A64::compile_statistics;
