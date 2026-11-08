@@ -1893,6 +1893,7 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
         if (replacement == OotMacros::Id::None ||
             !FrontRunOotMacro(split, fs, method, replacement)) {
             const auto parameter_count = fs.parameters.size();
+            VideoCommon::Nx2Profile::CountJitMacro(method);
             const auto read = [&fs](u32 address) {
                 return address < Regs::NUM_REGS ? fs.regs[address] : 0U;
             };

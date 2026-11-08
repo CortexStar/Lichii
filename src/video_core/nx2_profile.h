@@ -207,11 +207,19 @@ private:
 inline thread_local std::array<u32, 0x2000> t_method_count{};
 inline thread_local std::array<u32, 0x2000> t_method_same{};
 inline thread_local std::array<u32, 0x2000> t_dma_reads{};
+/// Split front: macro calls without a native replacement (macro_hle_oot.h), which the JIT ran.
+inline thread_local std::array<u32, 0x2000> t_jit_macros{};
 
 inline void CountMethod(u32 method, bool same) {
     if (Enabled() && method < t_method_count.size()) {
         ++t_method_count[method];
         t_method_same[method] += same ? 1 : 0;
+    }
+}
+
+inline void CountJitMacro(u32 macro) {
+    if (Enabled() && macro < t_jit_macros.size()) {
+        ++t_jit_macros[macro];
     }
 }
 
@@ -359,9 +367,13 @@ inline bool Report(const char* thread_name = "GPU thread") {
     if (const std::string reads = TopMethods(t_dma_reads, nullptr, window); !reads.empty()) {
         LOG_INFO(HW_GPU, "{} MME DMA reads per second by macro:{}", thread_name, reads);
     }
+    if (const std::string jit = TopMethods(t_jit_macros, nullptr, window); !jit.empty()) {
+        LOG_INFO(HW_GPU, "{} macros run by the JIT per second:{}", thread_name, jit);
+    }
     t_method_count = {};
     t_method_same = {};
     t_dma_reads = {};
+    t_jit_macros = {};
     data = {};
     data.window_start = now;
     data.window_start_ticks = now_ticks;
