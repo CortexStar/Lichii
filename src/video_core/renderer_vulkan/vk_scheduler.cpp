@@ -279,22 +279,32 @@ void Scheduler::MarkFrameEnd(u64 frame) {
     }
 }
 
-void Scheduler::DispatchWork() {
+void Scheduler::DispatchWork(bool lazy) {
     if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
         VideoCommon::GpuSplit::CheckOwner("Scheduler::DispatchWork");
     }
-    if (chunk && !chunk->Empty()) {
-        // Waking the worker is a system call (~2% of the GPU thread at one dispatch per 8
-        // draws): skip it while the worker is still busy, it pops the queue before waiting.
-        bool wake;
-        {
-            std::scoped_lock ql{queue_mutex};
+    // Chunks handed over between submissions (full ones, from Record) wake a sleeping worker
+    // only in pairs: each wake is a system call on this thread (~1% of it in Ocarina), and
+    // nothing waits for those chunks before the next submission, which always wakes it.
+    const bool has_work = chunk && !chunk->Empty();
+    if (!has_work && !(lazy_queued && !lazy)) {
+        return;
+    }
+    // Waking the worker is a system call (~2% of the GPU thread at one dispatch per 8
+    // draws): skip it while the worker is still busy, it pops the queue before waiting.
+    bool wake;
+    {
+        std::scoped_lock ql{queue_mutex};
+        if (has_work) {
             work_queue.push(std::move(chunk));
-            wake = worker_waiting;
         }
-        if (wake) {
-            event_cv.notify_all();
-        }
+        wake = worker_waiting && !work_queue.empty() && (!lazy || work_queue.size() >= 2);
+        lazy_queued = worker_waiting && !wake && !work_queue.empty();
+    }
+    if (wake) {
+        event_cv.notify_all();
+    }
+    if (has_work) {
         AcquireNewChunk();
     }
 }
