@@ -2463,20 +2463,37 @@ vk::Pipeline GraphicsPipeline::LinkLibraries(VkRenderPass render_pass, bool opti
 }
 
 bool GraphicsPipeline::MakeLibraryPipeline(VkRenderPass render_pass) {
-    PipelineStates states;
+    // Shared with the prefetch below; the structures point into each other, so they stay put.
+    const auto shared_states = std::make_shared<PipelineStates>();
+    PipelineStates& states = *shared_states;
     FillStates(states);
     static constexpr std::array parts{GplPart::PreRasterization, GplPart::Fragment};
+    std::array<std::string, parts.size()> library_keys;
+    std::array<u64, parts.size()> names{};
     for (size_t index = 0; index < parts.size(); ++index) {
-        const GplPart part = parts[index];
+        library_keys[index] = ShaderLibraryKey(parts[index], states, render_pass);
         // The log names a library after its vertex (or fragment) program.
-        const u64 name =
-            part == GplPart::PreRasterization ? key.unique_hashes[1] : key.unique_hashes[5];
+        names[index] =
+            parts[index] == GplPart::PreRasterization ? key.unique_hashes[1] : key.unique_hashes[5];
+    }
+    // Both parts at once: the pre-rasterization library on a compile thread while this thread
+    // builds the fragment one. The GetOrCreate below takes the prefetch over when no compile
+    // thread has started it, and returns only once it is built, so `this` and the states outlive
+    // every call of the builder.
+    library_cache->Prefetch(
+        GplPart::PreRasterization, library_keys[0],
+        [this, shared_states, render_pass] {
+            return MakeShaderLibrary(GplPart::PreRasterization, *shared_states, render_pass);
+        },
+        names[0]);
+    for (const size_t index : {size_t{1}, size_t{0}}) {
+        const GplPart part = parts[index];
         shader_libraries[index] = library_cache->GetOrCreate(
-            part, ShaderLibraryKey(part, states, render_pass),
-            [&] { return MakeShaderLibrary(part, states, render_pass); }, name);
-        if (!shader_libraries[index]) {
-            return false;
-        }
+            part, library_keys[index], [&] { return MakeShaderLibrary(part, states, render_pass); },
+            names[index]);
+    }
+    if (!shader_libraries[0] || !shader_libraries[1]) {
+        return false;
     }
     const VkGraphicsPipelineLibraryCreateInfoEXT vertex_input_ci{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT,

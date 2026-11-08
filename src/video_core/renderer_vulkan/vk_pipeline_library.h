@@ -6,18 +6,16 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstring>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <type_traits>
-#include <unordered_map>
 #include <vector>
 
 #include "common/common_types.h"
 #include "common/thread_worker.h"
+#include "video_core/renderer_vulkan/gpl_build_once.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Vulkan {
@@ -115,6 +113,14 @@ public:
     std::shared_ptr<const GplLibrary> GetOrCreate(GplPart part, const std::string& key,
                                                   const Builder& build, u64 name);
 
+    /// Starts building the library for `key` on a compile thread when nobody has, and returns at
+    /// once. A new pipeline builds its two shader libraries at the same time this way: the draw
+    /// waits for the slower one instead of both in turn (Ocarina of Time: 214 + 190 ms for one
+    /// pipeline). GetOrCreate for the same key takes the build over when the compile thread
+    /// hasn't started it, so `build` must stay valid until that GetOrCreate returns, and is never
+    /// called after it.
+    void Prefetch(GplPart part, std::string key, Builder build, u64 name);
+
     void RecordLink(bool optimized, std::chrono::nanoseconds time);
 
     /// Runs `task` on the low-priority thread that links fast-linked pipelines again with link
@@ -129,15 +135,10 @@ public:
     void Report();
 
 private:
-    struct Entry {
-        std::mutex mutex;
-        std::condition_variable condition;
-        bool done{};
-        std::shared_ptr<const GplLibrary> library;
-    };
+    /// Builds the library with `build`, timing it for the report; null when it failed.
+    std::shared_ptr<const GplLibrary> Build(GplPart part, const Builder& build, u64 name);
 
-    std::mutex mutex;
-    std::unordered_map<std::string, std::shared_ptr<Entry>> entries;
+    BuildOnceMap<GplLibrary> entries;
 
     std::array<std::atomic<u32>, 2> built{};
     std::array<std::atomic<u32>, 2> failed{};
@@ -152,8 +153,11 @@ private:
     std::atomic<u32> fallbacks{};
     std::atomic<u32> logged_builds{};
     std::atomic<size_t> total_libraries{};
-    /// Last member: stopped before the counters its tasks report to are destroyed.
+    std::array<std::atomic<u32>, 2> prefetched{};
+    /// Last members: stopped before the counters their tasks report to are destroyed.
     Common::ThreadWorker optimize_worker{1, "VkGplOptimize", {}, Common::ThreadPlacement::Background};
+    /// Prefetch: at normal priority, as a draw usually waits for what they build.
+    Common::ThreadWorker compile_workers{2, "VkGplCompile", {}, Common::ThreadPlacement::Default};
     std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
 };
 
