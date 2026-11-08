@@ -155,6 +155,24 @@ constexpr std::array ULTRAWIDE_RECORDS{
     BuiltinPatchRecord{0xEF383C, ULTRAWIDE_CTOR_HIGH, ULTRAWIDE_CTOR_HIGH_ORIGINAL},
 };
 
+// The render pipeline's settings are mirrored into nodes (main+0x11ac..., per setting: init, then
+// compare and store when it changes) after `bl getter; ldrb w8, [x0]`. `mov w8, wzr` there makes
+// the setting false. Module offsets: the community IPS files' offsets are these + 0x100.
+constexpr std::array<u8, 4> OOT_LDRB_W8_X0{0x08, 0x00, 0x40, 0x39};
+constexpr std::array<u8, 4> OOT_MOV_W8_WZR{0xE8, 0x03, 0x1F, 0x2A};
+
+// cLohan's OcclusionOff_ZPrePassAndSamplesQuery: CreateZPrePassOcclusionQuery (getter
+// main+0xf5acc0) and CreateSamplesPassedQuery (main+0xf5bf70) off, so the game stops issuing the
+// per-object occlusion queries and the conditional renders (macro 0xe2c) they feed.
+constexpr std::array OOT_OCCLUSION_OFF_RECORDS{
+    BuiltinPatchRecord{0x11ACE68, OOT_MOV_W8_WZR, OOT_LDRB_W8_X0},
+    BuiltinPatchRecord{0x11B828C, OOT_MOV_W8_WZR, OOT_LDRB_W8_X0},
+    BuiltinPatchRecord{0x11B82A4, OOT_MOV_W8_WZR, OOT_LDRB_W8_X0},
+    BuiltinPatchRecord{0x11ACEC8, OOT_MOV_W8_WZR, OOT_LDRB_W8_X0},
+    BuiltinPatchRecord{0x11B82DC, OOT_MOV_W8_WZR, OOT_LDRB_W8_X0},
+    BuiltinPatchRecord{0x11B82F4, OOT_MOV_W8_WZR, OOT_LDRB_W8_X0},
+};
+
 constexpr std::array BUILTIN_PATCHES{
     // Ocarina of Time takes its "dynamic resolution disabled" path, so the 3D renders at full scale
     // instead of following the GPU-time controller down to its 480p floor.
@@ -193,6 +211,15 @@ constexpr std::array BUILTIN_PATCHES{
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
         .records = ULTRAWIDE_RECORDS,
         .ultrawide = true,
+    },
+    // Ocarina of Time stops issuing its per-object occlusion queries and the conditional renders
+    // they feed.
+    BuiltinPatch{
+        .name = "Occlusion Off (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = OOT_OCCLUSION_OFF_RECORDS,
     },
 };
 
