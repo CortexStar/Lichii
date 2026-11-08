@@ -268,6 +268,7 @@ private:
         RasterizerDiscardEnable,
         DepthBiasEnable,
         LogicOp,
+        LogicOpEnable,
         ColorWriteEnable,
         VertexInput,
     };
@@ -451,6 +452,7 @@ private:
         u32 rasterizer_discard{};
         u32 depth_bias_enable{};
         u32 logic_op{};
+        u32 logic_op_enable{};
         std::array<VkBool32, 8> color_write_enable{};
         const void* vertex_input{};
     };
@@ -459,6 +461,8 @@ private:
     Tegra::Engines::Maxwell3D::DirtyState::Flags dyn_state_mask{};
     bool dyn_state_mask_built{};
     bool dyn_state_never_skip{};
+    /// AMD with a dynamic logic op enable: VideoCommon::HostLogicOpEnable's float workaround.
+    bool logic_op_float_workaround{};
 
     /// Vertex input layouts, built once and recorded by pointer
     /// (immutable while the rasterizer lives).

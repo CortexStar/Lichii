@@ -123,6 +123,7 @@ add_library(video_core STATIC
     nx2_cmdpage_diag.h
     nx2_debug_control.cpp
     nx2_debug_control.h
+    host_logic_op.h
     nx2_profile.h
     nx2_query_fast.h
     nx2_reactive.h
