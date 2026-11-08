@@ -20,6 +20,7 @@
 #include "common/assert.h"
 #include "common/dkb_frame_trace.h"
 #include "common/logging.h"
+#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/core.h"
 #include "shader_recompiler/exception.h"
@@ -102,6 +103,132 @@ void KeplerCompute::ConsumeSinkImpl(Core::System& system) {
     }
     method_sink.clear();
 }
+
+namespace {
+
+// EDEN_NX2_DRAIN_CHECK (diagnostic): the back compares what it reads and releases running a QMD
+// signal with what the split front's QMD view read and noted for it (FrontQmdView::Check), the
+// values the reductions and maxima land with too, and every 512th time the view's table with
+// its own.
+[[nodiscard]] bool QmdCheckEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_DRAIN_CHECK");
+        return value != nullptr && value[0] != '0';
+    }();
+    return enabled;
+}
+
+struct QmdCheckCell {
+    std::optional<u32> expected; ///< Set by the front's check before the release lands
+    bool at_least{};
+};
+
+// What the back read and released running the last QMD signal (the back thread's own).
+struct QmdBackCheck {
+    struct Released {
+        GPUVAddr address;
+        u32 payload;
+        u32 flags;
+        std::shared_ptr<QmdCheckCell> cell; ///< Reductions and maxima: compared when they land
+    };
+    std::vector<std::pair<GPUVAddr, NativeQmdScheduler::Descriptor>> reads;
+    std::vector<Released> releases;
+};
+QmdBackCheck& BackCheck() {
+    static QmdBackCheck check;
+    return check;
+}
+
+struct QmdCheckStats {
+    std::atomic<u64> signals, read_differences, release_differences, values, value_differences,
+        tables, table_differences;
+    std::atomic<u32> logged;
+    std::atomic<s64> last_report;
+};
+QmdCheckStats& CheckStats() {
+    static QmdCheckStats stats{};
+    return stats;
+}
+
+// A reduction or a maximum landed with `value`: what the view noted for it, if it did.
+void CheckLandedValue(const std::shared_ptr<QmdCheckCell>& cell, GPUVAddr address, u32 value) {
+    if (!cell || !cell->expected) {
+        return;
+    }
+    auto& stats = CheckStats();
+    stats.values.fetch_add(1, std::memory_order_relaxed);
+    const bool same = cell->at_least ? value >= *cell->expected : value == *cell->expected;
+    if (!same) {
+        stats.value_differences.fetch_add(1, std::memory_order_relaxed);
+        if (stats.logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+            LOG_WARNING(HW_GPU, "QMD view check: {:#x} landed {:#x}, the front noted {}{:#x}",
+                        address, value, cell->at_least ? ">= " : "", *cell->expected);
+        }
+    }
+}
+
+// The back, right after it ran a signal the front's QMD view valued: compares.
+void CheckQmdSignal(const VideoCommon::FrontQmdView::Check& front,
+                    const std::shared_ptr<NativeQmdScheduler>& table) {
+    auto& stats = CheckStats();
+    auto& back = BackCheck();
+    stats.signals.fetch_add(1, std::memory_order_relaxed);
+    const auto log = [&stats](std::string_view what) {
+        if (stats.logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+            LOG_WARNING(HW_GPU, "QMD view check: {}", what);
+        }
+    };
+    bool reads_same = front.reads.size() == back.reads.size();
+    for (size_t i = 0; reads_same && i < front.reads.size(); ++i) {
+        reads_same = front.reads[i].address == back.reads[i].first &&
+                     front.reads[i].descriptor == back.reads[i].second;
+    }
+    if (!reads_same) {
+        stats.read_differences.fetch_add(1, std::memory_order_relaxed);
+        log(fmt::format("{} descriptors read, the front read {} (first {:#x})", back.reads.size(),
+                        front.reads.size(), back.reads.empty() ? 0 : back.reads[0].first));
+    }
+    bool releases_same = front.notes.size() == back.releases.size();
+    for (size_t i = 0; releases_same && i < front.notes.size(); ++i) {
+        const auto& noted = front.notes[i];
+        const auto& released = back.releases[i];
+        releases_same = noted.address == released.address && noted.payload == released.payload &&
+                        noted.flags == released.flags;
+        if (releases_same && noted.known && released.cell) {
+            released.cell->expected = noted.value;
+            released.cell->at_least = noted.at_least;
+        }
+    }
+    if (!releases_same) {
+        stats.release_differences.fetch_add(1, std::memory_order_relaxed);
+        log(fmt::format("{} releases, the front noted {} (first {:#x})", back.releases.size(),
+                        front.notes.size(), back.releases.empty() ? 0 : back.releases[0].address));
+    }
+    if (table) {
+        static const NativeQmdScheduler shared;
+        stats.tables.fetch_add(1, std::memory_order_relaxed);
+        if (!table->SameStates(shared)) {
+            stats.table_differences.fetch_add(1, std::memory_order_relaxed);
+            log(fmt::format("the table differs ({} QMDs, the back's {})", table->StateCount(),
+                            shared.StateCount()));
+        }
+    }
+    const s64 now = std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
+    if (s64 last = stats.last_report.load(std::memory_order_relaxed);
+        now - last >= 10 && stats.last_report.compare_exchange_strong(last, now)) {
+        LOG_INFO(HW_GPU,
+                 "QMD view check: {} signals ({} read, {} released otherwise), {} landed values "
+                 "({} differ), {} tables ({} differ)",
+                 stats.signals.load(), stats.read_differences.load(),
+                 stats.release_differences.load(), stats.values.load(),
+                 stats.value_differences.load(), stats.tables.load(),
+                 stats.table_differences.load());
+    }
+}
+
+} // Anonymous namespace
 
 // A semaphore write that lands when its fence signals, counted as an asynchronous report
 // (Tegra::Nx2AsyncReportsSettled) until it did; none at an unmapped address.
@@ -378,10 +505,20 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             }
         }
         VideoCommon::Nx2Profile::Scope signal_scope{VideoCommon::Nx2Profile::Zone::QmdSignal};
+        const bool checking = QmdCheckEnabled() && front_macros;
+        if (checking) {
+            BackCheck().reads.clear();
+            BackCheck().releases.clear();
+        }
         const auto error = native_qmd.Signal(qmd_address, argument,
             [&](u64 address, NativeQmdScheduler::Descriptor& descriptor) {
                 if (!memory_manager.IsFullyMappedRange(address, sizeof(descriptor))) return false;
                 memory_manager.ReadBlockUnsafe(address, descriptor.data(), sizeof(descriptor));
+                SCOPE_EXIT {
+                    if (checking) {
+                        BackCheck().reads.emplace_back(address, descriptor);
+                    }
+                };
                 // An all-zero QMD whose words GPU work wrote (a copy) may still be only in the
                 // buffer cache: flush it and read again.
                 if (std::ranges::all_of(descriptor, [](u32 word) { return word == 0; })) {
@@ -423,9 +560,16 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                 if (!memory_manager.IsFullyMappedRange(address, four_words ? 16 : sizeof(payload))) return false;
                 // The split's front: a page the query cache may hold results for.
                 VideoCommon::GpuSplit::NoteGpuSemaphore(address);
+                std::shared_ptr<QmdCheckCell> cell;
+                if (checking) {
+                    if ((flags & (1U << 26)) || (!four_words && (flags & (1U << 19)))) {
+                        cell = std::make_shared<QmdCheckCell>();
+                    }
+                    BackCheck().releases.push_back({address, payload, flags, cell});
+                }
                 if (flags & (1U << 26)) {
                     const auto report = MakeFencedReport(address);
-                    rasterizer->SignalFence([this, address, payload, flags, report] {
+                    rasterizer->SignalFence([this, address, payload, flags, report, cell] {
                         const u32 value = ReduceSemaphore((flags >> 20) & 7, (flags >> 24) & 1,
                                                           memory_manager.Read<u32>(address), payload);
                         memory_manager.Write<u32>(address, value);
@@ -444,6 +588,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                         if (report) {
                             report->Complete();
                         }
+                        CheckLandedValue(cell, address, value);
                     });
                 } else if (four_words) {
                     rasterizer->Query(address, VideoCommon::QueryType::Payload,
@@ -454,7 +599,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                     // releases also advance: a plain write would move it backwards and leave
                     // GEQ acquires waiting forever.
                     const auto report = MakeFencedReport(address);
-                    rasterizer->SignalFence([this, address, payload, report] {
+                    rasterizer->SignalFence([this, address, payload, report, cell] {
                         const u32 value = (std::max)(memory_manager.Read<u32>(address), payload);
                         memory_manager.Write<u32>(address, value);
                         if (const auto device = memory_manager.GpuToCpuAddress(address)) {
@@ -463,6 +608,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                         if (report) {
                             report->Complete();
                         }
+                        CheckLandedValue(cell, address, value);
                     });
                 } else {
                     static const u64 watch = [] {
@@ -1888,6 +2034,9 @@ KeplerCompute::FrontState& KeplerCompute::Front(VideoCommon::GpuSplit& split) {
         // A new session's or a restarted split's: the QMDs the back scheduled meanwhile, in the
         // table the engines share. The back is idle, its table the current one.
         VideoCommon::FrontQmdView::Get().TakeOver(native_qmd);
+        if (QmdCheckEnabled()) {
+            VideoCommon::FrontQmdView::Get().EnableChecks();
+        }
     }
     return *front;
 }
@@ -2220,6 +2369,25 @@ void KeplerCompute::BackWrites(Core::System& system, const u64* writes, u32 coun
     }
 }
 
+void KeplerCompute::FrontNoteSignal(VideoCommon::GpuSplit& split, bool valued) {
+    namespace Profile = VideoCommon::Nx2Profile;
+    auto& view = VideoCommon::FrontQmdView::Get();
+    split.NoteDispatch(valued);
+    Profile::Add(valued          ? Profile::Counter::QmdValued
+                 : view.Synced() ? Profile::Counter::QmdWaited
+                                 : Profile::Counter::QmdUnsynced,
+                 1);
+    if (!valued || !QmdCheckEnabled()) {
+        return;
+    }
+    static u64 checks{};
+    std::shared_ptr<NativeQmdScheduler> table;
+    if (++checks % 512 == 0 && view.Current()) {
+        table = view.CopyTable();
+    }
+    split.DeferFunction([check = view.TakeCheck(), table] { CheckQmdSignal(check, table); });
+}
+
 void KeplerCompute::FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& fs, u32 method) {
     // Narrow drains: instead of every compute macro word and memory-writing method counting as
     // unbounded (DmaPusher::FrontBackWrites), what ProcessNativeMethod writes.
@@ -2236,7 +2404,7 @@ void KeplerCompute::FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& fs
         if (SignalsQmd(method, argument)) {
             const bool valued = view.Signal(split, FrontQmdMemory{memory_manager},
                                             GPUVAddr{fs.registers[0xad]} << 8, argument, nullptr);
-            split.NoteDispatch(valued);
+            FrontNoteSignal(split, valued);
         }
         break;
     }
@@ -2261,7 +2429,7 @@ void KeplerCompute::FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& fs
         if ((fs.registers[0xa7] & (1U << 24)) != 0 || (fs.registers[0xcc] & (1U << 12)) == 0) {
             const bool valued =
                 view.Signal(split, FrontQmdMemory{memory_manager}, address, 3, &qmd);
-            split.NoteDispatch(valued);
+            FrontNoteSignal(split, valued);
         }
         break;
     }

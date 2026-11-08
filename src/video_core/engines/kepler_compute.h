@@ -295,6 +295,8 @@ private:
     void FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split, FrontState& state);
     /// Narrow drains (GpuSplit::NarrowDrains): notes what the method just sent writes.
     void FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& state, u32 method);
+    /// A QMD signal was just sent: what holds acquires for it, profile counts, checks.
+    void FrontNoteSignal(VideoCommon::GpuSplit& split, bool valued);
     std::unique_ptr<FrontState> front;
     bool front_macros{};
     /// Writes the front holds back to send as one ring entry (GpuSplit::Writes). Register

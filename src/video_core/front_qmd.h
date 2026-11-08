@@ -5,13 +5,16 @@
 
 #include <array>
 #include <deque>
+#include <memory>
 #include <optional>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "common/common_types.h"
 #include "video_core/gpu_split.h"
 #include "video_core/native_qmd.h"
+#include "video_core/nx2_profile.h"
 
 namespace VideoCommon {
 
@@ -84,6 +87,9 @@ public:
 
     /// The engines schedule QMDs the front does not see (the split stopped).
     void Lose() {
+        if (synced) {
+            Nx2Profile::Add(Nx2Profile::Counter::QmdLost, 1);
+        }
         synced = false;
         inline_writes_count = 0;
         ClearWaiting();
@@ -98,6 +104,38 @@ public:
     }
     [[nodiscard]] size_t Waiting() const {
         return waiting.size();
+    }
+
+    /// EDEN_NX2_DRAIN_CHECK (diagnostic): what the last signal Signal valued read and noted, for
+    /// the back to compare with what it reads and releases running it.
+    struct CheckRead {
+        GPUVAddr address;
+        Descriptor descriptor;
+    };
+    struct CheckNote {
+        GPUVAddr address;
+        u32 payload; ///< The release's own
+        u32 flags;
+        u32 value; ///< What the word holds once it landed, if `known`
+        bool known;
+        bool at_least;
+    };
+    struct Check {
+        std::vector<CheckRead> reads;
+        std::vector<CheckNote> notes;
+    };
+    void EnableChecks() {
+        checking = true;
+    }
+    [[nodiscard]] Check TakeCheck() {
+        return std::exchange(check, {});
+    }
+    /// A copy of the table, while it is current (as the back's once it ran everything sent).
+    [[nodiscard]] std::shared_ptr<Tegra::NativeQmdScheduler> CopyTable() const {
+        auto copy =
+            std::make_shared<Tegra::NativeQmdScheduler>(Tegra::NativeQmdScheduler::OwnTable{});
+        copy->CopyStates(scheduler);
+        return copy;
     }
 
     /// LOAD_INLINE_QMD_DATA was just sent: running it, the back writes `qmd` to the QMD at
@@ -226,6 +264,7 @@ private:
             }
             waiting.pop_front();
             retry_after = 0;
+            Nx2Profile::Add(Nx2Profile::Counter::QmdLate, 1);
         }
         // Every signal sent before the reads made late is valued: none of their releases waits.
         late_reads.clear();
@@ -268,6 +307,9 @@ private:
                 }
             }
             attempt_reads.push_back(qmd_address);
+            if (checking && !late) {
+                check.reads.push_back({qmd_address, descriptor});
+            }
             return true;
         };
         const auto release = [&](u64 destination, u32 payload, u32 flags) {
@@ -278,6 +320,9 @@ private:
             releases.push_back({destination, payload, flags});
             return true;
         };
+        if (checking) {
+            check = {};
+        }
         scheduler.BeginAttempt();
         scheduler.Signal(address, argument, read, release, [](const Descriptor&) { return true; });
         if (!failure && late && ReleasesIntoLateReads()) {
@@ -399,22 +444,27 @@ private:
                 }
             }
         }
+        CheckNote note{address, payload, flags, payload, true, false};
         if (reduction) {
             if (base) {
                 const bool is_signed = ((flags >> 24) & 1) != 0;
-                memory.NoteRelease(
-                    split, address,
-                    Tegra::ReduceSemaphore((flags >> 20) & 7, is_signed, *base, payload), false);
+                note.value = Tegra::ReduceSemaphore((flags >> 20) & 7, is_signed, *base, payload);
+                memory.NoteRelease(split, address, note.value, false);
             } else {
+                note.known = false;
                 memory.ForgetRelease(split, address);
             }
         } else if (maximum) {
             // Whatever the word held, it holds the payload at least.
-            memory.NoteRelease(split, address, base ? (std::max)(*base, payload) : payload,
-                               !base.has_value());
+            note.value = base ? (std::max)(*base, payload) : payload;
+            note.at_least = !base.has_value();
+            memory.NoteRelease(split, address, note.value, note.at_least);
         } else {
             // Four words: the payload as 64 bits, a time stamp after it.
             memory.NoteRelease(split, address, payload, false);
+        }
+        if (checking) {
+            check.notes.push_back(note);
         }
     }
 
@@ -429,6 +479,8 @@ private:
     std::deque<WaitingSignal> waiting;
     u64 retry_after{};
     std::unordered_set<u64> late_reads;
+    bool checking{};
+    Check check;
     /// The last inline QMDs sent, oldest first from inline_writes_count on: a back a millisecond
     /// behind has some ten to write, a few times that in long frames.
     std::array<InlineWrite, 256> inline_writes{};

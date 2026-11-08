@@ -163,29 +163,37 @@ inline u64 Ticks() {
 
 /// Amounts counted on the GPU thread, logged per second with the zones.
 enum class Counter : u32 {
-    DownloadBytes,  ///< Buffer data copied back from the host GPU at fences
-    DownloadCopies, ///< Buffer ranges copied back
-    DmaReadBytes,   ///< Guest memory the native MME read with DMA
+    DownloadBytes,           ///< Buffer data copied back from the host GPU at fences
+    DownloadCopies,          ///< Buffer ranges copied back
+    DmaReadBytes,            ///< Guest memory the native MME read with DMA
     DownloadBytesOnDmaPages, ///< Of DownloadBytes: on pages the MME has DMA-read
-    MethodWrites,   ///< 3D register writes (Maxwell3D::CallMethod below the macro range)
-    SameValueWrites, ///< Of MethodWrites: the register already held the value
-    AcquireChecks,  ///< Semaphore acquires evaluated
-    AcquireWaits,   ///< Of AcquireChecks: not met yet (the channel waits)
-    DeltaWords,     ///< Split back: StateDelta words applied
-    DeltaSameWords, ///< Of DeltaWords: the register held the value already
-    CbWriteWords,   ///< Split back: words in Kind::CbWrite entries
-    BatchRepeats,   ///< Split back: instances a DrawBatch counted without replaying them
-    RingWords,      ///< Split back: ring words consumed
-    RingEntries,    ///< Split back: ring entries executed
-    FusedWrites,    ///< Split back: compute writes in Kind::Writes entries (EDEN_NX2_COMPUTE_FUSE)
-    MergedUploads,  ///< Split back: inline upload flushes joined to the one before (I2M_MERGE)
-    RunDraws,       ///< Split back: draw.end words in Kind::DrawRun entries
+    MethodWrites,            ///< 3D register writes (Maxwell3D::CallMethod below the macro range)
+    SameValueWrites,         ///< Of MethodWrites: the register already held the value
+    AcquireChecks,           ///< Semaphore acquires evaluated
+    AcquireWaits,            ///< Of AcquireChecks: not met yet (the channel waits)
+    DeltaWords,              ///< Split back: StateDelta words applied
+    DeltaSameWords,          ///< Of DeltaWords: the register held the value already
+    CbWriteWords,            ///< Split back: words in Kind::CbWrite entries
+    BatchRepeats,            ///< Split back: instances a DrawBatch counted without replaying them
+    RingWords,               ///< Split back: ring words consumed
+    RingEntries,             ///< Split back: ring entries executed
+    FusedWrites,   ///< Split back: compute writes in Kind::Writes entries (EDEN_NX2_COMPUTE_FUSE)
+    MergedUploads, ///< Split back: inline upload flushes joined to the one before (I2M_MERGE)
+    RunDraws,      ///< Split back: draw.end words in Kind::DrawRun entries
     DispatchNoBarrier,      ///< Guest dispatches recorded without the barrier before them
     DispatchBarrierOther,   ///< ... with it: other work was recorded since the last dispatch
     DispatchBarrierUnknown, ///< ... with it: accesses not fully known (indirect, replaced, ...)
     DispatchBarrierRaw,     ///< ... with it: reads what a dispatch since the barrier wrote
     DispatchBarrierWaw,     ///< ... with it: writes what a dispatch since the barrier wrote
     DispatchBarrierWar,     ///< ... with it: writes what a dispatch since the barrier read
+    // The split front's QMD view (FrontQmdView): signals whose releases it noted when sent,
+    // signals that waited for the back and of them those valued late, signals sent while it had
+    // no table, and the times it lost its table.
+    QmdValued,
+    QmdWaited,
+    QmdLate,
+    QmdUnsynced,
+    QmdLost,
     Count,
 };
 
@@ -587,6 +595,20 @@ inline bool Report(const char* thread_name = "GPU thread") {
                             rate(Counter::DispatchNoBarrier), rate(Counter::DispatchBarrierOther),
                             rate(Counter::DispatchBarrierUnknown), rate(Counter::DispatchBarrierRaw),
                             rate(Counter::DispatchBarrierWaw), rate(Counter::DispatchBarrierWar));
+    }
+    if (const u64 signals = data.counters[static_cast<size_t>(Counter::QmdValued)] +
+                            data.counters[static_cast<size_t>(Counter::QmdWaited)] +
+                            data.counters[static_cast<size_t>(Counter::QmdUnsynced)];
+        signals != 0) {
+        const auto per_second = [&](Counter counter) {
+            return static_cast<double>(data.counters[static_cast<size_t>(counter)]) * 1e9 /
+                   static_cast<double>(window);
+        };
+        line += fmt::format(" | QMD view: {:.0f} signals valued, {:.0f} waited ({:.0f} valued "
+                            "late), {:.0f} without a table, {:.0f} tables lost",
+                            per_second(Counter::QmdValued), per_second(Counter::QmdWaited),
+                            per_second(Counter::QmdLate), per_second(Counter::QmdUnsynced),
+                            per_second(Counter::QmdLost));
     }
     std::string drains;
     for (size_t i = 0; i < data.drain_count.size(); ++i) {
