@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -151,14 +152,26 @@ public:
 
     void Reset();
 
+    /// Whether the timer thread must be woken for an event at `time` (basic_lock held).
+    [[nodiscard]] bool NeedsWake(s64 time, bool relaxed) const;
+
     using heap_t = boost::heap::fibonacci_heap<CoreTiming::Event, boost::heap::compare<std::greater<>>>;
     heap_t event_queue;
     s64 global_timer = 0;
 #ifdef _WIN32
     s64 timer_resolution_ns{};
 #endif
-    /// Set by Advance: until when the timer thread can sleep in the OS (see Common::OsWakeTime).
-    s64 next_os_wake{};
+    /// Set by Advance for the timer thread: wait until `until`, in the OS (blocks) or precisely.
+    struct NextWait {
+        s64 until{};
+        bool blocks{};
+    } next_wait;
+    /// When the timer thread looks at the queue next: the minimum while it is in Advance, the
+    /// maximum while it waits on an empty queue (basic_lock).
+    s64 planned_wake{(std::numeric_limits<s64>::min)()};
+    /// How late an OS wait of the timer thread can end (Advance; see Common::OsWakeTime).
+    s64 os_wake_guard{};
+
     u64 event_fifo_id = 0;
     std::atomic<s64> pause_end_time{};
     /// Cycle timing

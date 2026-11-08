@@ -7,6 +7,7 @@
 #include <bitset>
 #include <chrono>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -190,4 +191,33 @@ TEST_CASE("CoreTiming[DroppedEventType]", "[core]") {
     core_timing.AddTicks(1'000'000);
     REQUIRE_FALSE(core_timing.Advance().has_value());
     REQUIRE(later_ran);
+}
+
+TEST_CASE("CoreTiming[WakeOnlyWhenNeeded]", "[core]") {
+    // ScheduleEvent wakes the timer thread only if it would otherwise look at the queue too late:
+    // a precise event needs it up os_wake_guard before, a relaxed one by its due time.
+    Core::Timing::CoreTiming core_timing;
+    core_timing.SetMulticore(false);
+    core_timing.os_wake_guard = 100;
+    core_timing.planned_wake = 1'000;
+    CHECK(core_timing.NeedsWake(1'050, false));
+    CHECK_FALSE(core_timing.NeedsWake(1'100, false));
+    CHECK_FALSE(core_timing.NeedsWake(5'000, false));
+    CHECK_FALSE(core_timing.NeedsWake(1'050, true));
+    CHECK(core_timing.NeedsWake(999, true));
+
+    // Advance plans the next look: nothing queued means never, so any new event wakes it.
+    REQUIRE_FALSE(core_timing.Advance().has_value());
+    CHECK(core_timing.planned_wake == (std::numeric_limits<s64>::max)());
+    CHECK(core_timing.NeedsWake(1'000'000'000'000, false));
+    // With an event queued, it looks again by the time it has to wait for it.
+    const auto later = Core::Timing::CreateEvent(
+        "later", [](s64, std::chrono::nanoseconds) { return std::nullopt; });
+    core_timing.ScheduleEvent(std::chrono::milliseconds{10}, later);
+    const auto next = core_timing.Advance();
+    REQUIRE(next.has_value());
+    CHECK(core_timing.planned_wake == core_timing.next_wait.until);
+    CHECK(core_timing.next_wait.until <= *next);
+    CHECK_FALSE(core_timing.NeedsWake(*next + 1'000'000'000, false));
+    core_timing.UnscheduleEvent(later);
 }

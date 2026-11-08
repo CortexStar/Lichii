@@ -105,12 +105,15 @@ void CoreTiming::Initialize(std::function<void()>&& on_thread_init_) {
                     if (auto const next_time = Advance(); next_time) {
                         // There are more events left in the queue. Sleep in the OS while no
                         // event needs a precise wake-up, then wait precisely for the next one:
-                        // a monitor wait counts as CPU time for as long as it lasts.
-                        auto const now = GetGlobalTimeNs().count();
-                        if (next_os_wake > now) {
-                            event.BlockFor(std::chrono::nanoseconds(next_os_wake - now));
-                        } else if (*next_time > now) {
-                            event.WaitFor(std::chrono::nanoseconds(*next_time - now));
+                        // a monitor wait counts as CPU time for as long as it lasts. Advance
+                        // chose which (next_wait) and told ScheduleEvent when to wake us.
+                        auto const remaining = next_wait.until - GetGlobalTimeNs().count();
+                        if (remaining > 0) {
+                            if (next_wait.blocks) {
+                                event.BlockFor(std::chrono::nanoseconds(remaining));
+                            } else {
+                                event.WaitFor(std::chrono::nanoseconds(remaining));
+                            }
                         }
                     } else {
                         // Queue is empty, wait until another event is scheduled and signals us to
@@ -173,6 +176,7 @@ bool CoreTiming::HasPendingEvents() const {
 
 void CoreTiming::ScheduleEvent(std::chrono::nanoseconds ns_into_future,
                                const std::shared_ptr<EventType>& event_type, bool absolute_time) {
+    bool wake;
     {
         std::scoped_lock scope{basic_lock};
         const auto next_time{absolute_time ? ns_into_future : GetGlobalTimeNs() + ns_into_future};
@@ -180,15 +184,18 @@ void CoreTiming::ScheduleEvent(std::chrono::nanoseconds ns_into_future,
         auto h{event_queue.emplace(Event{next_time.count(), event_fifo_id++, event_type, 0,
                                          heap_t::handle_type{}, event_type->relaxed})};
         (*h).handle = h;
+        wake = NeedsWake(next_time.count(), event_type->relaxed);
     }
-
-    event.Set();
+    if (wake) {
+        event.Set();
+    }
 }
 
 void CoreTiming::ScheduleLoopingEvent(std::chrono::nanoseconds start_time,
                                       std::chrono::nanoseconds resched_time,
                                       const std::shared_ptr<EventType>& event_type,
                                       bool absolute_time) {
+    bool wake;
     {
         std::scoped_lock scope{basic_lock};
         const auto next_time{absolute_time ? start_time : GetGlobalTimeNs() + start_time};
@@ -197,9 +204,18 @@ void CoreTiming::ScheduleLoopingEvent(std::chrono::nanoseconds start_time,
                                          resched_time.count(), heap_t::handle_type{},
                                          event_type->relaxed})};
         (*h).handle = h;
+        wake = NeedsWake(next_time.count(), event_type->relaxed);
     }
+    if (wake) {
+        event.Set();
+    }
+}
 
-    event.Set();
+bool CoreTiming::NeedsWake(s64 time, bool relaxed) const {
+    // The timer thread looks at the queue again by planned_wake (Advance), or right away while it
+    // is in Advance (planned_wake is then the minimum). The new event only needs it sooner if the
+    // thread has to be up before then to wait for it.
+    return Common::OsWakeTime(time, relaxed, os_wake_guard) < planned_wake;
 }
 
 void CoreTiming::UnscheduleEvent(const std::shared_ptr<EventType>& event_type,
@@ -273,6 +289,8 @@ u64 CoreTiming::GetGPUTicks() const {
 
 std::optional<s64> CoreTiming::Advance() {
     std::scoped_lock lock{advance_lock, basic_lock};
+    // Scanning: events scheduled from here on are seen below, so they need no wake-up.
+    planned_wake = std::numeric_limits<s64>::min();
     global_timer = GetGlobalTimeNs().count();
 
     while (!event_queue.empty() && event_queue.top().time <= global_timer) {
@@ -332,14 +350,20 @@ std::optional<s64> CoreTiming::Advance() {
     }
 
     if (!event_queue.empty()) {
-        const s64 guard = OsWakeGuardNs();
+        os_wake_guard = OsWakeGuardNs();
         s64 os_wake = std::numeric_limits<s64>::max();
         for (const Event& queued : event_queue) {
-            os_wake = (std::min)(os_wake, Common::OsWakeTime(queued.time, queued.relaxed, guard));
+            os_wake =
+                (std::min)(os_wake, Common::OsWakeTime(queued.time, queued.relaxed, os_wake_guard));
         }
-        next_os_wake = os_wake;
-        return event_queue.top().time;
+        const s64 top = event_queue.top().time;
+        // Decided here, under the lock, so ScheduleEvent compares against what the thread does.
+        next_wait.blocks = os_wake > GetGlobalTimeNs().count();
+        next_wait.until = next_wait.blocks ? os_wake : top;
+        planned_wake = next_wait.until;
+        return top;
     } else {
+        planned_wake = std::numeric_limits<s64>::max();
         return std::nullopt;
     }
 }
