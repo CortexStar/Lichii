@@ -13,6 +13,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <unordered_set>
@@ -576,7 +577,13 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
     // colour image and stores none retains its colour and opens a skip window; the pass that
     // stores an image upscaling it is replaced by a plain copy and closes it. The gameplay
     // network is left alone: its pair (+0xc0 -> +0xd0) carries the tonemap.
-    if (!native_upscale_disabled && !dlss_chain.active &&
+    // EXPERIMENT (do not merge): EDEN_NX2_UPSCALE_REPLACE=0 runs the real movie network
+    // (upstream 92f119195f's switch), for the image and GPU-time A/B against the copy.
+    static const bool network_replace = [] {
+        const char* value = std::getenv("EDEN_NX2_UPSCALE_REPLACE");
+        return value == nullptr || std::string_view{value} != "0";
+    }();
+    if (network_replace && !native_upscale_disabled && !dlss_chain.active &&
         Settings::GetCurrentProgramID() == VideoCommon::OotNetwork::ProgramId &&
         (launch_description.const_buffer_enable_mask & 1)) {
         const auto& cbuf = launch_description.const_buffer_config[0];
