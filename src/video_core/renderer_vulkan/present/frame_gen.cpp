@@ -234,8 +234,13 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
 
     const VkExtent2D extent{.width = frame->width, .height = frame->height};
     const f32 flow_scale = ConfiguredFlowScale(peak_guest_extent, extent);
-    if ((!chain && !fsr3_chain) || built_extent.width != extent.width || built_extent.height != extent.height ||
-        built_format != format || built_flow_scale != flow_scale) {
+    // The type can change from the status bar while a game runs. Only LSFG uses the flow scale;
+    // rebuilding the built-in chain for it would drop its history.
+    const bool wants_fsr3 = Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3;
+    const bool wrong_chain = wants_fsr3 ? !fsr3_chain : !chain;
+    const bool flow_scale_changed = chain && built_flow_scale != flow_scale;
+    if (wrong_chain || built_extent.width != extent.width || built_extent.height != extent.height ||
+        built_format != format || flow_scale_changed) {
         Rebuild(device, extent, format, flow_scale);
     }
 
