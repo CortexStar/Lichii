@@ -794,8 +794,13 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         device.SupportsDynamicState3LineRasterizationMode();
     // Polygon mode, provoking vertex, line stipple and patch control points: dynamic where the
     // device has them (the 9070 XT has all four), recorded through the dynamic-state packet.
+    // EXPERIMENT (do not merge): EDEN_NX2_DYNAMIC_RASTER=0 keeps these four in the pipelines,
+    // for the A/B; the winner ships unconditionally.
     dynamic_features.has_dynamic_raster_state =
-        dynamic_features.has_extended_dynamic_state_3_enables;
+        dynamic_features.has_extended_dynamic_state_3_enables && [] {
+            const char* const value = std::getenv("EDEN_NX2_DYNAMIC_RASTER");
+            return value == nullptr || std::string_view{value} != "0";
+        }();
     dynamic_features.has_dynamic_polygon_mode =
         dynamic_features.has_dynamic_raster_state && device.SupportsDynamicState3PolygonMode();
     dynamic_features.has_dynamic_provoking_vertex =
