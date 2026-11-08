@@ -394,7 +394,12 @@ private:
             NoteFirstUnpublished(); // TEST
         }
         write_position += words;
-        if (write_position - published_local >= publish_every) {
+        const u64 unpublished = write_position - published_local;
+        // The back waits for work at the last position published (it stored it in back_idle_at
+        // before it spun): it gets these words after a few, not after publish_every.
+        if (unpublished >= publish_every ||
+            (unpublished >= PublishAfterWait &&
+             back_idle_at.load(std::memory_order_relaxed) == published_local)) {
             Publish();
         }
     }
@@ -493,6 +498,10 @@ private:
     /// The front sleeps in Backoff (#161: instead of yielding).
     alignas(128) std::atomic<bool> front_waiting{};
     std::atomic<u32> front_wake{};
+    /// The back's position when it last ran out of work, stored before it waits for more: while
+    /// it equals published_local, the back waits for the words the front holds (Commit). The back
+    /// writes it once per wait, the front reads it at every Commit.
+    alignas(128) std::atomic<u64> back_idle_at{~u64{0}};
     /// TEST (profile_publishes): when the back last ran out of work, 0 while it runs.
     alignas(128) std::atomic<u64> back_idle_since{};
     std::jthread back_thread;

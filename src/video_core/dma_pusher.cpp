@@ -125,12 +125,16 @@ bool DmaPusher::Step() {
     // as this frame's commands (methods on unbound subchannels, garbage QMDs, then a channel
     // waiting forever on a release it never got). The acquire is released now, so the commands
     // are written and the memory not yet reused: copy them here. EDEN_NX2_RESNAPSHOT=0: off.
+    // The current list's entries before this one ran already, and an entry the acquire suspended
+    // inside reads its remaining words from memory anyway (CanUseSubmittedCommands).
     if (ResnapshotEnabled() && suspensions.load(std::memory_order_relaxed) != suspensions_before) {
         const u64 now = suspensions.load(std::memory_order_acquire);
+        size_t first_entry = dma_pushbuffer_subindex + (command_resume_offset != 0 ? 1 : 0);
         for (CommandList& list : dma_pushbuffer) {
             if (!list.submitted_offsets.empty()) {
-                RefreshSnapshot(list, now);
+                RefreshSnapshot(list, now, first_entry);
             }
+            first_entry = 0;
         }
     }
 
@@ -643,10 +647,11 @@ void DmaPusher::NoteDmaSemaphore(u32 method, u32 argument) {
     }
 }
 
-void DmaPusher::RefreshSnapshot(CommandList& list, u64 now) {
+void DmaPusher::RefreshSnapshot(CommandList& list, u64 now, size_t first_entry) {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Resnapshot}; // TEST
     list.snapshot_suspensions = now;
-    for (size_t i = 0; i < list.command_lists.size() && i < list.submitted_offsets.size(); ++i) {
+    for (size_t i = first_entry; i < list.command_lists.size() && i < list.submitted_offsets.size();
+         ++i) {
         const CommandListHeader& entry = list.command_lists[i];
         const u32 offset = list.submitted_offsets[i];
         if (offset + entry.size > list.submitted_words.size()) {

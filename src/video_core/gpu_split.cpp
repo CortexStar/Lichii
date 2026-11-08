@@ -157,6 +157,7 @@ void GpuSplit::Stop() {
     front_macros = false;
     published.store(0, std::memory_order_relaxed);
     consumed.store(0, std::memory_order_relaxed);
+    back_idle_at.store(~u64{0}, std::memory_order_relaxed);
     back_waiting.store(false, std::memory_order_relaxed);
     front_waiting.store(false, std::memory_order_relaxed);
     tick_requested.store(false, std::memory_order_relaxed);
@@ -568,6 +569,8 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         MaybeTick();
         u64 available = published.load(std::memory_order_acquire);
         if (available == read_position) {
+            // The front publishes what it holds at its next commit (a few words) from now on.
+            back_idle_at.store(read_position, std::memory_order_relaxed);
             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
             const GpuWaitStats::IdleScope idle{GpuWaitStats::g_back_idle_ns};
             // TEST (profile_publishes): out of work from now until this block ends.
