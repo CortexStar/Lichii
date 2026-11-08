@@ -11,7 +11,9 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <source_location>
 #include <span>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -117,11 +119,14 @@ private:
 /// Vulkan exception generated from a VkResult.
 class Exception final : public std::exception {
 public:
-    /// Construct the exception with a result.
+    /// Construct the exception with a result and where it was raised: the call that returned it
+    /// (a wrapper's Check names its Vulkan function).
     /// @pre result != VK_SUCCESS
-    explicit Exception(VkResult result_) : result{result_} {}
+    explicit Exception(VkResult result_,
+                       std::source_location location = std::source_location::current());
     virtual ~Exception() = default;
 
+    /// The result and the source line that raised it.
     const char* what() const noexcept override;
     VkResult GetResult() const noexcept {
         return result;
@@ -129,20 +134,23 @@ public:
 
 private:
     VkResult result;
+    std::string message;
 };
 
 /// Throws a Vulkan exception if result is not success.
-inline void Check(VkResult result) {
+inline void Check(VkResult result,
+                  std::source_location location = std::source_location::current()) {
     if (result != VK_SUCCESS) {
-        throw Exception(result);
+        throw Exception(result, location);
     }
 }
 
 /// Throws a Vulkan exception if result is an error.
 /// @return result
-inline VkResult Filter(VkResult result) {
+inline VkResult Filter(VkResult result,
+                       std::source_location location = std::source_location::current()) {
     if (result < 0) {
-        throw Exception(result);
+        throw Exception(result, location);
     }
     return result;
 }

@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <memory>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -361,8 +363,21 @@ bool Load(VkInstance instance, InstanceDispatch& dld) noexcept {
 #undef X
 }
 
+Exception::Exception(VkResult result_, std::source_location location) : result{result_} {
+    // Named from src/ down, as the log names files.
+    std::string_view file{location.file_name()};
+    if (const size_t src = file.rfind("src/video_core/"); src != std::string_view::npos) {
+        file.remove_prefix(src + 4);
+    } else if (const size_t win_src = file.rfind("src\\video_core\\");
+               win_src != std::string_view::npos) {
+        file.remove_prefix(win_src + 4);
+    }
+    message = std::string{string_VkResult(result)} + " at " + std::string{file} + ':' +
+              std::to_string(location.line());
+}
+
 const char* Exception::what() const noexcept {
-    return string_VkResult(result);
+    return message.c_str();
 }
 
 void Destroy(VkInstance instance, const InstanceDispatch& dld) noexcept {
