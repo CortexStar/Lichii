@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -415,6 +416,30 @@ constexpr std::array<std::pair<u32, u32>, 13> UltrawideOriginals{{
     {0x215FB0, 0x52A89E08},
 }};
 
+// Sets an environment variable for one test section (the built-ins' experiment switches).
+class ScopedEnv {
+public:
+    ScopedEnv(const char* name_, const char* value) : name{name_} {
+#ifdef _WIN32
+        _putenv_s(name, value);
+#else
+        setenv(name, value, 1);
+#endif
+    }
+    ~ScopedEnv() {
+#ifdef _WIN32
+        _putenv_s(name, "");
+#else
+        unsetenv(name);
+#endif
+    }
+    ScopedEnv(const ScopedEnv&) = delete;
+    ScopedEnv& operator=(const ScopedEnv&) = delete;
+
+private:
+    const char* name;
+};
+
 void PutWord(std::vector<u8>& nso, size_t offset, u32 word) {
     std::memcpy(nso.data() + offset, &word, sizeof(word));
 }
@@ -488,6 +513,26 @@ TEST_CASE("Built-in Ultrawide applies only docked with the 21:9 aspect ratio", "
         REQUIRE(WordAt(patched, sizeof(Loader::NSOHeader) + 0x20C99C) == 0x14E8E761);
         REQUIRE(WordAt(patched, sizeof(Loader::NSOHeader) + 0x215FB0) == 0x14E8C1DF);
         REQUIRE(WordAt(patched, sizeof(Loader::NSOHeader) + 0x3C46724) == 0x72A8A428);
+    }
+
+    SECTION("EDEN_OOT_UW_SIZE_TABLE=0 leaves the size table, index and cap records out") {
+        UltrawideSettings settings{Settings::AspectRatio::R21_9, Settings::ConsoleMode::Docked};
+        ScopedEnv off{"EDEN_OOT_UW_SIZE_TABLE", "0"};
+        const auto patched = context.Manager().PatchNSO(nso, "main");
+        REQUIRE(WordAt(patched, UltrawideSizeOffset) == 2560);
+        REQUIRE(WordAt(patched, UltrawideIndexOffset) == BneInstruction);
+        REQUIRE(WordAt(patched, UltrawideCapOffset) == 0x6B0802BF);
+        REQUIRE(WordAt(patched, UltrawideCaveOffset) == 0);
+        REQUIRE(WordAt(patched, UltrawidePictureOffset) == 0xD281AE08);
+    }
+
+    SECTION("EDEN_OOT_UW_MARKERS=0 leaves the two marker sites out") {
+        UltrawideSettings settings{Settings::AspectRatio::R21_9, Settings::ConsoleMode::Docked};
+        ScopedEnv off{"EDEN_OOT_UW_MARKERS", "0"};
+        const auto patched = context.Manager().PatchNSO(nso, "main");
+        REQUIRE(WordAt(patched, sizeof(Loader::NSOHeader) + 0x20C99C) == 0x52A89E08);
+        REQUIRE(WordAt(patched, sizeof(Loader::NSOHeader) + 0x3C46720) == 0);
+        REQUIRE(WordAt(patched, UltrawideCanvasOffset) == 0x14D34876);
     }
 
     SECTION("16:9 leaves the game alone") {
