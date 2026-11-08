@@ -20,6 +20,7 @@
 #include "core/frontend/graphics_context.h"
 #include "video_core/control/scheduler.h"
 #include "video_core/dma_pusher.h"
+#include "video_core/front_qmd.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/gpu_split.h"
@@ -90,6 +91,10 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                         last_progress = std::chrono::steady_clock::now();
                     }
                 }
+                if (split.Active()) {
+                    // The back may have run everything sent meanwhile.
+                    VideoCommon::FrontQmdView::Get().MaybeTakeOver(split);
+                }
                 if (!state.queue.TryPop(next)) {
                     // The CPU usually releases the semaphore soon after: poll for half a
                     // millisecond, then in short sleeps. Ocarina of Time waits here ~330 times a
@@ -118,8 +123,9 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
             }
             last_progress = std::chrono::steady_clock::now();
             if (split.Active()) {
-                // Between commands the back may have run out of work.
+                // Between commands the back may have run out of work, and everything sent.
                 split.PublishSoon();
+                VideoCommon::FrontQmdView::Get().MaybeTakeOver(split);
                 // Only command lists are parsed here; everything else runs on the back thread
                 // in order, and so does the signal that the command ran.
                 auto* const rasterizer_ptr = renderer.ReadRasterizer();
@@ -128,7 +134,10 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     Tegra::Nx2ListStats::NoteListQueued(submit_list->channel, -1);
                     scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
                 } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
-                    split.Defer([gpu = &system.GPU()] { gpu->TickWork(); });
+                    // The sync operations (the back may run them between any two entries too,
+                    // GpuSplit::RequestTick): flushes write guest memory where GPU work wrote.
+                    split.Defer([gpu = &system.GPU()] { gpu->TickWork(); },
+                                VideoCommon::GpuSplit::Writes::Caches);
                 } else if (auto* run = std::get_if<RunCommand>(&next.data)) {
                     if (run->before_later_reads) {
                         // GPU memory maps unmap caches (UnmapMemory downloads): the back's state.

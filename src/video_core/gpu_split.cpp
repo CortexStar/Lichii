@@ -147,8 +147,10 @@ void GpuSplit::Stop() {
     semaphore_writes_limit = 1024;
     last_any_write = 0;
     last_unplaced_write = 0;
+    last_mapping_change = 0;
     last_noted_write = 0;
     write_positions.fill(0);
+    coarse_positions.fill(0);
     published_local = 0;
     consumed_cache = 0;
     publish_every = PublishEvery;
@@ -310,8 +312,17 @@ void ForEachDeviceRange(const Tegra::MemoryManager& memory, GPUVAddr address, u6
 } // Anonymous namespace
 
 void GpuSplit::NoteWrite(const Tegra::MemoryManager& memory, GPUVAddr address, u64 size) {
-    if (size > MaxNotedBytes || address + size < address) {
-        NoteAnyWrite();
+    if (size == 0) {
+        return;
+    }
+    if (size > MaxCoarseNotedBytes || address + size < address) {
+        NoteUnplacedWrite();
+        return;
+    }
+    if (size > MaxNotedBytes) {
+        ForEachDeviceRange(memory, address, size, [this](DAddr device, u64 bytes) {
+            NoteCoarseDeviceWrite(device, bytes);
+        });
         return;
     }
     ForEachDeviceRange(memory, address, size,
@@ -322,6 +333,14 @@ void GpuSplit::NoteDeviceWrite(DAddr address, u64 size) {
     const u64 last = (address + size - 1) >> WriteGranuleBits;
     for (u64 granule = address >> WriteGranuleBits; granule <= last; ++granule) {
         write_positions[WriteSlot(granule)] = write_position;
+    }
+    last_noted_write = write_position;
+}
+
+void GpuSplit::NoteCoarseDeviceWrite(DAddr address, u64 size) {
+    const u64 last = (address + size - 1) >> CoarseGranuleBits;
+    for (u64 granule = address >> CoarseGranuleBits; granule <= last; ++granule) {
+        coarse_positions[CoarseSlot(granule)] = write_position;
     }
     last_noted_write = write_position;
 }
@@ -355,6 +374,10 @@ u64 GpuSplit::DeviceWritesTarget(DAddr address, u64 size) const {
     const u64 last = (address + size - 1) >> WriteGranuleBits;
     for (u64 granule = address >> WriteGranuleBits; granule <= last; ++granule) {
         target = std::max(target, write_positions[WriteSlot(granule)]);
+    }
+    const u64 last_coarse = (address + size - 1) >> CoarseGranuleBits;
+    for (u64 granule = address >> CoarseGranuleBits; granule <= last_coarse; ++granule) {
+        target = std::max(target, coarse_positions[CoarseSlot(granule)]);
     }
     return target;
 }

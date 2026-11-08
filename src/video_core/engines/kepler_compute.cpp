@@ -1437,8 +1437,7 @@ namespace {
 
 // The QMD scheduling of every channel, run on the front as the back will run it.
 VideoCommon::FrontQmdView& GetFrontQmd() {
-    static VideoCommon::FrontQmdView view;
-    return view;
+    return VideoCommon::FrontQmdView::Get();
 }
 
 // An engine's GPU address space as its back reads QMDs and their release words (FrontQmdView).
@@ -1486,32 +1485,12 @@ struct FrontQmdMemory {
 }
 
 // What the back writes to guest memory running `method` (GpuSplit::Writes), as
-// ProcessNativeMethod runs it: nothing for register writes and the macro code and bindings (the
-// front's), what FrontNoteWrites notes for reports, inline QMDs and QMD launches, anywhere for
-// inline uploads (and with EDEN_NATIVE_DRAW_DIAGNOSTICS, the methods it traces).
-[[nodiscard]] VideoCommon::GpuSplit::Writes FrontWrites(const std::bitset<0xe00>& plain_methods,
-                                                        u32 method) {
+// ProcessNativeMethod runs it: below the macro methods, nothing for register writes, the macro
+// code and bindings (the front's) and the methods EDEN_NATIVE_DRAW_DIAGNOSTICS traces, and what
+// FrontNoteWrites notes for reports, inline QMDs, QMD launches and inline uploads.
+[[nodiscard]] VideoCommon::GpuSplit::Writes FrontWrites(u32 method) {
     using Writes = VideoCommon::GpuSplit::Writes;
-    if (method >= plain_methods.size()) {
-        return Writes::Anywhere;
-    }
-    if (plain_methods[method]) {
-        return Writes::Noted;
-    }
-    switch (method) {
-    case 0x45:
-    case 0x46:
-    case 0x47:
-    case 0x48:
-    case 0xae:
-    case 0xaf:
-    case 0xb0:
-    case 0x107:
-    case 0x6c3:
-        return Writes::Noted;
-    default:
-        return Writes::Anywhere;
-    }
+    return method < 0xe00 ? Writes::Noted : Writes::Unplaced;
 }
 
 } // Anonymous namespace
@@ -1543,8 +1522,9 @@ KeplerCompute::FrontState& KeplerCompute::Front(VideoCommon::GpuSplit& split) {
         front->bind_pointer = native_bind_pointer;
         front->macro = native_macro;
         front_macros = true;
-        // A new session's or a restarted split's: the QMDs the back scheduled meanwhile.
-        GetFrontQmd().Lose();
+        // A new session's or a restarted split's: the QMDs the back scheduled meanwhile, in the
+        // table the engines share. The back is idle, its table the current one.
+        GetFrontQmd().TakeOver(native_qmd);
     }
     return *front;
 }
@@ -1613,7 +1593,7 @@ void KeplerCompute::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit&
                                     const GPUVAddr* segment) {
     auto& fs = Front(split);
     if (method >= fs.registers.size()) {
-        split.Method(this, method, argument, is_last_call, segment);
+        split.Method(this, method, argument, is_last_call, segment, FrontWrites(method));
         return;
     }
     if (method >= 0xe00) {
@@ -1632,10 +1612,9 @@ void KeplerCompute::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit&
     }
     FrontApply(fs, method, argument);
     if (IsQmdMethod(method)) {
-        GetFrontQmd().Sync(split, native_qmd);
+        GetFrontQmd().MaybeTakeOver(split, native_qmd);
     }
-    split.Method(this, method, argument, is_last_call, segment,
-                 FrontWrites(native_plain_methods, method));
+    split.Method(this, method, argument, is_last_call, segment, FrontWrites(method));
     FrontNoteWrites(split, fs, method, argument, false);
     FrontQmdCheck(split);
 }
@@ -1673,6 +1652,17 @@ void KeplerCompute::FrontNoteWrites(VideoCommon::GpuSplit& split, const FrontSta
     case 0x107:
         FrontInlineQmd(split, fs, argument);
         break;
+    case KEPLER_COMPUTE_REG_INDEX(data_upload): {
+        // Upload::State::ProcessData, of the upload exec_upload started: the whole of it at each
+        // data method, at most.
+        Upload::Registers upload;
+        std::memcpy(&upload, fs.registers.data() + KEPLER_COMPUTE_REG_INDEX(upload),
+                    sizeof(upload));
+        const bool linear = (fs.registers[KEPLER_COMPUTE_REG_INDEX(exec_upload)] & 1) != 0;
+        const auto range = Upload::UploadedRange(upload, linear);
+        split.NoteWrite(memory_manager, range.address, range.size);
+        break;
+    }
     case 0xae:
     case 0xaf:
     case 0xb0:
@@ -1737,18 +1727,23 @@ void KeplerCompute::FrontInlineQmd(VideoCommon::GpuSplit& split, const FrontStat
                                    u32 last_word) {
     const GPUVAddr address = ((GPUVAddr{fs.registers[0xc6]} << 32) | fs.registers[0xc7]) << 8;
     if (!memory_manager.IsFullyMappedRange(address, 256)) {
-        // The back writes nothing either, unless a map still queued changes that.
-        if (!split.Ran(split.LastUnplacedWrite())) {
+        // The back writes nothing either, unless a change of the mappings still queued changes
+        // that.
+        if (!split.Ran(split.LastMappingChange())) {
             GetFrontQmd().Lose();
-            split.NoteAnyWrite();
+            split.NoteUnplacedWrite();
         }
         return;
     }
     split.NoteWrite(memory_manager, address, 256);
+    // The words the back writes (registers 0xc8 to 0x107).
+    NativeQmdScheduler::Descriptor qmd;
+    std::memcpy(qmd.data(), fs.registers.data() + 0xc8, sizeof(qmd));
+    qmd[63] = last_word;
+    if (const auto device = memory_manager.GpuToCpuAddress(address)) {
+        GetFrontQmd().NoteInlineWrite(split, *device, qmd);
+    }
     if ((fs.registers[0xa7] & (1U << 24)) != 0 || (fs.registers[0xcc] & (1U << 12)) == 0) {
-        NativeQmdScheduler::Descriptor qmd;
-        std::memcpy(qmd.data(), fs.registers.data() + 0xc8, sizeof(qmd));
-        qmd[63] = last_word;
         GetFrontQmd().Signal(split, FrontQmdMemory{memory_manager}, address, 3, &qmd);
     }
 }
@@ -1764,19 +1759,23 @@ void KeplerCompute::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuS
         return;
     }
     if (method >= fs.registers.size()) {
-        split.MultiMethod(this, method, base_start, amount, methods_pending, segment);
+        split.MultiMethod(this, method, base_start, amount, methods_pending, segment,
+                          FrontWrites(method));
         return;
     }
     for (u32 i = 0; i < amount; ++i) {
         FrontApply(fs, method, base_start[i]);
     }
     if (IsQmdMethod(method)) {
-        GetFrontQmd().Sync(split, native_qmd);
+        GetFrontQmd().MaybeTakeOver(split, native_qmd);
     }
     split.MultiMethod(this, method, base_start, amount, methods_pending, segment,
-                      FrontWrites(native_plain_methods, method));
-    // The back runs them one by one; what they write is the back's once it ran them all.
-    for (u32 i = 0; i < amount; ++i) {
+                      FrontWrites(method));
+    // The back runs them one by one; what they write is the back's once it ran them all. Each
+    // upload data word may write the upload's range: once covers them.
+    const u32 notes =
+        method == KEPLER_COMPUTE_REG_INDEX(data_upload) ? (std::min)(amount, 1U) : amount;
+    for (u32 i = 0; i < notes; ++i) {
         FrontNoteWrites(split, fs, method, base_start[i], false);
     }
     FrontQmdCheck(split);
@@ -1801,9 +1800,9 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
         }
         FrontApply(fs, address, value);
         if (IsQmdMethod(address)) {
-            GetFrontQmd().Sync(split, native_qmd);
+            GetFrontQmd().MaybeTakeOver(split, native_qmd);
         }
-        split.MacroWrite(this, address, value, FrontWrites(native_plain_methods, address));
+        split.MacroWrite(this, address, value, FrontWrites(address));
         FrontNoteWrites(split, fs, address, value, true);
         FrontQmdCheck(split);
         return true;

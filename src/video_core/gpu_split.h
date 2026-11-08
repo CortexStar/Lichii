@@ -133,7 +133,11 @@ public:
     /// What the sender of an entry tells about the guest memory the back writes running it, for
     /// the front's reads of guest memory (WaitForWrites, MemoryWritesTarget).
     enum class Writes : u8 {
-        Anywhere, ///< Unknown: a read anywhere waits for the entry
+        /// Unknown: a read anywhere waits for the entry, and it may change the GPU's mappings
+        /// (unmaps; GPU maps drain the split)
+        Anywhere,
+        /// Guest memory anywhere, the mappings not: engine work whose writes nobody placed
+        Unplaced,
         /// The GPU caches anywhere (shader stores, copies into buffers), guest memory only through
         /// them, where GPU work wrote (Nx2MayBeGpuWritten): a read of the caches waits for it, a
         /// read of other guest memory not (MemoryWritesTarget)
@@ -295,10 +299,18 @@ public:
         return write_position - published_local;
     }
 
-    /// The entry just sent (Writes::Noted) writes [address, address + size) of `memory`.
+    /// The entry just sent (Writes::Noted) writes [address, address + size) of `memory`, as
+    /// mapped now. Up to MaxNotedBytes by 256-byte granule, up to MaxCoarseNotedBytes by 64 KiB
+    /// granule, longer writes count as unplaced.
     void NoteWrite(const Tegra::MemoryManager& memory, GPUVAddr address, u64 size);
-    /// The entry just sent may write guest memory anywhere.
+    /// The entry just sent may write guest memory anywhere and change the GPU's mappings
+    /// (Writes::Anywhere).
     void NoteAnyWrite() {
+        NoteUnplacedWrite();
+        last_mapping_change = write_position;
+    }
+    /// The entry just sent may write guest memory anywhere (Writes::Unplaced).
+    void NoteUnplacedWrite() {
         last_any_write = write_position;
         last_unplaced_write = write_position;
     }
@@ -309,14 +321,21 @@ public:
     void NoteWrites(Writes writes) {
         if (writes == Writes::Anywhere) {
             NoteAnyWrite();
+        } else if (writes == Writes::Unplaced) {
+            NoteUnplacedWrite();
         } else if (writes == Writes::Caches) {
             NoteCacheWrite();
         }
     }
     /// The position after the last entry sent that may write guest memory where the front does
-    /// not know (NoteAnyWrite), outside what the caches hold.
+    /// not know (NoteAnyWrite, NoteUnplacedWrite), outside what the caches hold.
     [[nodiscard]] u64 LastUnplacedWrite() const {
         return (std::min)(last_unplaced_write, write_position);
+    }
+    /// The position after the last entry sent that may change the GPU's mappings (NoteAnyWrite):
+    /// once the back ran it, what is mapped now is what the back finds mapped.
+    [[nodiscard]] u64 LastMappingChange() const {
+        return (std::min)(last_mapping_change, write_position);
     }
     /// Once the back ran everything before the position returned, no entry sent so far writes
     /// guest memory in [address, address + size) of `memory` but through the GPU caches
@@ -350,18 +369,27 @@ private:
     static constexpr size_t PublishEvery = 256;
     static constexpr size_t PublishAfterWait = 8;
 
-    /// NoteWrite places writes by 256-byte granule of device memory, up to MaxNotedBytes long
-    /// (longer ones count as anywhere), in write_positions slots hashed by granule: granules that
-    /// share a slot share its position, so a read may wait for a write elsewhere, never miss one.
-    /// 16384 slots: the constant buffer words of a few hundred queued draws share few with a QMD.
+    /// NoteWrite places writes by 256-byte granule of device memory, up to MaxNotedBytes long,
+    /// in write_positions slots hashed by granule: granules that share a slot share its position,
+    /// so a read may wait for a write elsewhere, never miss one. 16384 slots: the constant buffer
+    /// words of a few hundred queued draws share few with a QMD. Writes up to MaxCoarseNotedBytes
+    /// (copies, uploads) go by 64 KiB granule into coarse_positions, longer ones count as
+    /// unplaced.
     static constexpr u32 WriteGranuleBits = 8;
     static constexpr u64 MaxNotedBytes = 0x4000;
     static constexpr u32 WriteSlotBits = 14;
+    static constexpr u32 CoarseGranuleBits = 16;
+    static constexpr u64 MaxCoarseNotedBytes = u64{16} << 20;
+    static constexpr u32 CoarseSlotBits = 12;
 
     static size_t WriteSlot(u64 granule) {
         return static_cast<size_t>((granule * 0x9E3779B97F4A7C15ULL) >> (64 - WriteSlotBits));
     }
+    static size_t CoarseSlot(u64 granule) {
+        return static_cast<size_t>((granule * 0x9E3779B97F4A7C15ULL) >> (64 - CoarseSlotBits));
+    }
     void NoteDeviceWrite(DAddr address, u64 size);
+    void NoteCoarseDeviceWrite(DAddr address, u64 size);
     /// The position WaitForWrites waits for.
     [[nodiscard]] u64 WritesTarget(const Tegra::MemoryManager& memory, GPUVAddr address,
                                    u64 size) const;
@@ -460,12 +488,16 @@ private:
     std::unordered_map<u64, SemaphoreWrite> semaphore_writes;
     size_t semaphore_writes_limit = 1024; ///< Forget what the back ran past this many
     /// After the last entry that may write guest memory or the GPU caches anywhere (NoteAnyWrite,
-    /// NoteCacheWrite), the last one that may write guest memory itself anywhere (NoteAnyWrite),
-    /// the last one NoteWrite placed, and the last placed write in each slot's granules.
+    /// NoteUnplacedWrite, NoteCacheWrite), the last one that may write guest memory itself
+    /// anywhere (NoteAnyWrite, NoteUnplacedWrite), the last one that may change the GPU's
+    /// mappings (NoteAnyWrite), the last one NoteWrite placed, and the last placed write in each
+    /// slot's granules, fine and coarse.
     u64 last_any_write{};
     u64 last_unplaced_write{};
+    u64 last_mapping_change{};
     u64 last_noted_write{};
     std::array<u64, size_t{1} << WriteSlotBits> write_positions{};
+    std::array<u64, size_t{1} << CoarseSlotBits> coarse_positions{};
     u64 published_local{};
     u64 consumed_cache{};
     u64 first_unpublished_ticks{}; ///< TEST: when the first word not published yet was sent
