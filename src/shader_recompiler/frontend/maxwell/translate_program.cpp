@@ -96,6 +96,10 @@ void MarkStorageByAddress(IR::Program& program, const HostTranslateInfo& host_in
     program.info.storage_by_address =
         host_info.gpu_page_table &&
         (program.info.uses_global_memory || !program.info.storage_buffers_descriptors.empty());
+    // Mesh and task programs bind in other stages' slots: their banks stay descriptors.
+    program.info.uniforms_by_address = host_info.uniforms_by_address &&
+                                       !program.info.constant_buffer_descriptors.empty() &&
+                                       program.stage != Stage::Mesh && program.stage != Stage::Task;
 }
 
 void AddNVNStorageBuffers(IR::Program& program, const HostTranslateInfo& host_info) {

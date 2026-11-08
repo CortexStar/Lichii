@@ -642,6 +642,11 @@ u64 BufferCacheRuntime::NullPageAddress() {
     return null_page_address;
 }
 
+std::pair<std::span<u8>, u64> BufferCacheRuntime::AllocateBankTable(u32 size) {
+    const StagingBufferRef ref = staging_pool.Request(size, MemoryUsage::Upload);
+    return {ref.mapped_span.first(size), ref.device_address + ref.offset};
+}
+
 u64 BufferCacheRuntime::SyncPageTable(size_t id, VideoCommon::GpuPageTable& table) {
     if (page_tables.size() <= id) {
         page_tables.resize(id + 1);

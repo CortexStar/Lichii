@@ -330,7 +330,11 @@ public:
 
     /// Info::storage_by_address: storage buffers and global memory through the GPU page table.
     bool storage_by_address{};
+    /// Info::uniforms_by_address: constant buffers from the draw's bank table.
+    bool uniforms_by_address{};
     const Info* program_info{};
+    Id bank_table_push_constant{};
+    u32 bank_table_member_index{};
     Id page_table_push_constant{};
     u32 page_table_member_index{};
     Id page_table_func{};
@@ -346,6 +350,9 @@ public:
     [[nodiscard]] Id StorageBaseAddress(u32 binding);
     /// The guest address (u64) of byte `offset` (u32 id) of storage buffer `binding`, plus `bias`.
     [[nodiscard]] Id StorageAddress(u32 binding, Id offset, u32 bias = 0);
+    /// A constant buffer read through the bank table (Info::uniforms_by_address): `binding` and
+    /// `byte_offset` are u32 ids, the offset already aligned down to `element_size`.
+    [[nodiscard]] Id BankLoad(Id result_type, u32 element_size, Id binding, Id byte_offset);
     /// A load or store through a PhysicalStorageBuffer pointer: Aligned (and Volatile for
     /// coherent global memory).
     [[nodiscard]] Id LoadByAddress(Id type, Id pointer, u32 alignment);

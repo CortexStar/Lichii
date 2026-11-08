@@ -10,6 +10,7 @@
 
 #include <boost/container/small_vector.hpp>
 
+#include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/memory_tracker_base.h"
 #include "video_core/buffer_cache/upload_order.h"
@@ -201,6 +202,7 @@ public:
         VkBuffer buffer;
         VkDeviceAddress device_address; // base of `buffer`, 0 without buffer device address
         u32 offset;
+        const u8* mapped; // the allocation's bytes (host-visible stream memory)
     };
 
     std::span<u8> BindMappedUniformBuffer([[maybe_unused]] size_t stage,
@@ -211,6 +213,7 @@ public:
             .buffer = ref.buffer,
             .device_address = ref.device_address,
             .offset = static_cast<u32>(ref.offset),
+            .mapped = ref.mapped_span.data(),
         };
         RebindStreamUniform(last_stream_uniform, size);
         return ref.mapped_span;
@@ -226,6 +229,11 @@ public:
     /// live: made on the scheduler tick that is current now, so the staging pool has not recycled
     /// it and the GPU has not even started on it.
     void RebindStreamUniform(const StreamUniformRef& ref, u32 size) {
+        if (bank_entry != nullptr) {
+            FillBankEntry(ref.device_address != 0 ? ref.device_address + ref.offset : 0, size);
+            last_bank_bytes = ref.mapped;
+            return;
+        }
         guest_descriptor_queue.AddBuffer(ref.buffer, ref.device_address, ref.offset, size);
     }
 
@@ -271,7 +279,28 @@ public:
     }
 
     void BindUniformBuffer(const Buffer& buffer, u32 offset, u32 size) {
+        if (bank_entry != nullptr) {
+            FillBankEntry(buffer.Handle() != VK_NULL_HANDLE ? buffer.DeviceAddress() + offset : 0,
+                          size);
+            last_bank_bytes = nullptr;
+            return;
+        }
         BindBuffer(buffer, offset, size);
+    }
+
+    /// Constant buffers by device address: while set, uniform binds fill this bank table entry
+    /// instead of adding a descriptor.
+    void SetBankEntry(Shader::Backend::SPIRV::BankTableEntry* entry) noexcept {
+        bank_entry = entry;
+    }
+
+    /// A draw's (or dispatch's) bank table: `size` bytes in the stream buffer, written now and
+    /// read by the shaders of the work recorded next. Returns its bytes and device address.
+    std::pair<std::span<u8>, u64> AllocateBankTable(u32 size);
+
+    /// The host-visible bytes the last bank entry points at (stream allocations), else nullptr.
+    [[nodiscard]] const u8* LastBankBytes() const noexcept {
+        return last_bank_bytes;
     }
 
     void BindStorageBuffer(const Buffer& buffer, u32 offset, u32 size,
@@ -330,6 +359,15 @@ private:
 
     VkFormat TexelBufferFormat(VideoCore::Surface::PixelFormat format) const;
 
+    /// A bank without memory reads zeroes from the null page.
+    void FillBankEntry(u64 address, u32 size) {
+        *bank_entry = Shader::Backend::SPIRV::BankTableEntry{
+            .address = address != 0 ? address : NullPageAddress(),
+            .size = address != 0 ? size : 0,
+            .reserved = 0,
+        };
+    }
+
     void ReserveNullBuffer();
     vk::Buffer CreateNullBuffer();
 
@@ -365,6 +403,8 @@ private:
     std::vector<VideoCommon::GpuPageTable::Update> page_table_updates;
     vk::Buffer null_page;
     u64 null_page_address{};
+    Shader::Backend::SPIRV::BankTableEntry* bank_entry{};
+    const u8* last_bank_bytes{};
 
     u32 uniform_buffer_alignment{1}; ///< Asked once per bound uniform buffer: kept here
     u32 storage_buffer_alignment{1};

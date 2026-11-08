@@ -141,7 +141,7 @@ inline void WriteDescriptorBuffer(const Device& device, const DescriptorBufferLa
 }
 
 [[nodiscard]] inline u32 NumDescriptorEntries(const Shader::Info& info) {
-    return Shader::NumDescriptors(info.constant_buffer_descriptors) +
+    return Shader::NumDescriptors(Shader::BoundConstantBuffers(info)) +
            Shader::NumDescriptors(Shader::BoundStorageBuffers(info)) +
            Shader::NumDescriptors(info.texture_buffer_descriptors) +
            Shader::NumDescriptors(info.image_buffer_descriptors) +
@@ -348,7 +348,7 @@ public:
         is_compute |= (stage & VK_SHADER_STAGE_COMPUTE_BIT) != 0 && !mesh_emulation;
         uses_mesh |= (stage & (VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT)) != 0;
 
-        Add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, stage, info.constant_buffer_descriptors);
+        Add(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, stage, Shader::BoundConstantBuffers(info));
         Add(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, stage, Shader::BoundStorageBuffers(info));
         Add(VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, stage, info.texture_buffer_descriptors);
         Add(VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, stage, info.image_buffer_descriptors);
