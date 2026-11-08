@@ -16,6 +16,7 @@ add_executable(tests
     video_core/upload_batch.cpp
     video_core/upload_order.cpp
     video_core/gpu_page_table.cpp
+    video_core/native_verify.cpp
     video_core/unswizzle_workers.cpp
     video_core/block_linear_swizzle.cpp
     video_core/aftermath_dump.cpp
