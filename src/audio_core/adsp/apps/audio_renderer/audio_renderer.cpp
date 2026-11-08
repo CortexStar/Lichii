@@ -132,6 +132,8 @@ void AudioRenderer::CreateSinkStreams() {
 void AudioRenderer::Main(std::stop_token stop_token) {
     Common::SetCurrentThreadName("DSP_AudioRenderer_Main");
     Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
+    // Renders a 5 ms audio frame each period: keep it on time under CPU load.
+    Common::SetCurrentThreadToGamesMmcss();
 
     // TODO: Create buffer map/unmap thread + mailbox
     // TODO: Create gMix devices, initialize them here

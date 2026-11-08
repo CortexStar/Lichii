@@ -880,6 +880,47 @@ void SetCurrentThreadToBackgroundWork() {
 #endif
 }
 
+void SetCurrentThreadToGamesMmcss() {
+#ifdef _WIN32
+    // avrt.dll is loaded at run time: no import library needed, as for the CPU-set calls.
+    using SetCharacteristics = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
+    using RevertCharacteristics = BOOL(WINAPI*)(HANDLE);
+    struct Avrt {
+        SetCharacteristics set{};
+        RevertCharacteristics revert{};
+    };
+    static const Avrt avrt = [] {
+        Avrt result;
+        if (const HMODULE module = LoadLibraryW(L"avrt.dll"); module != nullptr) {
+            result.set = reinterpret_cast<SetCharacteristics>(
+                reinterpret_cast<void*>(GetProcAddress(module, "AvSetMmThreadCharacteristicsW")));
+            result.revert = reinterpret_cast<RevertCharacteristics>(
+                reinterpret_cast<void*>(GetProcAddress(module, "AvRevertMmThreadCharacteristics")));
+        }
+        return result;
+    }();
+    // Leaves the task when the thread exits.
+    struct Registration {
+        HANDLE handle{};
+        ~Registration() {
+            if (handle != nullptr && avrt.revert != nullptr) {
+                avrt.revert(handle);
+            }
+        }
+    };
+    thread_local Registration registration;
+    if (registration.handle != nullptr || avrt.set == nullptr) {
+        return;
+    }
+    DWORD task_index = 0;
+    registration.handle = avrt.set(L"Games", &task_index);
+    if (registration.handle == nullptr) {
+        LOG_WARNING(Common, "AvSetMmThreadCharacteristicsW(Games) failed: {}",
+                    Common::GetLastErrorMsg());
+    }
+#endif
+}
+
 void SetCurrentThreadToAllCores() {
 #if defined(__ANDROID__)
     ADPF::RemoveCurrentThread();

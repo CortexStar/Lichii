@@ -344,6 +344,9 @@ void PresentManager::PresentThread(std::stop_token token) {
     Common::SetCurrentThreadName("VulkanPresent");
     Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
     Common::SetCurrentThreadToPerformanceCores();
+    // Each present is a short burst with a deadline; under background load a normal-class
+    // TIME_CRITICAL thread (GPU, GPUBack, guest cores) could otherwise delay it.
+    Common::SetCurrentThreadToGamesMmcss();
     while (!token.stop_requested()) {
         std::unique_lock lock{queue_mutex};
         // Wait for presentation frames

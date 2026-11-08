@@ -142,6 +142,12 @@ void SetCurrentThreadToEfficiencyCores();
 void SetCurrentThreadToBackgroundWork();
 void SetCurrentThreadToAllCores();
 
+/// Windows: registers the calling thread with MMCSS's "Games" task (AvSetMmThreadCharacteristics)
+/// until it exits, so the Multimedia Class Scheduler raises it above the process's
+/// TIME_CRITICAL threads while it stays within the task's CPU budget. For short, deadline-bound
+/// threads (present, audio). No-op elsewhere.
+void SetCurrentThreadToGamesMmcss();
+
 enum class PinnedRole : u32 { GpuFront, GpuBack, GuestCore };
 
 /// The experimental pin_gpu_threads setting (Windows and Linux): the split GPU thread's front and
