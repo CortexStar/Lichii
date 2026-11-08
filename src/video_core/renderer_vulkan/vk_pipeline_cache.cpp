@@ -689,10 +689,18 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     host_info.ApplyDescriptorLimitPolicy();
     // Storage buffers and global memory through the GPU page table (the buffer cache keeps it on
     // the same condition, BufferCacheRuntime::SupportsGpuPageTable).
-    profile.gpu_page_table = device.SupportsGpuPageTable();
+    // EXPERIMENT (do not merge): EDEN_NX2_NATIVE_STORAGE=0 / EDEN_NX2_NATIVE_UNIFORMS=0 turn the
+    // layers off for the A/B.
+    const auto experiment_off = [](const char* name) {
+        const char* const value = std::getenv(name);
+        return value != nullptr && value[0] == '0';
+    };
+    profile.gpu_page_table =
+        device.SupportsGpuPageTable() && !experiment_off("EDEN_NX2_NATIVE_STORAGE");
     host_info.gpu_page_table = profile.gpu_page_table;
     // Constant buffers by device address from each draw's bank table (same requirements).
-    profile.uniforms_by_address = device.SupportsGpuPageTable();
+    profile.uniforms_by_address =
+        device.SupportsGpuPageTable() && !experiment_off("EDEN_NX2_NATIVE_UNIFORMS");
     host_info.uniforms_by_address = profile.uniforms_by_address;
     LOG_INFO(Render_Vulkan,
              "Storage and global memory through the GPU page table: {}, constant buffers by "
