@@ -17,6 +17,7 @@
 #include <QLocale>
 #include <QString>
 #include <QToolButton>
+#include <QTranslator>
 #include <QVariant>
 
 #include "common/common_types.h"
@@ -187,10 +188,15 @@ void ConfigureUi::SetConfiguration() {
         ui->theme_combobox->findData(QString::fromStdString(UISettings::values.theme)));
     const QString language = QString::fromStdString(UISettings::values.language.GetValue());
     if (ui->language_combobox->findData(language) == -1) {
-        // A language this build has no translation for, which the main window shows in English.
-        // It is listed so that the setting stays until another language is chosen.
-        ui->language_combobox->addItem(tr("%1 - not in this build").arg(LanguageName(language)),
-                                       language);
+        // A language the list doesn't have, listed so that the setting stays until another one is
+        // chosen. It is marked missing only if the main window's load fails too: that load falls
+        // back to the base language (de.qm for de_AT), and shows English without one.
+        QTranslator probe;
+        QString name = LanguageName(language);
+        if (!probe.load(language, QStringLiteral(":/languages/"))) {
+            name = tr("%1 - not in this build").arg(name);
+        }
+        ui->language_combobox->addItem(name, language);
     }
     ui->language_combobox->setCurrentIndex(ui->language_combobox->findData(language));
     ui->show_add_ons->setChecked(UISettings::values.show_add_ons.GetValue());
