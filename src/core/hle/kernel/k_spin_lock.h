@@ -12,6 +12,14 @@
 
 namespace Kernel {
 
+/// Address waits for the kernel's own locks (Common::Nx2AddressWait: WaitOnAddress on Windows).
+namespace Nx2Wait {
+/// Sleeps while word holds expected; may return early.
+void Wait(std::atomic<u32>& word, u32 expected);
+void WakeOne(std::atomic<u32>& word);
+void WakeAll(std::atomic<u32>& word);
+} // namespace Nx2Wait
+
 class KSpinLock {
 public:
     explicit KSpinLock() = default;
@@ -25,8 +33,8 @@ public:
 
 private:
     // 0 free, 1 held, 2 held with (possible) sleepers. The scheduler lock is taken by every
-    // core thousands of times a frame and held for microseconds: a contended Lock spins briefly
-    // before sleeping, instead of putting the host thread to sleep at once and paying its
+    // core thousands of times a frame and held for microseconds: a contended Lock spins up to
+    // 20 us before sleeping, instead of putting the host thread to sleep at once and paying its
     // wake-up latency (std::mutex did).
     std::atomic<u32> m_state{0};
 };
