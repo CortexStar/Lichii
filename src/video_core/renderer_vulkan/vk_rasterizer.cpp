@@ -3004,13 +3004,17 @@ bool RasterizerVulkan::FrameDumpBuffers(bool compute, std::span<const u64> shade
 
 void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
     std::array<ImageView*, VideoCommon::NUM_RT> colors{};
-    const auto& ids = texture_cache.GetRenderTargets().color_buffer_ids;
+    const auto& render_targets = texture_cache.GetRenderTargets();
+    const auto& ids = render_targets.color_buffer_ids;
     for (size_t slot = 0; slot < ids.size(); ++slot) {
         if (ids[slot]) {
             colors[slot] = &texture_cache.GetImageView(ids[slot]);
         }
     }
-    if (frame_dump.BeginPass(framebuffer, colors)) {
+    ImageView* const depth = render_targets.depth_buffer_id
+                                 ? &texture_cache.GetImageView(render_targets.depth_buffer_id)
+                                 : nullptr;
+    if (frame_dump.BeginPass(framebuffer, colors, depth)) {
         scheduler.RequestRenderpass(framebuffer);
     }
 }

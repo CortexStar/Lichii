@@ -374,7 +374,8 @@ int FrameDump::Decode(const Target& target, const u8* pixel, std::array<float, 4
     return 0;
 }
 
-bool FrameDump::BeginPass(const void* framebuffer, std::span<ImageView* const> colors) {
+bool FrameDump::BeginPass(const void* framebuffer, std::span<ImageView* const> colors,
+                          ImageView* depth) {
     if (framebuffer == pass_framebuffer) {
         return false;
     }
@@ -386,6 +387,11 @@ bool FrameDump::BeginPass(const void* framebuffer, std::span<ImageView* const> c
             continue;
         }
         if (const auto target = MakeTarget(*colors[slot], slot)) {
+            pass_targets.push_back(*target);
+        }
+    }
+    if (depth) {
+        if (const auto target = MakeTarget(*depth, DEPTH_SLOT)) {
             pass_targets.push_back(*target);
         }
     }
@@ -532,8 +538,11 @@ bool FrameDump::EndPass() {
     for (const Target& target : pass_targets) {
         recorded |= Record(
             target,
-            fmt::format("{:04}_pass{:03}_d{}-{}_rt{}", sequence++, pass_index, pass_first_draw,
-                        draws, target.slot),
+            target.slot == DEPTH_SLOT
+                ? fmt::format("{:04}_pass{:03}_d{}-{}_zeta", sequence++, pass_index,
+                              pass_first_draw, draws)
+                : fmt::format("{:04}_pass{:03}_d{}-{}_rt{}", sequence++, pass_index,
+                              pass_first_draw, draws, target.slot),
             fmt::format(R"("kind":"pass","pass":{},"first_draw":{},"draw_count":{},"slot":{},"shaders":[{}])",
                         pass_index, pass_first_draw, draws - pass_first_draw, target.slot,
                         shaders));

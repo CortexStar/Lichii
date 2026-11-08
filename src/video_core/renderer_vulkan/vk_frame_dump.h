@@ -150,9 +150,11 @@ public:
                     const std::array<u32, 3>& block, std::optional<GPUVAddr> indirect,
                     std::optional<std::array<u32, 3>> indirect_grid);
 
-    /// Starts a pass when the framebuffer changes and captures the previous one.
-    /// Returns true when copies were recorded, which ends the current render pass.
-    bool BeginPass(const void* framebuffer, std::span<ImageView* const> colors);
+    /// Starts a pass when the framebuffer changes and captures the previous one: its colour
+    /// targets and its depth/stencil target (`depth`, may be null; depth-only passes such as
+    /// shadow maps have nothing else). Returns true when copies were recorded, which ends the
+    /// current render pass.
+    bool BeginPass(const void* framebuffer, std::span<ImageView* const> colors, ImageView* depth);
     void NoteDraw(std::span<const u64> shader_hashes);
     /// Captures the current pass; returns true when copies were recorded.
     bool EndPass();
@@ -167,6 +169,8 @@ public:
 
 private:
     enum class DepthEncoding { None, Unorm16, Unorm24, Float32 };
+    /// Target slot of a pass's depth/stencil attachment (after the colour slots).
+    static constexpr u32 DEPTH_SLOT = 8;
 
     struct Target {
         u32 slot;

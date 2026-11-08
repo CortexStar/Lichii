@@ -32,7 +32,7 @@ def fmt_list(values):
 def card(entry):
     kind = entry.get("kind", "?")
     if kind == "pass":
-        title = f"pass {entry['pass']} rt{entry['slot']} · draws {entry['first_draw']}+{entry['draw_count']}"
+        title = f"pass {entry['pass']} " + ("depth" if entry["slot"] == 8 else f"rt{entry['slot']}") + f" · draws {entry['first_draw']}+{entry['draw_count']}"
     elif kind == "dispatch":
         title = f"dispatch {entry['dispatch']} img{entry['slot']} · after draw {entry['after_draws']}"
     elif kind == "sampled" and "dispatch" in entry:
