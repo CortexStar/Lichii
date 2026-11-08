@@ -382,6 +382,12 @@ void CoreTiming::ResetTicks() {
     downcount = MAX_SLICE_LENGTH;
 }
 
+bool CoreTiming::GuestCounterIsHostClock() const {
+    return GuestCounterIsHostClock(is_multicore, Common::g_wall_clock.IsNative(),
+                                   Settings::values.sync_core_speed.GetValue(),
+                                   Settings::CurrentProgramIsSwitch2());
+}
+
 u64 CoreTiming::GetClockTicks() const {
     u64 fres = is_multicore ? Common::g_wall_clock.GetCNTPCT() : Common::g_wall_clock.CPUTickToGuestCNTPCT(cpu_ticks);
     // Switch 2 SDKs convert ticks with a fixed 31.25 MHz, so a scaled counter speeds up every

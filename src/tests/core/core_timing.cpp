@@ -221,3 +221,15 @@ TEST_CASE("CoreTiming[WakeOnlyWhenNeeded]", "[core]") {
     CHECK_FALSE(core_timing.NeedsWake(*next + 1'000'000'000, false));
     core_timing.UnscheduleEvent(later);
 }
+
+TEST_CASE("CoreTiming::GuestCounterIsHostClock", "[core]") {
+    using Core::Timing::CoreTiming;
+    // Multicore, native clock, no core-speed sync, a Switch 2 title: the JIT reads the TSC.
+    STATIC_CHECK(CoreTiming::GuestCounterIsHostClock(true, true, false, true));
+    // Single core counts emulated ticks; a non-native clock is not the TSC.
+    STATIC_CHECK_FALSE(CoreTiming::GuestCounterIsHostClock(false, true, false, true));
+    STATIC_CHECK_FALSE(CoreTiming::GuestCounterIsHostClock(true, false, false, true));
+    // Core-speed sync divides by the speed limit; Switch 1 titles scale by the CPU clock.
+    STATIC_CHECK_FALSE(CoreTiming::GuestCounterIsHostClock(true, true, true, true));
+    STATIC_CHECK_FALSE(CoreTiming::GuestCounterIsHostClock(true, true, false, false));
+}

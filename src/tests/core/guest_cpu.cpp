@@ -1,0 +1,132 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#include <map>
+#include <optional>
+#include <catch2/catch_test_macros.hpp>
+#include "common/common_types.h"
+#include "dynarmic/interface/A64/a64.h"
+
+#if defined(_MSC_VER)
+#include <intrin.h>
+#elif defined(__x86_64__)
+#include <x86intrin.h>
+#endif
+
+namespace {
+
+constexpr u64 Entry = 0x10000;
+constexpr u32 Svc0 = 0xD4000001;
+
+/// Guest code at Entry, flat little-endian data memory, SVC #0 stops the run.
+class GuestEnvironment : public Dynarmic::A64::UserCallbacks {
+public:
+    Dynarmic::A64::Jit* jit{};
+    std::map<u64, u32> code;
+    std::map<u64, u8> data;
+    u64 callback_counter_reads{};
+
+    std::optional<u32> MemoryReadCode(u64 address) override {
+        const auto it = code.find(address);
+        if (it == code.end()) {
+            return std::nullopt;
+        }
+        return it->second;
+    }
+    u64 MemoryRead(u64 address, size_t size) override {
+        u64 value = 0;
+        for (size_t i = 0; i < size; ++i) {
+            value |= u64(data[address + i]) << (8 * i);
+        }
+        return value;
+    }
+    Dynarmic::A64::Vector MemoryRead128(u64 address) override {
+        return {MemoryRead(address, 8), MemoryRead(address + 8, 8)};
+    }
+    void MemoryWrite(u64 address, u64 value, size_t size) override {
+        for (size_t i = 0; i < size; ++i) {
+            data[address + i] = u8(value >> (8 * i));
+        }
+    }
+    void MemoryWrite128(u64 address, Dynarmic::A64::Vector value) override {
+        MemoryWrite(address, value[0], 8);
+        MemoryWrite(address + 8, value[1], 8);
+    }
+    void CallSVC(u32) override {
+        jit->HaltExecution();
+    }
+    void ExceptionRaised(u64, Dynarmic::A64::Exception) override {}
+    void AddTicks(u64) override {}
+    u64 GetTicksRemaining() override {
+        return 1000;
+    }
+    u64 GetCNTPCT() override {
+        ++callback_counter_reads;
+        return 0;
+    }
+
+    void Load(std::initializer_list<u32> instructions) {
+        u64 address = Entry;
+        for (const u32 instruction : instructions) {
+            code[address] = instruction;
+            address += 4;
+        }
+    }
+};
+
+Dynarmic::A64::UserConfig BaseConfig(GuestEnvironment& env) {
+    Dynarmic::A64::UserConfig config;
+    config.callbacks = &env;
+    config.enable_cycle_counting = false;
+    config.wall_clock_cntpct = true;
+    return config;
+}
+
+} // namespace
+
+#if defined(__x86_64__) || defined(_M_X64)
+TEST_CASE("Inline CNTPCT_EL0 reads scale the host TSC", "[guest_cpu]") {
+    GuestEnvironment env;
+    // mrs x0, cntpct_el0; mrs x1, cntpct_el0; isb; mrs x2, cntpct_el0; svc #0
+    env.Load({0xD53BE020, 0xD53BE021, 0xD5033FDF});
+    env.code[Entry + 12] = 0xD53BE022;
+    env.code[Entry + 16] = Svc0;
+    // Factor 2^63: the counter is TSC / 2.
+    const u64 factor = u64{1} << 63;
+    u64 last_tsc = 0;
+    auto config = BaseConfig(env);
+    config.cntpct_rdtsc_factor = &factor;
+    config.cntpct_last_tsc = &last_tsc;
+    config.cntpct_spin_tsc = 1000;
+    Dynarmic::A64::Jit jit{config};
+    env.jit = &jit;
+
+    const u64 before = __rdtsc();
+    jit.SetPC(Entry);
+    jit.Run();
+    const u64 after = __rdtsc();
+
+    CHECK(env.callback_counter_reads == 0);
+    const u64 x0 = jit.GetRegister(0);
+    const u64 x1 = jit.GetRegister(1);
+    const u64 x2 = jit.GetRegister(2);
+    CHECK(x0 >= before / 2);
+    CHECK(x0 <= x1);
+    CHECK(x1 <= x2);
+    CHECK(x2 <= after / 2);
+    // The last read's TSC is kept for the polling check.
+    CHECK(last_tsc >= before);
+    CHECK(last_tsc <= after);
+    CHECK(last_tsc / 2 == x2);
+}
+
+TEST_CASE("CNTPCT_EL0 without a factor uses the callback", "[guest_cpu]") {
+    GuestEnvironment env;
+    env.Load({0xD53BE020, Svc0});
+    Dynarmic::A64::Jit jit{BaseConfig(env)};
+    env.jit = &jit;
+    jit.SetPC(Entry);
+    jit.Run();
+    CHECK(env.callback_counter_reads == 1);
+    CHECK(jit.GetRegister(0) == 0);
+}
+#endif

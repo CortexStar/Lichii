@@ -130,6 +130,15 @@ public:
     /// Returns the current CNTPCT tick value.
     u64 GetClockTicks() const;
 
+    /// Whether GetClockTicks is the host clock's guest counter (WallClock::GetCNTPCT) unchanged:
+    /// multicore on the native (invariant TSC) clock, no synchronized core speed, and no CPU clock
+    /// scaling (Switch 2 titles ignore it). The JIT then reads the counter inline.
+    static constexpr bool GuestCounterIsHostClock(bool multicore, bool native_clock,
+                                                  bool sync_core_speed, bool switch2) {
+        return multicore && native_clock && !sync_core_speed && switch2;
+    }
+    bool GuestCounterIsHostClock() const;
+
     /// Returns the current GPU tick value.
     u64 GetGPUTicks() const;
 
