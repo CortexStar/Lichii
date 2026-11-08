@@ -168,6 +168,17 @@ public:
                  const std::array<f32, 16>& reproject, bool flip_y, bool reset,
                  bool hdr = false, ImageView* effects = nullptr, ImageView* fog = nullptr);
 
+    /// Ocarina of Time's upscaled scene without the HUD (the output pass's image before the HUD is
+    /// drawn over it), for AMD frame generation's HUD-less input.
+    struct OotHudlessScene {
+        VkImage image{}; ///< B10G11R11, GENERAL, read-only until the next scene frame
+        VkExtent2D extent{};
+        u64 scene_frame{~u64{0}}; ///< OotDlss::SceneFrame() it was copied in
+    };
+    [[nodiscard]] const OotHudlessScene& OotHudless() const noexcept {
+        return oot_hudless;
+    }
+
     /// Copies an image into a particle copy, or back (OotMotionVectors::SnapshotScene).
     void OotSnapshotScene(VkImage image, VideoCore::Surface::PixelFormat format,
                           std::array<u32, 2> size, u32 which, bool restore);
@@ -335,6 +346,9 @@ public:
     bool oot_fsr4_checked{};
 #endif
     vk::Sampler oot_point_sampler;
+    vk::Image oot_hudless_image;
+    OotHudlessScene oot_hudless;
+    void SnapshotOotHudless(const Framebuffer& scene);
     std::optional<std::chrono::steady_clock::time_point> oot_amd_last_evaluation;
 
     /// TemporalUpscale's history: its previous result (images[current]) and the image the next

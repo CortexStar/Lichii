@@ -174,6 +174,10 @@ public:
                                    std::array<f32, 2> motion_scale, bool use_history = true) override;
     VideoCommon::OotNetwork::BypassState* OotNetworkBypass() override;
     void OotSceneEnd() override;
+    /// Ocarina of Time's last upscaled scene without the HUD (TextureCacheRuntime::OotHudless).
+    [[nodiscard]] const TextureCacheRuntime::OotHudlessScene& OotHudless() const noexcept {
+        return texture_cache_runtime.OotHudless();
+    }
     bool AccelerateOotDlss(const Tegra::Engines::Fermi2D::Surface& src,
                            const Tegra::Engines::Fermi2D::Surface& dst,
                            const Tegra::Texture::TICEntry& depth, std::array<f32, 2> jitter,

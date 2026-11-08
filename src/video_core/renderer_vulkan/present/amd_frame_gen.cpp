@@ -1,10 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <cstdio>
 #include <mutex>
+#include <utility>
+#include <vector>
 
 #include <windows.h>
 
@@ -104,6 +107,19 @@ struct AmdFrameGen::Impl {
     VkExtent2D ui_extent{};
     bool ui_fresh{};
     bool ui_registered{};
+    // HUD-less back buffers (ComposeHudless), one per frame in flight: frame generation reads
+    // frame N's while frame N+1 renders.
+    std::array<vk::Image, 3> hudless;
+    VkExtent2D hudless_extent{};
+    VkFormat hudless_format{};
+    vk::Image hudless_encode; ///< The scene sRGB-encoded at its size (a blit into an sRGB format)
+    VkExtent2D encode_extent{};
+    VkFormat encode_format{};
+    bool hudless_ready{};
+
+    [[nodiscard]] VkImage HudlessFor(u64 frame) const {
+        return *hudless[frame % hudless.size()];
+    }
 
     void RegisterUi(VkImage image) {
         ffxConfigureDescFrameGenerationSwapChainRegisterUiResourceVK ui{};
@@ -170,6 +186,11 @@ struct AmdFrameGen::Impl {
         config.allowAsyncWorkloads = true;
         config.generationRect = generation_rect;
         config.frameID = frame_id;
+        if (enabled && hudless_ready) {
+            config.HUDLessColor =
+                AmdFfx::Image2D(HudlessFor(frame_id), hudless_format, hudless_extent.width,
+                                hudless_extent.height, false, FFX_API_RESOURCE_STATE_GENERIC_READ);
+        }
         AmdFfx::Scope ffx_scope{"ffxConfigure(frame generation)"};
         if (const auto result = AmdFfx::Api().configure(&frame_gen_context, &config.header);
             result != FFX_API_RETURN_OK) {
@@ -502,6 +523,182 @@ void AmdFrameGen::ComposeUi(MemoryAllocator& allocator, VkFormat format,
     });
     state.scheduler.InvalidateState();
     state.RegisterUi(*state.ui_image);
+}
+
+namespace {
+
+/// The sRGB format with the same bytes per texel and channel order, if any.
+VkFormat SrgbVariant(VkFormat format) {
+    switch (format) {
+    case VK_FORMAT_B8G8R8A8_UNORM:
+    case VK_FORMAT_B8G8R8A8_SRGB:
+        return VK_FORMAT_B8G8R8A8_SRGB;
+    case VK_FORMAT_R8G8B8A8_UNORM:
+    case VK_FORMAT_R8G8B8A8_SRGB:
+        return VK_FORMAT_R8G8B8A8_SRGB;
+    case VK_FORMAT_A8B8G8R8_UNORM_PACK32:
+    case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+        return VK_FORMAT_A8B8G8R8_SRGB_PACK32;
+    default:
+        return VK_FORMAT_UNDEFINED;
+    }
+}
+
+vk::Image CreateTransferImage(MemoryAllocator& allocator, VkFormat format, VkExtent2D extent,
+                              VkImageUsageFlags usage) {
+    return allocator.CreateImage(VkImageCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = format,
+        .extent = {extent.width, extent.height, 1},
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = usage | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    });
+}
+
+constexpr VkImageSubresourceLayers ColorLayer{
+    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+    .mipLevel = 0,
+    .baseArrayLayer = 0,
+    .layerCount = 1,
+};
+
+} // Anonymous namespace
+
+void AmdFrameGen::ComposeHudless(MemoryAllocator& allocator, VkImage frame_image,
+                                 VkFormat frame_format, VkExtent2D frame_extent, VkImage scene,
+                                 VkExtent2D scene_extent, bool scene_fresh, VkRect2D rect) {
+    auto& state = *impl;
+    // The frame is copied to the back buffer as it is only when they match (CopyToSwapchain).
+    if (state.frame_gen_context == nullptr || frame_format != state.format ||
+        frame_extent.width != state.display_size.width ||
+        frame_extent.height != state.display_size.height) {
+        state.hudless_ready = false;
+        return;
+    }
+    std::vector<VkImage> fresh;
+    if (!state.hudless[0] || state.hudless_format != frame_format ||
+        state.hudless_extent.width != frame_extent.width ||
+        state.hudless_extent.height != frame_extent.height) {
+        // Frame generation may still read the old ones for a queued present.
+        WaitForPresents();
+        state.scheduler.Finish();
+        state.hudless_format = frame_format;
+        state.hudless_extent = frame_extent;
+        for (auto& image : state.hudless) {
+            image = CreateTransferImage(allocator, frame_format, frame_extent,
+                                        VK_IMAGE_USAGE_SAMPLED_BIT);
+            fresh.push_back(*image);
+        }
+    }
+    const VkFormat encode_format = SrgbVariant(frame_format);
+    const bool one_to_one =
+        scene != VK_NULL_HANDLE && scene_fresh && encode_format != VK_FORMAT_UNDEFINED &&
+        rect.extent.width == scene_extent.width && rect.extent.height == scene_extent.height &&
+        rect.offset.x >= 0 && rect.offset.y >= 0 &&
+        static_cast<u32>(rect.offset.x) + rect.extent.width <= frame_extent.width &&
+        static_cast<u32>(rect.offset.y) + rect.extent.height <= frame_extent.height;
+    if (one_to_one && (!state.hudless_encode || state.encode_format != encode_format ||
+                       state.encode_extent.width != scene_extent.width ||
+                       state.encode_extent.height != scene_extent.height)) {
+        state.scheduler.Finish();
+        state.encode_format = encode_format;
+        state.encode_extent = scene_extent;
+        state.hudless_encode = CreateTransferImage(allocator, encode_format, scene_extent,
+                                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+        fresh.push_back(*state.hudless_encode);
+    }
+    state.scheduler.RequestOutsideRenderPassOperationContext();
+    state.scheduler.Record([fresh = std::move(fresh), frame_image, frame_extent,
+                            target = state.HudlessFor(state.frame_id), scene, scene_extent,
+                            encode = one_to_one ? *state.hudless_encode : VK_NULL_HANDLE,
+                            rect](vk::CommandBuffer cmdbuf) {
+        for (const VkImage image : fresh) {
+            const VkImageMemoryBarrier init{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = 0,
+                .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = image,
+                .subresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+            };
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, init);
+        }
+        const VkMemoryBarrier before{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT,
+            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               0, before);
+        // The presented frame, HUD included...
+        const VkImageCopy whole{
+            .srcSubresource = ColorLayer,
+            .srcOffset = {0, 0, 0},
+            .dstSubresource = ColorLayer,
+            .dstOffset = {0, 0, 0},
+            .extent = {frame_extent.width, frame_extent.height, 1},
+        };
+        cmdbuf.CopyImage(frame_image, VK_IMAGE_LAYOUT_GENERAL, target, VK_IMAGE_LAYOUT_GENERAL,
+                         whole);
+        if (encode != VK_NULL_HANDLE) {
+            // ...with the scene before the HUD over the game's area, encoded as the guest's
+            // plain copy to its sRGB framebuffer encodes it.
+            const VkImageBlit blit{
+                .srcSubresource = ColorLayer,
+                .srcOffsets = {VkOffset3D{0, 0, 0},
+                               VkOffset3D{static_cast<s32>(scene_extent.width),
+                                          static_cast<s32>(scene_extent.height), 1}},
+                .dstSubresource = ColorLayer,
+                .dstOffsets = {VkOffset3D{0, 0, 0},
+                               VkOffset3D{static_cast<s32>(scene_extent.width),
+                                          static_cast<s32>(scene_extent.height), 1}},
+            };
+            cmdbuf.BlitImage(scene, VK_IMAGE_LAYOUT_GENERAL, encode, VK_IMAGE_LAYOUT_GENERAL, blit,
+                             VK_FILTER_NEAREST);
+            const VkMemoryBarrier encoded{
+                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+            };
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   0, encoded);
+            const VkImageCopy area{
+                .srcSubresource = ColorLayer,
+                .srcOffset = {0, 0, 0},
+                .dstSubresource = ColorLayer,
+                .dstOffset = {rect.offset.x, rect.offset.y, 0},
+                .extent = {rect.extent.width, rect.extent.height, 1},
+            };
+            cmdbuf.CopyImage(encode, VK_IMAGE_LAYOUT_GENERAL, target, VK_IMAGE_LAYOUT_GENERAL,
+                             area);
+        }
+        const VkMemoryBarrier after{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                               0, after);
+    });
+    state.hudless_ready = true;
 }
 
 void AmdFrameGen::WaitForPresents() {

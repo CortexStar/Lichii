@@ -2390,6 +2390,13 @@ bool TextureCacheRuntime::OotDlss(Framebuffer* dst_framebuffer, ImageView& input
     } else {
         DrawUpscaledOutput(dst_framebuffer, output_view, output_image, output_sampler);
     }
+#ifdef _WIN32
+    // After the tonemap the output is the presented scene up to the HUD: AMD frame generation
+    // compares it with the presented image to find the HUD.
+    if (!hdr && !motion_debug && AmdFrameGen::Active() != nullptr && AmdFrameGen::Wanted()) {
+        SnapshotOotHudless(*dst_framebuffer);
+    }
+#endif
     static bool logged{};
     if (!std::exchange(logged, true)) {
         LOG_INFO(Render_Vulkan, "OoT {}: {}x{} -> {}x{} ({}), camera{} motion vectors",
@@ -2398,6 +2405,98 @@ bool TextureCacheRuntime::OotDlss(Framebuffer* dst_framebuffer, ImageView& input
                  object_pixels != VK_NULL_HANDLE ? " and object" : "");
     }
     return true;
+}
+
+void TextureCacheRuntime::SnapshotOotHudless(const Framebuffer& scene) {
+    const VkImage source = scene.Images()[0];
+    const VkImageSubresourceRange source_range = scene.ImageRanges()[0];
+    const VkExtent2D extent = scene.RenderArea();
+    if (!oot_hudless_image || oot_hudless.extent.width != extent.width ||
+        oot_hudless.extent.height != extent.height) {
+        scheduler.Finish();
+        oot_hudless_image = memory_allocator.CreateImage(VkImageCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = VK_FORMAT_B10G11R11_UFLOAT_PACK32,
+            .extent = {extent.width, extent.height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        });
+        oot_hudless.image = *oot_hudless_image;
+        oot_hudless.extent = extent;
+        oot_hudless.scene_frame = ~u64{0};
+        scheduler.RequestOutsideRenderPassOperationContext();
+        scheduler.Record([image = oot_hudless.image](vk::CommandBuffer cmdbuf) {
+            const VkImageMemoryBarrier barrier{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = 0,
+                .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = image,
+                .subresourceRange{
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            };
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, barrier);
+        });
+    }
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([source, source_range, target = oot_hudless.image,
+                      extent](vk::CommandBuffer cmdbuf) {
+        const VkMemoryBarrier before{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               0, before);
+        const VkImageCopy copy{
+            .srcSubresource{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .mipLevel = source_range.baseMipLevel,
+                .baseArrayLayer = source_range.baseArrayLayer,
+                .layerCount = 1,
+            },
+            .srcOffset = {0, 0, 0},
+            .dstSubresource{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .mipLevel = 0,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+            .dstOffset = {0, 0, 0},
+            .extent = {extent.width, extent.height, 1},
+        };
+        cmdbuf.CopyImage(source, VK_IMAGE_LAYOUT_GENERAL, target, VK_IMAGE_LAYOUT_GENERAL, copy);
+        const VkMemoryBarrier after{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                               0, after);
+    });
+    oot_hudless.scene_frame = ::VideoCommon::OotDlss::SceneFrame().load(std::memory_order_relaxed);
 }
 
 bool TextureCacheRuntime::PrepareOotAmd(VkExtent2D render_size, VkExtent2D upscale_size,

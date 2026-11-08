@@ -105,6 +105,16 @@ public:
     /// Without `draw` the swapchain composes no UI.
     void ComposeUi(MemoryAllocator& allocator, VkFormat format, const PerfOverlayDraw* draw);
 
+    /// The game's scene without its HUD, for frame generation to find the HUD in the presented
+    /// image (frame-interpolation-swap-chain.md, "UI Composition", method 3). Builds this frame's
+    /// HUD-less back buffer from the presented frame `frame_image` (`frame_format`, the back
+    /// buffer's format and size) with the scene copied over `rect`: only where the scene
+    /// (B10G11R11, linear) is shown 1:1 and the back buffer is 8-bit sRGB-encoded; otherwise the
+    /// presented frame itself (no HUD found). Recorded before the frame is presented.
+    void ComposeHudless(MemoryAllocator& allocator, VkImage frame_image, VkFormat frame_format,
+                        VkExtent2D frame_extent, VkImage scene, VkExtent2D scene_extent,
+                        bool scene_fresh, VkRect2D rect);
+
     /// Configures frame N and records its prepare pass (depth, motion, camera).
     void Prepare(Scheduler& scheduler, const PrepareInputs& inputs);
 
