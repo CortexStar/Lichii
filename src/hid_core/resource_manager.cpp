@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <cstdlib>
+
 #include "common/logging.h"
 #include "core/core.h"
 #include "core/core_timing.h"
@@ -62,6 +64,15 @@ ResourceManager::ResourceManager(Core::System& system_,
                                                       UpdateNpad(ns_late);
                                                       return std::nullopt;
                                                   });
+    // A host input change reaches the shared memory now, not up to 1 ms later.
+    npad_input_event = Core::Timing::CreateEvent(
+        "HID::NpadInputCallback",
+        [this](s64 time,
+               std::chrono::nanoseconds ns_late) -> std::optional<std::chrono::nanoseconds> {
+            npad_input_publish.Begin();
+            UpdateNpad(ns_late);
+            return std::nullopt;
+        });
     default_update_event = Core::Timing::CreateEvent(
         "HID::UpdateDefaultCallback",
         [this](s64 time,
@@ -86,7 +97,11 @@ ResourceManager::ResourceManager(Core::System& system_,
 }
 
 ResourceManager::~ResourceManager() {
+    if (npad) {
+        npad->SetInputChangedCallback({});
+    }
     system.CoreTiming().UnscheduleEvent(npad_update_event);
+    system.CoreTiming().UnscheduleEvent(npad_input_event);
     system.CoreTiming().UnscheduleEvent(default_update_event);
     system.CoreTiming().UnscheduleEvent(mouse_keyboard_update_event);
     system.CoreTiming().UnscheduleEvent(motion_update_event);
@@ -251,6 +266,16 @@ void ResourceManager::InitializeHidCommonSampler() {
     sleep_button->SetAppletResource(applet_resource, &shared_mutex);
     capture_button->SetAppletResource(applet_resource, &shared_mutex);
 
+    // EXPERIMENT (do not merge): EDEN_INPUT_IMMEDIATE=0 publishes only on the 1 ms tick.
+    static const bool immediate = [] {
+        const char* value = std::getenv("EDEN_INPUT_IMMEDIATE");
+        return value == nullptr || value[0] != '0';
+    }();
+    npad->SetInputChangedCallback([this] {
+        if (immediate && npad_input_publish.Request()) {
+            system.CoreTiming().ScheduleEvent(std::chrono::nanoseconds{0}, npad_input_event);
+        }
+    });
     system.CoreTiming().ScheduleLoopingEvent(npad_update_ns, npad_update_ns, npad_update_event);
     system.CoreTiming().ScheduleLoopingEvent(default_update_ns, default_update_ns,
                                              default_update_event);

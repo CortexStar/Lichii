@@ -12,7 +12,9 @@ namespace {
 
 using Vulkan::SubmissionPolicy::Action;
 using Vulkan::SubmissionPolicy::Advance;
+using Vulkan::SubmissionPolicy::AmdNativeBudget;
 using Vulkan::SubmissionPolicy::DefaultNativeBudget;
+using Vulkan::SubmissionPolicy::NativeBudget;
 using Vulkan::SubmissionPolicy::ParseBudget;
 
 } // namespace
@@ -33,6 +35,46 @@ TEST_CASE("Native desktop submissions use an exact default budget", "[video_core
     REQUIRE(DefaultNativeBudget == 128);
     REQUIRE(submissions == std::vector<u32>{128, 256, 384});
     REQUIRE(dispatches == std::vector<u32>{32, 64, 96, 160, 192, 224, 288, 320, 352});
+}
+
+TEST_CASE("AMD's proprietary driver submits native titles every 512 draws",
+          "[video_core][submission_policy]") {
+    STATIC_REQUIRE(NativeBudget(false) == DefaultNativeBudget);
+    STATIC_REQUIRE(NativeBudget(true) == AmdNativeBudget);
+    STATIC_REQUIRE(AmdNativeBudget == 512);
+    u32 counter{};
+    std::vector<u32> submissions;
+    for (u32 work = 1; work <= 1024; ++work) {
+        if (Advance(counter, true, false, NativeBudget(true)) == Action::Flush) {
+            submissions.push_back(work);
+        }
+    }
+    REQUIRE(submissions == std::vector<u32>{512, 1024});
+}
+
+TEST_CASE("Native submissions wait for the render pass to end, for at most four budgets",
+          "[video_core][submission_policy]") {
+    u32 counter{};
+    // Pass active throughout: the flush comes at four budgets.
+    std::vector<u32> submissions;
+    for (u32 work = 1; work <= 1024; ++work) {
+        if (Advance(counter, true, false, 128, 4096, true) == Action::Flush) {
+            submissions.push_back(work);
+        }
+    }
+    REQUIRE(submissions == std::vector<u32>{512, 1024});
+    // The pass ends after the budget: the next draw flushes.
+    counter = 0;
+    for (u32 work = 1; work < 200; ++work) {
+        REQUIRE(Advance(counter, true, false, 128, 4096, true) != Action::Flush);
+    }
+    REQUIRE(Advance(counter, true, false, 128, 4096, false) == Action::Flush);
+    REQUIRE(counter == 0);
+    // Before the budget an ended pass changes nothing.
+    for (u32 work = 1; work < 128; ++work) {
+        REQUIRE(Advance(counter, true, false, 128, 4096, false) != Action::Flush);
+    }
+    REQUIRE(Advance(counter, true, false, 128, 4096, false) == Action::Flush);
 }
 
 TEST_CASE("Native submission overrides do not round to a dispatch boundary",

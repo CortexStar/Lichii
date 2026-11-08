@@ -22,6 +22,7 @@
 #include "video_core/control/channel_state.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/host_logic_op.h"
 #include "video_core/memory_manager.h"
 #include "video_core/renderer_opengl/gl_device.h"
 #include "video_core/renderer_opengl/gl_query_cache.h"
@@ -1210,28 +1211,16 @@ void RasterizerOpenGL::SyncBlendState() {
 
 void RasterizerOpenGL::SyncLogicOpState() {
     auto& flags = maxwell3d->dirty.flags;
-    if (!flags[Dirty::LogicOp]) {
+    // On AMD the logic op also follows the vertex formats (HostLogicOpEnable); SyncVertexFormats
+    // clears their flag after this.
+    const bool amd = device.IsAmd();
+    if (!flags[Dirty::LogicOp] && !(amd && flags[Dirty::VertexFormats])) {
         return;
     }
     flags[Dirty::LogicOp] = false;
 
-    auto& regs = maxwell3d->regs;
-
-    if (device.IsAmd()) {
-        using namespace Tegra::Engines;
-
-        bool has_float = std::any_of(
-            regs.vertex_attrib_format.begin(),
-            regs.vertex_attrib_format.end(),
-            [](const auto& n) {
-                return n.type == Maxwell3D::Regs::VertexAttribute::Type::Float;
-            }
-        );
-
-        regs.logic_op.enable = static_cast<u32>(!has_float);
-    }
-
-    if (regs.logic_op.enable) {
+    const auto& regs = maxwell3d->regs;
+    if (VideoCommon::HostLogicOpEnable(regs, amd)) {
         glEnable(GL_COLOR_LOGIC_OP);
         glLogicOp(MaxwellToGL::LogicOp(regs.logic_op.op));
     } else {

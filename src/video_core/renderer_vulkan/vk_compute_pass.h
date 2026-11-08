@@ -120,6 +120,25 @@ private:
     ComputePassDescriptorQueue& compute_pass_descriptor_queue;
 };
 
+/// Resolves samples query results copied with availability (resolve_query_availability.comp): the
+/// count when the query had landed, 1024 samples (visible) otherwise.
+class QueryAvailabilityResolvePass final : public ComputePass {
+public:
+    explicit QueryAvailabilityResolvePass(
+        const Device& device_, Scheduler& scheduler_, DescriptorPool& descriptor_pool_,
+        ComputePassDescriptorQueue& compute_pass_descriptor_queue_);
+
+    /// `count` entries: 16 bytes each at `src_offset` in `src_buffer`, 8 bytes each at
+    /// `dst_offset` in `dst_buffer`. Orders the copy that wrote the source before it, and its own
+    /// writes before later transfer and shader reads.
+    void Resolve(VkBuffer dst_buffer, VkDeviceSize dst_offset, VkBuffer src_buffer,
+                 VkDeviceSize src_offset, u32 count);
+
+private:
+    Scheduler& scheduler;
+    ComputePassDescriptorQueue& compute_pass_descriptor_queue;
+};
+
 class QueriesPrefixScanPass final : public ComputePass {
 public:
     explicit QueriesPrefixScanPass(const Device& device_, Scheduler& scheduler_,
@@ -189,6 +208,26 @@ public:
     /// Encodes every layer of one level (`source` is its RGBA8 storage view) into `buffer`,
     /// `out_offset` bytes past `buffer_offset`; blocks are row-major, layer after layer.
     void Encode(VkImageView source, u32 width, u32 height, u32 layers, bool bc3, VkBuffer buffer,
+                VkDeviceSize buffer_offset, VkDeviceSize buffer_size, VkDeviceSize out_offset);
+
+private:
+    Scheduler& scheduler;
+    ComputePassDescriptorQueue& compute_pass_descriptor_queue;
+};
+
+/// Compresses an RGBA8 image level to BC7 blocks in a buffer (bc7_encoder.comp, a port of
+/// DirectXTex's GPU BC7 encoder limited to the single-subset modes 4, 5 and 6).
+class Bc7EncoderPass final : public ComputePass {
+public:
+    explicit Bc7EncoderPass(const Device& device_, Scheduler& scheduler_,
+                            DescriptorPool& descriptor_pool_,
+                            ComputePassDescriptorQueue& compute_pass_descriptor_queue_);
+    ~Bc7EncoderPass();
+
+    /// Encodes every layer of one level (`source` is its RGBA8 storage view) into `buffer`,
+    /// `out_offset` bytes (a multiple of 16) past `buffer_offset`; blocks are row-major, layer
+    /// after layer.
+    void Encode(VkImageView source, u32 width, u32 height, u32 layers, VkBuffer buffer,
                 VkDeviceSize buffer_offset, VkDeviceSize buffer_size, VkDeviceSize out_offset);
 
 private:

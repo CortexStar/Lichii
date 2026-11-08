@@ -235,8 +235,13 @@ struct TextureDescriptor {
     u32 count;
     u32 size_shift;
     /// Index in Info::handle_programs when the handle is computed at draw time (read from a
-    /// storage buffer), ~0 when it is the constant buffer word above.
+    /// storage buffer), ~0 when it is the constant buffer word above. With a count above 1 the
+    /// program computes the handle of each element (HandleOp::Index): a handle the shader reads
+    /// from a table at an index only each invocation knows, the shader indexing the array.
     u32 handle_program{~0U};
+    /// Whether the shader indexes the descriptor: an array, whose count the descriptor limits set
+    /// (LimitSampledTextureArrays). It stays one when they cut it to a single element.
+    bool is_descriptor_array{};
 
     auto operator<=>(const TextureDescriptor&) const = default;
 };
@@ -335,6 +340,9 @@ struct Info {
     bool uses_sampled_1d{};
     bool uses_sparse_residency{};
     bool uses_demote_to_helper_invocation{};
+    /// Fragment stage: derivatives, implicit-LOD samples or quad reads may run after a demote
+    /// (UsesQuadAfterDemote).
+    bool uses_quad_after_demote{};
     bool uses_subgroup_vote{};
     bool uses_subgroup_mask{};
     bool uses_fswzadd{};
@@ -357,6 +365,12 @@ struct Info {
     bool uses_atomic_s32_max{};
     bool uses_int64_bit_atomics{};
     bool uses_global_memory{};
+    /// Storage buffers and global memory are reached through the GPU page table: the storage
+    /// buffer descriptors are not bound, they name the ranges the draw must have resident.
+    bool storage_by_address{};
+    /// Constant buffers are read by device address from the draw's bank table: the constant
+    /// buffer descriptors are not bound.
+    bool uniforms_by_address{};
     bool requires_coherent_global_memory{};
     bool requires_coherent_image_memory{};
     /// Set by the SPIR-V backend when HMMA runs on cooperative matrices, which need full subgroups
@@ -405,6 +419,25 @@ u32 NumDescriptors(const Descriptors& descriptors) {
     return num;
 }
 
+/// The constant buffer descriptors bound as uniform buffers: none when the program reads them
+/// from the bank table (Info::uniforms_by_address).
+[[nodiscard]] inline std::span<const ConstantBufferDescriptor> BoundConstantBuffers(
+    const Info& info) {
+    if (info.uniforms_by_address) {
+        return {};
+    }
+    return info.constant_buffer_descriptors;
+}
+
+/// The storage buffer descriptors bound as buffers: none when the program reaches storage
+/// through the GPU page table (Info::storage_by_address).
+[[nodiscard]] inline std::span<const StorageBufferDescriptor> BoundStorageBuffers(
+    const Info& info) {
+    if (info.storage_by_address) {
+        return {};
+    }
+    return info.storage_buffers_descriptors;
+}
 
 /// Operations of a handle program, a stack machine over 32-bit words. Operands follow the
 /// operation code in the program; values are popped right operand first.
@@ -420,13 +453,15 @@ enum class HandleOp : u32 {
     Select, ///< condition, true value, false value
     Tee,    ///< slot: keeps the top value in the slot (shared subexpressions)
     Load,   ///< slot: the value kept there
+    Index,  ///< the element of the descriptor array being computed (see TextureDescriptor)
 };
 
 /// Runs a handle program; read_cbuf(index, offset) and read_storage(binding, offset) return the
-/// words it reads. Returns nothing for a malformed program.
+/// words it reads, and element is the descriptor array element computed (HandleOp::Index).
+/// Returns nothing for a malformed program.
 template <typename ReadCbuf, typename ReadStorage>
 std::optional<u32> EvaluateHandleProgram(std::span<const u32> code, ReadCbuf&& read_cbuf,
-                                         ReadStorage&& read_storage) {
+                                         ReadStorage&& read_storage, u32 element = 0) {
     std::array<u32, 64> stack{};
     std::array<u32, 256> slots{};
     size_t size = 0;
@@ -469,6 +504,10 @@ std::optional<u32> EvaluateHandleProgram(std::span<const u32> code, ReadCbuf&& r
         if (op == HandleOp::Load) {
             const u32 slot = operand();
             push(slot < slots.size() ? slots[slot] : 0U);
+            continue;
+        }
+        if (op == HandleOp::Index) {
+            push(element);
             continue;
         }
         if (op == HandleOp::Select) {

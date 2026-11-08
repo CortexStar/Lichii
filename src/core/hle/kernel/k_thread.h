@@ -8,8 +8,6 @@
 
 #include <array>
 #include <atomic>
-#include <condition_variable>
-#include <mutex>
 #include <span>
 #include <string>
 #include <utility>
@@ -127,6 +125,23 @@ KProcess* GetCurrentProcessPointer(KernelCore& kernel);
 KProcess& GetCurrentProcess(KernelCore& kernel);
 s32 GetCurrentCoreId(KernelCore& kernel);
 Core::Memory::Memory& GetCurrentMemory(KernelCore& kernel);
+
+/// KThread::m_context_guard. The scheduler only try_locks and unlocks it, often in a loop while
+/// another core still unloads the thread; each try on the winpthreads mutex was costly.
+class KThreadContextGuard {
+public:
+    bool try_lock() {
+        return !m_flag.load(std::memory_order_relaxed) &&
+               !m_flag.exchange(true, std::memory_order_acquire);
+    }
+
+    void unlock() {
+        m_flag.store(false, std::memory_order_release);
+    }
+
+private:
+    std::atomic<bool> m_flag{false};
+};
 
 class KThread final : public KAutoObjectWithSlabHeapAndContainer<KThread, KWorkerTask>,
                       public Common::IntrusiveListBaseNode<KThread>,
@@ -933,15 +948,15 @@ private:
     bool m_resource_limit_release_hint{};
     bool m_is_kernel_address_key{};
     StackParameters m_stack_parameters{};
-    std::mutex m_context_guard{};
+    KThreadContextGuard m_context_guard{};
 
     // For emulation
     std::shared_ptr<Common::Fiber> m_host_context{};
     ThreadType m_thread_type{};
     StepState m_step_state{};
-    bool m_dummy_thread_runnable{true};
-    std::mutex m_dummy_thread_mutex{};
-    std::condition_variable m_dummy_thread_cv{};
+    /// 1 while the host thread behind a dummy thread may run, 0 while the scheduler keeps it
+    /// waiting (an HLE service thread waiting for a request, a host thread on a kernel object).
+    std::atomic<u32> m_dummy_thread_runnable{1};
 
     // For debugging
     std::vector<KSynchronizationObject*> m_wait_objects_for_debugging{};
@@ -989,6 +1004,11 @@ public:
     ConditionVariableThreadTree* GetConditionVariableTree() const {
         return m_condvar_tree;
     }
+
+    /// KAddressArbiter's pre-wait spin: how well this thread's spins paid off lately (0-16), and
+    /// a counter that probes again now and then while it is 0. Touched only by the thread itself.
+    u8 m_nx2_arb_spin_credit{8};
+    u8 m_nx2_arb_spin_probe{};
 };
 
 class KScopedDisableDispatch {

@@ -11,9 +11,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <optional>
 
+#include "dynarmic/interface/halt_reason.h"
+#include "dynarmic/interface/A64/host_function.h"
 #include "dynarmic/interface/optimization_flags.h"
 
 namespace Dynarmic {
@@ -91,6 +92,14 @@ struct UserCallbacks {
     // Memory must be interpreted as little endian.
     virtual std::optional<std::uint32_t> MemoryReadCode(VAddr vaddr) {
         return std::uint32_t(MemoryRead(vaddr, sizeof(std::uint32_t)));
+    }
+
+    /// x64 backend: a host function that replaces the guest function starting at vaddr, asked
+    /// when a block starting there is translated. The block calls it and returns to X30; if it
+    /// declines, the guest's code runs. Not used while single-stepping.
+    virtual std::optional<HostFunctionEntry> GetHostFunction(VAddr vaddr) {
+        (void)vaddr;
+        return std::nullopt;
     }
 
     // Reads through these callbacks may not be aligned.
@@ -283,6 +292,87 @@ struct UserConfig {
     /// callbacks.
     bool recompile_on_exclusive_fastmem_failure = true;
 
+    /// x64 only. The host is TSO, so ordered (acquire) loads are emitted as plain loads instead
+    /// of LOCK XADD. Ordered stores keep XCHG, which keeps STLR followed by LDAR ordered.
+    bool tso_ordered_loads = false;
+
+    /// x64 only. DMB that only orders loads (xxLD) or only stores (xxST) is a no-op on TSO.
+    bool elide_ld_st_barriers = false;
+
+    /// x64 only. The register allocator moves a value it must evict into a free callee-saved
+    /// GPR when there is one, instead of spilling it to the stack.
+    bool spill_to_free_gpr = false;
+
+    /// x64 only. When an instruction overwrites an operand that is still needed later, the
+    /// register allocator writes into a copy in a free register instead of evicting the original.
+    bool scratch_copy_to_free_reg = false;
+
+    /// x64 only, with unchecked 64-bit fastmem. A base + immediate address whose only use is one
+    /// load or store is folded into that access's addressing mode instead of computed with LEA.
+    bool fold_address_offsets = false;
+
+    /// x64 only. A 32-bit value known to be zero-extended in its host register (written by a
+    /// 32-bit instruction) is not zero-extended again by SetW / ZeroExtendWordToLong.
+    bool elide_redundant_zext = false;
+
+    /// x64 only. Blocks do not save and set up %rbp as a frame pointer (nothing in the JIT
+    /// reads it; Windows unwinding does not use it).
+    bool omit_block_frame = false;
+
+    /// x64 only, without cycle counting. Links to a higher guest PC skip the halt check; links
+    /// to the same or a lower PC and indirect branches (RSB/fast dispatch) check it instead, so
+    /// every loop still sees a halt request.
+    bool halt_check_on_back_edges = false;
+
+    /// x64 only. Return stack buffer entries used (power of two, 8 to 32).
+    std::uint32_t rsb_size = 8;
+
+    /// x64 only. Unlinked block exits jump to one shared stub per target (PC store + dispatcher
+    /// return) instead of an inline stub, so patch sites are 5/6 bytes instead of 22/23.
+    bool compact_block_exits = false;
+
+    /// x64 only. Cold code (memory-access fault and abort paths, atomic fallbacks, exit stubs) is
+    /// emitted into a separate region at the end of the code cache, away from the hot blocks.
+    bool far_code = false;
+
+    /// x64 only. log2 of the number of fast dispatch table entries (0 = default 20) and whether
+    /// the table is 4-way set associative (the four ways of a set share one cache line).
+    std::uint32_t fast_dispatch_table_bits = 0;
+    bool fast_dispatch_set_associative = false;
+
+    /// x64 only, without cycle counting. Conditional branches, CSEL and CBZ/TBZ use the host
+    /// flags directly when the flag-setting instruction was emitted right before them, instead
+    /// of reloading NZCV from the guest state (the state is still written).
+    bool reuse_host_flags = false;
+
+    /// x64 only, with fastmem exclusives and Unsafe_IgnoreGlobalMonitor. LSE atomics (LDADD
+    /// and friends, SWP, CAS) become one host atomic instruction (or a host CAS loop) instead
+    /// of an exclusive load/store pair that ends the block.
+    bool native_lse_atomics = false;
+
+    /// The halt reasons the memory callbacks raise when they refuse an access. An LSE atomic on
+    /// the callback path (native_lse_atomics) retries a refused exclusive write until the word
+    /// changes, and stops retrying once one of these is set.
+    HaltReason memory_abort_halt_reasons = HaltReason::MemoryAbort;
+    /// x64 only, without cycle counting and with omit_block_frame. BL and BLR become a host
+    /// `call` and RET a host `ret` once the guest return address matches the one the call
+    /// pushed (else the fast dispatcher runs), so the host's return predictor predicts guest
+    /// returns. Spills and the check bit move into the JIT state; the host stack holds one frame
+    /// per guest call.
+    bool host_call_return = false;
+
+    /// x64 only, with FastDispatch. Every BR/BLR (and every RET that misses host_call_return)
+    /// site gets a one-entry cache of its last target, compared and jumped through in place,
+    /// so each site has its own indirect jump for the CPU to predict; a miss takes the fast
+    /// dispatcher and refills the entry.
+    bool indirect_branch_cache = false;
+
+    /// x64 only. Emitted code holds no per-Jit pointers: the UserCallbacks object, this config,
+    /// the TPIDR pointers and this processor's exclusive-monitor slots are read from the JIT
+    /// state instead of being immediates, so a block compiled for one core is valid for every
+    /// core with the same config otherwise (the step towards one code cache per process).
+    bool core_independent_code = false;
+
     /// This option relates to translation. Generally when we run into an unpredictable
     /// instruction the ExceptionRaised callback is called. If this is true, we define
     /// definite behaviour for some unpredictable instructions.
@@ -292,6 +382,17 @@ struct UserConfig {
     /// This tells the translator a wall clock will be used, thus allowing it
     /// to avoid writting certain unnecessary code only needed for cycle timers.
     bool wall_clock_cntpct = false;
+
+    /// x64 backend, with wall_clock_cntpct: MRS CNTPCT_EL0 reads the host TSC in the emitted code
+    /// and returns (TSC * *cntpct_rdtsc_factor) >> 64 instead of calling UserCallbacks::GetCNTPCT.
+    /// The factor is read at every access, so the owner may change it.
+    const std::uint64_t* cntpct_rdtsc_factor = nullptr;
+
+    /// With cntpct_rdtsc_factor: the TSC of the previous read is kept here, and a read less than
+    /// cntpct_spin_tsc TSC ticks after it (a guest polling the counter) runs two PAUSEs first, so
+    /// the SMT sibling gets the core. nullptr disables this.
+    std::uint64_t* cntpct_last_tsc = nullptr;
+    std::uint32_t cntpct_spin_tsc = 0;
 
     /// This allows accurately emulating protection fault handlers. If true, we check
     /// for exit after every data memory access by the emulated program.

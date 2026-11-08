@@ -9,6 +9,7 @@
 #include <functional>
 #include <list>
 #include <mutex>
+#include <utility>
 
 #include "common/common_types.h"
 
@@ -53,6 +54,14 @@ public:
 
     void DeregisterHostAction(u32 syncpoint_id, const ActionHandle& handle);
 
+    /// Called with the syncpoint id and its new value on every guest increment, under the lock
+    /// that orders increments, so observers see each syncpoint's values in order. Once
+    /// RemoveGuestIncrementObserver returns, the observer is not running and won't be called again.
+    using IncrementObserver = std::function<void(u32 syncpoint_id, u32 value)>;
+    ActionHandle AddGuestIncrementObserver(IncrementObserver&& observer);
+
+    void RemoveGuestIncrementObserver(const ActionHandle& handle);
+
     void IncrementGuest(u32 syncpoint_id);
 
     void IncrementHost(u32 syncpoint_id);
@@ -70,8 +79,8 @@ public:
     }
 
 private:
-    void Increment(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
-                   std::list<RegisteredAction>& action_storage);
+    void Increment(u32 syncpoint_id, std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
+                   std::list<RegisteredAction>& action_storage, bool guest);
 
     ActionHandle RegisterAction(std::atomic<u32>& syncpoint,
                                 std::list<RegisteredAction>& action_storage, u32 expected_value,
@@ -86,6 +95,8 @@ private:
 
     std::array<std::list<RegisteredAction>, NUM_MAX_SYNCPOINTS> guest_action_storage;
     std::array<std::list<RegisteredAction>, NUM_MAX_SYNCPOINTS> host_action_storage;
+
+    std::list<std::pair<ActionHandle, IncrementObserver>> guest_increment_observers;
 
     std::mutex guard;
     u64 last_action_id{};

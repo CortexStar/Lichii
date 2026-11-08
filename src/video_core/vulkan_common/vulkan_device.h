@@ -63,13 +63,17 @@ VK_DEFINE_HANDLE(VmaPool)
     FEATURE(EXT, DepthBiasControl, DEPTH_BIAS_CONTROL, depth_bias_control)                         \
     FEATURE(EXT, DepthClipControl, DEPTH_CLIP_CONTROL, depth_clip_control)                         \
     FEATURE(EXT, DescriptorBuffer, DESCRIPTOR_BUFFER, descriptor_buffer)                           \
+    FEATURE(EXT, DescriptorHeap, DESCRIPTOR_HEAP, descriptor_heap)                                 \
     FEATURE(EXT, ExtendedDynamicState, EXTENDED_DYNAMIC_STATE, extended_dynamic_state)             \
     FEATURE(EXT, ExtendedDynamicState2, EXTENDED_DYNAMIC_STATE_2, extended_dynamic_state2)         \
     FEATURE(EXT, ExtendedDynamicState3, EXTENDED_DYNAMIC_STATE_3, extended_dynamic_state3)         \
     FEATURE(EXT, 4444Formats, 4444_FORMATS, format_a4b4g4r4)                                       \
     FEATURE(EXT, IndexTypeUint8, INDEX_TYPE_UINT8, index_type_uint8)                               \
     FEATURE(EXT, LineRasterization, LINE_RASTERIZATION, line_rasterization)                        \
+    FEATURE(EXT, MemoryPriority, MEMORY_PRIORITY, memory_priority)                                 \
     FEATURE(EXT, MeshShader, MESH_SHADER, mesh_shader)                                             \
+    FEATURE(EXT, PageableDeviceLocalMemory, PAGEABLE_DEVICE_LOCAL_MEMORY,                          \
+            pageable_device_local_memory)                                                          \
     FEATURE(EXT, PrimitiveTopologyListRestart, PRIMITIVE_TOPOLOGY_LIST_RESTART,                    \
             primitive_topology_list_restart)                                                       \
     FEATURE(EXT, ProvokingVertex, PROVOKING_VERTEX, provoking_vertex)                              \
@@ -79,14 +83,18 @@ VK_DEFINE_HANDLE(VmaPool)
     FEATURE(KHR, CooperativeMatrix, COOPERATIVE_MATRIX, cooperative_matrix)                        \
     FEATURE(KHR, Maintenance5, MAINTENANCE_5, maintenance5)                                        \
     FEATURE(KHR, Maintenance6, MAINTENANCE_6, maintenance6)                                        \
+    FEATURE(KHR, PipelineBinary, PIPELINE_BINARY, pipeline_binary)                                 \
+    FEATURE(KHR, PresentId2, PRESENT_ID_2, present_id2)                                            \
+    FEATURE(KHR, PresentModeFifoLatestReady, PRESENT_MODE_FIFO_LATEST_READY,                       \
+            present_mode_fifo_latest_ready)                                                        \
+    FEATURE(KHR, PresentWait2, PRESENT_WAIT_2, present_wait2)                                      \
     FEATURE(KHR, PipelineExecutableProperties, PIPELINE_EXECUTABLE_PROPERTIES,                     \
             pipeline_executable_properties)                                                        \
     FEATURE(KHR, ShaderQuadControl, SHADER_QUAD_CONTROL, shader_quad_control)                      \
-    FEATURE(KHR, ShaderMaximalReconvergence, SHADER_MAXIMAL_RECONVERGENCE,                        \
-            shader_maximal_reconvergence)                                                        \
+    FEATURE(KHR, ShaderMaximalReconvergence, SHADER_MAXIMAL_RECONVERGENCE,                         \
+            shader_maximal_reconvergence)                                                          \
     FEATURE(KHR, WorkgroupMemoryExplicitLayout, WORKGROUP_MEMORY_EXPLICIT_LAYOUT,                  \
             workgroup_memory_explicit_layout)
-
 
 // Define miscellaneous extensions which may be used by the implementation here.
 #define FOR_EACH_VK_EXTENSION(EXTENSION)                                                           \
@@ -94,6 +102,7 @@ VK_DEFINE_HANDLE(VmaPool)
     EXTENSION(EXT, CONDITIONAL_RENDERING, conditional_rendering)                                   \
     EXTENSION(EXT, CONSERVATIVE_RASTERIZATION, conservative_rasterization)                         \
     EXTENSION(EXT, DEPTH_RANGE_UNRESTRICTED, depth_range_unrestricted)                             \
+    EXTENSION(EXT, HDR_METADATA, hdr_metadata)                                                     \
     EXTENSION(EXT, MEMORY_BUDGET, memory_budget)                                                   \
     EXTENSION(EXT, ROBUSTNESS_2, robustness_2)                                                     \
     EXTENSION(EXT, SAMPLER_FILTER_MINMAX, sampler_filter_minmax)                                   \
@@ -141,10 +150,8 @@ VK_DEFINE_HANDLE(VmaPool)
     EXTENSION_NAME(VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME)                                   \
     EXTENSION_NAME(VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME)                                 \
     EXTENSION_NAME(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME)                                 \
-    EXTENSION_NAME(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)                                     \
     EXTENSION_NAME(VK_EXT_4444_FORMATS_EXTENSION_NAME)                                             \
     EXTENSION_NAME(VK_EXT_LINE_RASTERIZATION_EXTENSION_NAME)                                       \
-    EXTENSION_NAME(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME)                                             \
     EXTENSION_NAME(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME)                               \
     EXTENSION_NAME(VK_NV_GEOMETRY_SHADER_PASSTHROUGH_EXTENSION_NAME)                               \
     EXTENSION_NAME(VK_NV_VIEWPORT_ARRAY2_EXTENSION_NAME)                                           \
@@ -230,6 +237,58 @@ enum class NvidiaArchitecture {
     Arch_Turing,
     Arch_AmpereOrNewer,
 };
+
+/**
+ * Whether float16 arithmetic stays off on this AMD proprietary (or AMDVLK) driver. Eden turned it
+ * off on every AMD driver for float16 errors in Donkey Kong Country Returns HD on early-2026
+ * drivers (eden-emu PR 3661, which records no driver version or repro). Driver 2.0.416 (26.10.2)
+ * computes float16 add, mul, fma, NMin/NMax clamps, compares, isnan and f16<->f32 conversions of
+ * every half value bit-exact to IEEE 754 in the packed, bitcast-unpacked form the recompiler emits.
+ */
+[[nodiscard]] constexpr bool IsAmdFloat16Broken(u32 driver_version) {
+    return driver_version < VK_MAKE_API_VERSION(0, 2, 0, 416);
+}
+
+/**
+ * Whether a pipeline linked from graphics pipeline libraries gets link time optimization. Fast
+ * links (without it) are used where the driver has fast linking and draws them correctly.
+ * `fragment_quad_after_demote`: the fragment shader reads the quad (derivatives, implicit-LOD
+ * samples, quad shuffles) after a DemoteToHelperInvocation (Shader::Info::uses_quad_after_demote;
+ * guest discards are emitted as demotes).
+ * TODO(AMD): GPUOpen-Drivers/AMD-Gfx-Drivers#126. On AMD's Windows driver a fast-linked pipeline
+ * whose fragment shader uses derivatives after a demote lets the demoted invocations write their
+ * colour output (dotted fringes around discarded texels: RX 7800 XT, RX 7900 XTX, RX 9070 XT,
+ * 26.10.1-26.10.2); monolithic pipelines and optimized links are correct. Those pipelines are
+ * linked optimized there until AMD fixes it; every other one is fast linked.
+ */
+[[nodiscard]] constexpr bool GraphicsLibraryLinksOptimized(VkDriverId driver_id, bool fast_linking,
+                                                           bool fragment_quad_after_demote) {
+    if (!fast_linking) {
+        return true;
+    }
+    return driver_id == VK_DRIVER_ID_AMD_PROPRIETARY && fragment_quad_after_demote;
+}
+
+/**
+ * Whether a fast-linked pipeline is linked again with link time optimization in the background,
+ * the draws switching to it once built. On AMD's driver a fast link keeps the vertex shader's uber
+ * fetch and every vertex output the fragment shader doesn't read; an optimized link drops both.
+ */
+[[nodiscard]] constexpr bool GraphicsLibraryRelinksOptimized(VkDriverId driver_id,
+                                                             bool linked_optimized,
+                                                             bool libraries_keep_link_info) {
+    return driver_id == VK_DRIVER_ID_AMD_PROPRIETARY && !linked_optimized &&
+           libraries_keep_link_info;
+}
+
+/// Whether graphics pipeline libraries keep link time optimization info, as every library an
+/// optimized link takes must: where some pipeline may be linked optimized
+/// (GraphicsLibraryLinksOptimized). Shader libraries are shared between pipelines that are and
+/// pipelines that aren't.
+[[nodiscard]] constexpr bool GraphicsLibrariesKeepLinkInfo(VkDriverId driver_id,
+                                                           bool fast_linking) {
+    return !fast_linking || driver_id == VK_DRIVER_ID_AMD_PROPRIETARY;
+}
 
 /// Handles data specific to a physical device.
 class Device {
@@ -425,6 +484,7 @@ public:
     FN_MAX_LIMIT_ELEM(PerStageDescriptorSampledImages) \
     FN_MAX_LIMIT_ELEM(PerStageDescriptorStorageBuffers) \
     FN_MAX_LIMIT_ELEM(PerStageResources) \
+    FN_MAX_LIMIT_ELEM(PerStageDescriptorSamplers) \
     FN_MAX_LIMIT_ELEM(DescriptorSetSamplers) \
     FN_MAX_LIMIT_ELEM(DescriptorSetUniformBuffers) \
     FN_MAX_LIMIT_ELEM(DescriptorSetUniformBuffersDynamic) \
@@ -582,7 +642,28 @@ FN_MAX_LIMIT_LIST
         return properties.descriptor_buffer;
     }
 
+    /// Returns true if the device supports descriptor heaps (bindless textures and samplers).
+    bool IsExtDescriptorHeapSupported() const {
+        return extensions.descriptor_heap;
+    }
+
+    /// Returns the descriptor heap properties of the device.
+    const VkPhysicalDeviceDescriptorHeapPropertiesEXT& DescriptorHeapProperties() const {
+        return properties.descriptor_heap;
+    }
+
     /// Returns true if the device supports buffer device address.
+    /// Shaders can reach storage and global memory through the GPU page table
+    /// (VideoCommon::GpuPageTable): buffer device addresses, 64-bit integers and atomics, and
+    /// 8/16-bit storage access (without them the backend emulates small stores with storage
+    /// buffer loops that need bound buffers).
+    bool SupportsGpuPageTable() const {
+        return IsBufferDeviceAddressSupported() && IsShaderInt64Supported() &&
+               IsExtShaderAtomicInt64Supported() && IsDescriptorAliasingSupported() &&
+               IsInt8Supported() && IsStorageBuffer8BitAccessSupported() &&
+               IsShaderInt16Supported() && IsStorageBuffer16BitAccessSupported();
+    }
+
     bool IsBufferDeviceAddressSupported() const {
         return extensions.buffer_device_address;
     }
@@ -657,6 +738,22 @@ FN_MAX_LIMIT_LIST
         return extensions.swapchain_mutable_format;
     }
 
+    /// Returns true if VK_EXT_hdr_metadata is enabled.
+    bool IsExtHdrMetadataEnabled() const {
+        return extensions.hdr_metadata;
+    }
+
+    /// Returns true if presents can carry an id and be waited for (VK_KHR_present_id2 and
+    /// VK_KHR_present_wait2). The surface still has to support them.
+    bool IsKhrPresentWait2Enabled() const {
+        return extensions.present_id2 && extensions.present_wait2;
+    }
+
+    /// Returns true if VK_PRESENT_MODE_FIFO_LATEST_READY_KHR may be used.
+    bool IsKhrPresentModeFifoLatestReadyEnabled() const {
+        return extensions.present_mode_fifo_latest_ready;
+    }
+
     /// Returns true if VK_KHR_shader_float_controls is enabled.
     bool IsKhrShaderFloatControlsSupported() const {
         return extensions.shader_float_controls;
@@ -706,7 +803,35 @@ FN_MAX_LIMIT_LIST
         return properties.properties.limits.maxTessellationPatchSize;
     }
 
+    /// The device has VK_EXT_graphics_pipeline_library: graphics pipelines built during play are
+    /// linked from per-stage libraries.
+    bool IsExtGraphicsPipelineLibrarySupported() const {
+        return graphics_pipeline_library_enabled;
+    }
+
+    /// Whether a pipeline is linked from graphics pipeline libraries with link time optimization
+    /// (GraphicsLibraryLinksOptimized).
+    bool LinksGraphicsLibrariesOptimized(bool fragment_quad_after_demote) const {
+        // EXPERIMENT, A/B only, never merges: EDEN_NX2_EXP_GPL_FAST_LINK=1 fast links on any
+        // driver with fast linking (the AMD fringe repro).
+        static const bool fast = std::getenv("EDEN_NX2_EXP_GPL_FAST_LINK") != nullptr;
+        if (fast && properties.graphics_pipeline_library.graphicsPipelineLibraryFastLinking) {
+            return false;
+        }
+        return GraphicsLibraryLinksOptimized(
+            GetDriverID(), properties.graphics_pipeline_library.graphicsPipelineLibraryFastLinking,
+            fragment_quad_after_demote);
+    }
+
+    /// Whether graphics pipeline libraries keep link time optimization info
+    /// (GraphicsLibrariesKeepLinkInfo).
+    bool KeepsGraphicsLibraryLinkInfo() const {
+        return GraphicsLibrariesKeepLinkInfo(
+            GetDriverID(), properties.graphics_pipeline_library.graphicsPipelineLibraryFastLinking);
+    }
+
     /// Returns true if the device supports task and mesh shaders (VK_EXT_mesh_shader).
+
     bool IsExtMeshShaderSupported() const {
         return extensions.mesh_shader && features.mesh_shader.taskShader &&
                features.mesh_shader.meshShader;
@@ -1073,7 +1198,9 @@ FN_MAX_LIMIT_LIST
         return extensions.memory_budget;
     }
 
+    /// Device memory in use, reused for 50 ms (QueryDeviceMemoryUsage asks the driver).
     u64 GetDeviceMemoryUsage() const;
+    u64 QueryDeviceMemoryUsage() const;
 
     /// The driver's current memory budget for this process (VK_EXT_memory_budget), in
     /// GetDeviceMemoryUsage() terms: the usage at which the main device-local heap reaches its
@@ -1150,6 +1277,13 @@ FN_MAX_LIMIT_LIST
     /// Returns true if the device supports VK_KHR_maintenance4.
     bool IsKhrMaintenance4Supported() const {
         return extensions.maintenance4;
+    }
+
+    /// Lichii keeps the driver's binaries of the pipelines it builds (VK_KHR_pipeline_binary):
+    /// the device has pipeline binaries and doesn't prefer its internal cache.
+    bool IsKhrPipelineBinarySupported() const {
+        return extensions.pipeline_binary &&
+               !properties.pipeline_binary.pipelineBinaryPrefersInternalCache;
     }
 
     /// Returns true if the device supports VK_KHR_maintenance5.
@@ -1328,9 +1462,12 @@ private:
         VkPhysicalDeviceFloatControlsProperties float_controls{};
         VkPhysicalDevicePushDescriptorPropertiesKHR push_descriptor{};
         VkPhysicalDeviceDescriptorBufferPropertiesEXT descriptor_buffer{};
+        VkPhysicalDeviceDescriptorHeapPropertiesEXT descriptor_heap{};
         VkPhysicalDeviceSubgroupSizeControlProperties subgroup_size_control{};
         VkPhysicalDeviceTransformFeedbackPropertiesEXT transform_feedback{};
         VkPhysicalDeviceMaintenance5PropertiesKHR maintenance5{};
+        VkPhysicalDevicePipelineBinaryPropertiesKHR pipeline_binary{};
+        VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT graphics_pipeline_library{};
         VkPhysicalDeviceDepthStencilResolveProperties depth_stencil_resolve{};
         VkPhysicalDeviceCustomBorderColorPropertiesEXT custom_border_color{};
         VkPhysicalDeviceCooperativeMatrixPropertiesKHR cooperative_matrix{};
@@ -1342,6 +1479,11 @@ private:
     Extensions extensions{};
     Features features{};
     Properties properties{};
+
+    /// VK_EXT_graphics_pipeline_library, added to the device with its feature only.
+    bool graphics_pipeline_library_requested{};
+    VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT graphics_pipeline_library_features{};
+    bool graphics_pipeline_library_enabled{};
 
     VkPhysicalDeviceFeatures2 features2{};
     VkPhysicalDeviceFaultFeaturesEXT device_fault_features{};
@@ -1379,6 +1521,8 @@ private:
     bool dynamic_state3_alpha_to_one{};
     bool supports_conditional_barriers{};      ///< Allows barriers in conditional control flow.
     mutable std::atomic<size_t> custom_border_color_samplers_used{};
+    mutable std::atomic<u64> memory_usage_value{}; ///< Last GetDeviceMemoryUsage() answer
+    mutable std::atomic<s64> memory_usage_time{};  ///< When it was taken (steady clock ns)
     u64 device_access_memory{};                ///< Total size of device local memory in bytes.
     u32 sets_per_pool{};                       ///< Sets per Description Pool
     NvidiaArchitecture nvidia_arch{NvidiaArchitecture::Arch_AmpereOrNewer};

@@ -21,6 +21,8 @@ add_library(input_common STATIC
     drivers/virtual_amiibo.h
     drivers/virtual_gamepad.cpp
     drivers/virtual_gamepad.h
+    helpers/gameinput_mapping.cpp
+    helpers/gameinput_mapping.h
     helpers/stick_from_buttons.cpp
     helpers/stick_from_buttons.h
     helpers/touch_from_buttons.cpp
@@ -82,6 +84,16 @@ else()
 
     target_link_libraries(input_common PRIVATE SDL3::SDL3)
     target_compile_definitions(input_common PRIVATE HAVE_SDL3)
+
+    if (WIN32)
+        # Microsoft GameInput: the MIT header from externals/gameinput, the runtime loaded from
+        # System32 at run time (no import library, nothing shipped).
+        target_sources(input_common PRIVATE
+            drivers/gameinput_source.cpp
+            drivers/gameinput_source.h)
+        target_include_directories(input_common SYSTEM PRIVATE
+            ${CMAKE_SOURCE_DIR}/externals/gameinput/include)
+    endif()
 endif()
 
 if (ENABLE_LIBUSB)

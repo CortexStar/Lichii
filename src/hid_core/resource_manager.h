@@ -5,6 +5,7 @@
 
 #include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/service.h"
+#include "hid_core/resources/npad/npad_input_publish.h"
 
 namespace Core {
 class System;
@@ -148,6 +149,8 @@ private:
     std::shared_ptr<SleepButton> sleep_button{nullptr};
     std::shared_ptr<UniquePad> unique_pad{nullptr};
     std::shared_ptr<Core::Timing::EventType> npad_update_event;
+    std::shared_ptr<Core::Timing::EventType> npad_input_event;
+    NpadInputPublish npad_input_publish;
     std::shared_ptr<Core::Timing::EventType> default_update_event;
     std::shared_ptr<Core::Timing::EventType> mouse_keyboard_update_event;
     std::shared_ptr<Core::Timing::EventType> motion_update_event;

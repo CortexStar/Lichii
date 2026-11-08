@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -392,4 +393,176 @@ TEST_CASE("Built-in Dynamic FPS leaves both records alone when a user mod change
     auto expected = nso;
     std::memcpy(expected.data() + offset, &mod_word, sizeof(mod_word));
     REQUIRE(context.Manager().PatchNSO(nso, "main") == expected);
+}
+
+namespace {
+
+constexpr std::string_view Ultrawide = "Ultrawide 21:9 (built-in)";
+constexpr size_t UltrawideSizeOffset = sizeof(Loader::NSOHeader) + 0x3F58568;
+constexpr size_t UltrawideIndexOffset = sizeof(Loader::NSOHeader) + 0x1087FC0;
+constexpr size_t UltrawideListIndexOffset = sizeof(Loader::NSOHeader) + 0x1087EE0;
+constexpr size_t UltrawidePictureOffset = sizeof(Loader::NSOHeader) + 0x31F39F4;
+constexpr size_t UltrawideCanvasOffset = sizeof(Loader::NSOHeader) + 0x774368;
+constexpr size_t UltrawideHookCaveOffset = sizeof(Loader::NSOHeader) + 0x3C46400;
+constexpr size_t UltrawideCapOffset = sizeof(Loader::NSOHeader) + 0x6505EC;
+constexpr size_t UltrawideCaveOffset = sizeof(Loader::NSOHeader) + 0x3C46700;
+constexpr u32 BneInstruction = 0x54000061;
+// The originals at the picture and scene sizes and at Ivan0xFF's eight hook sites.
+constexpr std::array<std::pair<u32, u32>, 13> UltrawideOriginals{{
+    {0x1202EE0, 0xD2814008}, {0x31F39F4, 0xD2814008}, {0x31F3A00, 0xD280F008},
+    {0x3485CC0, 0x2D558400}, {0x4F1E8, 0x2D558EA0},  {0x23B9A8, 0x2D558C00},
+    {0x33B82C, 0x2D558440},  {0x25D76C, 0x1E2202A1}, {0x774368, 0xAD401041},
+    {0x3B5C758, 0xA941A269}, {0x20C2B0, 0x52A89E08}, {0x20C99C, 0x52A89E08},
+    {0x215FB0, 0x52A89E08},
+}};
+
+// Sets an environment variable for one test section (the built-ins' experiment switches).
+class ScopedEnv {
+public:
+    ScopedEnv(const char* name_, const char* value) : name{name_} {
+#ifdef _WIN32
+        _putenv_s(name, value);
+#else
+        setenv(name, value, 1);
+#endif
+    }
+    ~ScopedEnv() {
+#ifdef _WIN32
+        _putenv_s(name, "");
+#else
+        unsetenv(name);
+#endif
+    }
+    ScopedEnv(const ScopedEnv&) = delete;
+    ScopedEnv& operator=(const ScopedEnv&) = delete;
+
+private:
+    const char* name;
+};
+
+void PutWord(std::vector<u8>& nso, size_t offset, u32 word) {
+    std::memcpy(nso.data() + offset, &word, sizeof(word));
+}
+
+std::vector<u8> MakeUltrawideMain() {
+    auto nso = MakeMain(OcarinaBuildId, TbzInstruction);
+    nso.resize(UltrawideSizeOffset + 8);
+    // The real main's segments, so the cave is checked against its executable padding.
+    Loader::NSOHeader header;
+    std::memcpy(&header, nso.data(), sizeof(header));
+    header.segments[0].size = 63201744;
+    header.segments[1].location = 63205376;
+    header.segments[1].size = 12603520;
+    header.segments[2].location = 75812864;
+    header.segments[2].size = 5217152;
+    header.segments[2].bss_size = 1414272;
+    std::memcpy(nso.data(), &header, sizeof(header));
+    PutWord(nso, UltrawideCapOffset, 0x6B0802BF); // cmp w21, w8
+    PutWord(nso, UltrawideSizeOffset, 2560);
+    PutWord(nso, UltrawideSizeOffset + 4, 1440);
+    PutWord(nso, UltrawideIndexOffset, BneInstruction);
+    PutWord(nso, UltrawideListIndexOffset, BneInstruction);
+    for (const auto& [offset, word] : UltrawideOriginals) {
+        PutWord(nso, sizeof(Loader::NSOHeader) + offset, word);
+    }
+    return nso;
+}
+
+class UltrawideSettings {
+public:
+    UltrawideSettings(Settings::AspectRatio aspect, Settings::ConsoleMode mode)
+        : previous_aspect{Settings::values.aspect_ratio.GetValue()},
+          previous_mode{Settings::values.use_docked_mode.GetValue()} {
+        Settings::values.aspect_ratio.SetValue(aspect);
+        Settings::values.use_docked_mode.SetValue(mode);
+    }
+    ~UltrawideSettings() {
+        Settings::values.aspect_ratio.SetValue(previous_aspect);
+        Settings::values.use_docked_mode.SetValue(previous_mode);
+    }
+    UltrawideSettings(const UltrawideSettings&) = delete;
+    UltrawideSettings& operator=(const UltrawideSettings&) = delete;
+
+private:
+    Settings::AspectRatio previous_aspect;
+    Settings::ConsoleMode previous_mode;
+};
+
+} // Anonymous namespace
+
+TEST_CASE("Built-in Ultrawide applies only docked with the 21:9 aspect ratio", "[patch_manager]") {
+    PatchManagerTestContext context;
+    Settings::values.disabled_addons[OcarinaTitleId] = {std::string{MaxResolution}};
+    const auto nso = MakeUltrawideMain();
+
+    SECTION("Docked at 21:9 renders 3440x1440 with the 21:9 hooks") {
+        UltrawideSettings settings{Settings::AspectRatio::R21_9, Settings::ConsoleMode::Docked};
+        const auto patched = context.Manager().PatchNSO(nso, "main");
+        REQUIRE(WordAt(patched, UltrawideSizeOffset) == 3440);
+        REQUIRE(WordAt(patched, UltrawideSizeOffset + 4) == 1440);
+        REQUIRE(WordAt(patched, UltrawideIndexOffset) == NopInstruction);
+        REQUIRE(WordAt(patched, UltrawideListIndexOffset) == NopInstruction);
+        REQUIRE(WordAt(patched, UltrawidePictureOffset) == 0xD281AE08); // mov x8, #3440
+        REQUIRE(WordAt(patched, UltrawideCanvasOffset) == 0x14D34876);  // b main+0x3C46540
+        // The first routine reruns sead's ldp s0, s1, [x0, #172].
+        REQUIRE(WordAt(patched, UltrawideHookCaveOffset) == 0x2D558400);
+        REQUIRE(WordAt(patched, UltrawideCapOffset) == 0x14D7D845);       // b main+0x3C46700
+        REQUIRE(WordAt(patched, UltrawideCaveOffset) == 0x6B0902DF);      // cmp w22, w9
+        REQUIRE(WordAt(patched, UltrawideCaveOffset + 24) == 0x172827B9); // b main+0x6505FC
+        // The two other world-to-HUD sites branch to 2580.0f caves.
+        REQUIRE(WordAt(patched, sizeof(Loader::NSOHeader) + 0x20C99C) == 0x14E8E761);
+        REQUIRE(WordAt(patched, sizeof(Loader::NSOHeader) + 0x215FB0) == 0x14E8C1DF);
+        REQUIRE(WordAt(patched, sizeof(Loader::NSOHeader) + 0x3C46724) == 0x72A8A428);
+    }
+
+    SECTION("EDEN_OOT_UW_SIZE_TABLE=0 leaves the size table, index and cap records out") {
+        UltrawideSettings settings{Settings::AspectRatio::R21_9, Settings::ConsoleMode::Docked};
+        ScopedEnv off{"EDEN_OOT_UW_SIZE_TABLE", "0"};
+        const auto patched = context.Manager().PatchNSO(nso, "main");
+        REQUIRE(WordAt(patched, UltrawideSizeOffset) == 2560);
+        REQUIRE(WordAt(patched, UltrawideIndexOffset) == BneInstruction);
+        REQUIRE(WordAt(patched, UltrawideCapOffset) == 0x6B0802BF);
+        REQUIRE(WordAt(patched, UltrawideCaveOffset) == 0);
+        REQUIRE(WordAt(patched, UltrawidePictureOffset) == 0xD281AE08);
+    }
+
+    SECTION("EDEN_OOT_UW_MARKERS=0 leaves the two marker sites out") {
+        UltrawideSettings settings{Settings::AspectRatio::R21_9, Settings::ConsoleMode::Docked};
+        ScopedEnv off{"EDEN_OOT_UW_MARKERS", "0"};
+        const auto patched = context.Manager().PatchNSO(nso, "main");
+        REQUIRE(WordAt(patched, sizeof(Loader::NSOHeader) + 0x20C99C) == 0x52A89E08);
+        REQUIRE(WordAt(patched, sizeof(Loader::NSOHeader) + 0x3C46720) == 0);
+        REQUIRE(WordAt(patched, UltrawideCanvasOffset) == 0x14D34876);
+    }
+
+    SECTION("16:9 leaves the game alone") {
+        UltrawideSettings settings{Settings::AspectRatio::R16_9, Settings::ConsoleMode::Docked};
+        REQUIRE(context.Manager().PatchNSO(nso, "main") == nso);
+    }
+
+    SECTION("Handheld leaves the game alone") {
+        UltrawideSettings settings{Settings::AspectRatio::R21_9, Settings::ConsoleMode::Handheld};
+        REQUIRE(context.Manager().PatchNSO(nso, "main") == nso);
+    }
+
+    SECTION("Disabled in Add-Ons leaves the game alone") {
+        UltrawideSettings settings{Settings::AspectRatio::R21_9, Settings::ConsoleMode::Docked};
+        Settings::values.disabled_addons[OcarinaTitleId] = {std::string{MaxResolution},
+                                                            std::string{Ultrawide}};
+        REQUIRE(context.Manager().PatchNSO(nso, "main") == nso);
+    }
+
+    SECTION("One unexpected original skips every record") {
+        UltrawideSettings settings{Settings::AspectRatio::R21_9, Settings::ConsoleMode::Docked};
+        auto other = nso;
+        PutWord(other, UltrawideCanvasOffset, 0xAD401042);
+        REQUIRE(context.Manager().PatchNSO(other, "main") == other);
+    }
+
+    SECTION("A cave over code that is not padding skips every record") {
+        UltrawideSettings settings{Settings::AspectRatio::R21_9, Settings::ConsoleMode::Docked};
+        auto other = nso;
+        PutWord(other, UltrawideCaveOffset + 8, 1);
+        REQUIRE(context.Manager().PatchNSO(other, "main") == other);
+    }
 }

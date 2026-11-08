@@ -18,19 +18,20 @@
 
 #include "common/assert.h"
 #include "common/cityhash.h"
-#include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/exception.h"
 #include "shader_recompiler/frontend/ampere/trap_guards.h"
+#include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/object_pool.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dirty_flags.h"
 #include "video_core/dlss_contract.h"
-#include "video_core/fire_emblem_upscale.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/fire_emblem_upscale.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_debug_control.h"
+#include "video_core/pipeline_cache_policy.h"
 #include "video_core/shader_cache.h"
 #include "video_core/shader_environment.h"
 #include "video_core/texture_cache/util.h"
@@ -422,6 +423,7 @@ void ShaderCache::RemovePendingShaders() {
         lookup_cache.erase(it);
     }
     marked_for_removal.clear();
+    removal_pending.store(false, std::memory_order_release);
 
     if (!removed_shaders.empty()) {
         if (removed_shaders.size() > 16) {
@@ -450,6 +452,7 @@ void ShaderCache::InvalidatePageEntries(std::vector<Entry*>& entries, VAddr addr
         UnmarkMemory(entry);
         RemoveEntryFromInvalidationCache(entry);
         marked_for_removal.push_back(entry);
+        removal_pending.store(true, std::memory_order_release);
     }
 }
 
@@ -499,6 +502,21 @@ const ShaderInfo* ShaderCache::MakeShaderInfo(GenericEnvironment& env, VAddr cpu
         info->size_bytes = env.ReadSizeBytes();
     }
     info->lowered_native = env.LoweredNative();
+    if (info->lowered_native && env.ShaderStage() == Shader::Stage::VertexB) {
+        // The hardware only fetches the attributes in the input map, so a read outside it is
+        // never valid (none of Ocarina of Time's 1,250 cached vertex programs makes one).
+        std::array<std::array<bool, 4>, Tegra::Engines::Maxwell3D::Regs::NumVertexAttributes>
+            input_generic{};
+        for (size_t index = 0; index < input_generic.size(); ++index) {
+            input_generic[index] = env.SPH().vtg.InputGeneric(index);
+        }
+        info->vertex_attribute_mask = VertexAttributeMask(input_generic);
+    } else if (env.ShaderStage() == Shader::Stage::Task ||
+               env.ShaderStage() == Shader::Stage::Mesh) {
+        // Task and mesh pipelines have no vertex input (Ocarina of Time: 191 keys for 31 sets of
+        // shaders, split only by the attribute registers).
+        info->vertex_attribute_mask = 0;
+    }
     const size_t size_bytes{env.SourceSizeBytes() ? env.SourceSizeBytes() : info->size_bytes};
     const ShaderInfo* const result{info.get()};
     Register(std::move(info), cpu_addr, size_bytes);

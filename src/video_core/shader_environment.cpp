@@ -156,6 +156,10 @@ static Shader::TextureType ConvertTextureType(const Tegra::Texture::TICEntry& en
 }
 
 static Shader::TexturePixelFormat ConvertTexturePixelFormat(const Tegra::Texture::TICEntry& entry) {
+    if (entry.HasNoFormat()) {
+        // The texture cache binds the null view for it (IsValidEntry), an RGBA8 texture.
+        return Shader::TexturePixelFormat::A8B8G8R8_UNORM;
+    }
     return static_cast<Shader::TexturePixelFormat>(
         PixelFormatFromTextureInfo(entry.format, entry.r_type, entry.g_type, entry.b_type,
                                    entry.a_type, entry.srgb_conversion));

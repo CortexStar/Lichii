@@ -4,6 +4,44 @@ Graphical enhancements and visual quality improvments. This doesn't cover textur
 
 ## Visual Enhancements
 
+### Native HDR output
+
+**HDR follows the monitor on Windows (Auto) and is off elsewhere.** Setting it to On assumes that
+you have configured a compatible HDR environment: Vulkan, a suitable GPU and driver,
+an HDR-capable display, and HDR enabled in the operating system where required.
+Verifying and maintaining that environment is the user's responsibility. Configure
+it before starting the game.
+
+This feature preserves native HDR output from Switch 2 games that support it. It
+does not add HDR to SDR-only games. The HDR setting is Auto by default on Windows:
+the game is told the display runs HDR only while Windows HDR is on for the monitor
+that shows it, with that monitor's peak luminance and its SDR content brightness as
+reference white (HDR Peak Luminance and HDR Reference White at 0); on an SDR desktop
+the game renders SDR. Elsewhere it is Off by default, and Auto means SDR because the
+host state is not known; On declares that your environment supports both HDR10 and
+scRGB. The emulator starts with an SDR swapchain and selects HDR output when the game
+supplies native HDR frames, and sends HDR10 metadata (BT.2020 primaries, the
+reported peak).
+
+The emulator does not enable operating-system HDR, tone-map HDR into SDR, or
+reinterpret HDR pixels as SDR. If the surface does not offer the HDR format the game
+needs, it logs an error and presents SDR. Captures are not promised HDR-to-SDR tone
+mapping.
+
+On Windows, Auto follows changes during play: toggling Windows HDR, moving the window
+to another monitor, changing the SDR content brightness or running the Windows HDR
+Calibration app is picked up within half a second, and the game is asked to query the
+display again (games that listen switch between SDR and HDR images; the HDR10 metadata
+is updated too). Run the Windows HDR Calibration app for your monitor first: Windows
+reports the peak from the display's colour profile where one is set, else from its
+EDID, and the game tone maps to that peak.
+
+Windows Auto HDR applies to SDR output of DirectX 11 and 12 games. With HDR on Auto
+and Windows HDR on, a game with an HDR mode presents native HDR10, which Auto HDR
+leaves alone. If you keep HDR Off on an HDR desktop and Auto HDR engages for the
+emulator, turn Auto HDR off for `lichii.exe` / `eden-cli.exe` in Settings > System > Display > Graphics, so
+SDR frames are shown as SDR.
+
 ### Anti-aliasing
 
 Enhancements aimed at removing jagged lines/sharp edges and/or masking artifacts.

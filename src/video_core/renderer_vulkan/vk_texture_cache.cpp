@@ -31,11 +31,14 @@
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/nx2.h"
 #include "video_core/render_trace.h"
+#include "video_core/renderer_vulkan/sampler_class_key.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/texture_cache/host_mip_limits.h"
 
+#include "video_core/dlss_contract.h"
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/renderer_vulkan/blit_image.h"
+#include "video_core/renderer_vulkan/depth_write_policy.h"
 #include "video_core/renderer_vulkan/framebuffer_limits.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
@@ -44,9 +47,9 @@
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/formatter.h"
+#include "video_core/texture_cache/pool_mirror.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/util.h"
-#include "video_core/dlss_contract.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #ifdef EGLANTINE_STREAMLINE
 #include "video_core/vulkan_common/streamline.h"
@@ -373,10 +376,32 @@ constexpr std::array<VkFormat, 2> HugeAstcViewFormats{VK_FORMAT_A8B8G8R8_UNORM_P
 constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM_BLOCK,
                                                          VK_FORMAT_BC1_RGBA_SRGB_BLOCK};
 
+[[nodiscard]] bool WillUseGpuBcnTranscode(const Device& device, const ImageInfo& info);
+
+// ASTC that the GPU re-compresses to BC3 is encoded as BC7 instead (bc7_encoder.comp): the same
+// 16 bytes per block, with 7- or 8-bit endpoints and up to 16 index levels against BC3's 5:6:5
+// colours with 4. Only the GPU encodes BC7, so CPU-decoded ASTC keeps BC3.
+[[nodiscard]] bool IsBc7Astc(const Device& device, const ImageInfo& info) {
+    static constexpr VkFormatFeatureFlags features = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                                     VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+                                                     VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    return Settings::GetAstcRecompression() == Settings::AstcRecompression::Bc3 &&
+           !IsOpaqueBc1Astc(device, info) && WillUseGpuBcnTranscode(device, info) &&
+           device.IsFormatSupported(VK_FORMAT_BC7_UNORM_BLOCK, features, FormatType::Optimal) &&
+           device.IsFormatSupported(VK_FORMAT_BC7_SRGB_BLOCK, features, FormatType::Optimal);
+}
+
+constexpr std::array<VkFormat, 2> Bc7AstcViewFormats{VK_FORMAT_BC7_UNORM_BLOCK,
+                                                      VK_FORMAT_BC7_SRGB_BLOCK};
+
 [[nodiscard]] std::optional<VkFormat> AstcHostFormat(const Device& device, const ImageInfo& info) {
     if (IsOpaqueBc1Astc(device, info)) {
         return VideoCore::Surface::IsPixelFormatSRGB(info.format) ? VK_FORMAT_BC1_RGBA_SRGB_BLOCK
                                                                   : VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+    }
+    if (IsBc7Astc(device, info)) {
+        return VideoCore::Surface::IsPixelFormatSRGB(info.format) ? VK_FORMAT_BC7_SRGB_BLOCK
+                                                                  : VK_FORMAT_BC7_UNORM_BLOCK;
     }
     return HugeAstcHostFormat(device, info);
 }
@@ -462,6 +487,27 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
            info.size.width == info.size.height && !device.HasBrokenCubeImageCompatibility();
 }
 
+[[nodiscard]] bool DepthWrittenByShader(const Device& device, const ImageInfo& info,
+                                        bool attachable) {
+    // EXPERIMENT (do not merge): EDEN_NX2_EXP_DEPTH_TRANSFER_DST=1 keeps TRANSFER_DST on every
+    // depth image (HiZ/HiS off on AMD) for the A/B.
+    static const bool keep_transfer_dst = std::getenv("EDEN_NX2_EXP_DEPTH_TRANSFER_DST") != nullptr;
+    if (keep_transfer_dst) {
+        return false;
+    }
+    const auto type = VideoCore::Surface::GetFormatType(info.format);
+    return Vulkan::DepthWrittenByShader(
+        device.GetDriverID(), device.IsExtShaderStencilExportSupported(), attachable,
+        static_cast<u32>(info.num_samples),
+        type == VideoCore::Surface::SurfaceType::Depth ||
+            type == VideoCore::Surface::SurfaceType::DepthStencil);
+}
+
+/// Whether transfer commands may write the image (see DepthWrittenByShader).
+[[nodiscard]] bool TransferWritable(const Image& image) {
+    return (image.UsageFlags() & VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0;
+}
+
 [[nodiscard]] VkImageCreateInfo MakeImageCreateInfo(const Device& device, const ImageInfo& info,
                                                     std::optional<VkFormat> format_override = {}) {
     auto format_info =
@@ -505,7 +551,10 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
         .arrayLayers = static_cast<u32>(info.resources.layers),
         .samples = ConvertSampleCount(info.num_samples),
         .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = ImageUsageFlags(format_info, info.format, allow_storage),
+        .usage = ImageUsageFlags(format_info, info.format, allow_storage) &
+                 ~(DepthWrittenByShader(device, info, format_info.attachable)
+                       ? VkImageUsageFlags{VK_IMAGE_USAGE_TRANSFER_DST_BIT}
+                       : VkImageUsageFlags{0}),
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 0,
         .pQueueFamilyIndices = nullptr,
@@ -562,7 +611,10 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
             return image;
         }
     }
-    return may_fail ? allocator.TryCreateImage(image_ci) : allocator.CreateImage(image_ci);
+    const float priority = info.render_target ? MemoryAllocator::RenderTargetPriority
+                                              : MemoryAllocator::ImagePriority;
+    return may_fail ? allocator.TryCreateImage(image_ci, false, priority)
+                    : allocator.CreateImage(image_ci, false, priority);
 }
 
 [[nodiscard]] vk::ImageView MakeStorageView(const vk::Device& device, u32 level, VkImage image,
@@ -1297,6 +1349,9 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
       render_pass_cache{render_pass_cache_}, descriptor_pool{descriptor_pool_},
       compute_pass_descriptor_queue{compute_pass_descriptor_queue_},
       resolution{Settings::values.resolution_info} {
+    if (device.IsExtDescriptorHeapSupported()) {
+        texture_heap.emplace(device, memory_allocator);
+    }
     // Before anything below reads astc_recompression (passes, view formats).
     UseBc3ForSwitch2OnSmallCards(device);
     // Huge ASTC arrays always decode on the GPU (IsHugeAstcArray), whatever the decode setting.
@@ -1307,6 +1362,8 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
         if (Settings::GetAstcRecompression() != Settings::AstcRecompression::Uncompressed) {
             bc_encoder_pass.emplace(device, scheduler, descriptor_pool,
                                     compute_pass_descriptor_queue);
+            bc7_encoder_pass.emplace(device, scheduler, descriptor_pool,
+                                     compute_pass_descriptor_queue);
         }
     }
     if (!device.IsKhrImageFormatListSupported()) {
@@ -1700,11 +1757,21 @@ void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,
         total_size += copy.extent.width * copy.extent.height * copy.extent.depth * img_bpp;
     }
     const VkBuffer copy_buffer = GetTemporaryBuffer(total_size);
-    const VkImage dst_image = dst.Handle();
+    // A depth image transfers cannot write gets the copy in a scratch image of its format; a
+    // shader copies the regions over below. The scratch image's earlier contents are discarded.
+    const bool via_scratch = !TransferWritable(dst);
+    const VkImage scratch_image =
+        via_scratch ? AcquireMsaaScratchImage(MakeMsaaScratchImageCreateInfo(
+                          device, dst.info,
+                          VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))
+                    : VK_NULL_HANDLE;
+    const VkImage dst_image = via_scratch ? scratch_image : dst.Handle();
+    const VkImageLayout dst_old_layout =
+        via_scratch ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
     const VkImage src_image = src.Handle();
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([dst_image, src_image, copy_buffer, src_aspect_mask, dst_aspect_mask,
-                      vk_in_copies, vk_out_copies](vk::CommandBuffer cmdbuf) {
+                      dst_old_layout, vk_in_copies, vk_out_copies](vk::CommandBuffer cmdbuf) {
         RangedBarrierRange dst_range;
         RangedBarrierRange src_range;
         for (const VkBufferImageCopy& copy : vk_in_copies) {
@@ -1763,7 +1830,7 @@ void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,
                                  VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
                                  VK_ACCESS_TRANSFER_WRITE_BIT,
                 .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-                .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .oldLayout = dst_old_layout,
                 .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -1807,6 +1874,12 @@ void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,
         cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
                        0, {}, {}, post_barriers);
     });
+    if (via_scratch) {
+        // Only the depth aspect was reinterpreted (see copy_aspect): stencil stays as it is.
+        blit_image_helper.CopyMSAADepth(render_pass_cache, dst.Handle(), dst.info.format,
+                                        scratch_image, dst.info.format, 1, copies, false, false);
+        ReleaseMsaaScratchImage(scratch_image);
+    }
 }
 
 bool TextureCacheRuntime::WantsTemporalUpscaleDepth() const {
@@ -2333,6 +2406,16 @@ void TextureCacheRuntime::BlitImage(Framebuffer* dst_framebuffer, ImageView& dst
             return;
         }
     }
+    if (const Image* const dst_image = dst.BackingImage();
+        dst_image != nullptr && !TransferWritable(*dst_image) && !is_src_msaa) {
+        if ((aspect_mask & VK_IMAGE_ASPECT_STENCIL_BIT) != 0) {
+            blit_image_helper.BlitDepthStencil(dst_framebuffer, src, dst_region, src_region,
+                                               filter, operation);
+        } else {
+            blit_image_helper.BlitDepth(dst_framebuffer, src, dst_region, src_region);
+        }
+        return;
+    }
     ASSERT(!(is_dst_msaa && !is_src_msaa));
     ASSERT(operation == Fermi2D::Operation::SrcCopy);
 
@@ -2574,6 +2657,13 @@ void TextureCacheRuntime::CopyImage(Image& dst, Image& src,
     copies = HostImageCopies(dst, src, copies, host_copies);
     if (copies.empty())
         return;
+    if (!TransferWritable(dst)) {
+        const bool copies_stencil = (dst.AspectMask() & VK_IMAGE_ASPECT_STENCIL_BIT) != 0;
+        blit_image_helper.CopyMSAADepth(render_pass_cache, dst.Handle(), dst.info.format,
+                                        src.Handle(), src.info.format, 1, copies, copies_stencil,
+                                        false);
+        return;
+    }
 
     if (ENABLE_MSAA_RESOLVE_CONSUME) {
         InvalidateResolveShadow(dst.Handle());
@@ -2698,7 +2788,7 @@ void TextureCacheRuntime::CopyImageMSAA(Image& dst, Image& src,
     const bool msaa_to_non_msaa = src.info.num_samples > 1 && dst.info.num_samples == 1;
     const u32 num_samples = msaa_to_non_msaa ? src.info.num_samples : dst.info.num_samples;
     if (ENABLE_MSAA_RESOLVE_CONSUME && msaa_to_non_msaa && copies.size() == 1 &&
-        src.info.format == dst.info.format) {
+        src.info.format == dst.info.format && TransferWritable(dst)) {
         const VideoCommon::ImageCopy& copy = copies.front();
         const ResolveShadow* const shadow = GetValidResolveShadow(src.Handle());
         if (shadow != nullptr && shadow->aspect_mask == dst.AspectMask() &&
@@ -2876,6 +2966,10 @@ void TextureCacheRuntime::LogMemoryStatistics() const {
     Vulkan::LogMemoryStatistics(device);
 }
 
+bool TextureCacheRuntime::SameAstcHostFormat(const ImageInfo& a, const ImageInfo& b) const {
+    return AstcHostFormat(device, a) == AstcHostFormat(device, b);
+}
+
 bool TextureCacheRuntime::UseOpaqueAstcFormat() const {
     // EDEN_NX2_ASTC_BC1=0 keeps every re-compressed ASTC image in BC3.
     static const bool enabled = [] {
@@ -2985,6 +3079,8 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
                                    ? std::span<const VkFormat>{HugeAstcViewFormats}
                                : IsOpaqueBc1Astc(runtime_.device, info)
                                    ? std::span<const VkFormat>{OpaqueAstcViewFormats}
+                               : IsBc7Astc(runtime_.device, info)
+                                   ? std::span<const VkFormat>{Bc7AstcViewFormats}
                                    : runtime->ViewFormats(info.format),
                                AstcHostFormat(runtime_.device, info),
                                UsesSparseLayers(runtime_.device, info, gpu_addr_) ||
@@ -3145,8 +3241,12 @@ void Image::UploadMemory(VkBuffer buffer, VkDeviceSize offset,
     }
 
     const bool msaa_upload_is_depth = (aspect_mask & VK_IMAGE_ASPECT_DEPTH_BIT) != 0;
-    const bool wants_msaa_upload = info.num_samples > 1
-        && ((aspect_mask & VK_IMAGE_ASPECT_COLOR_BIT) != 0 || msaa_upload_is_depth);
+    // Depth without TRANSFER_DST takes the same path: the upload lands in a scratch image and a
+    // shader copies it (one sample: a plain texel copy).
+    const bool wants_msaa_upload =
+        (info.num_samples > 1 &&
+         ((aspect_mask & VK_IMAGE_ASPECT_COLOR_BIT) != 0 || msaa_upload_is_depth)) ||
+        (msaa_upload_is_depth && !TransferWritable(*this));
 
     if (wants_msaa_upload) {
         const bool msaa_upload_copies_stencil =
@@ -3178,7 +3278,8 @@ void Image::UploadMemory(VkBuffer buffer, VkDeviceSize offset,
         image_copies.reserve(copies.size());
         for (const auto& copy : copies) {
             VideoCommon::ImageCopy image_copy{};
-            image_copy.src_offset = {0, 0, 0};
+            // The upload wrote the scratch image at the copy's own offset.
+            image_copy.src_offset = copy.image_offset;
             image_copy.dst_offset = {copy.image_offset.x >> samples_x,
                                      copy.image_offset.y >> samples_y, copy.image_offset.z};
             image_copy.src_subresource = copy.image_subresource;
@@ -4296,7 +4397,7 @@ bool Image::BlitScaleHelper(bool scale_up) {
 
 bool Image::NeedsScaleHelper() const {
     const auto& device = runtime->device;
-    if (info.num_samples > 1) {
+    if (info.num_samples > 1 || !TransferWritable(*this)) {
         return true;
     }
     static constexpr auto OPTIMAL_FORMAT = FormatType::Optimal;
@@ -4342,6 +4443,10 @@ ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::ImageViewI
         format_info.format = VideoCore::Surface::IsPixelFormatSRGB(format)
                                  ? VK_FORMAT_BC1_RGBA_SRGB_BLOCK
                                  : VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+    } else if (IsBc7Astc(*device, image.info) && IsPixelFormatASTC(format)) {
+        format_info.format = VideoCore::Surface::IsPixelFormatSRGB(format)
+                                 ? VK_FORMAT_BC7_SRGB_BLOCK
+                                 : VK_FORMAT_BC7_UNORM_BLOCK;
     }
     if (device->ApiVersion() >= VK_API_VERSION_1_3) {
         const VkFormatProperties3 properties3 =
@@ -4405,12 +4510,17 @@ ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::ImageViewI
         .components = swizzle_mapping,
         .subresourceRange = MakeSubresourceRange(aspect_mask, HostRange(image, info.range)),
     };
+    heap_view_base = create_info;
+    heap_view_base.pNext = nullptr;
+    heap_view_usage = clamped_view_usage;
+    heap_astc_decode = view_next == &astc_decode_mode;
     const auto create = [&](TextureType tex_type, std::optional<u32> num_layers) {
         VkImageViewCreateInfo ci{create_info};
         ci.viewType = ImageViewType(tex_type);
         if (num_layers) {
             ci.subresourceRange.layerCount = *num_layers;
         }
+        heap_view_layers[static_cast<size_t>(tex_type)] = ci.subresourceRange.layerCount;
         vk::ImageView handle = device->GetLogical().CreateImageView(ci);
         if (device->HasDebuggingToolAttached()) {
             handle.SetObjectNameEXT(VideoCommon::Name(*this, gpu_addr).c_str());
@@ -4555,6 +4665,29 @@ VkImageView ImageView::StorageView(Shader::TextureType texture_type,
 
 bool ImageView::IsRescaled() const noexcept {
     return (*slot_images)[image_id].IsRescaled();
+}
+
+bool ImageView::HeapViewCreateInfo(Shader::TextureType texture_type, HeapViewInfo& out) const {
+    const size_t index = static_cast<size_t>(texture_type);
+    if (index >= heap_view_layers.size() || heap_view_layers[index] == 0 || !image_views[index]) {
+        return false;
+    }
+    out.usage = VkImageViewUsageCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+        .pNext = nullptr,
+        .usage = heap_view_usage,
+    };
+    out.astc_decode = VkImageViewASTCDecodeModeEXT{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_ASTC_DECODE_MODE_EXT,
+        .pNext = &out.usage,
+        .decodeMode = VK_FORMAT_R8G8B8A8_UNORM,
+    };
+    out.create_info = heap_view_base;
+    out.create_info.pNext = heap_astc_decode ? static_cast<const void*>(&out.astc_decode)
+                                             : static_cast<const void*>(&out.usage);
+    out.create_info.viewType = ImageViewType(texture_type);
+    out.create_info.subresourceRange.layerCount = heap_view_layers[index];
+    return true;
 }
 
 vk::ImageView ImageView::MakeView(VkFormat vk_format, VkImageAspectFlags aspect_mask,
@@ -4717,20 +4850,52 @@ Sampler::Sampler(TextureCacheRuntime& runtime, const Tegra::Texture::TSCEntry& t
     Emplace(VariantKey{});
 }
 
-Sampler::VariantKey Sampler::MakeKey(const ImageView& image_view, bool is_depth) const noexcept {
+u64 ImageView::SamplerClassKey() const noexcept {
+    SamplerViewTraits traits{
+        .anisotropy = SupportsAnisotropy(),
+        .integer = IsPixelFormatInteger(format),
+        .minmax = SupportsMinmaxFilter(),
+        .border_format = RequiresBorderColorFormat(),
+        .srgb = IsPixelFormatSRGB(format),
+        .identity_swizzle = HasIdentitySwizzle(),
+    };
+    if (!traits.identity_swizzle) {
+        const VkComponentMapping& mapping = Swizzle();
+        traits.swizzle = {static_cast<u8>(mapping.r), static_cast<u8>(mapping.g),
+                          static_cast<u8>(mapping.b), static_cast<u8>(mapping.a)};
+    }
+    return PackSamplerClassKey(traits);
+}
+
+u32 ImageView::PoolMetaBits() const noexcept {
+    namespace Meta = VideoCommon::PoolMirror::Meta;
+    u32 bits = 0;
+    if (!SupportsDepthComparison()) {
+        bits |= Meta::NO_DEPTH_COMPARE;
+    }
+    if (IsPixelFormatInteger(format) || IsPixelFormatASTC(format) || IsPixelFormatBCn(format) ||
+        IsPixelFormatETC2(format)) {
+        bits |= Meta::UNCOMPARABLE_FORMAT;
+    }
+    return bits;
+}
+
+Sampler::VariantKey Sampler::MakeKey(u64 view_key, bool is_depth) const noexcept {
+    const SamplerViewTraits view = UnpackSamplerClassKey(view_key);
     VariantKey key{};
-    key.reduce_anisotropy = has_added_anisotropy && !image_view.SupportsAnisotropy();
-    key.force_nearest = has_linear_filtering && IsPixelFormatInteger(image_view.format);
-    key.drop_reduction = has_minmax_reduction && !image_view.SupportsMinmaxFilter();
-    key.drop_custom_border = has_custom_border_colors && image_view.RequiresBorderColorFormat();
-    key.srgb_border = has_srgb_border_color && IsPixelFormatSRGB(image_view.format);
+    key.reduce_anisotropy = has_added_anisotropy && !view.anisotropy;
+    key.force_nearest = has_linear_filtering && view.integer;
+    key.drop_reduction = has_minmax_reduction && !view.minmax;
+    key.drop_custom_border = has_custom_border_colors && view.border_format;
+    key.srgb_border = has_srgb_border_color && view.srgb;
     // A compare-enabled TSC read by a plain (non-Dref) sample: Maxwell ignores the comparison,
     // Vulkan leaves it undefined and AMD returns the 0/1 compare result (Ocarina forest fog
     // composite read alpha 0 -> black screen). Use a variant without comparison.
     key.drop_compare = has_depth_comparison && !is_depth;
-    if (needs_swizzle_mapping && !key.drop_custom_border && !image_view.HasIdentitySwizzle()) {
-        const VkComponentMapping& mapping = image_view.Swizzle();
-        key.swizzle = {mapping.r, mapping.g, mapping.b, mapping.a};
+    if (needs_swizzle_mapping && !key.drop_custom_border && !view.identity_swizzle) {
+        for (size_t i = 0; i < key.swizzle.size(); ++i) {
+            key.swizzle[i] = static_cast<VkComponentSwizzle>(view.swizzle[i]);
+        }
     }
     return key;
 }
@@ -4794,7 +4959,6 @@ VkSampler Sampler::Emplace(VariantKey key) {
     if (key.drop_compare) {
         create_info.compareEnable = VK_FALSE;
     }
-    create_info.pNext = chain;
     if (key.force_nearest) {
         create_info.magFilter = VK_FILTER_NEAREST;
         create_info.minFilter = VK_FILTER_NEAREST;
@@ -4808,24 +4972,111 @@ VkSampler Sampler::Emplace(VariantKey key) {
     if (!custom_border) {
         create_info.borderColor = ConvertBorderColor(color);
     }
+    // Heap descriptors name a custom border color by a registered index.
+    RegisteredBorderColor border_index;
+    if (custom_border && device_ptr->IsExtDescriptorHeapSupported()) {
+        u32 index = 0;
+        if (device_ptr->GetLogical().RegisterCustomBorderColorEXT(border_ci, &index) ==
+            VK_SUCCESS) {
+            border_index = RegisteredBorderColor{*device_ptr, index};
+        } else {
+            static bool warned = false;
+            if (!std::exchange(warned, true)) {
+                LOG_WARNING(Render_Vulkan,
+                            "No custom border color index left for heap sampler descriptors");
+            }
+        }
+    }
+    const bool reduction = has_minmax_reduction && !key.drop_reduction;
+    VkSamplerCreateInfo created = create_info;
+    created.pNext = chain;
     variants.push_back(Variant{
         .key = key,
-        .sampler = device_ptr->GetLogical().CreateSampler(create_info),
+        .sampler = device_ptr->GetLogical().CreateSampler(created),
+        .create_info = create_info,
+        .custom_border = custom_border,
+        .reduction = reduction,
+        .color = color,
+        .border_index = std::move(border_index),
     });
     return *variants.back().sampler;
 }
 
-VkSampler Sampler::HandleFor(const ImageView& image_view, bool is_depth) {
-    VariantKey key = MakeKey(image_view, is_depth);
+Sampler::RegisteredBorderColor::~RegisteredBorderColor() {
+    if (device_ptr != nullptr) {
+        device_ptr->GetLogical().UnregisterCustomBorderColorEXT(value);
+    }
+}
+
+Sampler::RegisteredBorderColor& Sampler::RegisteredBorderColor::operator=(
+    RegisteredBorderColor&& rhs) noexcept {
+    if (this != &rhs) {
+        if (device_ptr != nullptr) {
+            device_ptr->GetLogical().UnregisterCustomBorderColorEXT(value);
+        }
+        device_ptr = std::exchange(rhs.device_ptr, nullptr);
+        value = rhs.value;
+    }
+    return *this;
+}
+
+bool Sampler::HeapSamplerCreateInfo(VkSampler variant, HeapSamplerInfo& out) const {
+    const auto it = std::ranges::find_if(
+        variants, [variant](const Variant& candidate) { return *candidate.sampler == variant; });
+    if (it == variants.end()) {
+        return false;
+    }
+    out.border = VkSamplerCustomBorderColorCreateInfoEXT{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT,
+        .pNext = nullptr,
+        .customBorderColor = std::bit_cast<VkClearColorValue>(it->color),
+        .format = VK_FORMAT_UNDEFINED,
+    };
+    out.border_index = VkSamplerCustomBorderColorIndexCreateInfoEXT{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_INDEX_CREATE_INFO_EXT,
+        .pNext = &out.border,
+        .index = it->border_index.Index(),
+    };
+    out.mapping = VkSamplerBorderColorComponentMappingCreateInfoEXT{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_BORDER_COLOR_COMPONENT_MAPPING_CREATE_INFO_EXT,
+        .pNext = it->border_index.Valid() ? static_cast<const void*>(&out.border_index)
+                                          : static_cast<const void*>(&out.border),
+        .components{it->key.swizzle[0], it->key.swizzle[1], it->key.swizzle[2], it->key.swizzle[3]},
+        .srgb = VK_FALSE,
+    };
+    const void* chain = nullptr;
+    if (it->custom_border) {
+        chain = it->key.HasSwizzle() ? static_cast<const void*>(&out.mapping) : out.mapping.pNext;
+    }
+    out.reduction = VkSamplerReductionModeCreateInfoEXT{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO_EXT,
+        .pNext = chain,
+        .reductionMode = reduction_mode,
+    };
+    if (it->reduction) {
+        chain = &out.reduction;
+    }
+    out.create_info = it->create_info;
+    out.create_info.pNext = chain;
+    return true;
+}
+
+VkSampler Sampler::HandleForClass(u64 view_key, bool is_depth) {
+    VariantKey key = MakeKey(view_key, is_depth);
     if (variants.size() >= MAX_VARIANTS) {
         key.srgb_border = false;
         key.swizzle = {};
     }
-    VkSampler handle = Find(key);
-    if (handle == VK_NULL_HANDLE) {
-        handle = Emplace(key);
-    }
+    const VkSampler handle = Find(key);
+    return handle != VK_NULL_HANDLE ? handle : Emplace(key);
+}
+
+VkSampler Sampler::HandleFor(const ImageView& image_view, bool is_depth) {
+    const u64 view_key = image_view.SamplerClassKey();
+    const VkSampler handle = HandleForClass(view_key, is_depth);
     if (VideoCommon::RenderTrace::Enabled() && (is_depth || has_depth_comparison)) {
+        // The variant cap leaves force_nearest alone.
+        const VariantKey key = MakeKey(view_key, is_depth);
         static thread_local std::set<std::tuple<VkSampler, VkImage, s32, s32, s32, bool, bool>> seen;
         if (seen.size() < 4096 &&
             seen.emplace(handle, image_view.ImageHandle(), image_view.range.base.level,
@@ -5159,9 +5410,10 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
         map, swizzles);
 
     // Encode every level into one buffer, then copy it into the image.
-    const bool bc3 = !IsOpaqueBc1Astc(device, info) &&
+    const bool bc7 = bc7_encoder_pass && IsBc7Astc(device, info);
+    const bool bc3 = !bc7 && !IsOpaqueBc1Astc(device, info) &&
                      Settings::GetAstcRecompression() != Settings::AstcRecompression::Bc1;
-    const u64 block_bytes = bc3 ? 16 : 8;
+    const u64 block_bytes = bc7 || bc3 ? 16 : 8;
     boost::container::small_vector<VideoCommon::BufferImageCopy, 16> copies;
     u64 total = 0;
     for (u32 level = 0; level < levels; ++level) {
@@ -5187,9 +5439,16 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     }
     const auto output = staging_buffer_pool.Request(total, MemoryUsage::DeviceLocal);
     for (u32 level = 0; level < levels; ++level) {
-        bc_encoder_pass->Encode(*pending.views[level], copies[level].image_extent.width,
-                                copies[level].image_extent.height, layers, bc3, output.buffer,
-                                output.offset, total, copies[level].buffer_offset);
+        if (bc7) {
+            bc7_encoder_pass->Encode(*pending.views[level], copies[level].image_extent.width,
+                                     copies[level].image_extent.height, layers, output.buffer,
+                                     output.offset, total, copies[level].buffer_offset);
+        } else {
+            bc_encoder_pass->Encode(*pending.views[level], copies[level].image_extent.width,
+                                    copies[level].image_extent.height, layers, bc3,
+                                    output.buffer, output.offset, total,
+                                    copies[level].buffer_offset);
+        }
     }
     scheduler.Record([](vk::CommandBuffer cmdbuf) {
         const VkMemoryBarrier barrier{

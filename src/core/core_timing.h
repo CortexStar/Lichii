@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -29,8 +30,9 @@ using TimedCallback = std::function<std::optional<std::chrono::nanoseconds>(
 
 /// Contains the characteristics of a particular event.
 struct EventType {
-    explicit EventType(TimedCallback&& callback_, std::string&& name_)
-        : callback{std::move(callback_)}, name{std::move(name_)}, sequence_number{0} {}
+    explicit EventType(TimedCallback&& callback_, std::string&& name_, bool relaxed_ = false)
+        : callback{std::move(callback_)}, name{std::move(name_)}, sequence_number{0},
+          relaxed{relaxed_} {}
 
     /// The event's callback function.
     TimedCallback callback;
@@ -39,6 +41,9 @@ struct EventType {
     /// A monotonic sequence number, incremented when this event is
     /// changed externally.
     size_t sequence_number;
+    /// The event may run up to an OS timer tick late (a poll, not a deadline): the timer thread
+    /// sleeps in the OS until it instead of waiting for it in a monitor wait.
+    const bool relaxed;
 };
 
 enum class UnscheduleEventType {
@@ -125,6 +130,15 @@ public:
     /// Returns the current CNTPCT tick value.
     u64 GetClockTicks() const;
 
+    /// Whether GetClockTicks is the host clock's guest counter (WallClock::GetCNTPCT) unchanged:
+    /// multicore on the native (invariant TSC) clock, no synchronized core speed, and no CPU clock
+    /// scaling (Switch 2 titles ignore it). The JIT then reads the counter inline.
+    static constexpr bool GuestCounterIsHostClock(bool multicore, bool native_clock,
+                                                  bool sync_core_speed, bool switch2) {
+        return multicore && native_clock && !sync_core_speed && switch2;
+    }
+    bool GuestCounterIsHostClock() const;
+
     /// Returns the current GPU tick value.
     u64 GetGPUTicks() const;
 
@@ -144,15 +158,32 @@ public:
 #endif
 
     struct Event;
+    struct TimingTrace;
 
     void Reset();
+
+    /// Whether the timer thread must be woken for an event at `time` (basic_lock held).
+    [[nodiscard]] bool NeedsWake(s64 time, bool relaxed) const;
 
     using heap_t = boost::heap::fibonacci_heap<CoreTiming::Event, boost::heap::compare<std::greater<>>>;
     heap_t event_queue;
     s64 global_timer = 0;
 #ifdef _WIN32
-    s64 timer_resolution_ns;
+    s64 timer_resolution_ns{};
 #endif
+    /// Set by Advance for the timer thread: wait until `until`, in the OS (blocks) or precisely.
+    struct NextWait {
+        s64 until{};
+        bool blocks{};
+        std::string name; ///< The event it waits for (EDEN_NX2_TIMING_TRACE only)
+    } next_wait;
+    /// When the timer thread looks at the queue next: the minimum while it is in Advance, the
+    /// maximum while it waits on an empty queue (basic_lock).
+    s64 planned_wake{(std::numeric_limits<s64>::min)()};
+    /// How late an OS wait of the timer thread can end (Advance; see Common::OsWakeTime).
+    s64 os_wake_guard{};
+    /// EDEN_NX2_TIMING_TRACE=1: what the timer thread waits for and runs, logged every 2 s.
+    std::unique_ptr<TimingTrace> trace;
     u64 event_fifo_id = 0;
     std::atomic<s64> pause_end_time{};
     /// Cycle timing
@@ -179,5 +210,8 @@ public:
 /// @returns An EventType instance representing the created event.
 ///
 std::shared_ptr<EventType> CreateEvent(std::string name, TimedCallback&& callback);
+
+/// Creates a relaxed event (EventType::relaxed): one that may run up to an OS timer tick late.
+std::shared_ptr<EventType> CreateRelaxedEvent(std::string name, TimedCallback&& callback);
 
 } // namespace Core::Timing

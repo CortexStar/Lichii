@@ -14,7 +14,9 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/renderer_base.h"
 #ifdef HAS_LSFG
+#include "video_core/perf_overlay.h"
 #include "video_core/renderer_vulkan/present/frame_gen.h"
+#include "video_core/renderer_vulkan/present/perf_overlay_pass.h"
 #endif
 #include "video_core/renderer_vulkan/vk_blit_screen.h"
 #include "video_core/renderer_vulkan/vk_present_manager.h"
@@ -59,6 +61,14 @@ public:
         return device.GetDriverName();
     }
 
+    [[nodiscard]] u32 HostFrameCap() const override {
+        return swapchain.GetFrameCap();
+    }
+
+    void SetGuestPresentRate(u32 hz) override {
+        present_manager.SetGuestPresentRate(hz);
+    }
+
     [[nodiscard]] VideoCore::FrameGenStatus GetFrameGenStatus() const override {
 #ifdef HAS_LSFG
         return frame_gen.CurrentStatus();
@@ -74,6 +84,10 @@ private:
     Common::DkbFrameTrace::RateLimit trace_cpu_rate;
     std::chrono::steady_clock::time_point trace_last_frame{};
     u64 trace_frame{};
+    VideoCore::PerfOverlay::Stats perf_overlay_stats;
+    f32 perf_overlay_white{};
+
+    void RefreshPerfOverlay(std::chrono::steady_clock::time_point now, bool hdr_output);
 
     void InterpolateFrames(Frame* prev_frame, Frame* curr_frame);
     Frame* previous_frame = nullptr;  // Store the previous frame for interpolation
@@ -83,7 +97,7 @@ private:
 
     vk::Buffer RenderToBuffer(std::span<const Tegra::FramebufferConfig> framebuffers,
                               const Layout::FramebufferLayout& layout, VkFormat format,
-                              VkDeviceSize buffer_size);
+                              VkDeviceSize buffer_size, bool hdr_output = false);
     void RenderScreenshot(std::span<const Tegra::FramebufferConfig> framebuffers);
     void RenderAppletCaptureLayer(std::span<const Tegra::FramebufferConfig> framebuffers);
 

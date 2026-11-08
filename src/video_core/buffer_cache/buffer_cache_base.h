@@ -9,8 +9,11 @@
 #include <algorithm>
 #include <cstdlib>
 #include <array>
+#include <atomic>
 #include <bit>
+#include <bitset>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -25,7 +28,6 @@
 #include <boost/container/small_vector.hpp>
 
 #include "common/common_types.h"
-#include "common/spin_recursive_mutex.h"
 #include "common/div_ceil.h"
 #include "common/literals.h"
 #include "common/lru_cache.h"
@@ -33,22 +35,36 @@
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/slot_vector.h"
+#include "common/spin_recursive_mutex.h"
+#include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/shader_info.h"
 #include "video_core/buffer_cache/buffer_base.h"
+#include "video_core/buffer_cache/nx2_bufcache.h"
 #include "video_core/buffer_cache/read_trap_tracker.h"
+#include "video_core/buffer_cache/uniform_stream_reuse.h"
 #include "video_core/buffer_cache/virtual_range_cache.h"
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/delayed_destruction_ring.h"
 #include "video_core/dirty_flags.h"
-#include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/gpu_page_table.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2.h"
 #include "video_core/nx2_download_trace.h"
+#include "video_core/nx2_reactive.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/types.h"
 
 namespace VideoCommon {
+
+/// How much of a guest uniform bank [gpu_addr, +size) to bind: up to where its mapping, or the
+/// mapping's device range, ends. The bank size is only an upper limit (native titles bind 64 KiB
+/// banks over smaller allocations); bound in full, the buffer covered device memory past the
+/// mapping, and uploads read it as unmapped memory.
+inline u32 MappedUniformSize(const Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, u32 size) {
+    return static_cast<u32>(gpu_memory.MaxContinuousRange(gpu_addr, size));
+}
 
 using BufferId = Common::SlotId;
 
@@ -289,7 +305,9 @@ public:
         return !AsyncBufferDownloads();
     }
 
-    bool InlineMemory(DAddr dest_address, size_t copy_size, std::span<const u8> inlined_buffer);
+    /// `pages_clean` (optional): set when no page the write touches holds GPU-written data.
+    bool InlineMemory(DAddr dest_address, size_t copy_size, std::span<const u8> inlined_buffer,
+                      bool* pages_clean = nullptr);
 
     void BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr, u32 size);
 
@@ -311,6 +329,43 @@ public:
     void SetComputeUniformBufferState(u32 mask, const ComputeUniformBufferSizes* sizes);
 
     void UnbindGraphicsStorageBuffers(size_t stage);
+
+    /// GPU page table: whether graphics stage `stage` reaches its storage buffers and global
+    /// memory by device address (Shader::Info::storage_by_address). Its storage bindings are then
+    /// made resident in the page table instead of bound.
+    void SetStorageByAddress(size_t stage, bool by_address) {
+        graphics_storage_by_address[stage] = by_address;
+    }
+
+    /// GPU page table: the same for the compute program of the next dispatch.
+    void SetComputeStorageByAddress(bool by_address) {
+        compute_storage_by_address = by_address;
+    }
+
+    /// Constant buffers by device address: whether graphics stage `stage` reads its constant
+    /// buffers from the draw's bank table (Shader::Info::uniforms_by_address).
+    void SetUniformsByAddress(size_t stage, bool by_address) {
+        graphics_uniforms_by_address[stage] = by_address;
+    }
+
+    /// The same for the compute program of the next dispatch.
+    void SetComputeUniformsByAddress(bool by_address) {
+        compute_uniforms_by_address = by_address;
+    }
+
+    /// Starts the bank table of the next draw (or dispatch): the stages that read constant
+    /// buffers by address get their entries, unbound banks reading zero. Before binding.
+    void BeginBankTable(bool compute);
+
+    /// The device address of the bank table BeginBankTable started, filled by the binds since.
+    [[nodiscard]] u64 BankTableAddress() const noexcept {
+        return bank_table_address;
+    }
+
+    /// The device address of the current address space's page table, with the entries made
+    /// resident so far uploaded in command order (call it after binding, before recording).
+    /// 0 without page table support.
+    [[nodiscard]] u64 PageTableAddress();
 
     bool BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
                                    bool is_written, u32 indirect_offset = ~0U);
@@ -339,6 +394,10 @@ public:
     [[nodiscard]] std::pair<Buffer*, u32> ObtainCPUBuffer(DAddr gpu_addr, u32 size,
                                                           ObtainBufferSynchronize sync_info,
                                                           ObtainBufferOperation post_op);
+
+    /// GPU work recorded now reads or writes these bytes, of a buffer obtained before (work set
+    /// up once that keeps reading them, as conditional rendering does). Creates no buffer.
+    void MarkUsed(DAddr device_addr, u64 size);
     void FlushCachedWrites();
 
     /// Where the CPU writes into GPU-written memory that were collected but not applied yet
@@ -385,11 +444,13 @@ public:
     /// True when it recorded copies, which the GPU completes at `tick` (the caller submits).
     bool Nx2CopyListPages(u64 tick);
     enum class Nx2ListRead { Unknown, Copied, Synced, NeedsSync, Pending };
-    /// Front thread: Synced when guest memory holds the page `device_addr` lies in (flushed and
-    /// written by no GPU work since), else Copied with `out` filled from the copy of its last
-    /// write once the GPU is done with it. Unknown otherwise: the caller drains and flushes.
-    /// Pages draws write are only Synced or Unknown, and NeedsSync until `past_sync`: the
-    /// split's back ran the work before the last host-level wait (GpuSplit::WaitForSync).
+    /// Front thread: Synced when guest memory holds the bytes [device_addr, device_addr +
+    /// out.size()) of their page: no GPU work wrote them since the page was flushed, or the host
+    /// wrote them since. Else Copied with `out` filled once the GPU is done with the copy of the
+    /// page's last write: from the copy where GPU work wrote, from guest memory elsewhere once
+    /// the page was flushed. Unknown otherwise: the caller drains and flushes. Pages draws write
+    /// are only Synced or Unknown, and NeedsSync until `past_sync`: the split's back ran the work
+    /// before the last host-level wait (GpuSplit::WaitForSync).
     /// With `pending_tick`, a copy the GPU has not finished returns Pending and sets the tick
     /// instead of waiting for it.
     Nx2ListRead Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool past_sync,
@@ -397,9 +458,16 @@ public:
     /// Front thread, the split drained: the command list page was flushed to guest memory.
     void Nx2NoteListSynced(DAddr page);
 
+    /// GPU thread: whether GPU writes over pages the guest CPU reads were queued for download
+    /// since the last call.
+    [[nodiscard]] bool TakeReadPrefetchQueued() noexcept {
+        return std::exchange(read_prefetch_queued, false);
+    }
+
     void Nx2FlushListPages(std::span<const DAddr> pages);
-    /// CPU and inline writes: they reach guest memory, so a synced page stays synced, but its copy
-    /// no longer holds the page.
+    /// CPU, inline and copy engine writes of bytes guest memory holds: they reach guest memory,
+    /// so a synced page stays synced and the words they cover are guest memory's again, but the
+    /// page's copy no longer holds the page.
     void Nx2NoteListHostWrite(DAddr device_addr, u64 size);
 
     /// Return true when a CPU region is modified from the GPU
@@ -456,6 +524,28 @@ public:
         }
     }
 
+    /// Visits the device address ranges the last configured dispatch binds as uniform, storage
+    /// and texture buffers, with whether it may write them: func(DAddr, u64 size, bool written).
+    template <typename Func>
+    void ForEachComputeBufferRange(Func&& func) const {
+        const auto* const sizes = channel_state->compute_uniform_buffer_sizes;
+        ForEachEnabledBit(channel_state->enabled_compute_uniform_buffer_mask, [&](u32 index) {
+            const Binding& binding = channel_state->compute_uniform_buffers[index];
+            func(binding.device_addr,
+                 u64{sizes ? std::min(binding.size, (*sizes)[index]) : binding.size}, false);
+        });
+        ForEachEnabledBit(channel_state->enabled_compute_storage_buffers, [&](u32 index) {
+            const Binding& binding = channel_state->compute_storage_buffers[index];
+            func(binding.device_addr, u64{binding.size},
+                 ((channel_state->written_compute_storage_buffers >> index) & 1) != 0);
+        });
+        ForEachEnabledBit(channel_state->enabled_compute_texture_buffers, [&](u32 index) {
+            const TextureBufferBinding& binding = channel_state->compute_texture_buffers[index];
+            func(binding.device_addr, u64{binding.size},
+                 ((channel_state->written_compute_texture_buffers >> index) & 1) != 0);
+        });
+    }
+
     /// Return true when a region is registered on the cache
     [[nodiscard]] bool IsRegionRegistered(DAddr addr, size_t size);
 
@@ -482,8 +572,30 @@ public:
     Common::SpinRecursiveMutex mutex;
     Runtime& runtime;
     bool any_buffer_uploaded = false;
-    /// Indirectly read banks of native programs already uploaded this frame.
-    std::unordered_set<DAddr> native_indirect_uniforms_this_frame;
+    /// Bumped whenever gpu_modified_ranges gains a range: a page found free of GPU-written data
+    /// stays free while it is unchanged (the rasterizer's inline writes).
+    std::atomic<u64> gpu_modified_serial{};
+    /// Set once a range went into gpu_modified_ranges without marking its pages in
+    /// Tegra::g_nx2_gpu_written_pages (outside Switch 2 sessions): the bitmap no longer bounds it.
+    bool nx2_gpu_ranges_unmarked = false;
+    /// Bytes of native uniform banks compared or uploaded this frame. Ocarina of Time binds
+    /// overlapping 64 KiB windows at a different start for most draws: keyed by start address,
+    /// every window uploaded again.
+    Common::RangeSet<DAddr> native_bank_ranges_this_frame;
+
+    /// RasterizerInterface::QueueFlushRegion: queues the GPU-written parts of a range for download
+    /// at the next fence instead of flushing them now. Returns whether anything was queued.
+    bool Nx2QueueReadDownload(DAddr device_addr, u64 size) {
+        if (!memory_tracker.IsRegionGpuModified(device_addr, size)) {
+            return false; // nothing CommitAsyncFlushesHigh would copy: flush the old way
+        }
+        bool queued = false;
+        gpu_modified_ranges.ForEachInRange(device_addr, size, [&](DAddr lower, DAddr upper) {
+            uncommitted_gpu_modified_ranges.Add(lower, upper - lower);
+            queued = true;
+        });
+        return queued;
+    }
 
 private:
     template <typename Mask, typename Func>
@@ -530,6 +642,9 @@ private:
 
     void BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 binding_index, bool needs_bind);
 
+    /// Counts what a streamed uniform buffer bind did (EDEN_NX2_GPU_PROFILE).
+    void NoteUniformReuse(VideoCommon::UniformReuseResult result, u32 size);
+
     void BindHostGraphicsStorageBuffers(size_t stage);
 
     void BindHostGraphicsTextureBuffers(size_t stage);
@@ -571,6 +686,28 @@ private:
     void UpdateComputeStorageBuffers();
 
     void UpdateComputeTextureBuffers();
+
+    /// The buffers and multi-range segments a stage's storage bindings resolved to, kept while the
+    /// bindings, the GPU mappings and the set of buffers (binding_epoch) stay the same.
+    struct StorageResolveCache {
+        u64 epoch{}; ///< binding_epoch when stored; 0 never matches
+        u64 map_serial{};
+        size_t as_id{};
+        const void* channel{};
+        u64 enabled{};
+        u64 written{};
+        std::array<Binding, NUM_STORAGE_BUFFERS> bindings{};
+        std::vector<MultiRangeSegment> segments;
+    };
+
+    /// Restores the stage's resolved storage bindings from the cache when nothing they depend on
+    /// changed. False: resolve them, then StoreStorageResolve.
+    bool ReuseStorageResolve(StorageResolveCache& cache, std::span<Binding> bindings, u64 enabled,
+                             u64 written, std::vector<MultiRangeSegment>& pool);
+
+    void StoreStorageResolve(StorageResolveCache& cache, std::span<const Binding> bindings,
+                             u64 enabled, u64 written, const std::vector<MultiRangeSegment>& pool,
+                             u64 start_epoch);
 
     void MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync = false);
 
@@ -652,6 +789,168 @@ private:
     void InlineMemoryImplementation(DAddr dest_address, size_t copy_size,
                                     std::span<const u8> inlined_buffer);
 
+    /// The guest bytes of a device page of native uniform banks at their last upload by
+    /// UploadNativeBank. Bit k of `valid`: granule k of the page still holds what the host buffer
+    /// holds there; other host writes over the granule clear it.
+    struct BankShadow {
+        std::array<u8, Core::DEVICE_PAGESIZE> bytes{};
+        u16 valid{};
+        u64 compared_frame{}; ///< frame_tick of the last compare
+    };
+    static constexpr u64 BANK_GRANULE = Core::DEVICE_PAGESIZE / 16;
+    static constexpr size_t MAX_BANK_SHADOWS = 4096;
+
+    /// The once-a-frame upload of part of a native uniform bank: only the granules whose guest
+    /// bytes differ from what was uploaded last time.
+    void UploadNativeBank(Buffer& buffer, DAddr device_addr, u64 upload_size);
+
+    /// The shadow of the device page `page`, created if missing; nullptr at the cap when every
+    /// shadow was compared this frame.
+    BankShadow* BankShadowOf(DAddr page);
+
+    /// Host buffer writes other than UploadNativeBank over [device_addr, device_addr + size).
+    void InvalidateBankShadows(DAddr device_addr, u64 size);
+
+    /// UploadHotPages wrote `bytes` over the device page `page`: bank shadow pages that are
+    /// exactly this page take them as what the host holds, others are
+    /// invalidated.
+    void RefreshBankShadows(DAddr page, const u8* bytes);
+
+    /// UploadNativeBank wrote `bytes` over [device_addr, device_addr + size): hot pages wholly
+    /// inside take them as what the host holds, others are invalidated.
+    void RefreshHotShadows(DAddr device_addr, const u8* bytes, u64 size);
+
+    /// Whether a bank shadow covers part of [device_addr, device_addr + size).
+    [[nodiscard]] bool OverlapsBankShadow(DAddr device_addr, u64 size) const;
+
+    /// A host upload wrote `bytes` over [device_addr, device_addr + size): bank shadow pages it
+    /// wholly covers take them as what the host holds, pages it
+    /// partly covers are invalidated.
+    void RefreshBankShadowsFromUpload(DAddr device_addr, const u8* bytes, u64 size);
+
+    /// MappedUploadMemory for SynchronizeBuffer when bank shadows exist: a copy of up to 256 KiB
+    /// over a shadow reads guest memory once into a cached scratch, which feeds both the staging
+    /// buffer and RefreshBankShadowsFromUpload; a larger one invalidates the shadow pages.
+    void MappedUploadMemoryRefreshingBanks(Buffer& buffer, u64 total_size_bytes,
+                                           std::span<BufferCopy> copies);
+
+    /// Keyed by device page.
+    std::map<DAddr, std::unique_ptr<BankShadow>> bank_shadows;
+    std::vector<u8> bank_refresh_scratch;
+
+    /// A range SynchronizeBuffer left clean: clean while no CPU-dirty mark
+    /// fell in it (the 256 KiB regions it covers when it covers at most MAX_SKIP_REGIONS of them,
+    /// else its buffer: Buffer::cpu_dirty_gen), no mark not tied to a range (cpu_dirty_epoch) and
+    /// no buffer came or went. `hot_mask`: the hot pages in the range,
+    /// bit k for the k-th device page from the range's first; they are always dirty, and a hit
+    /// compares them.
+    struct SyncSkip {
+        const Buffer* buffer{};
+        DAddr device_addr{};
+        u32 size{};
+        u64 gen{};
+        u64 epoch{};
+        u64 binding_epoch{};
+        u64 region_sum{};
+        u64 hot_mask{};
+    };
+    static constexpr u32 SYNC_SKIP_BITS = 10;
+    std::array<SyncSkip, size_t{1} << SYNC_SKIP_BITS> sync_skip{};
+    /// Bumped by CPU-dirty marks not tied to one range (cached writes, deleted buffers).
+    u64 cpu_dirty_epoch = 1;
+
+    /// CPU-dirty marks per 256 KiB device region, regions folded onto
+    /// SKIP_REGION_SLOTS counters (a shared counter only drops more entries). The counters only
+    /// grow, so their sum over a range is unchanged exactly when none of them changed.
+    static constexpr u32 SKIP_REGION_BITS = 18;
+    static constexpr size_t SKIP_REGION_SLOTS = 4096;
+    static constexpr u64 MAX_SKIP_REGIONS = 64;
+    std::array<u64, SKIP_REGION_SLOTS> skip_region_gen{};
+
+    /// The number of regions [device_addr, device_addr + size) covers (1 for an empty range).
+    [[nodiscard]] static u64 SkipRegionCount(DAddr device_addr, u64 size) noexcept {
+        const u64 first = device_addr >> SKIP_REGION_BITS;
+        const u64 last = (device_addr + (size == 0 ? 0 : size - 1)) >> SKIP_REGION_BITS;
+        return last - first + 1;
+    }
+
+    [[nodiscard]] u64 SkipRegionSum(DAddr device_addr, u64 size) const noexcept {
+        const u64 first = device_addr >> SKIP_REGION_BITS;
+        const u64 count = SkipRegionCount(device_addr, size);
+        u64 sum = 0;
+        for (u64 region = first; region != first + count; ++region) {
+            sum += skip_region_gen[region % SKIP_REGION_SLOTS];
+        }
+        return sum;
+    }
+
+    void BumpSkipRegions(DAddr device_addr, u64 size) noexcept {
+        const u64 first = device_addr >> SKIP_REGION_BITS;
+        const u64 count = SkipRegionCount(device_addr, size);
+        if (count >= SKIP_REGION_SLOTS) {
+            for (u64& gen : skip_region_gen) {
+                ++gen;
+            }
+            return;
+        }
+        for (u64 region = first; region != first + count; ++region) {
+            ++skip_region_gen[region % SKIP_REGION_SLOTS];
+        }
+    }
+
+    /// CPU-dirty marks over [device_addr, device_addr + size): their buffers' syncs can't be
+    /// skipped until they ran again.
+    void NoteCpuDirty(DAddr device_addr, u64 size);
+
+    /// A SYNC_SKIP hit on a range holding hot pages (`hot_mask` from the range's first device
+    /// page): compares and uploads them. Empty when one of them needs the full walk.
+    [[nodiscard]] std::optional<bool> SyncSkippedHotPages(Buffer& buffer, DAddr device_addr,
+                                                          u64 hot_mask);
+
+    /// A page the guest rewrites between most of its syncs: it stays
+    /// unprotected and CPU-dirty (Type::Hot in the tracker), and each sync compares its guest
+    /// bytes with `bytes`, which the host buffer holds while `valid`, uploading only changes.
+    struct HotPage {
+        std::array<u8, Core::DEVICE_PAGESIZE> bytes{};
+        bool valid{};
+        u32 unchanged{}; ///< Syncs since the bytes last changed
+        u64 changed_frame{};
+    };
+    struct PageHeat {
+        u32 heat{};
+        u64 frame{};
+        u64 no_promote_until{}; ///< Demoted for its cost: not promoted before this frame
+    };
+    static constexpr size_t MAX_HOT_PAGES = 2048;
+    static constexpr u32 HOT_PAGE_HEAT = 16;
+    /// Unchanged compares in a row that cost more than the guest fault and
+    /// re-protection the hot page saves (~0.4 us a compare against several us a fault).
+    static constexpr u32 HOT_DEMOTE_UNCHANGED = 8;
+    static constexpr u64 HOT_COOLDOWN_FRAMES = 512;
+    std::unordered_map<DAddr, std::unique_ptr<HotPage>> hot_pages;
+    std::unordered_map<DAddr, PageHeat> page_heat;
+    std::vector<DAddr> hot_changed_pages;
+    std::vector<DAddr> hot_promote_pages;
+    std::vector<DAddr> hot_demote_pages;
+
+    /// Counts the syncs that found these (small) ranges dirty; pages dirty at most of them
+    /// become hot.
+    void NoteDirtyPages(DAddr device_addr, u64 size);
+
+    /// A hot page reached by a sync: false when it must be uploaded from guest memory as usual.
+    bool SyncHotPage(DAddr page);
+
+    void ApplyHotPageChanges();
+
+    /// Uploads hot_changed_pages from their copies.
+    void UploadHotPages(Buffer& buffer);
+
+    /// GPU writes: hot pages they touch are tracked as usual again.
+    void DemoteHotPages(DAddr device_addr, u64 size);
+
+    /// Host writes other than UploadHotPages: the copies no longer say what the host holds.
+    void InvalidateHotShadows(DAddr device_addr, u64 size);
+
     Tegra::MaxwellDeviceMemoryManager& device_memory;
 
     Common::SlotVector<Buffer> slot_buffers;
@@ -717,6 +1016,7 @@ private:
             if (memory_tracker.IsRegionPreflushable(device_addr, size)) {
                 uncommitted_gpu_modified_ranges.Add(device_addr, size);
             } else {
+                PrefetchCpuReadRanges(device_addr, size);
                 ArmReadTraps(device_addr, size);
             }
             return;
@@ -732,11 +1032,67 @@ private:
             }
         });
         if (queued < size) {
+            PrefetchCpuReadRanges(device_addr, size);
             ArmReadTraps(device_addr, size);
         }
         if (Nx2DownloadTrace::g_enabled && queued != 0) [[unlikely]] {
             Nx2DownloadTrace::Queued(device_addr, size, queued);
         }
+    }
+
+    /// Reactive prefetch: the parts of a trapped GPU write over pages the guest CPU has
+    /// read GPU data from are also copied back at the next fence. The trap stays armed, so a read
+    /// before that copy reaches guest memory still flushes; a later one finds nothing to flush.
+    void PrefetchCpuReadRanges(DAddr device_addr, u64 size) {
+        RollCpuReadRanges();
+        if (cpu_read_ranges.Empty() && cpu_read_ranges_previous.Empty()) {
+            return;
+        }
+        const auto queue = [&](DAddr lower, DAddr upper) {
+            uncommitted_gpu_modified_ranges.Add(lower, upper - lower);
+            read_prefetch_queued = true;
+        };
+        cpu_read_ranges.ForEachInRange(device_addr, size, queue);
+        cpu_read_ranges_previous.ForEachInRange(device_addr, size, queue);
+    }
+
+    /// Forgets the pages the guest CPU has not read GPU data from for a while
+    /// (Nx2Reactive::HotFrames, 64 to 128 frames): cpu_read_ranges holds this period's reads,
+    /// the previous period's are kept one more period.
+    void RollCpuReadRanges() {
+        constexpr u64 frames = Nx2Reactive::HotFrames;
+        const u64 epoch = Nx2Reactive::g_frame.load(std::memory_order_relaxed) / frames;
+        if (epoch == cpu_read_epoch) {
+            return;
+        }
+        if (epoch == cpu_read_epoch + 1) {
+            cpu_read_ranges_previous = std::move(cpu_read_ranges);
+        } else {
+            cpu_read_ranges_previous.Clear();
+            cpu_read_ranges.Clear();
+        }
+        cpu_read_epoch = epoch;
+    }
+
+    /// Whether every GPU-written byte in [device_addr, device_addr + size) has a download
+    /// recorded that is still to land (GPU::WaitForLanding).
+    [[nodiscard]] bool GpuWritesDownloading(DAddr device_addr, u64 size) const {
+        if (pending_download_ranges.empty()) {
+            return false;
+        }
+        Common::RangeSet<DAddr> missing;
+        gpu_modified_ranges.ForEachInRange(device_addr, size, [&](DAddr lower, DAddr upper) {
+            missing.Add(lower, upper - lower);
+        });
+        if (missing.Empty()) {
+            return false;
+        }
+        for (const Common::RangeSet<DAddr>& ranges : pending_download_ranges) {
+            ranges.ForEachInRange(device_addr, size, [&](DAddr lower, DAddr upper) {
+                missing.Subtract(lower, upper - lower);
+            });
+        }
+        return missing.Empty();
     }
 
     /// GPU writes that are not downloaded at fences: trap the guest CPU's next read of their
@@ -755,6 +1111,10 @@ private:
     /// Ranges the guest CPU read after GPU writes. A read that must flush downloads the GPU
     /// writes in all of them, so the reads that usually follow it find nothing left to flush.
     Common::RangeSet<DAddr> cpu_read_ranges;
+    Common::RangeSet<DAddr> cpu_read_ranges_previous; ///< Read in the previous period only
+    u64 cpu_read_epoch{};                             ///< Period of cpu_read_ranges (HotFrames)
+    /// PrefetchCpuReadRanges queued a download since TakeReadPrefetchQueued.
+    bool read_prefetch_queued{};
     bool download_cpu_read_ranges{};
     Common::RangeSet<DAddr> gpu_modified_ranges;
     std::deque<Common::RangeSet<DAddr>> committed_gpu_modified_ranges;
@@ -785,6 +1145,118 @@ private:
     VirtualRangeCache virtual_ranges;
     std::vector<MultiRangeSegment> graphics_segments;
     std::vector<MultiRangeSegment> compute_segments;
+    /// Bumped whenever a buffer is created, deleted or joined: resolved bindings may be stale.
+    u64 binding_epoch = 1;
+
+    /// GPU page table, one per GPU address space (MemoryManager::GetID).
+    static constexpr u32 PAGE_TABLE_BLOCKS = 8192; ///< 2 MiB of mapped address space each
+    struct ResidentRun {
+        GPUVAddr gpu_addr{};
+        DAddr device_addr{};
+        u32 size{};
+        BufferId buffer_id;
+    };
+    /// One storage binding made resident: the host buffers its guest range maps to, kept on the
+    /// terms of StorageBindingMemo (no buffer came or went, no mapping changed).
+    struct Residency {
+        GPUVAddr gpu_addr{};
+        u32 size{};
+        u64 epoch{}; ///< binding_epoch when stored; 0 never matches
+        u64 map_serial{};
+        size_t as_id{};
+        const void* channel{};
+        boost::container::small_vector<ResidentRun, 2> runs;
+        bool mapped{}; ///< the runs are in the page table
+    };
+    [[nodiscard]] GpuPageTable* CurrentPageTable();
+    /// Finds (or creates) the buffers holding `binding`'s guest range, unless `residency` still
+    /// holds them. Update phase: a buffer this creates may delete others (has_deleted_buffers).
+    void ResolveResidency(Residency& residency, const Binding& binding);
+    /// Maps the resolved runs in the page table, synchronizes them and marks what the program
+    /// can write (at most `write_mark_limit` bytes). Bind phase.
+    void MakeResident(Residency& residency, bool is_written, u64 write_mark_limit);
+    /// EDEN_NX2_NATIVE_VERIFY=storage: the table translates the binding's first and last byte to
+    /// where its buffer holds them.
+    void VerifyResidency(const Residency& residency);
+    /// A buffer goes away: page table entries into it go back to the null page.
+    void UnmapFromPageTables(BufferId buffer_id);
+    std::unordered_map<size_t, std::unique_ptr<GpuPageTable>> page_tables;
+    std::unordered_set<u32> page_table_buffers; ///< BufferId indices with entries in a table
+    std::array<bool, NUM_STAGES> graphics_storage_by_address{};
+    std::array<bool, NUM_STAGES> graphics_uniforms_by_address{};
+    bool compute_uniforms_by_address{};
+    /// The bank table being filled (BeginBankTable), entries by stage * 18 + constant buffer.
+    Shader::Backend::SPIRV::BankTableEntry* bank_table{};
+    u64 bank_table_address{};
+    /// While binding a by-address bank: its entry, which the runtime fills instead of a
+    /// descriptor.
+    void TargetBankEntry(size_t table_stage, u32 index);
+    /// EDEN_NX2_NATIVE_VERIFY=uniforms: a streamed bank's table entry holds the guest bytes.
+    void VerifyBankEntry(size_t table_stage, u32 index, DAddr device_addr, u32 size);
+    bool compute_storage_by_address{};
+    std::array<std::array<Residency, NUM_STORAGE_BUFFERS>, NUM_STAGES + 1> residencies{};
+    bool page_table_full_logged{};
+    std::array<StorageResolveCache, NUM_STAGES> graphics_storage_resolve{};
+    StorageResolveCache compute_storage_resolve{};
+
+    /// One storage binding's last lookup when it resolved to a single buffer (no segments), kept
+    /// on the same terms as StorageResolveCache. Index NUM_STAGES is
+    /// compute.
+    struct StorageBindingMemo {
+        u64 epoch{}; ///< binding_epoch when stored; 0 never matches
+        u64 map_serial{};
+        size_t as_id{};
+        const void* channel{};
+        DAddr device_addr{};
+        GPUVAddr gpu_addr{};
+        u32 size{};
+        bool is_written{};
+        BufferId buffer_id{};
+    };
+    std::array<std::array<StorageBindingMemo, NUM_STORAGE_BUFFERS>, NUM_STAGES + 1>
+        storage_binding_memo{};
+
+    /// Resolves one storage binding (FindBuffer, then ResolveMultiRangeStorage), from its memo
+    /// when nothing it depends on changed.
+    void ResolveStorageBinding(size_t memo_stage, u32 index, Binding& binding, bool is_written,
+                               std::vector<MultiRangeSegment>& pool);
+
+    /// A vertex or index buffer binding and what it was resolved from: the same GPU range, the
+    /// same mappings and the same set of buffers resolve to it again.
+    struct GeometryMemo {
+        u64 epoch{}; ///< binding_epoch when stored; 0 never matches
+        u64 map_serial{};
+        size_t as_id{};
+        const void* channel{};
+        GPUVAddr begin{};
+        GPUVAddr end{};
+        u64 extra{};
+        Binding binding{};
+    };
+    std::array<GeometryMemo, NUM_VERTEX_BUFFERS> vertex_memo{};
+    GeometryMemo index_memo{};
+    std::array<GeometryMemo, NUM_COMPUTE_UNIFORM_BUFFERS> compute_uniform_memo{};
+
+    /// The last BindGraphicsUniformBuffer of a (stage, slot) and what it translated to, valid
+    /// while that binding is the one it set (DisableGraphicsUniformBuffer clears it) and the
+    /// mappings and the set of buffers stay the same.
+    struct UniformBindMemo {
+        u64 epoch{}; ///< binding_epoch when stored; 0 never matches
+        u64 map_serial{};
+        size_t as_id{};
+        const void* channel{};
+        GPUVAddr gpu_addr{};
+        DAddr device_addr{};
+        u32 size{};
+    };
+    std::array<std::array<UniformBindMemo, NUM_GRAPHICS_UNIFORM_BUFFERS>, NUM_STAGES>
+        uniform_bind_memo{};
+
+    [[nodiscard]] bool ReuseGeometry(const GeometryMemo& memo, GPUVAddr begin, GPUVAddr end,
+                                     u64 extra) const;
+
+    void StoreGeometry(GeometryMemo& memo, GPUVAddr begin, GPUVAddr end, u64 extra,
+                       const Binding& binding);
     u64 frame_tick = 0;
     /// EDEN_NX2_TABLE_POINTER_TRACE: last table entry and size bound per table pointer slot.
     std::unordered_map<u64, std::pair<GPUVAddr, u32>> traced_table_pointers;
@@ -803,8 +1275,9 @@ private:
 
     /// A command list page (Nx2CopyListPages): the GPU writes noted to it and the last copy.
     using Nx2Staging = decltype(std::declval<Runtime&>().DownloadStagingBuffer(size_t{}, true));
+    static constexpr size_t Nx2ListPageWords = (size_t{1} << Tegra::Nx2WrittenPageBits) / 4;
     struct Nx2ListPage {
-        u64 writes{};      ///< GPU writes noted to the page
+        u64 writes{};      ///< GPU and host writes noted to the page
         u64 copy_writes{}; ///< `writes` when the copy was made: the copy is current while equal
         u64 copy_tick{};   ///< GPU tick that completes the copy
         /// `writes` when the front last flushed the page: guest memory holds it while equal
@@ -817,8 +1290,25 @@ private:
         /// the page's lists read guest memory once the back ran the work before the last such
         /// wait and no write came since the front flushed the page (Nx2ReadListCopy).
         bool draw_written{};
+        /// The page's 4-byte words GPU work wrote that guest memory does not hold: set by the GPU
+        /// writes noted to the page (the whole range a dispatch or copy may write), cleared for
+        /// the words the host writes whole and for every word once the front flushed the page.
+        /// Once it did (`flushed`), guest memory holds the other words, so a list on none of
+        /// these reads it directly. Before, GPU work may have written the page before it became
+        /// a command list page, unnoted.
+        std::bitset<Nx2ListPageWords> gpu_words;
+        bool flushed{};
         std::optional<Nx2Staging> copy;
     };
+    /// Sets (`set`) or clears the words of `entry.gpu_words` within [begin, end) bytes of its
+    /// page: every word the bytes touch when setting, only the words they cover when clearing.
+    static void Nx2MarkListWords(Nx2ListPage& entry, u64 begin, u64 end, bool set);
+    /// Whether GPU work wrote any word of [begin, end) bytes of the page guest memory lacks.
+    [[nodiscard]] static bool Nx2HasListWords(const Nx2ListPage& entry, u64 begin, u64 end);
+    /// Fills `out` with the page's bytes from `offset` (`device_addr`) on: the words of
+    /// `entry.gpu_words` from its copy, the others from guest memory once the page was flushed.
+    void Nx2ReadListWords(const Nx2ListPage& entry, DAddr device_addr, u64 offset,
+                          std::span<u8> out);
     std::mutex nx2_list_mutex; ///< nx2_list_pages: the split's front reads the copies
     std::unordered_map<DAddr, Nx2ListPage> nx2_list_pages;
     /// Copies replaced while the GPU may still write them: freed once it is past their tick.

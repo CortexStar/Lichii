@@ -241,3 +241,59 @@ TEST_CASE("NX2 full-range NV12 preserves same-size chroma and converts resized f
         }
     }
 }
+
+TEST_CASE("NX2 video interpolates chroma when converting to RGBA",
+          "[video_core][nx2_video_render]") {
+    Nx2VideoDecoder decoder{"video/avc"};
+    REQUIRE(decoder.IsOpen());
+    for (const AVPixelFormat format : {AV_PIX_FMT_YUV420P, AV_PIX_FMT_NV12}) {
+        auto picture = Picture(16, 16, format);
+        AVFrame* frame = picture.frame->GetFrame();
+        // Flat luma; Cb steps from 64 to 192 between chroma columns 3 and 4, Cr neutral.
+        for (u32 y = 0; y < 16; ++y) {
+            std::fill_n(frame->data[0] + y * frame->linesize[0], 16, u8{128});
+        }
+        for (u32 y = 0; y < 8; ++y) {
+            for (u32 x = 0; x < 8; ++x) {
+                const u8 cb = x < 4 ? 64 : 192;
+                if (format == AV_PIX_FMT_NV12) {
+                    frame->data[1][y * frame->linesize[1] + x * 2] = cb;
+                    frame->data[1][y * frame->linesize[1] + x * 2 + 1] = 128;
+                } else {
+                    frame->data[1][y * frame->linesize[1] + x] = cb;
+                    frame->data[2][y * frame->linesize[2] + x] = 128;
+                }
+            }
+        }
+        constexpr u32 pitch = 16 * 4;
+        std::vector<u8> rgba(pitch * 16, 0);
+        decoder.Render(picture, Nx2PictureFormat::Rgba8, 16, 16, pitch, 0, rgba);
+        const auto blue = [&](u32 x) { return rgba[8 * pitch + x * 4 + 2]; };
+        // Pixel 7 lies between chroma samples 3 and 4: with each sample spread over two pixels
+        // it would be as blue as pixel 0.
+        REQUIRE(blue(0) < blue(7));
+        REQUIRE(blue(7) < blue(15));
+    }
+}
+
+TEST_CASE("NX2 picture hashes match across layouts and the written NV12 image",
+          "[video_core][nx2_video_render]") {
+    using Tegra::Host1x::Nx2Nv12Hash;
+    using Tegra::Host1x::Nx2PictureHash;
+    Nx2VideoDecoder decoder{"video/avc"};
+    REQUIRE(decoder.IsOpen());
+    constexpr u32 width = 18, height = 10, pitch = 64;
+    const auto planar = Picture(width, height, AV_PIX_FMT_YUV420P);
+    const auto nv12 = Picture(width, height, AV_PIX_FMT_NV12);
+    // Picture fills both from the same sample pattern.
+    REQUIRE(Nx2PictureHash(planar) != 0);
+    REQUIRE(Nx2PictureHash(planar) == Nx2PictureHash(nv12));
+    // What the service writes for a same-size NV12 image hashes the same: a self-check of the
+    // write path.
+    std::vector<u8> image(pitch * height * 2, 0xcd);
+    decoder.Render(planar, Nx2PictureFormat::Nv12, width, height, pitch, pitch * height, image);
+    REQUIRE(Nx2Nv12Hash(image, width, height, pitch, pitch * height) == Nx2PictureHash(planar));
+    // One wrong byte anywhere in the visible image changes it.
+    image[pitch * height + pitch * 2 + 5] ^= 1;
+    REQUIRE(Nx2Nv12Hash(image, width, height, pitch, pitch * height) != Nx2PictureHash(planar));
+}

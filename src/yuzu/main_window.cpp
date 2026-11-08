@@ -3584,8 +3584,16 @@ void MainWindow::ShowFullscreen() {
         window->hide();
         window->setWindowFlags(window->windowFlags() | Qt::FramelessWindowHint);
         const auto screen_geometry = GuessCurrentScreen(window)->geometry();
+        // One row taller keeps Windows from treating an OpenGL window of the screen's physical
+        // size as exclusive fullscreen (yuzu 3da39e4969; at a scale above 100% it never is).
+        // A Vulkan swapchain has to match the screen exactly to be flipped by the display
+        // (independent flip); one row taller makes the desktop compositor copy every frame.
+        const bool opengl =
+            Settings::values.renderer_backend.GetValue() != Settings::RendererBackend::Vulkan &&
+            Settings::values.renderer_backend.GetValue() != Settings::RendererBackend::Null;
+        const int extra_row = opengl && window->devicePixelRatioF() == 1.0 ? 1 : 0;
         window->setGeometry(screen_geometry.x(), screen_geometry.y(), screen_geometry.width(),
-                            screen_geometry.height() + 1);
+                            screen_geometry.height() + extra_row);
         window->raise();
         window->showNormal();
     };

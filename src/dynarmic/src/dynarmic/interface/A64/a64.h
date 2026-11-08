@@ -9,6 +9,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -20,6 +21,31 @@
 
 namespace Dynarmic {
 namespace A64 {
+
+/// Work of every A64 JIT in the process (the x64 backend counts it): basic blocks compiled, the
+/// host time spent compiling them and how often a whole code cache was thrown away.
+struct CompileStatistics {
+    std::atomic<std::uint64_t> blocks{0};
+    std::atomic<std::uint64_t> nanoseconds{0};
+    std::atomic<std::uint64_t> cache_clears{0};
+};
+inline CompileStatistics compile_statistics;
+
+/// DIAGNOSTIC (do not merge): where JIT compile time goes during loads.
+struct CompileDiagnostics {
+    static constexpr std::size_t MaxCores = 8;
+    std::atomic<std::uint64_t> core_blocks[MaxCores]{};
+    std::atomic<std::uint64_t> core_ns[MaxCores]{};
+    std::atomic<std::uint64_t> translate_ns{0};
+    std::atomic<std::uint64_t> optimize_ns{0};
+    std::atomic<std::uint64_t> emit_ns{0};
+    std::atomic<std::uint64_t> guest_instructions{0};
+    std::atomic<std::uint64_t> other_core_repeats{0}; ///< Location compiled before by another core's JIT.
+    std::atomic<std::uint64_t> same_core_repeats{0};  ///< Location compiled before by this JIT.
+    std::atomic<std::uint64_t> range_invalidations{0};
+    std::atomic<std::uint64_t> invalidated_bytes{0};
+};
+inline CompileDiagnostics compile_diagnostics;
 
 class Jit final {
 public:

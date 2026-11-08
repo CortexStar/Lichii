@@ -138,7 +138,7 @@ server is on but idle, its thread sleeps in `epoll`/IOCP.
 | `capture_frame` | Relaunch with `EDEN_NX2_FRAME_DUMP`, owner touches `capture.now`, agent copies the dump | Capture the next frame now, sampled textures and bound buffers optional, get the manifest summary back; `capture_image` returns any pass PNG | 1 |
 | `reject_shaders` | Rebuild the env, relaunch, replay to the spot, once per bisection step | Reject or restore hashes live; bisection becomes a loop of reject, screenshot | 1 |
 | `pause`, `resume`, `step_frames` | Not possible | Freeze on the broken frame, capture it, step one present | 2 |
-| `input`, `input_sequence` (buttons, sticks, frame-timed sequences) | Owner plays to the spot | Agent walks to the spot itself and replays a repro (done) | 2 |
+| `input`, `input_sequence` (buttons, sticks, frame- or ms-timed sequences) | Owner plays to the spot | Agent walks to the spot itself and replays a repro (done) | 2 |
 | `shaders` (inventory) | Shader dump and offline sweep | List loaded programs: key, hash, stage, address, lowered or rejected with the error | 2 |
 | `switches` (live `EDEN_NX2_*`) | Relaunch per switch | Toggle the observer switches live (classification below) | 2 |
 | `read_memory`, `search_memory`, `read_gpu_memory` | GDB stub session or log prints plus a rebuild | Read a range by address, find known values in the heap (done) | 3 |
@@ -166,8 +166,8 @@ to 0.1 ms. With fewer than two presents, statistics are zero and the interval li
 Only available samples from the 4096-timestamp ring are used; overflow sets `truncated: true`.
 For example: `{"method":"frame_times","params":{"seconds":5,"refresh_hz":60}}`.
 
-**`screenshot`** `{height?, save?, timeout_s?}`. It requests a 16:9 layout from
-`Layout::DefaultFrameLayout`, and the renderer blits the presented framebuffers into it. The
+**`screenshot`** `{height?, width?, save?, timeout_s?}`. It requests a layout of that size
+(16:9 without `width`; a 21:9 frame wants e.g. 1720x720) from `Layout::DefaultFrameLayout`, and the renderer blits the presented framebuffers into it. The
 BGRA result is turned into RGB and encoded as PNG with stb, which `common` already compiles. The
 pixel buffer is owned by the completion callback, so a request that times out cannot leave the
 renderer writing into freed memory. If the Qt screenshot hotkey has a request pending, the tool
@@ -304,11 +304,13 @@ How the reads are safe:
 
 ### Input (implemented)
 
-**`input`** `{buttons?, left_stick?, right_stick?, frames, timeout_s?}` holds the buttons and
-sticks for `frames` presented frames and then releases them. It returns when they are done.
-**`input_sequence`** `{steps: [{buttons?, left_stick?, right_stick?, frames}, ...], timeout_s?}`
-runs the steps back to back, at most 1000 steps and 36000 frames per call. A step with no
-buttons and no sticks injects nothing, so it works as a pause between moves.
+**`input`** `{buttons?, left_stick?, right_stick?, frames | ms, timeout_s?}` holds the buttons
+and sticks for `frames` presented frames or for `ms` milliseconds of wall time, and then releases
+them. It returns when they are done. **`input_sequence`**
+`{steps: [{buttons?, left_stick?, right_stick?, frames | ms}, ...], timeout_s?}` runs the steps
+back to back, at most 1000 steps, 36000 frames and 600000 ms per call. Each step takes exactly one
+of `frames` and `ms`; a sequence may mix them. A step with no buttons and no sticks injects
+nothing, so it works as a pause between moves.
 
 - **Buttons** are `A B X Y L R ZL ZR Plus Minus Up Down Left Right StickL StickR` (the
   `NpadButton` names). Home and Capture are not offered: they would leave the game. Unknown
@@ -325,11 +327,21 @@ or setting, so it works with whatever the owner has mapped and leaves nothing be
 goes to player 1, or to the handheld controller when player 1 is not connected; the result names
 which. When no injector is installed, each getter costs one atomic load.
 
-Timing is by presents, not wall time. `RunInput` starts the script at `g_nx2_present_count + 1`,
-the next present. The injector looks up the active step from the present count at every read
-(`InputAt`), so a step changes at the first npad update after its present: the npad updates
-every 1 ms (`src/hid_core/resource_manager.cpp:48`). A slow frame stretches the step in time but
-not in frames, so the same sequence moves the camera the same way on every run.
+`RunInput` starts the script at `g_nx2_present_count + 1`, the next present. The injector asks
+`InputScript` for the active step at every read, passing the present count and the steady clock,
+so a step changes at the first npad update after its end: the npad updates every 1 ms
+(`src/hid_core/resource_manager.cpp:48`).
+
+- A `frames` step counts presents. A slow frame stretches it in time but not in frames, so the
+  same sequence moves the camera the same way on every run of a game that steps its logic per
+  frame.
+- An `ms` step counts wall time. A game whose logic runs in real time whatever the frame rate
+  (an unlocked frame rate) covers the same game time with it at 60 or 240 fps, which a `frames`
+  step would not. Back-to-back `ms` steps chain from each other's exact end, so the up to 1 ms
+  of polling delay does not add up over a sequence; the first `ms` step starts at the first read
+  from the start present on. A `frames` step after an `ms` step counts from the next present.
+
+The result gives the totals (`frames`, `ms`), `first_present`, `last_present` and `elapsed_s`.
 
 Release: the injector returns nothing from the end of the last step on, so the input ends on its
 exact frame even before the handler removes it. The handler removes it on every exit path

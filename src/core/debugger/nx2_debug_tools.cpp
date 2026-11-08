@@ -13,11 +13,13 @@
 #include <fstream>
 #include <future>
 #include <iterator>
+#include <mutex>
 #include <numeric>
 #include <thread>
 
 #include "common/fs/path_util.h"
 #include "common/scope_exit.h"
+#include "common/input_latency.h"
 #include "common/logging.h"
 #include "common/nx2_sampler.h"
 #include "common/scm_rev.h"
@@ -45,6 +47,8 @@ constexpr size_t RING_LINES = 20000;
 constexpr u64 MAX_READ = 64 * 1024;
 /// Presented frames one input or input_sequence call holds at most (10 minutes at 60 fps).
 constexpr u64 MAX_INPUT_FRAMES = 36000;
+/// Wall time one input or input_sequence call holds at most (10 minutes).
+constexpr u64 MAX_INPUT_MS = 600000;
 constexpr size_t MAX_INPUT_STEPS = 1000;
 
 constexpr std::array<std::pair<std::string_view, HID::NpadButton>, 16> INPUT_BUTTONS{{
@@ -79,6 +83,10 @@ struct ToolState {
     u64 samples{};
     u64 gpu_reads{};
     std::atomic<bool> stopping{};
+    /// The server runs different clients' requests at once: the tools take turns on this state,
+    /// and input calls (which wait for frames and touch only the controller) on their own.
+    std::mutex tools_mutex;
+    std::mutex input_mutex;
 };
 
 namespace {
@@ -189,6 +197,7 @@ json Status(ToolState& state, const json& params) {
     const u64 after = g_nx2_present_count.load(std::memory_order_relaxed);
     const double seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+    const auto input = Common::InputLatency::Recent();
     return {
         {"title", state.title},
         {"program_id", fmt::format("{:016X}", state.program_id)},
@@ -205,6 +214,12 @@ json Status(ToolState& state, const json& params) {
         {"dump_dir", state.dump_directory.generic_string()},
         {"log_filter", state.log_filter},
         {"rejected", HexList(VideoCore::Nx2Debug::RejectedHashes())},
+        // Button change to the host present of the first frame that sampled it.
+        {"input_to_present", {{"samples", input.samples},
+                              {"mean_ms", input.mean_ms},
+                              {"p50_ms", input.p50_ms},
+                              {"p99_ms", input.p99_ms},
+                              {"max_ms", input.max_ms}}},
     };
 }
 
@@ -308,7 +323,9 @@ json Screenshot(ToolState& state, const json& params) {
         throw std::runtime_error{"a screenshot is already pending: no frame was presented since"};
     }
     const u32 height = Param<u32>(params, "height", 720, 144, 2160);
-    const auto layout = Layout::DefaultFrameLayout(height * 16 / 9, height);
+    // A 21:9 frame (Ocarina's Ultrawide Add-On) needs a 21:9 image, e.g. width 1720 at height 720.
+    const u32 width = Param<u32>(params, "width", height * 16 / 9, 144, 5120);
+    const auto layout = Layout::DefaultFrameLayout(width, height);
     const auto pixels = std::make_shared<std::vector<u8>>(size_t{layout.width} * layout.height * 4);
     const auto done = std::make_shared<std::promise<bool>>();
     auto future = done->get_future();
@@ -587,18 +604,30 @@ json ReadGpuMemory(ToolState& state, const json& params) {
     return result;
 }
 
+u64 SteadyNs() {
+    return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count());
+}
+
 /// Holds the steps on player 1 (or the handheld controller when player 1 is not connected) from
 /// the next present on, and returns once they are done. The injector stops by itself after the
 /// last step; leaving this function by any path removes it.
 json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json& params,
               const ClientGone& client_gone) {
-    u64 total = 0;
+    u64 total_frames = 0;
+    u64 total_ms = 0;
     for (const InputStep& step : steps) {
-        total += step.frames;
+        total_frames += step.frames;
+        total_ms += step.ms;
     }
-    if (total > MAX_INPUT_FRAMES) {
+    if (total_frames > MAX_INPUT_FRAMES) {
         throw std::runtime_error{
-            fmt::format("{} frames in total; at most {} per call", total, MAX_INPUT_FRAMES)};
+            fmt::format("{} frames in total; at most {} per call", total_frames, MAX_INPUT_FRAMES)};
+    }
+    if (total_ms > MAX_INPUT_MS) {
+        throw std::runtime_error{
+            fmt::format("{} ms in total; at most {} per call", total_ms, MAX_INPUT_MS)};
     }
     auto& hid = state.system.HIDCore();
     HID::EmulatedController* controller = hid.GetEmulatedController(HID::NpadIdType::Player1);
@@ -610,11 +639,12 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
     if (!controller->IsConnected()) {
         throw std::runtime_error{"neither player 1 nor the handheld controller is connected"};
     }
-    const int timeout = Param<int>(params, "timeout_s", static_cast<int>(total / 20 + 10), 1, 900);
+    const int timeout = Param<int>(
+        params, "timeout_s", static_cast<int>(total_frames / 20 + total_ms / 1000 + 10), 1, 900);
     const u64 start = g_nx2_present_count.load(std::memory_order_relaxed) + 1;
-    const auto script = std::make_shared<const std::vector<InputStep>>(steps);
-    controller->SetInputInjector([script, start] {
-        return InputAt(*script, start, g_nx2_present_count.load(std::memory_order_relaxed));
+    const auto script = std::make_shared<InputScript>(steps, start);
+    controller->SetInputInjector([script] {
+        return script->At(g_nx2_present_count.load(std::memory_order_relaxed), SteadyNs());
     });
     SCOPE_EXIT {
         controller->SetInputInjector({});
@@ -622,8 +652,9 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
     const auto begin = std::chrono::steady_clock::now();
     const auto deadline = begin + std::chrono::seconds{timeout};
     for (;;) {
-        const u64 now = g_nx2_present_count.load(std::memory_order_relaxed);
-        if (now >= start + total) {
+        const size_t step =
+            script->Step(g_nx2_present_count.load(std::memory_order_relaxed), SteadyNs());
+        if (step >= steps.size()) {
             break;
         }
         if (state.stopping.load(std::memory_order_relaxed)) {
@@ -635,16 +666,18 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         }
         if (std::chrono::steady_clock::now() >= deadline) {
             throw std::runtime_error{fmt::format(
-                "{} of {} frames were presented within {} s (paused or loading?); input released",
-                now >= start ? now - start : 0, total, timeout)};
+                "step {} of {} was still running after {} s (paused or loading?); input released",
+                step, steps.size(), timeout)};
         }
-        std::this_thread::sleep_for(2ms);
+        std::this_thread::sleep_for(1ms);
     }
     return {
         {"controller", name},
         {"steps", steps.size()},
-        {"frames", total},
+        {"frames", total_frames},
+        {"ms", total_ms},
         {"first_present", start},
+        {"last_present", g_nx2_present_count.load(std::memory_order_relaxed)},
         {"elapsed_s",
          std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count()},
     };
@@ -674,10 +707,14 @@ json InputSequence(ToolState& state, const json& params, const ClientGone& clien
 
 Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
     const auto handler = [&state](json (*tool)(ToolState&, const json&)) -> Handler {
-        return [state, tool](const json& params, const ClientGone&) { return tool(*state, params); };
+        return [state, tool](const json& params, const ClientGone&) {
+            std::scoped_lock lock{state->tools_mutex};
+            return tool(*state, params);
+        };
     };
     const auto waiting = [&state](json (*tool)(ToolState&, const json&, const ClientGone&)) -> Handler {
         return [state, tool](const json& params, const ClientGone& client_gone) {
+            std::scoped_lock lock{state->input_mutex};
             return tool(*state, params, client_gone);
         };
     };
@@ -855,18 +892,27 @@ InputStep ParseInputStep(const json& step) {
         throw std::runtime_error{"a step is an object"};
     }
     for (const auto& [key, value] : step.items()) {
-        if (key != "buttons" && key != "left_stick" && key != "right_stick" && key != "frames") {
+        if (key != "buttons" && key != "left_stick" && key != "right_stick" && key != "frames" &&
+            key != "ms") {
             throw std::runtime_error{fmt::format(
-                "unknown key \"{}\": want buttons, left_stick, right_stick, frames", key)};
+                "unknown key \"{}\": want buttons, left_stick, right_stick, frames, ms", key)};
         }
     }
-    InputStep result{.input = {}, .frames = 0};
-    const json& frames = step.at("frames");
-    if (!frames.is_number_integer() || frames.get<s64>() < 1 ||
-        frames.get<u64>() > MAX_INPUT_FRAMES) {
-        throw std::runtime_error{fmt::format("frames must be 1 to {}", MAX_INPUT_FRAMES)};
+    if (step.contains("frames") == step.contains("ms")) {
+        throw std::runtime_error{"a step needs exactly one of frames and ms"};
     }
-    result.frames = frames.get<u64>();
+    const auto count = [&step](const char* key, u64 high) -> u64 {
+        if (!step.contains(key)) {
+            return 0;
+        }
+        const json& value = step.at(key);
+        if (!value.is_number_integer() || value.get<s64>() < 1 || value.get<u64>() > high) {
+            throw std::runtime_error{fmt::format("{} must be 1 to {}", key, high)};
+        }
+        return value.get<u64>();
+    };
+    InputStep result{
+        .input = {}, .frames = count("frames", MAX_INPUT_FRAMES), .ms = count("ms", MAX_INPUT_MS)};
     for (const json& button : step.value("buttons", json::array())) {
         const std::string text = button.is_string() ? button.get<std::string>() : button.dump();
         const auto it = std::ranges::find(INPUT_BUTTONS, std::string_view{text},
@@ -900,18 +946,56 @@ InputStep ParseInputStep(const json& step) {
     return result;
 }
 
-std::optional<HID::InjectedInput> InputAt(std::span<const InputStep> steps, u64 start, u64 now) {
-    if (now < start) {
+InputScript::InputScript(std::vector<InputStep> steps_, u64 start_)
+    : steps{std::move(steps_)}, start{start_} {}
+
+void InputScript::Advance(u64 present, u64 now_ns) {
+    if (!started) {
+        if (present < start) {
+            return;
+        }
+        started = true;
+        step_present = start;
+        step_ns = now_ns;
+    }
+    while (index < steps.size()) {
+        const InputStep& step = steps[index];
+        if (step.frames != 0) {
+            const u64 end = step_present + step.frames;
+            if (present < end) {
+                return;
+            }
+            // The next step's frames count on from here; its time from now, the first look after
+            // the boundary present.
+            step_present = end;
+            step_ns = now_ns;
+        } else {
+            const u64 end = step_ns + step.ms * 1'000'000;
+            if (now_ns < end) {
+                return;
+            }
+            // Frames are counted from the next present: the current one was shown before the time
+            // ran out.
+            step_present = present + 1;
+            step_ns = end;
+        }
+        ++index;
+    }
+}
+
+std::optional<HID::InjectedInput> InputScript::At(u64 present, u64 now_ns) {
+    std::scoped_lock lock{mutex};
+    Advance(present, now_ns);
+    if (!started || index >= steps.size()) {
         return std::nullopt;
     }
-    u64 end = start;
-    for (const InputStep& step : steps) {
-        end += step.frames;
-        if (now < end) {
-            return step.input;
-        }
-    }
-    return std::nullopt;
+    return steps[index].input;
+}
+
+size_t InputScript::Step(u64 present, u64 now_ns) {
+    std::scoped_lock lock{mutex};
+    Advance(present, now_ns);
+    return index;
 }
 
 Service::Service(System& system, std::string title, u64 program_id, const Endpoint& endpoint,

@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -78,20 +79,48 @@ struct GuestSearch {
                                             u64 start, u64 end, size_t max_hits,
                                             std::chrono::steady_clock::time_point deadline);
 
-/// One step of input or input_sequence: what to hold, for how many presented frames.
+/// One step of input or input_sequence: what to hold, for how many presented frames or for how many
+/// milliseconds of wall time. Exactly one of frames and ms is non-zero.
 struct InputStep {
     HID::InjectedInput input;
     u64 frames;
+    u64 ms;
 };
 
-/// {buttons?, left_stick?, right_stick?, frames}. Sticks are [x, y] in -1..1. Throws
-/// std::runtime_error on unknown keys, buttons or out-of-range values.
+/// {buttons?, left_stick?, right_stick?, frames | ms}. Sticks are [x, y] in -1..1. Throws
+/// std::runtime_error on unknown keys, buttons or out-of-range values, and unless exactly one of
+/// frames and ms is given.
 [[nodiscard]] InputStep ParseInputStep(const nlohmann::json& step);
 
-/// The input of the step active at present count now, for steps starting at present count start;
-/// nothing before start and from the end of the last step on.
-[[nodiscard]] std::optional<HID::InjectedInput> InputAt(std::span<const InputStep> steps, u64 start,
-                                                       u64 now);
+/// The steps of one input or input_sequence call, run back to back from present count start on.
+/// A frames step ends after that many presents, an ms step after that much wall time. Callers
+/// pass the present count and a steady clock in nanoseconds; the script moves to the next step on
+/// the first call past a step's end. Safe to call from several threads.
+class InputScript {
+public:
+    InputScript(std::vector<InputStep> steps, u64 start);
+
+    /// The input of the active step; nothing before start and from the end of the last step on.
+    [[nodiscard]] std::optional<HID::InjectedInput> At(u64 present, u64 now_ns);
+
+    /// Index of the active step: 0 before start, the step count once all are done.
+    [[nodiscard]] size_t Step(u64 present, u64 now_ns);
+
+private:
+    void Advance(u64 present, u64 now_ns);
+
+    std::mutex mutex;
+    const std::vector<InputStep> steps;
+    const u64 start;
+    bool started{};
+    size_t index{};
+    /// Present count from which the active step's frames are counted.
+    u64 step_present{};
+    /// Steady time at which the active step began. Consecutive ms steps chain from each other's
+    /// end, so a polling delay does not add up over a sequence.
+    u64 step_ns{};
+};
+
 /// Guest-present intervals within [begin_ns, end_ns], using only retained ring timestamps.
 [[nodiscard]] nlohmann::json ReadFrameTimes(u64 before, u64 after, u64 begin_ns, u64 end_ns,
                                           double refresh_hz);

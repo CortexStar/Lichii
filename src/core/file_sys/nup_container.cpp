@@ -8,14 +8,18 @@
 #include <cstring>
 #include <list>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <random>
 #include <span>
+#include <string_view>
 #include <unordered_map>
 
 #include <fmt/format.h>
 #include <openssl/evp.h>
 #include <zstd.h>
 
+#include "common/fs/mapped_file.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/swap.h"
@@ -147,6 +151,69 @@ bool Sha256(const u8* data, std::size_t size, std::array<u8, 0x20>& out) {
     unsigned int length = 0;
     EVP_Digest(data, size, out.data(), &length, EVP_sha256(), nullptr);
     return length == out.size();
+}
+
+/// The container file mapped read-only. RealVfsFile::Read holds the real filesystem's lock and
+/// seeks and reads through stdio, so the guest's RomFS reads (Ocarina of Time: ~2,500 reads,
+/// ~450 MiB per save load) ran one at a time at ~1 GB/s; from the mapping they are copies out of
+/// the page cache on the reading thread.
+class NupMappedFile final : public VfsFile {
+public:
+    NupMappedFile(VirtualFile original_, std::unique_ptr<Common::FS::MappedFile> mapped_)
+        : original(std::move(original_)), mapped(std::move(mapped_)) {}
+
+    std::string GetName() const override {
+        return original->GetName();
+    }
+
+    std::size_t GetSize() const override {
+        return mapped->Data().size();
+    }
+
+    bool Resize(std::size_t) override {
+        return false;
+    }
+
+    VirtualDir GetContainingDirectory() const override {
+        return original->GetContainingDirectory();
+    }
+
+    bool IsWritable() const override {
+        return false;
+    }
+
+    bool IsReadable() const override {
+        return true;
+    }
+
+    std::size_t Read(u8* data, std::size_t length, std::size_t offset) const override {
+        return mapped->Read(data, length, offset);
+    }
+
+    std::size_t Write(const u8*, std::size_t, std::size_t) override {
+        return 0;
+    }
+
+    bool Rename(std::string_view) override {
+        return false;
+    }
+
+private:
+    VirtualFile original;
+    std::unique_ptr<Common::FS::MappedFile> mapped;
+};
+
+/// The mapped container when file reads a host file unchanged, else file itself.
+VirtualFile MapHostFile(VirtualFile file) {
+    const std::string host_path = file != nullptr ? file->GetHostPath() : std::string{};
+    if (host_path.empty()) {
+        return file;
+    }
+    auto mapped = Common::FS::MappedFile::Open(host_path);
+    if (mapped == nullptr || mapped->Data().size() != file->GetSize()) {
+        return file;
+    }
+    return std::make_shared<NupMappedFile>(std::move(file), std::move(mapped));
 }
 
 /// A member file whose extent is zstd-compressed. Decompresses on first read and caches the
@@ -359,9 +426,47 @@ bool NupContainer::IsNupFile(const VirtualFile& file) {
     return magic == HeaderMagic;
 }
 
+namespace {
+
+struct KeptContainer {
+    std::mutex mutex;
+    std::unique_ptr<NupContainer> container;
+};
+
+KeptContainer& Kept() {
+    static KeptContainer kept;
+    return kept;
+}
+
+} // Anonymous namespace
+
+std::unique_ptr<NupContainer> NupContainer::Open(VirtualFile file_) {
+    // The same container: the same size and the same superblock (it holds the TOC's SHA-256).
+    Superblock super{};
+    if (file_ != nullptr && file_->GetSize() >= SuperblockSize &&
+        file_->ReadObject(&super, 0) == sizeof(Superblock)) {
+        auto& kept = Kept();
+        std::scoped_lock lock{kept.mutex};
+        if (kept.container && kept.container->file_size == file_->GetSize() &&
+            std::memcmp(&kept.container->superblock, &super, sizeof(Superblock)) == 0) {
+            return std::move(kept.container);
+        }
+    }
+    return std::make_unique<NupContainer>(std::move(file_));
+}
+
+void NupContainer::KeepParsed(std::unique_ptr<NupContainer> container) {
+    auto& kept = Kept();
+    std::scoped_lock lock{kept.mutex};
+    kept.container.reset();
+    if (container != nullptr && container->status == Loader::ResultStatus::Success) {
+        kept.container = std::move(container);
+    }
+}
+
 NupContainer::NupContainer(VirtualFile file_, std::size_t memory_cache_cap,
                            std::filesystem::path spill_dir_)
-    : file(std::move(file_)), cache(std::make_shared<NupDecompressCache>()) {
+    : file(MapHostFile(std::move(file_))), cache(std::make_shared<NupDecompressCache>()) {
     cache->cap = memory_cache_cap;
     cache->spill_dir = spill_dir_.empty()
                            ? Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "nup"
@@ -392,6 +497,8 @@ bool NupContainer::Parse() {
         status = Loader::ResultStatus::ErrorNUPBadFormat;
         return false;
     }
+    static_assert(sizeof(superblock) == sizeof(Superblock));
+    std::memcpy(superblock.data(), &super, sizeof(super));
     toc_offset = super.toc_offset;
     toc_size = super.toc_size;
     blob_offset = super.blob_offset;
@@ -770,6 +877,102 @@ VirtualDir NupContainer::GetRomFSDir(std::size_t package_index) {
         romfs_dir_cache[package_index] = BuildPackageDir(packages[package_index].romfs_dir);
     }
     return romfs_dir_cache[package_index];
+}
+
+VirtualDir NupContainer::GetMergedRomFSDir(std::optional<std::size_t> base_index,
+                                           std::optional<std::size_t> update_index) {
+    const auto romfs_dir = [this](std::optional<std::size_t> index) -> std::optional<u32> {
+        if (!index || *index >= packages.size() || packages[*index].romfs_dir == NoDir) {
+            return std::nullopt;
+        }
+        return packages[*index].romfs_dir;
+    };
+    const auto base = romfs_dir(base_index);
+    const auto update = romfs_dir(update_index);
+    if (base && update) {
+        return MergeDirTrees(*base, *update);
+    }
+    if (base) {
+        return GetRomFSDir(*base_index);
+    }
+    if (update) {
+        return GetRomFSDir(*update_index);
+    }
+    return nullptr;
+}
+
+VirtualDir NupContainer::MergeDirTrees(u32 base_dir, u32 overlay_dir) {
+    struct Entry {
+        std::string_view name;
+        u32 index; // into files for a file, into dirs for a directory
+    };
+    // A directory's files and subdirectories sorted by name, the last of equal names kept (the
+    // insert_or_assign of MergeShadowDirs).
+    const auto collect = [this](u32 dir, std::vector<Entry>& out_files,
+                                std::vector<Entry>& out_dirs) {
+        const DirNode& node = dirs[dir];
+        const u64 end = static_cast<u64>(node.first_child) + node.child_count;
+        for (u64 slot = node.first_child; slot < end; ++slot) {
+            const u32 child = children[slot];
+            if (child >= dirs.size()) {
+                const u32 file_index = child - static_cast<u32>(dirs.size());
+                out_files.push_back({files[file_index].name, file_index});
+            } else {
+                out_dirs.push_back({dirs[child].name, child});
+            }
+        }
+    };
+    const auto sort_unique = [](std::vector<Entry>& entries) {
+        std::stable_sort(entries.begin(), entries.end(),
+                         [](const Entry& a, const Entry& b) { return a.name < b.name; });
+        std::vector<Entry> unique;
+        unique.reserve(entries.size());
+        for (const Entry& entry : entries) {
+            if (!unique.empty() && unique.back().name == entry.name) {
+                unique.back() = entry;
+            } else {
+                unique.push_back(entry);
+            }
+        }
+        entries = std::move(unique);
+    };
+
+    // Base files first, then the overlay's: the overlay's file wins a name both have.
+    std::vector<Entry> file_entries;
+    std::vector<Entry> base_dirs;
+    std::vector<Entry> overlay_dirs;
+    collect(base_dir, file_entries, base_dirs);
+    collect(overlay_dir, file_entries, overlay_dirs);
+    sort_unique(file_entries);
+    sort_unique(base_dirs);
+    sort_unique(overlay_dirs);
+
+    std::vector<VirtualFile> merged_files;
+    merged_files.reserve(file_entries.size());
+    for (const Entry& entry : file_entries) {
+        merged_files.push_back(OpenFile(entry.index));
+    }
+
+    std::vector<VirtualDir> merged_dirs;
+    merged_dirs.reserve(base_dirs.size() + overlay_dirs.size());
+    auto base_it = base_dirs.begin();
+    auto overlay_it = overlay_dirs.begin();
+    while (base_it != base_dirs.end() || overlay_it != overlay_dirs.end()) {
+        if (overlay_it == overlay_dirs.end() ||
+            (base_it != base_dirs.end() && base_it->name < overlay_it->name)) {
+            merged_dirs.push_back(BuildPackageDir(base_it->index));
+            ++base_it;
+        } else if (base_it == base_dirs.end() || overlay_it->name < base_it->name) {
+            merged_dirs.push_back(BuildPackageDir(overlay_it->index));
+            ++overlay_it;
+        } else {
+            merged_dirs.push_back(MergeDirTrees(base_it->index, overlay_it->index));
+            ++base_it;
+            ++overlay_it;
+        }
+    }
+    return std::make_shared<VectorVfsDirectory>(std::move(merged_files), std::move(merged_dirs),
+                                                dirs[base_dir].name);
 }
 
 VirtualDir NupContainer::GetPackageDir(std::size_t package_index) {

@@ -29,6 +29,26 @@ class Event;
 
 namespace Service::VI {
 
+/**
+ * Scale of the Switch 1 compositor's vsync period (ScreenComposition).
+ *
+ * Unlocked Switch 1 titles present through this compositor, so with the speed limit off it ticks
+ * 100x faster to let them run free. Switch 2 titles present and pace through nx2:vi2 instead, so
+ * for them it stays at the display rate: at 1/100 of the period the timer thread spent 82% of
+ * its time in precise waits for 6,000 composition ticks a second that composed nothing.
+ */
+[[nodiscard]] constexpr float ScreenCompositionSpeedScale(bool multi_core, bool speed_limit_on,
+                                                          float speed_limit_percent,
+                                                          bool switch2) {
+    if (!multi_core) {
+        return 1.f;
+    }
+    if (speed_limit_on) {
+        return 100.f / speed_limit_percent;
+    }
+    return switch2 ? 1.f : 0.01f;
+}
+
 class Container;
 class DisplayList;
 

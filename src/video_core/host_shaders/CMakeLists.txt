@@ -17,6 +17,7 @@ set(SHADER_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_vertex_repack.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/astc_decoder.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/bc_encoder.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/bc7_encoder.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/blit_color_float.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/blit_color_srgb_to_linear.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/block_linear_unswizzle_2d.comp
@@ -69,6 +70,7 @@ set(SHADER_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/queries_prefix_scan_sum.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/queries_prefix_scan_sum_nosubgroups.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/resolve_conditional_render.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/resolve_query_availability.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/smaa_edge_detection.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/smaa_edge_detection.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/smaa_blending_weight_calculation.vert
@@ -86,6 +88,8 @@ set(SHADER_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_fidelityfx_fsr_easu_fp32.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_fidelityfx_fsr_rcas_fp16.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_fidelityfx_fsr_rcas_fp32.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_perf_overlay.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_perf_overlay.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_present.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_present.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_present_scaleforce_fp16.frag

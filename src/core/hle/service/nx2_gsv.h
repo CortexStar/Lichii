@@ -26,9 +26,11 @@
 #include <vector>
 
 #include "common/alignment.h"
+#include "common/display_hdr.h"
 #include "common/div_ceil.h"
 #include "common/dkb_frame_trace.h"
 #include "common/game_presets.h"
+#include "common/input_latency.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/core.h"
@@ -36,6 +38,7 @@
 #include "core/device_memory.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
+#include "core/frontend/emu_window.h"
 #include "core/frontend/framebuffer_layout.h"
 #include "core/perf_stats.h"
 #include "video_core/gpu.h"
@@ -1526,11 +1529,16 @@ struct Nx2NativeObjects {
         std::shared_ptr<std::mutex> decoder_mutex;
         u32 gpu_maps{};     // outstanding 426 maps
         bool mapped_here{}; // 426 added its GPU mapping (no other mapping covered it)
+        Tegra::ColorSpace color_space{Tegra::ColorSpace::RGB709};
+        u16 linear_unit_luminance{};
     };
     std::mutex mutex;
     std::map<u32, Memory> memories;
     std::map<u32, Image> images;
     std::optional<VideoTrace> last_video_write;
+    /// Frame rate of the movie a video decoder session is playing (started, not stopped), or 0:
+    /// presents and the vsync event pace at a multiple of it meanwhile (MovieCadenceRate).
+    std::atomic<u32> movie_rate{0};
     u32 next_memory{1};
     u32 next_image{1};
 
@@ -1684,15 +1692,9 @@ inline void Nx2RelayoutDecoderImage(Core::System& system, u64 address,
 // shapes read from the SDK: TIPC 1 -> u32 < 0x400, TIPC 3 -> u32 < 8, TIPC 11/31(u32) and
 // 32(handle, u32) -> one handle at word 3 then the result. Handles returned here are events (a
 // guess); everything else is auto-stubbed through the nx2: prefix.
-/// Rate of the nx2:vi2 vsync event the game starts frames on: Settings frame_rate_limit, or
-/// EDEN_NX2_VSYNC_HZ=<rate> for experiments.
+/// Rate of the nx2:vi2 vsync event the game starts frames on (Settings frame_rate_limit).
 inline u32 Nx2VsyncRateHz() {
-    static const long long forced = [] {
-        const char* text = std::getenv("EDEN_NX2_VSYNC_HZ");
-        return text ? (std::max)(std::strtoll(text, nullptr, 10), 1LL) : 0LL;
-    }();
-    return forced != 0 ? static_cast<u32>(forced)
-                       : (std::max<u32>)(Settings::values.frame_rate_limit.GetValue(), 1);
+    return (std::max<u32>)(Settings::values.frame_rate_limit.GetValue(), 1);
 }
 
 class INx2Vi2Session final : public ServiceFramework<INx2Vi2Session> {
@@ -2013,15 +2015,20 @@ private:
             const char* value = std::getenv("EDEN_NX2_FPS_LIMIT");
             return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
         }();
-        const u32 fps_limit =
-            forced_fps_limit != 0 ? forced_fps_limit : Settings::values.fps_limit.GetValue();
-        // With a frame rate limit other than 60 Hz the vsync event already paces the game; holding
-        // its swap interval here as well kept it at 60 fps (interval 2 of a 120 Hz event). Only an
-        // explicit FPS limit still applies then.
-        const bool timer_paced = Nx2VsyncRateHz() != 60;
-        const bool speed_limited = !timer_paced && Settings::values.use_speed_limit.GetValue() &&
-                                   Settings::SpeedLimit() != 0;
-        if (!speed_limited && fps_limit == 0) {
+        // The user's limit lowered to the host's VRR frame cap; while a movie plays, a multiple
+        // of the movie's rate, so each movie frame gets as many presents.
+        const u32 fps_limit = MovieCadenceRate(
+            EffectiveFpsLimit(forced_fps_limit != 0 ? forced_fps_limit
+                                                    : Settings::values.fps_limit.GetValue(),
+                              system.GPU().Renderer().HostFrameCap()),
+            m_objects->movie_rate.load(std::memory_order_relaxed));
+        const u32 speed_limit =
+            Settings::values.use_speed_limit.GetValue() ? Settings::SpeedLimit() : 0;
+        const auto vblank_interval =
+            PresentWordInterval(swap_interval, refresh_rate, Nx2VsyncRateHz(), speed_limit);
+        auto& renderer = system.GPU().Renderer();
+        if (vblank_interval.count() == 0 && fps_limit == 0) {
+            renderer.SetGuestPresentRate(0);
             return;
         }
         if (timing != std::exchange(m_swap_word, timing)) {
@@ -2029,12 +2036,10 @@ private:
                      "nx2:vi2 present #{} swap interval {} at {} Hz, FPS limit {} (word 12 = {:#x})",
                      m_presents, swap_interval, refresh_rate, fps_limit, timing);
         }
-        const auto vblank_interval =
-            timer_paced ? std::chrono::nanoseconds{0}
-                        : std::chrono::nanoseconds{100'000'000'000LL * swap_interval /
-                                                   refresh_rate /
-                                                   (speed_limited ? Settings::SpeedLimit() : 100)};
         const auto interval = PacedInterval(vblank_interval, fps_limit);
+        // The host presents on a steady cadence at this rate (VRR); rounded, 59.94 is 60.
+        renderer.SetGuestPresentRate(
+            static_cast<u32>((1'000'000'000LL + interval.count() / 2) / interval.count()));
         if (trace) {
             m_frame_trace.target_ms = std::chrono::duration<double, std::milli>(interval).count();
         }
@@ -2126,16 +2131,19 @@ private:
 
     // Shows a presented native image: word 5 is the image id, ~word 22 / word 24 the GPU fence
     // (syncpoint, value) to wait for (layout from changes.patch). The image is a block-linear
-    // RGBA8 surface in the console's native GOB layout at GPU address == CPU address.
+    // surface in the console's native GOB layout at GPU address == CPU address.
     // shown_size: the present's word 7, ((height - 1) << 16) | (width - 1) of the area the game drew
     // into from the image's top-left corner (0 when it gives none).
     void Composite(u32 image_id, u32 fence_id, u32 fence_value, u32 shown_size) {
+        NotifyHdrChange();
         u64 address{};
         u32 parent{};
         u64 parent_offset{};
         std::optional<Nx2NativeObjects::VideoTrace> video_trace;
         Nx2ImageLayout layout{};
-        u32 image_format{};
+        Nx2NativeImageFormat image_format{};
+        Tegra::ColorSpace color_space{Tegra::ColorSpace::RGB709};
+        u16 linear_unit_luminance{};
         {
             std::scoped_lock lk{m_objects->mutex};
             const auto image = m_objects->images.find(image_id);
@@ -2150,7 +2158,9 @@ private:
             parent = memory->second.parent;
             parent_offset = memory->second.parent_offset + image->second.offset;
             layout = Nx2CalculateImageLayout(image->second.preference.data());
-            image_format = image->second.preference[6];
+            image_format = static_cast<Nx2NativeImageFormat>(image->second.preference[6]);
+            color_space = image->second.color_space;
+            linear_unit_luminance = image->second.linear_unit_luminance;
             if (Nx2VideoTraceEnabled()) {
                 video_trace = m_objects->last_video_write;
             }
@@ -2234,14 +2244,20 @@ private:
             .offset = 0,
             .width = layout.width,
             .height = layout.height,
-            .stride = static_cast<u32>(layout.pitch / 4),
-            // Preference word 6: 1 = RGBA8, 4 = RGB10A2.
-            .pixel_format = image_format == 4 ? android::PixelFormat::Rgba1010102
-                                              : android::PixelFormat::Rgba8888,
+            .stride = static_cast<u32>(
+                layout.pitch / (image_format == Nx2NativeImageFormat::Rgba16Float ? 8 : 4)),
+            .pixel_format = image_format == Nx2NativeImageFormat::Rgba16Float
+                                ? android::PixelFormat::RgbaFp16
+                            : image_format == Nx2NativeImageFormat::Rgb10A2
+                                ? android::PixelFormat::Rgba1010102
+                                : android::PixelFormat::Rgba8888,
             .transform_flags = android::BufferTransformFlags::Unset,
             .crop_rect = {0, 0, static_cast<int>(crop_width), static_cast<int>(crop_height)},
             .blending = Tegra::BlendMode::Opaque,
             .native_tiling = true,
+            .color_space = color_space,
+            .linear_unit_luminance = linear_unit_luminance,
+            .input_ns = Common::InputLatency::CurrentFrameInput(),
         }};
         std::vector<Nvidia::NvFence> fences;
         if (fence_id < 192) {
@@ -2348,22 +2364,78 @@ private:
         TipcReplyWords(ctx, {60, 0});
     }
 
-    // nn::vi2::QueryDisplayHdrPaperWhite(display name): u16 paper white in nits. The empty reply
-    // left it to the message buffer's leftovers; answer the BT.2408 reference white.
-    void QueryDisplayHdrPaperWhite(HLERequestContext& ctx) {
-        TipcReplyWords(ctx, {203});
+    // The HDR output the guest is told about: the HDR settings combined with the state of the
+    // monitor showing the game (on Windows: Windows HDR on, the EDID peak, the SDR content
+    // brightness), so an SDR desktop gets an SDR frame and an HDR desktop the game's own HDR.
+    Common::HdrOutput ResolveHostHdrOutput(std::optional<Common::DisplayHdrInfo>& display) {
+        auto& monitor = Common::DisplayHdrMonitor::Instance();
+        monitor.Watch(system.GPU().Renderer().GetRenderWindow().GetWindowInfo().render_surface);
+        display = monitor.Current();
+        const bool vulkan =
+            Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Vulkan;
+        return Common::ResolveHdrOutput(
+            display, vulkan ? Settings::values.hdr_mode.GetValue() : Settings::HdrMode::Off,
+            Settings::values.hdr_peak_luminance.GetValue(),
+            Settings::values.hdr_reference_white.GetValue());
     }
 
-    // nn::vi2::QueryDisplayHdrStatus(display name): u64 HdrOutputFormat, u16. The sdk's
-    // DefaultDisplay::QueryHdrStatus takes format 1 as HDR output and fails with 0x272 on
-    // anything above 1. With the empty auto stub reply it read the request's leftover words as
-    // the format; Kirby Air Riders re-queries whenever its HDR status event fires and rebuilt its
-    // window images every few frames, which showed black. Report SDR output.
-    // nn::vi2::QueryDisplayHdrStatus(display name): u64 output format, u16 peak luminance in
-    // nits. The sdk takes format 1 as SDR and 2 as HDR and fails the query on any other value.
-    // Report SDR output with a typical SDR panel's peak.
+    static u64 HdrOutputKey(const Common::HdrOutput& output) {
+        return (u64{output.enabled} << 32) | (u64{output.peak_luminance} << 16) |
+               output.reference_white;
+    }
+
+    // What the game is told; m_logged_hdr_output keeps the last answer.
+    Common::HdrOutput HostHdrOutput() {
+        std::optional<Common::DisplayHdrInfo> display;
+        const auto output = ResolveHostHdrOutput(display);
+        const u64 logged = HdrOutputKey(output);
+        if (logged != m_logged_hdr_output) {
+            m_logged_hdr_output = logged;
+            LOG_INFO(Service,
+                     "nx2:vi2 HDR status: {} peak {} nits, reference white {} nits (display: {})",
+                     output.enabled ? "HDR" : "SDR", output.peak_luminance, output.reference_white,
+                     display ? fmt::format("hdr={} max {} nits, SDR white {} nits",
+                                           display->hdr_enabled, display->max_luminance,
+                                           display->sdr_white_level)
+                             : std::string{"no host query"});
+        }
+        return output;
+    }
+
+    // Fires the slots bound to the HDR status and paper white events once the monitor's state
+    // changed what the game was last told (Windows HDR toggled, the window moved to another
+    // monitor, a new HDR calibration or SDR content brightness), so it queries again and switches
+    // between SDR and HDR images. Runs at every present; costs an atomic load while nothing
+    // changes.
+    void NotifyHdrChange() {
+        const u64 generation = Common::DisplayHdrMonitor::Instance().Generation();
+        if (generation == m_hdr_generation) {
+            return;
+        }
+        m_hdr_generation = generation;
+        std::optional<Common::DisplayHdrInfo> display;
+        if (m_hdr_change_slots == 0 || m_logged_hdr_output == ~u64{} ||
+            HdrOutputKey(ResolveHostHdrOutput(display)) == m_logged_hdr_output) {
+            return;
+        }
+        LOG_INFO(Service, "nx2:vi2 display HDR state changed, signalling the game");
+        for (u32 index = 0; index < m_native_events.size(); ++index) {
+            if ((m_hdr_change_slots >> index) & 1 && m_native_events[index]) {
+                m_native_events[index]->Signal(system.Kernel());
+            }
+        }
+    }
+
+    // nn::vi2::QueryDisplayHdrPaperWhite(display name): u16 reference white in nits.
+    void QueryDisplayHdrPaperWhite(HLERequestContext& ctx) {
+        TipcReplyWords(ctx, {HostHdrOutput().reference_white});
+    }
+
+    // Wire reply: u64 output format (1 = SDR, 2 = HDR), u16 peak luminance in nits.
+    // MKW's SDK converts these to public formats 0/1 before DefaultDisplay tests for HDR.
     void QueryDisplayHdrStatus(HLERequestContext& ctx) {
-        TipcReplyWords(ctx, {1, 0, 400});
+        const auto output = HostHdrOutput();
+        TipcReplyWords(ctx, {output.enabled ? 2U : 1U, 0, output.peak_luminance});
     }
 
     // 212(u64 layer): u64 bits of the layer's buffer slots that are ready. The client polls it once
@@ -2465,20 +2537,28 @@ private:
         LOG_INFO(Service, "nx2:vi2 261 native event {} -> vsync", index);
         if (index < m_native_events.size() && m_native_events[index]) {
             SetVsyncSlot(index, true);
+            m_hdr_change_slots &= ~(1U << index);
         }
         TipcReplyWords(ctx, {});
     }
 
     // 263/265/267/269/271(u64 display name, u32 index): fire the slot when the display's refresh
     // rate, HDR status, HDR paper white, buffer max resolution or mode capability changes, so the
-    // game re-queries it. None of them change here: fire once so the game reads the current
-    // state, then leave the slot quiet. Kirby Air Riders re-queried its HDR status on every
-    // present while this slot fired with vsync.
+    // game re-queries it. Fire once so the game reads the current state, then leave the slot
+    // quiet; HDR status and paper white fire again when the host monitor changes
+    // (NotifyHdrChange). Kirby Air Riders re-queried its HDR status on every present while this
+    // slot fired with vsync.
     void BindChange(HLERequestContext& ctx) {
         const u32 index = ctx.CommandBuffer()[4];
         LOG_INFO(Service, "nx2:vi2 {} native event {} -> change notification", ctx.GetCommand(), index);
         if (index < m_native_events.size() && m_native_events[index]) {
             SetVsyncSlot(index, false);
+            const u32 command = ctx.GetCommand();
+            if (command == 265 || command == 267) {
+                m_hdr_change_slots |= 1U << index;
+            } else {
+                m_hdr_change_slots &= ~(1U << index);
+            }
             m_native_events[index]->Signal(system.Kernel());
         }
         TipcReplyWords(ctx, {});
@@ -2490,6 +2570,7 @@ private:
         LOG_INFO(Service, "nx2:vi2 {} native event {} unbound", ctx.GetCommand(), index);
         if (index < m_native_events.size() && m_native_events[index]) {
             SetVsyncSlot(index, false);
+            m_hdr_change_slots &= ~(1U << index);
         }
         TipcReplyWords(ctx, {});
     }
@@ -2527,10 +2608,13 @@ private:
             LOG_INFO(Service, "nx2:vi2 vsync rate: {} Hz", vsync_hz);
             m_vsync_timer = Core::Timing::CreateEvent(
                 "nx2:vi2 vsync",
-                [vsync_state = m_vsync, &kernel = system.Kernel(), VblankInterval](
+                [vsync_state = m_vsync, objects = m_objects, &kernel = system.Kernel(), vsync_hz,
+                 VblankInterval](
                     s64 scheduled,
                     std::chrono::nanoseconds late) -> std::optional<std::chrono::nanoseconds> {
                     std::scoped_lock lk{vsync_state->mutex};
+                    // The game starts its next frame here and samples input then.
+                    Common::InputLatency::FrameStart();
                     for (auto* vsync : vsync_state->events) {
                         vsync->Signal(kernel);
                     }
@@ -2564,7 +2648,10 @@ private:
                             vsync_state->trace_min_gap.reset();
                         }
                     }
-                    return std::nullopt;
+                    // While a movie plays, the next vblank at a multiple of its rate.
+                    const u32 hz = MovieCadenceRate(
+                        vsync_hz, objects->movie_rate.load(std::memory_order_relaxed));
+                    return std::chrono::nanoseconds{1'000'000'000LL / hz};
                 });
             system.CoreTiming().ScheduleLoopingEvent(VblankInterval, VblankInterval, m_vsync_timer);
         }
@@ -2588,6 +2675,9 @@ private:
     std::shared_ptr<Core::Timing::EventType> m_vsync_timer;
     u64 m_presents{};
     u64 m_shown_layout{}; // image and crop size last logged
+    u64 m_logged_hdr_output{~u64{}}; // HDR status last logged
+    u64 m_hdr_generation{};           // DisplayHdrMonitor generation NotifyHdrChange last saw
+    u32 m_hdr_change_slots{};         // native event slots bound to HDR status / paper white
     std::shared_ptr<std::atomic<bool>> m_capture_pending = std::make_shared<std::atomic<bool>>(false);
 };
 
@@ -2653,6 +2743,7 @@ public:
 
     ~INx2VideoSession() override {
         m_ready->SetRunning(system.Kernel(), false);
+        SetMovieRate(0);
         if (m_worker.joinable()) {
             {
                 std::scoped_lock lk{m_mutex};
@@ -2661,6 +2752,7 @@ public:
             m_cv.notify_all();
             m_worker.join();
         }
+        CloseStreamDump();
         // The ready timer runs on the HostTiming thread: clear its event under its lock first.
         {
             std::scoped_lock lk{m_ready->mutex};
@@ -2742,7 +2834,24 @@ private:
         }
         m_ready->SetRunning(system.Kernel(), true);
         m_ready->Signal(system.Kernel());
+        {
+            std::scoped_lock lk{m_mutex};
+            SetMovieRate(m_rate);
+        }
         TipcReplyWords(ctx, {});
+    }
+
+    // Publishes this session's movie rate for present pacing (0: stopped). A session only
+    // clears the rate it set.
+    void SetMovieRate(u32 rate) {
+        const u32 published = rate >= 1 && rate <= 240 ? rate : 0;
+        if (published != 0) {
+            m_objects->movie_rate.store(published, std::memory_order_relaxed);
+        } else if (m_published_rate != 0) {
+            u32 expected = m_published_rate;
+            m_objects->movie_rate.compare_exchange_strong(expected, 0, std::memory_order_relaxed);
+        }
+        m_published_rate = published;
     }
 
     void Configure(HLERequestContext& ctx) {
@@ -2782,6 +2891,9 @@ private:
             m_codec = std::move(codec);
             m_width = w[5];
             m_height = w[6];
+            LogRate(m_rate_meter.Finish(HostTimeUs())); // the previous stream, at its rate
+            m_rate = w[7];
+            ++m_stream_index;
             m_clock.Reset();
             m_stream_start.reset();
         }
@@ -2948,6 +3060,10 @@ private:
         }
         {
             std::scoped_lock lk{m_mutex};
+            if (ctx.GetCommand() == 207) {
+                SetMovieRate(0);
+                LogRate(m_rate_meter.Finish(HostTimeUs()));
+            }
             if (Nx2VideoTraceEnabled()) {
                 LOG_INFO(Service,
                          "nx2:vdec trace {} syncpoint={} inputs={} decoded={} outputs={} "
@@ -2988,6 +3104,7 @@ private:
             CompleteHandedFences();
             m_clock.Reset();
             m_stream_start.reset();
+            SetMovieRate(0);
         }
         TipcReplyWords(ctx, {});
     }
@@ -2999,6 +3116,30 @@ private:
     // When emulation last resumed from a pause: the movie's audio stopped meanwhile.
     s64 PauseEndUs() const {
         return system.CoreTiming().GetPauseEndTime().count() / 1000;
+    }
+
+    // How early a frame may be written: half a frame, so a client drawing at the movie's rate
+    // is never held back by jitter (m_mutex held).
+    u64 EarlyTolerance() const {
+        return m_frame_interval / 2;
+    }
+
+    // Always on, every 10 s of a playing movie and when it stops: how fast it plays as the client
+    // sees it, against the stream's rate (m_mutex held).
+    void LogRate(const std::optional<Nx2MovieRateMeter::Report>& report) {
+        if (!report || report->wall_us <= 0) {
+            return;
+        }
+        const double seconds = static_cast<double>(report->wall_us) / 1e6;
+        const double rate = m_rate != 0 ? static_cast<double>(m_rate)
+                                        : 1e6 / static_cast<double>(std::max<u64>(m_frame_interval, 1));
+        LOG_INFO(Service,
+                 "movie {}:{}: {} frames shown in {:.2f} s = {:.2f} fps (stream rate {:.2f} fps), "
+                 "movie time {:.2f} s = {:.3f}x real time",
+                 m_syncpoint, m_stream_index, report->frames, seconds,
+                 static_cast<double>(report->frames) / seconds, rate,
+                 static_cast<double>(report->movie_us) / 1e6,
+                 static_cast<double>(report->movie_us) / static_cast<double>(report->wall_us));
     }
 
     // Games such as Ocarina of Time show one decoded frame per frame they draw and never skip
@@ -3056,7 +3197,9 @@ private:
             if (!m_outputs.empty()) {
                 output = m_outputs.front();
                 m_outputs.pop_front();
-                m_clock.Acquired(HostTimeUs(), output->pts, PauseEndUs());
+                const s64 now = HostTimeUs();
+                m_clock.Acquired(now, output->pts, PauseEndUs());
+                LogRate(m_rate_meter.Shown(now, output->pts));
             }
         }
         if (!output) {
@@ -3102,6 +3245,7 @@ private:
                 m_decoded.clear();
                 m_last_decoded_pts = 0;
                 m_dropped_in_a_row = 0;
+                CloseStreamDump();
                 if (decoder) {
                     lk.unlock();
                     decoder->Reset();
@@ -3109,7 +3253,34 @@ private:
                 }
                 continue;
             }
+            // A client drawing faster than the movie plays shows its current frame again until
+            // the clock reaches the next one. Hold that frame back before it is written: writing
+            // advances the syncpoint the client acquires on, and an image it then finds empty
+            // (213 answered "no frame") left Ocarina's title movie black.
+            bool write{};
             if (!m_decoded.empty() && !m_free.empty() && !DropOvertakenFrames()) {
+                const auto hold =
+                    m_clock.HoldUs(HostTimeUs(), m_decoded.front().pts,
+                                   PauseEndUs(), EarlyTolerance());
+                if (hold) {
+                    ++m_frames_held;
+                    if (m_frames_held <= 5 || (m_frames_held % 600) == 0) {
+                        LOG_INFO(Service,
+                                 "{} holds frame pts {} us for {} us: the client acquires faster "
+                                 "than the movie plays ({} holds)",
+                                 GetServiceName(), m_decoded.front().pts, *hold, m_frames_held);
+                    }
+                    if (m_inputs.Empty() || m_decoded.size() >= MaxDecodedAhead) {
+                        m_cv.wait_for(lk, std::chrono::microseconds{static_cast<s64>(*hold)},
+                                      [&] { return m_quit || m_flush; });
+                        continue;
+                    }
+                    // Decode the next input meanwhile.
+                } else {
+                    write = true;
+                }
+            }
+            if (write) {
                 m_dropped_in_a_row = 0;
                 Decoded frame = std::move(m_decoded.front());
                 m_decoded.pop_front();
@@ -3144,17 +3315,17 @@ private:
                 if (!m_stream_start) {
                     m_stream_start = {written_us, frame.pts};
                 }
-                if (m_frames_out == 1 || (m_frames_out % 600) == 0 || frame.end) {
+                if (m_frames_out <= 5 || (m_frames_out % 600) == 0 || frame.end) {
                     // How far the frames written lag their timestamps since the stream's first.
                     const s64 behind_us =
                         (written_us - m_stream_start->first) -
                         (static_cast<s64>(frame.pts) - static_cast<s64>(m_stream_start->second));
                     LOG_INFO(Service,
                              "{} frame {} ({}x{}, pts {} us{}) in image {}, {} late dropped, "
-                             "{} ms behind",
+                             "{} early holds, {} ms behind",
                              GetServiceName(), m_frames_out, width, height, frame.pts,
                              frame.end ? ", end of stream" : "", image, m_frames_dropped,
-                             behind_us / 1000);
+                             m_frames_held, behind_us / 1000);
                 }
                 if (frame.end) {
                     m_stream_start.reset();
@@ -3166,6 +3337,9 @@ private:
                 m_ready->room.store(m_inputs.BelowReadyWatermark(), std::memory_order_relaxed);
             }
             std::string codec = m_codec;
+            const u32 width = m_width;
+            const u32 height = m_height;
+            const u32 rate = m_rate;
             if (codec.empty() && Tegra::Host1x::IsH264Stream(input.data)) {
                 codec = "video/avc";
                 m_codec = codec;
@@ -3182,8 +3356,10 @@ private:
                                               std::min(input.data.size(), size_t{16})),
                                           " "));
                 }
-                decoder = std::make_unique<Tegra::Host1x::Nx2VideoDecoder>(codec);
+                decoder = std::make_unique<Tegra::Host1x::Nx2VideoDecoder>(codec, width, height,
+                                                                           rate);
             }
+            DumpPacket(input, codec, width, height);
             pictures.clear();
             decoder->Decode(input.data, input.pts, pictures);
             if (input.end) {
@@ -3339,6 +3515,8 @@ private:
                     Nvidia::Devices::Nx2GpuMemoryRegistry::Get().DeviceAddressOf(address)) {
                 system.GPU().InvalidateRegion(*device, m_tiled.size());
             }
+            CheckWrite(frame, address, {WriteRange{0, m_tiled.size()}, WriteRange{0, 0}}, m_tiled,
+                       std::nullopt);
             trace_write();
             return {width, height};
         }
@@ -3354,6 +3532,17 @@ private:
         if (const auto device = Nvidia::Devices::Nx2GpuMemoryRegistry::Get().DeviceAddressOf(address)) {
             system.GPU().InvalidateRegion(*device, layout.size);
         }
+        const bool nv12 = layout.format == Tegra::Host1x::Nx2PictureFormat::Nv12;
+        const std::optional<u64> nv12_hash =
+            nv12 && width == frame.picture->width && height == frame.picture->height
+                ? std::optional{Tegra::Host1x::Nx2Nv12Hash(bytes, width, height, layout.pitch,
+                                                          layout.chroma_offset)}
+                : std::nullopt;
+        CheckWrite(frame, address,
+                   {WriteRange{0, layout.pitch * height},
+                    WriteRange{nv12 ? layout.chroma_offset : 0,
+                               nv12 ? layout.pitch * ((height + 1) / 2) : 0}},
+                   bytes, nv12_hash);
         trace_write();
         // A 428/426 that came in while this frame was written didn't see it: relayout it here.
         bool relayout = false;
@@ -3369,6 +3558,96 @@ private:
             Nx2RelayoutDecoderImage(system, address, layout);
         }
         return {width, height};
+    }
+
+    // EDEN_NX2_VDEC_TRACE self-check of a written frame: the hash of the decoded picture (the same
+    // as tools/nx2/av1_hw_probe.c prints, to compare with a decode of the stream dumped by
+    // EDEN_NX2_VDEC_STREAM_DUMP), whether the NV12 image built from it hashes the same, and
+    // whether guest memory holds what was written. Mismatches are errors.
+    using WriteRange = std::pair<u64, u64>; ///< Offset and size of a write into the image
+
+    void CheckWrite(const Decoded& frame, u64 address, std::array<WriteRange, 2> ranges,
+                    std::span<const u8> written,
+                    std::optional<u64> written_hash) {
+        if (!Nx2VideoTraceEnabled()) {
+            return;
+        }
+        const u64 picture_hash = Tegra::Host1x::Nx2PictureHash(*frame.picture);
+        bool memory_same = true;
+        std::vector<u8> readback;
+        for (const auto& [offset, size] : ranges) {
+            if (size == 0) {
+                continue;
+            }
+            readback.resize(size);
+            system.ApplicationMemory().ReadBlock(address + offset, readback.data(), size);
+            memory_same &= std::memcmp(readback.data(), written.data() + offset, size) == 0;
+        }
+        LOG_INFO(Service,
+                 "nx2:vdec trace frame hash syncpoint={} output={} pts={} picture={:016x} "
+                 "written={} memory={}",
+                 m_syncpoint, m_frames_out + 1, frame.pts, picture_hash,
+                 written_hash ? fmt::format("{:016x}", *written_hash) : std::string{"-"},
+                 memory_same ? "same" : "DIFFERS");
+        if (!memory_same || (written_hash && *written_hash != picture_hash)) {
+            LOG_ERROR(Service, "nx2:vdec frame pts {} was not written as decoded ({})", frame.pts,
+                      memory_same ? "converted image differs" : "guest memory differs");
+        }
+    }
+
+    // EDEN_NX2_VDEC_STREAM_DUMP=<dir>: every packet the game submits, one IVF file per stream
+    // (nx2-vdec-<syncpoint>-<n>.ivf), for tools/nx2/av1_hw_probe.c. Decode thread only.
+    void DumpPacket(const Input& input, const std::string& codec, u32 width, u32 height) {
+        static const char* const directory = std::getenv("EDEN_NX2_VDEC_STREAM_DUMP");
+        if (directory == nullptr) {
+            return;
+        }
+        if (m_stream_dump == nullptr) {
+            const std::string path = fmt::format("{}/nx2-vdec-{}-{}.ivf", directory, m_syncpoint,
+                                                 m_stream_dumps++);
+            m_stream_dump = std::fopen(path.c_str(), "wb");
+            if (m_stream_dump == nullptr) {
+                return;
+            }
+            const char* fourcc = codec.find("av1") != std::string::npos   ? "AV01"
+                                 : codec.find("vp9") != std::string::npos ? "VP90"
+                                 : codec.find("vp8") != std::string::npos ? "VP80"
+                                                                          : "H264";
+            std::array<u8, 32> header{'D', 'K', 'I', 'F', 0, 0, 32, 0};
+            std::memcpy(header.data() + 8, fourcc, 4);
+            const auto put16 = [&](size_t at, u32 v) {
+                header[at] = static_cast<u8>(v);
+                header[at + 1] = static_cast<u8>(v >> 8);
+            };
+            const auto put32 = [&](size_t at, u32 v) {
+                put16(at, v);
+                put16(at + 2, v >> 16);
+            };
+            put16(12, width);
+            put16(14, height);
+            put32(16, 1'000'000); // time base: pts in us
+            put32(20, 1);
+            std::fwrite(header.data(), 1, header.size(), m_stream_dump);
+        }
+        std::array<u8, 12> frame_header{};
+        for (u32 i = 0; i < 4; ++i) {
+            frame_header[i] = static_cast<u8>(input.data.size() >> (8 * i));
+        }
+        for (u32 i = 0; i < 8; ++i) {
+            frame_header[4 + i] = static_cast<u8>(input.pts >> (8 * i));
+        }
+        std::fwrite(frame_header.data(), 1, frame_header.size(), m_stream_dump);
+        std::fwrite(input.data.data(), 1, input.data.size(), m_stream_dump);
+        if (input.end) {
+            CloseStreamDump();
+        }
+    }
+
+    void CloseStreamDump() {
+        if (m_stream_dump != nullptr) {
+            std::fclose(m_stream_dump);
+            m_stream_dump = nullptr;
+        }
     }
 
     // EDEN_NX2_VDEC_DUMP=<dir>: save the luma of every 120th decoded frame, a quarter of its size,
@@ -3411,11 +3690,16 @@ private:
     std::string m_codec;
     u32 m_width{};
     u32 m_height{};
+    u32 m_rate{};           ///< Frames a second (Configure), 0 when not given
+    u32 m_published_rate{}; ///< Movie rate this session published (SetMovieRate)
     u32 m_handed{}; ///< Output images handed out (registered or released) so far
     u64 m_frames_out{};
     u64 m_decoded_frames{};
     u64 m_frames_dropped{};
-    Nx2MovieClock m_clock;
+    u64 m_frames_held{};   ///< Times the next frame was held back because it was early
+    Nx2MovieClock m_clock; ///< Host time of the frames the client shows (us)
+    Nx2MovieRateMeter m_rate_meter;
+    u32 m_stream_index{}; ///< Streams configured on this session, for the rate log
     u64 m_frame_interval{16667}; ///< us, from consecutive decoded frames
     u64 m_last_decoded_pts{};
     u32 m_dropped_in_a_row{};
@@ -3431,6 +3715,8 @@ private:
     bool m_flush{};
     bool m_quit{};
     std::thread m_worker;
+    std::FILE* m_stream_dump{}; ///< EDEN_NX2_VDEC_STREAM_DUMP file of the current stream
+    u32 m_stream_dumps{};
 };
 
 // Placeholder for the Switch 2 graphics-system server that nn::gsv::BootWithRemoteMemory talks
@@ -3466,6 +3752,9 @@ public:
              "CalculateDecoderImagePoolBuffer"},
             {901, &INx2GraphicsSystemSession::Stub, "VideoInitialize (guessed)"},
             {902, &INx2GraphicsSystemSession::OpenVideoSession, "OpenVideoDecoderSession (guessed)"},
+            // 903(): sent once a movie ends, after the decoder session's 115 (finalize) and before
+            // 1003, the x03 that ends the 901/902 group as 603, 1003, 1203 and 1603 end theirs.
+            {903, &INx2GraphicsSystemSession::StubReplyZeroed, "Unknown903"},
             {905, &INx2GraphicsSystemSession::OpenVideoSession, "OpenVideoDecoderSessionWithFlag"},
             {906, &INx2GraphicsSystemSession::OpenVideoSession, "OpenVideoDecoderSessionWithVersion"},
             {1001, &INx2GraphicsSystemSession::Stub, "VideoInitialize2 (guessed)"},
@@ -3569,6 +3858,9 @@ public:
     }
 
     ~INx2GraphicsSystemSession() override {
+        if (m_syncpt_observer != 0) {
+            system.Host1x().GetSyncpointManager().RemoveGuestIncrementObserver(m_syncpt_observer);
+        }
         if (m_syncpt_poll) {
             system.CoreTiming().UnscheduleEvent(m_syncpt_poll);
         }
@@ -3719,9 +4011,15 @@ private:
         LOG_WARNING(Service, "(STUBBED) nx2:gsv TIPC 204, version={} max_syncpoints={:#x}",
                     version_requested, max_syncpoints);
 
+        // Created first: the increment observer and the poll signal the notify event.
+        if (m_syncpt_events[0] == nullptr) {
+            m_syncpt_events[0] = m_context.CreateEvent("nx2:gsv:SyncptRequest");
+            m_syncpt_events[1] = m_context.CreateEvent("nx2:gsv:SyncptNotify");
+        }
         auto rw = ctx.GetObjectFromHandle<Kernel::KTransferMemory>(ctx.GetCopyHandle(0));
         auto ro = ctx.GetObjectFromHandle<Kernel::KTransferMemory>(ctx.GetCopyHandle(1));
         if (rw.IsNotNull() && ro.IsNotNull() && ro->GetSize() >= 0x2000) {
+            std::unique_lock lk{m_syncpt_mutex};
             m_syncpt_memory = &ro->GetOwner()->GetMemory();
             m_syncpt_rw = GetInteger(rw->GetSourceAddress());
             m_syncpt_ro = GetInteger(ro->GetSourceAddress());
@@ -3736,10 +4034,18 @@ private:
             memory.Write32(m_syncpt_ro + 0x18, SyncptRwBitsOffset);
             memory.Write32(m_syncpt_ro + 0x1c, SyncptRoBitsOffset);
             UpdateSyncptValues();
+            lk.unlock();
             if (!m_syncpt_poll) {
-                m_syncpt_poll = Core::Timing::CreateEvent(
+                // Each guest increment updates its value and answers armed waits at once.
+                m_syncpt_observer =
+                    system.Host1x().GetSyncpointManager().AddGuestIncrementObserver(
+                        [this](u32 id, u32 value) { OnSyncptIncrement(id, value); });
+                // The poll is only a fallback, not a deadline: relaxed, so the timer thread
+                // sleeps in the OS for it instead of spending its interval in a monitor wait.
+                m_syncpt_poll = Core::Timing::CreateRelaxedEvent(
                     "nx2:gsv:SyncptPoll",
-                    [this](s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
+                    [this](s64,
+                           std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
                         PollSyncpts();
                         return std::nullopt;
                     });
@@ -3750,10 +4056,6 @@ private:
             LOG_ERROR(Service, "nx2:gsv TIPC 204: missing syncpt transfer memory");
         }
 
-        if (m_syncpt_events[0] == nullptr) {
-            m_syncpt_events[0] = m_context.CreateEvent("nx2:gsv:SyncptRequest");
-            m_syncpt_events[1] = m_context.CreateEvent("nx2:gsv:SyncptNotify");
-        }
         IPC::ResponseBuilder rb{ctx, 2, 2, 0};
         rb.Push(ResultSuccess);
         rb.PushCopyObjects(ctx, *m_syncpt_events[0]); // signalled by the client
@@ -3775,19 +4077,37 @@ private:
         return changed;
     }
 
-    // Answers every armed wait: the value page is current, so the client rechecks its threshold
-    // and rearms if it still has to wait. Acknowledging without a value change costs the client a
-    // wakeup per poll, which keeps waits whose syncpoint we never see from hanging.
+    // Runs on the GPU thread that incremented the syncpoint, under the syncpoint manager's lock.
+    // Polling alone made a waiter see its value up to 500 us late.
+    void OnSyncptIncrement(u32 id, u32 value) {
+        std::scoped_lock lk{m_syncpt_mutex};
+        if (id >= std::min(m_syncpt_count, HostSyncpoints)) {
+            return;
+        }
+        m_syncpt_memory->Write64(m_syncpt_ro + SyncptValuesOffset + id * 8, value);
+        AckArmedSyncptWaits();
+    }
+
+    // The poll stays for waits armed just after the increment that satisfied them, which no later
+    // increment answers, and for syncpoints whose waits we never see an increment of.
     void PollSyncpts() {
+        std::scoped_lock lk{m_syncpt_mutex};
         if (m_syncpt_memory == nullptr) {
             return;
         }
+        UpdateSyncptValues();
+        AckArmedSyncptWaits();
+    }
+
+    // Answers every armed wait: the value page is current, so the client rechecks its threshold
+    // and rearms if it still has to wait. Acknowledging without a value change costs the client a
+    // wakeup, which keeps waits whose syncpoint we never see from hanging.
+    void AckArmedSyncptWaits() {
         const u32 words = (m_syncpt_count + 63) / 64;
         std::array<u64, 0x40> armed{};
         for (u32 w = 0; w < words; ++w) {
             armed[w] = m_syncpt_memory->Read64(m_syncpt_rw + SyncptRwBitsOffset + w * 8);
         }
-        UpdateSyncptValues();
         bool acked = false;
         for (u32 w = 0; w < words; ++w) {
             const u64 ro_address = m_syncpt_ro + SyncptRoBitsOffset + w * 8;
@@ -3936,6 +4256,22 @@ private:
         image.memory = w[19];
         std::copy_n(w + 2, image.preference.size(), image.preference.begin());
         image.size = Nx2CalculateImageLayout(w + 2).size;
+        // gsv 429's native format encodes color as well as storage; other commands use
+        // different descriptor layouts even though they share this handler.
+        if (ctx.GetCommand() == 429 && image.preference[1] == 1) {
+            switch (static_cast<Nx2NativeImageFormat>(image.preference[6])) {
+            case Nx2NativeImageFormat::Rgb10A2:
+                image.color_space = Tegra::ColorSpace::RGB2020_PQ;
+                break;
+            case Nx2NativeImageFormat::Rgba16Float:
+                image.color_space = Tegra::ColorSpace::RGB709_Linear;
+                image.linear_unit_luminance =
+                    static_cast<u16>((image.preference[7] >> 8) & 0xFFFF);
+                break;
+            default:
+                break;
+            }
+        }
         LOG_INFO(Service, "nx2:gsv 429 CreateNativeImage memory={} count={} size={:#x} -> id {}",
                  w[19], w[18], image.size, id);
         TipcReplyWords(ctx, {id});
@@ -4270,6 +4606,8 @@ private:
     u64 m_syncpt_ro{};
     u32 m_syncpt_count{};
     std::shared_ptr<Core::Timing::EventType> m_syncpt_poll;
+    Tegra::Host1x::SyncpointManager::ActionHandle m_syncpt_observer{};
+    std::mutex m_syncpt_mutex; ///< Orders page writes from GPU threads and the poll
 };
 
 } // namespace Service

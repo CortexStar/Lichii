@@ -1,0 +1,144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Lichii <noreply@anthropic.com>
+Date: Sat, 8 Nov 2026 19:00:00 +0100
+Subject: [PATCH] Add SPV_EXT_descriptor_heap / SPV_KHR_untyped_pointers emitters
+
+Bindless access through VK_EXT_descriptor_heap needs untyped pointer types,
+untyped variables decorated BuiltIn ResourceHeapEXT/SamplerHeapEXT, untyped
+access chains, OpConstantSizeOfEXT for the descriptor stride and OpDecorateId
+for ArrayStrideIdEXT.
+---
+diff --git a/include/sirit/sirit.h b/include/sirit/sirit.h
+--- a/include/sirit/sirit.h
++++ b/include/sirit/sirit.h
+@@ -116,6 +116,10 @@
+     Id AddGlobalVariable(Id result_type, spv::StorageClass storage_class,
+                          std::optional<Id> initializer = std::nullopt);
+ 
++    /// Adds a global untyped variable (SPV_KHR_untyped_pointers), e.g. a descriptor heap.
++    Id AddGlobalUntypedVariable(Id result_type, spv::StorageClass storage_class,
++                                std::optional<Id> data_type = std::nullopt);
++
+     // Types
+ 
+     /// Returns type void.
+@@ -174,6 +178,9 @@
+     /// Returns type pointer.
+     Id TypePointer(spv::StorageClass storage_class, Id type);
+ 
++    /// Returns an untyped pointer type (SPV_KHR_untyped_pointers).
++    Id TypeUntypedPointerKHR(spv::StorageClass storage_class);
++
+     /// Returns type function.
+     Id TypeFunction(Id return_type, std::span<const Id> arguments = {});
+ 
+@@ -210,6 +217,9 @@
+     /// Returns a numeric scalar constant.
+     Id Constant(Id result_type, const Literal& literal);
+ 
++    /// Returns the size in bytes of a descriptor type (SPV_EXT_descriptor_heap).
++    Id ConstantSizeOfEXT(Id result_type, Id type);
++
+     /// Returns a numeric scalar constant.
+     Id ConstantComposite(Id result_type, std::span<const Id> constituents);
+ 
+@@ -374,6 +384,10 @@
+     /// Create a pointer into a composite object that can be used with OpLoad and OpStore.
+     Id OpAccessChain(Id result_type, Id base, std::span<const Id> indexes = {});
+ 
++    /// Untyped access chain (SPV_KHR_untyped_pointers): base_type is the type base points to.
++    Id OpUntypedAccessChainKHR(Id result_type, Id base_type, Id base,
++                               std::span<const Id> indexes = {});
++
+     /// Create a pointer into a composite object that can be used with OpLoad and OpStore.
+     template <typename... Ts>
+     requires(...&& std::is_convertible_v<Ts, Id>) Id
+@@ -437,6 +451,9 @@
+     /// Add a decoration to target.
+     Id Decorate(Id target, spv::Decoration decoration, std::span<const Literal> literals = {});
+ 
++    /// Decorate a target with decoration operands that are ids (OpDecorateId).
++    Id DecorateId(Id target, spv::Decoration decoration, std::span<const Id> ids);
++
+     /// Add a decoration to target.
+     template <typename... Ts>
+     requires(...&& std::is_convertible_v<Ts, Literal>) Id
+diff --git a/src/instructions/annotation.cpp b/src/instructions/annotation.cpp
+--- a/src/instructions/annotation.cpp
++++ b/src/instructions/annotation.cpp
+@@ -17,6 +17,11 @@
+     return *annotations << spv::Op::OpDecorate << target << decoration << literals << EndOp{};
+ }
+ 
++Id Module::DecorateId(Id target, spv::Decoration decoration, std::span<const Id> ids) {
++    annotations->Reserve(3 + ids.size());
++    return *annotations << spv::Op::OpDecorateId << target << decoration << ids << EndOp{};
++}
++
+ Id Module::MemberDecorate(Id structure_type, Literal member, spv::Decoration decoration,
+                           std::span<const Literal> literals) {
+     annotations->Reserve(4 + literals.size());
+diff --git a/src/instructions/constant.cpp b/src/instructions/constant.cpp
+--- a/src/instructions/constant.cpp
++++ b/src/instructions/constant.cpp
+@@ -27,6 +27,11 @@
+     return *declarations << OpId{spv::Op::OpConstant, result_type} << literal << EndOp{};
+ }
+ 
++Id Module::ConstantSizeOfEXT(Id result_type, Id type) {
++    declarations->Reserve(4);
++    return *declarations << OpId{spv::Op::OpConstantSizeOfEXT, result_type} << type << EndOp{};
++}
++
+ Id Module::ConstantComposite(Id result_type, std::span<const Id> constituents) {
+     declarations->Reserve(3 + constituents.size());
+     return *declarations << OpId{spv::Op::OpConstantComposite, result_type} << constituents
+diff --git a/src/instructions/memory.cpp b/src/instructions/memory.cpp
+--- a/src/instructions/memory.cpp
++++ b/src/instructions/memory.cpp
+@@ -34,6 +34,13 @@
+     return *code << OpId{spv::Op::OpAccessChain, result_type} << base << indexes << EndOp{};
+ }
+ 
++Id Module::OpUntypedAccessChainKHR(Id result_type, Id base_type, Id base,
++                                   std::span<const Id> indexes) {
++    code->Reserve(5 + indexes.size());
++    return *code << OpId{spv::Op::OpUntypedAccessChainKHR, result_type} << base_type << base
++                 << indexes << EndOp{};
++}
++
+ Id Module::OpVectorExtractDynamic(Id result_type, Id vector, Id index) {
+     code->Reserve(5);
+     return *code << OpId{spv::Op::OpVectorExtractDynamic, result_type} << vector << index
+diff --git a/src/instructions/type.cpp b/src/instructions/type.cpp
+--- a/src/instructions/type.cpp
++++ b/src/instructions/type.cpp
+@@ -97,6 +97,11 @@
+     return *declarations << OpId{spv::Op::OpTypePointer} << storage_class << type << EndOp{};
+ }
+ 
++Id Module::TypeUntypedPointerKHR(spv::StorageClass storage_class) {
++    declarations->Reserve(3);
++    return *declarations << OpId{spv::Op::OpTypeUntypedPointerKHR} << storage_class << EndOp{};
++}
++
+ Id Module::TypeFunction(Id return_type, std::span<const Id> arguments) {
+     declarations->Reserve(3 + arguments.size());
+     return *declarations << OpId{spv::Op::OpTypeFunction} << return_type << arguments << EndOp{};
+diff --git a/src/sirit.cpp b/src/sirit.cpp
+--- a/src/sirit.cpp
++++ b/src/sirit.cpp
+@@ -134,6 +134,13 @@
+                              << initializer << EndOp{};
+ }
+ 
++Id Module::AddGlobalUntypedVariable(Id result_type, spv::StorageClass storage_class,
++                                    std::optional<Id> data_type) {
++    global_variables->Reserve(5);
++    return *global_variables << OpId{spv::Op::OpUntypedVariableKHR, result_type}
++                             << storage_class << data_type << EndOp{};
++}
++
+ Id Module::GetGLSLstd450() {
+     const char* extname = "GLSL.std.450";
+     size_t len = WordsInString(extname);

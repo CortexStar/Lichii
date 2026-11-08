@@ -5,7 +5,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
+#include <functional>
 #include <numbers>
+#include <span>
 #include "common/logging.h"
 #include "common/math_util.h"
 #include "common/param_package.h"
@@ -17,13 +20,16 @@
 namespace InputCommon {
 
 namespace {
-Common::UUID GetGUID(SDL_Joystick* joystick) {
-    const SDL_GUID guid = SDL_GetJoystickGUID(joystick);
+Common::UUID ToUUID(const SDL_GUID& guid) {
     std::array<u8, 16> data{};
     std::memcpy(data.data(), guid.data, sizeof(data));
     // Clear controller name crc
     std::memset(data.data() + 2, 0, sizeof(u16));
     return Common::UUID{data};
+}
+
+Common::UUID GetGUID(SDL_Joystick* joystick) {
+    return ToUUID(SDL_GetJoystickGUID(joystick));
 }
 
 using GamepadBindings = std::vector<SDL_GamepadBinding>;
@@ -75,6 +81,47 @@ SDL_GamepadBinding GetBindingForAxis(const GamepadBindings& bindings, SDL_Gamepa
                current.output.axis.axis == static_cast<SDL_GamepadAxis>(axis);
     });
 }
+
+#ifdef _WIN32
+/// The SDL gamepad bindings of a parsed SDL mapping, as SDL_GetGamepadBindings returns them.
+GamepadBindings ToSdlBindings(const GameInputMapping::Bindings& bindings) {
+    using GameInputMapping::Binding;
+    constexpr std::size_t FirstAxis = static_cast<std::size_t>(GameInputMapping::Element::LeftX);
+    GamepadBindings out;
+    for (std::size_t i = 0; i < bindings.size(); ++i) {
+        const Binding& binding = bindings[i];
+        SDL_GamepadBinding sdl{};
+        switch (binding.kind) {
+        case Binding::Kind::None:
+            continue;
+        case Binding::Kind::Button:
+            sdl.input_type = SDL_GAMEPAD_BINDTYPE_BUTTON;
+            sdl.input.button = binding.index;
+            break;
+        case Binding::Kind::Hat:
+            sdl.input_type = SDL_GAMEPAD_BINDTYPE_HAT;
+            sdl.input.hat.hat = binding.index;
+            sdl.input.hat.hat_mask = binding.hat_mask;
+            break;
+        case Binding::Kind::Axis:
+            sdl.input_type = SDL_GAMEPAD_BINDTYPE_AXIS;
+            sdl.input.axis.axis = binding.index;
+            sdl.input.axis.axis_min = binding.half_positive ? 0 : -32768;
+            sdl.input.axis.axis_max = binding.half_negative ? 0 : 32767;
+            break;
+        }
+        if (i < FirstAxis) {
+            sdl.output_type = SDL_GAMEPAD_BINDTYPE_BUTTON;
+            sdl.output.button = static_cast<SDL_GamepadButton>(i);
+        } else {
+            sdl.output_type = SDL_GAMEPAD_BINDTYPE_AXIS;
+            sdl.output.axis.axis = static_cast<SDL_GamepadAxis>(i - FirstAxis);
+        }
+        out.push_back(sdl);
+    }
+    return out;
+}
+#endif
 } // Anonymous namespace
 
 static bool SDLEventWatcher(void* user_data, SDL_Event* event) {
@@ -236,6 +283,13 @@ public:
         }
         f32 high_amplitude = vibration.high_amplitude * high_frequency_scale;
 
+        {
+            std::scoped_lock lock{gameinput_lock};
+            if (gameinput_rumble) {
+                gameinput_rumble(low_amplitude / 0xFFFF, high_amplitude / 0xFFFF);
+                return true;
+            }
+        }
         if (sdl_controller) {
             return SDL_RumbleGamepad(sdl_controller.get(), static_cast<u16>(low_amplitude),
                                      static_cast<u16>(high_amplitude), rumble_max_duration_ms);
@@ -246,6 +300,42 @@ public:
         }
 
         return false;
+    }
+
+    /// GameInput reads this joystick in SDL's place: SDL keeps it closed, its bindings come from
+    /// its SDL mapping and rumble goes to `rumble` (motor speeds 0..1).
+    void AttachGameInput(std::string name, GamepadBindings bindings,
+                         std::function<void(f32, f32)> rumble) {
+        std::scoped_lock lock{gameinput_lock};
+        gameinput_name = std::move(name);
+        gameinput_bindings = std::move(bindings);
+        gameinput_rumble = std::move(rumble);
+    }
+
+    void DetachGameInput() {
+        std::scoped_lock lock{gameinput_lock};
+        gameinput_name.clear();
+        gameinput_bindings.clear();
+        gameinput_rumble = {};
+    }
+
+    bool IsGameInput() const {
+        std::scoped_lock lock{gameinput_lock};
+        return static_cast<bool>(gameinput_rumble);
+    }
+
+    bool HasGamepadBindings() const {
+        return sdl_controller != nullptr || IsGameInput();
+    }
+
+    GamepadBindings GetGamepadBindings() const {
+        {
+            std::scoped_lock lock{gameinput_lock};
+            if (gameinput_rumble) {
+                return gameinput_bindings;
+            }
+        }
+        return GetBindings(sdl_controller.get());
     }
 
     bool HasHDRumble() const {
@@ -384,6 +474,12 @@ public:
     }
 
     std::string GetControllerName() const {
+        {
+            std::scoped_lock lock{gameinput_lock};
+            if (gameinput_rumble) {
+                return gameinput_name;
+            }
+        }
         if (sdl_controller) {
             switch (SDL_GetGamepadType(sdl_controller.get())) {
             case SDL_GAMEPAD_TYPE_XBOX360:
@@ -439,6 +535,11 @@ private:
     bool has_vibration{false};
     bool is_vibration_tested{false};
     BasicMotion motion;
+
+    mutable std::mutex gameinput_lock;
+    std::string gameinput_name;
+    GamepadBindings gameinput_bindings;
+    std::function<void(f32, f32)> gameinput_rumble;
 };
 
 std::shared_ptr<SDLJoystick> SDLDriver::GetSDLJoystickByGUID(const Common::UUID& guid, int port) {
@@ -523,6 +624,11 @@ std::shared_ptr<SDLJoystick> SDLDriver::GetSDLJoystickByGamepadID(SDL_JoystickID
 }
 
 void SDLDriver::InitJoystick(SDL_JoystickID joystick_id) {
+#ifdef _WIN32
+    if (IsGameInputJoystick(joystick_id)) {
+        return;
+    }
+#endif
     SDL_Joystick* sdl_joystick = SDL_OpenJoystick(joystick_id);
     SDL_Gamepad* sdl_gamecontroller = nullptr;
     int battery_percent = -1;
@@ -592,6 +698,10 @@ void SDLDriver::InitJoystick(SDL_JoystickID joystick_id) {
 }
 
 void SDLDriver::CloseJoystick(SDL_Joystick* sdl_joystick) {
+    // A joystick GameInput reads was never opened.
+    if (sdl_joystick == nullptr) {
+        return;
+    }
     const auto guid = GetGUID(sdl_joystick);
 
     std::scoped_lock lock{joystick_map_mutex};
@@ -612,6 +722,11 @@ void SDLDriver::PumpEvents() {
         return;
     }
     SDL_PumpEvents();
+#ifdef _WIN32
+    if (gameinput_changed.exchange(false)) {
+        BindGameInputPads();
+    }
+#endif
     const auto now = std::chrono::steady_clock::now();
     if (now - last_motion_stall_check < std::chrono::milliseconds{250}) {
         return;
@@ -686,6 +801,9 @@ void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
         break;
     case SDL_EVENT_JOYSTICK_ADDED:
         LOG_DEBUG(Input, "Controller connected with device index {}", event.jdevice.which);
+#ifdef _WIN32
+        BindGameInputPads();
+#endif
         InitJoystick(event.jdevice.which);
         break;
     }
@@ -752,6 +870,31 @@ SDLDriver::SDLDriver(std::string input_engine_) : InputEngine(std::move(input_en
 
     SDL_AddEventWatch(&SDLEventWatcher, this);
 
+#ifdef _WIN32
+    // EXPERIMENT (do not merge): EDEN_INPUT_IMMEDIATE=0 leaves every gamepad to SDL.
+    const char* const immediate = std::getenv("EDEN_INPUT_IMMEDIATE");
+    if (immediate == nullptr || immediate[0] != '0')
+    gameinput = GameInputSource::Create({
+        .connected =
+            [this](GameInputSource::Pad pad, const GameInputSource::Device& device) {
+                std::scoped_lock lock{gameinput_mutex};
+                gameinput_pads.push_back({.pad = pad,
+                                          .device = device,
+                                          .sdl_id = 0,
+                                          .joystick = nullptr,
+                                          .bindings = {}});
+                gameinput_changed = true;
+            },
+        .disconnected = [this](GameInputSource::Pad pad) { UnbindGameInputPad(pad); },
+        .state =
+            [this](GameInputSource::Pad pad, const GameInputMapping::GamepadState& state) {
+                OnGameInputState(pad, state);
+            },
+    });
+    gameinput_changed = false;
+    BindGameInputPads();
+#endif
+
     initialized = true;
     // Because the events for joystick connection happens before we have our event watcher added, we
     // can just open all the joysticks right here
@@ -766,6 +909,17 @@ SDLDriver::SDLDriver(std::string input_engine_) : InputEngine(std::move(input_en
 }
 
 SDLDriver::~SDLDriver() {
+#ifdef _WIN32
+    {
+        std::scoped_lock lock{gameinput_mutex};
+        for (const auto& entry : gameinput_pads) {
+            if (entry.joystick) {
+                entry.joystick->DetachGameInput();
+            }
+        }
+    }
+    gameinput.reset();
+#endif
     CloseJoysticks();
     SDL_RemoveEventWatch(&SDLEventWatcher, this);
 
@@ -780,7 +934,7 @@ std::vector<Common::ParamPackage> SDLDriver::GetInputDevices() const {
     ::Common::unordered_map<int, std::shared_ptr<SDLJoystick>> joycon_pairs;
     for (const auto& [key, value] : joystick_map) {
         for (const auto& joystick : value) {
-            if (!joystick->GetSDLJoystick()) {
+            if (!joystick->GetSDLJoystick() && !joystick->IsGameInput()) {
                 continue;
             }
             const std::string name =
@@ -982,11 +1136,11 @@ ButtonMapping SDLDriver::GetButtonMappingForDevice(const Common::ParamPackage& p
         {Settings::NativeButton::ZL, SDL_GAMEPAD_AXIS_LEFT_TRIGGER},
         {Settings::NativeButton::ZR, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER},
     }};
-    if (auto* controller = joystick->GetSDLGameController(); controller) {
+    if (joystick->HasGamepadBindings()) {
         // Parameters contain two joysticks return dual
         if (params.Has("guid2")) {
             const auto joystick2 = GetSDLJoystickByGUID(params.Get("guid2", ""), params.Get("port", 0));
-            if (joystick2->GetSDLGameController())
+            if (joystick2->HasGamepadBindings())
                 return GetDualControllerMapping(joystick, joystick2, switch_to_sdl_button, switch_to_sdl_axis);
         }
         return GetSingleControllerMapping(joystick, switch_to_sdl_button, switch_to_sdl_axis);
@@ -1055,8 +1209,7 @@ ButtonMapping SDLDriver::GetSingleControllerMapping(
     const ZButtonBindings& switch_to_sdl_axis) const {
     ButtonMapping mapping;
     mapping.reserve(switch_to_sdl_button.size() + switch_to_sdl_axis.size());
-    auto* controller = joystick->GetSDLGameController();
-    const auto bindings = GetBindings(controller);
+    const auto bindings = joystick->GetGamepadBindings();
 
     for (const auto& [switch_button, sdl_button] : switch_to_sdl_button) {
         const auto binding = GetBindingForButton(bindings, sdl_button);
@@ -1080,10 +1233,8 @@ ButtonMapping SDLDriver::GetDualControllerMapping(const std::shared_ptr<SDLJoyst
                                                   const ZButtonBindings& switch_to_sdl_axis) const {
     ButtonMapping mapping;
     mapping.reserve(switch_to_sdl_button.size() + switch_to_sdl_axis.size());
-    auto* controller = joystick->GetSDLGameController();
-    auto* controller2 = joystick2->GetSDLGameController();
-    const auto bindings = GetBindings(controller);
-    const auto bindings2 = GetBindings(controller2);
+    const auto bindings = joystick->GetGamepadBindings();
+    const auto bindings2 = joystick2->GetGamepadBindings();
 
     for (const auto& [switch_button, sdl_button] : switch_to_sdl_button) {
         if (IsButtonOnLeftSide(switch_button)) {
@@ -1138,13 +1289,12 @@ AnalogMapping SDLDriver::GetAnalogMappingForDevice(const Common::ParamPackage& p
     }
     const auto joystick = GetSDLJoystickByGUID(params.Get("guid", ""), params.Get("port", 0));
     const auto joystick2 = GetSDLJoystickByGUID(params.Get("guid2", ""), params.Get("port", 0));
-    auto* controller = joystick->GetSDLGameController();
-    if (controller == nullptr) {
+    if (!joystick->HasGamepadBindings()) {
         return {};
     }
 
     AnalogMapping mapping = {};
-    const auto bindings = GetBindings(controller);
+    const auto bindings = joystick->GetGamepadBindings();
     const auto binding_left_x = GetBindingForAxis(bindings, SDL_GAMEPAD_AXIS_LEFTX);
     const auto binding_left_y = GetBindingForAxis(bindings, SDL_GAMEPAD_AXIS_LEFTY);
     if (params.Has("guid2")) {
@@ -1279,14 +1429,13 @@ bool SDLDriver::IsStickInverted(const Common::ParamPackage& params) {
     if (joystick == nullptr) {
         return false;
     }
-    auto* controller = joystick->GetSDLGameController();
-    if (controller == nullptr) {
+    if (!joystick->HasGamepadBindings()) {
         return false;
     }
 
     const auto& axis_x = params.Get("axis_x", 0);
     const auto& axis_y = params.Get("axis_y", 0);
-    const auto bindings = GetBindings(controller);
+    const auto bindings = joystick->GetGamepadBindings();
     const auto binding_left_x = GetBindingForAxis(bindings, SDL_GAMEPAD_AXIS_LEFTX);
     const auto binding_right_x = GetBindingForAxis(bindings, SDL_GAMEPAD_AXIS_RIGHTX);
     const auto binding_left_y = GetBindingForAxis(bindings, SDL_GAMEPAD_AXIS_LEFTY);
@@ -1300,5 +1449,166 @@ bool SDLDriver::IsStickInverted(const Common::ParamPackage& params) {
     }
     return true;
 }
+
+#ifdef _WIN32
+bool SDLDriver::IsGameInputJoystick(SDL_JoystickID joystick_id) {
+    std::scoped_lock lock{gameinput_mutex};
+    return std::ranges::any_of(gameinput_pads, [joystick_id](const GameInputPad& entry) {
+        return entry.joystick && entry.sdl_id == joystick_id;
+    });
+}
+
+void SDLDriver::BindGameInputPads() {
+    if (!gameinput) {
+        return;
+    }
+    std::vector<SDL_JoystickID> released;
+    {
+        std::scoped_lock lock{gameinput_mutex};
+        int count = 0;
+        SDL_JoystickID* const ids = SDL_GetJoysticks(&count);
+        const std::span<const SDL_JoystickID> listed{ids, ids ? static_cast<std::size_t>(count) : 0};
+        for (auto& entry : gameinput_pads) {
+            if (entry.joystick) {
+                continue;
+            }
+            for (const SDL_JoystickID id : listed) {
+                if (SDL_GetJoystickVendorForID(id) != entry.device.vendor_id ||
+                    SDL_GetJoystickProductForID(id) != entry.device.product_id) {
+                    continue;
+                }
+                const bool taken =
+                    std::ranges::any_of(gameinput_pads, [id](const GameInputPad& other) {
+                        return other.joystick && other.sdl_id == id;
+                    });
+                if (taken) {
+                    continue;
+                }
+                char* const sdl_mapping = SDL_GetGamepadMappingForID(id);
+                const bool uses = GameInputMapping::UsesGameInput(
+                    entry.device.family, entry.device.supported_input, sdl_mapping != nullptr);
+                const auto bindings = sdl_mapping != nullptr
+                                          ? GameInputMapping::ParseSdlMapping(sdl_mapping)
+                                          : GameInputMapping::Bindings{};
+                SDL_free(sdl_mapping);
+                if (!uses) {
+                    // SDL keeps reading this device (motion, or no SDL gamepad mapping).
+                    break;
+                }
+                const Common::UUID guid = ToUUID(SDL_GetJoystickGUIDForID(id));
+                SDL_Joystick* const opened = SDL_GetJoystickFromID(id);
+                std::shared_ptr<SDLJoystick> joystick;
+                {
+                    std::scoped_lock map_lock{joystick_map_mutex};
+                    auto& list = joystick_map[guid];
+                    // SDL opened it before GameInput reported it: GameInput takes over its port.
+                    auto it = std::ranges::find_if(list, [opened](const auto& candidate) {
+                        return opened != nullptr && candidate->GetSDLJoystick() == opened;
+                    });
+                    if (it == list.end()) {
+                        it = std::ranges::find_if(list, [](const auto& candidate) {
+                            return !candidate->GetSDLJoystick() && !candidate->IsGameInput();
+                        });
+                    }
+                    if (it == list.end()) {
+                        list.push_back(std::make_shared<SDLJoystick>(
+                            guid, static_cast<int>(list.size()), nullptr, nullptr));
+                        it = std::prev(list.end());
+                    }
+                    joystick = *it;
+                }
+                joystick->SetSDLJoystick(nullptr, nullptr);
+                joystick->AttachGameInput(
+                    entry.device.name, ToSdlBindings(bindings),
+                    [source = gameinput.get(), pad = entry.pad](f32 low, f32 high) {
+                        source->Rumble(pad, low, high);
+                    });
+                PreSetController(joystick->GetPadIdentifier());
+                entry.sdl_id = id;
+                entry.bindings = bindings;
+                entry.joystick = std::move(joystick);
+                LOG_INFO(Input, "GameInput reads {} as SDL joystick {} port {}", entry.device.name,
+                         id, entry.joystick->GetPort());
+                break;
+            }
+        }
+        // Joysticks whose GameInput pad went away while SDL still lists them: SDL reads them now.
+        for (const SDL_JoystickID id : gameinput_released) {
+            const bool bound = std::ranges::any_of(gameinput_pads, [id](const GameInputPad& entry) {
+                return entry.joystick && entry.sdl_id == id;
+            });
+            if (!bound && std::ranges::find(listed, id) != listed.end() &&
+                SDL_GetJoystickFromID(id) == nullptr) {
+                released.push_back(id);
+            }
+        }
+        gameinput_released.clear();
+        SDL_free(ids);
+    }
+    for (const SDL_JoystickID id : released) {
+        InitJoystick(id);
+    }
+}
+
+void SDLDriver::UnbindGameInputPad(GameInputSource::Pad pad) {
+    std::shared_ptr<SDLJoystick> joystick;
+    GameInputMapping::Bindings bindings{};
+    {
+        std::scoped_lock lock{gameinput_mutex};
+        const auto it = std::ranges::find(gameinput_pads, pad, &GameInputPad::pad);
+        if (it == gameinput_pads.end()) {
+            return;
+        }
+        joystick = std::move(it->joystick);
+        bindings = it->bindings;
+        if (joystick) {
+            gameinput_released.push_back(it->sdl_id);
+        }
+        gameinput_pads.erase(it);
+    }
+    if (!joystick) {
+        return;
+    }
+    // Release whatever the pad held.
+    const PadIdentifier identifier = joystick->GetPadIdentifier();
+    const auto rest = GameInputMapping::Translate(bindings, {});
+    for (const auto& button : rest.buttons) {
+        SetButton(identifier, button.index, button.pressed);
+    }
+    for (const auto& hat : rest.hats) {
+        SetHatButton(identifier, hat.index, hat.value);
+    }
+    for (const auto& axis : rest.axes) {
+        SetAxis(identifier, axis.index, axis.value);
+    }
+    joystick->DetachGameInput();
+    gameinput_changed = true;
+}
+
+void SDLDriver::OnGameInputState(GameInputSource::Pad pad,
+                                 const GameInputMapping::GamepadState& state) {
+    PadIdentifier identifier;
+    GameInputMapping::Bindings bindings;
+    {
+        std::scoped_lock lock{gameinput_mutex};
+        const auto it = std::ranges::find(gameinput_pads, pad, &GameInputPad::pad);
+        if (it == gameinput_pads.end() || !it->joystick) {
+            return;
+        }
+        identifier = it->joystick->GetPadIdentifier();
+        bindings = it->bindings;
+    }
+    const auto joystick_state = GameInputMapping::Translate(bindings, state);
+    for (const auto& button : joystick_state.buttons) {
+        SetButton(identifier, button.index, button.pressed);
+    }
+    for (const auto& hat : joystick_state.hats) {
+        SetHatButton(identifier, hat.index, hat.value);
+    }
+    for (const auto& axis : joystick_state.axes) {
+        SetAxis(identifier, axis.index, axis.value);
+    }
+}
+#endif
 
 } // namespace InputCommon

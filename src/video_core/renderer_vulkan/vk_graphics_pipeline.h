@@ -9,10 +9,15 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <chrono>
+#include <cstring>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -20,11 +25,14 @@
 #include "shader_recompiler/shader_info.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
+#include "video_core/renderer_vulkan/heap_mappings.h"
 #include "video_core/renderer_vulkan/pipeline_build.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_descriptor_buffer.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
+#include "video_core/renderer_vulkan/vk_pipeline_binary.h"
+#include "video_core/renderer_vulkan/vk_pipeline_library.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -98,21 +106,37 @@ struct MeshEmulationSetup {
     std::array<u32, 4> position_lines{~0U, ~0U, ~0U, ~0U}; ///< line of PositionX..W
 };
 
+/// Graphics pipeline libraries: non-null `library_cache` builds the pipeline from shared
+/// per-stage libraries; the stages were emitted with one descriptor set per stage.
+struct GraphicsPipelineLibraryParams {
+    GraphicsPipelineLibraryCache* library_cache{};
+    std::array<u128, Tegra::Engines::Maxwell3D::Regs::MaxShaderStage> spirv_hashes{};
+};
+
 class GraphicsPipeline {
     static constexpr size_t NUM_STAGES = Tegra::Engines::Maxwell3D::Regs::MaxShaderStage;
 
 public:
+    /// Emits the stages' SPIR-V on a worker; with libraries it also returns each stage's SPIR-V
+    /// hash (zero for absent stages).
+    using EmitStagesFunc = std::function<std::array<vk::ShaderModule, NUM_STAGES>(
+        std::array<u128, NUM_STAGES>& spirv_hashes)>;
+
+    // Declared outside the class: GCC rejects a default argument `= {}` of a nested struct
+    // with member initializers inside its enclosing class.
+    using LibraryParams = GraphicsPipelineLibraryParams;
+
     explicit GraphicsPipeline(
         Scheduler& scheduler, BufferCache& buffer_cache, TextureCache& texture_cache,
         vk::PipelineCache& pipeline_cache, VideoCore::ShaderNotify* shader_notify,
         const Device& device, DescriptorPool& descriptor_pool,
-        GuestDescriptorQueue& guest_descriptor_queue,
-        DescriptorBufferRing& descriptor_buffer_ring, Common::ThreadWorker* worker_thread,
-        PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
-        const GraphicsPipelineCacheKey& key, std::array<vk::ShaderModule, NUM_STAGES> stages,
-        const std::array<const Shader::Info*, NUM_STAGES>& infos,
-        std::function<std::array<vk::ShaderModule, NUM_STAGES>()> emit_stages = {},
-        std::optional<MeshEmulationSetup> mesh_emulation = std::nullopt);
+        GuestDescriptorQueue& guest_descriptor_queue, DescriptorBufferRing& descriptor_buffer_ring,
+        Common::ThreadWorker* worker_thread, PipelineStatistics* pipeline_statistics,
+        RenderPassCache& render_pass_cache, const GraphicsPipelineCacheKey& key,
+        std::array<vk::ShaderModule, NUM_STAGES> stages,
+        const std::array<const Shader::Info*, NUM_STAGES>& infos, EmitStagesFunc emit_stages = {},
+        std::optional<MeshEmulationSetup> mesh_emulation = std::nullopt,
+        LibraryParams library_params = {}, PipelineBinaryCache* binary_cache = nullptr);
 
     static std::chrono::nanoseconds TakeHoldTime() noexcept;
 
@@ -156,6 +180,12 @@ public:
     }
 
     /// Switch 2 task/mesh pipeline: drawn with vkCmdDrawMeshTasksEXT.
+    /// Descriptor heap mode (heap_mappings.h): textures from the heaps mirroring the guest
+    /// pools, no pipeline layout or descriptor sets.
+    [[nodiscard]] bool IsHeapMode() const noexcept {
+        return heap_mode;
+    }
+
     [[nodiscard]] bool IsMeshPipeline() const noexcept {
         return stage_infos[0].is_task || stage_infos[0].is_mesh;
     }
@@ -212,6 +242,8 @@ public:
     [[nodiscard]] u32 MeshEmulationPayloadStride() const noexcept {
         return mesh_emulation ? mesh_emulation->payload_stride : 0;
     }
+    ~GraphicsPipeline();
+
     GraphicsPipeline& operator=(GraphicsPipeline&&) noexcept = delete;
     GraphicsPipeline(GraphicsPipeline&&) noexcept = delete;
 
@@ -219,6 +251,28 @@ public:
     GraphicsPipeline(const GraphicsPipeline&) = delete;
 
     void AddTransition(GraphicsPipeline* transition);
+
+    /// A cheap digest of a key: keys with different tags differ. Covers the attribute types and
+    /// blend attachments too, what Ocarina's transitions differ in.
+    [[nodiscard]] static u64 TransitionTag(const GraphicsPipelineCacheKey& k) noexcept {
+        u64 tag = 0;
+        for (const u64 hash : k.unique_hashes) {
+            tag = (tag ^ hash) * 0x9E3779B97F4A7C15ULL;
+        }
+        u64 formats{};
+        std::memcpy(&formats, k.state.color_formats.data(),
+                    (std::min)(sizeof(formats), sizeof(k.state.color_formats)));
+        tag ^= (u64{k.state.raw1} << 32 | k.state.raw2) ^ (formats * 0xC2B2AE3D27D4EB4FULL);
+        // Only bytes operator== compares: equal keys must tag alike.
+        u64 more = k.state.attribute_types;
+        if (offsetof(FixedPipelineState, attachments) + sizeof(k.state.attachments) <=
+            k.state.Size()) {
+            for (const auto& attachment : k.state.attachments) {
+                more = (more ^ attachment.raw) * 0x9E3779B97F4A7C15ULL;
+            }
+        }
+        return tag ^ (more * 0xD6E8FEB86659FD93ULL);
+    }
 
     bool Configure(bool is_indexed) {
         return configure_func(this, is_indexed);
@@ -228,9 +282,21 @@ public:
         if (key == current_key) {
             return this;
         }
-        const auto it{std::find(transition_keys.begin(), transition_keys.end(), current_key)};
-        return it != transition_keys.end() ? transitions[std::distance(transition_keys.begin(), it)]
-                                           : nullptr;
+        // Full keys (each transition's pipeline's own) are compared only where the tag matches,
+        // and a transition taken moves one place toward the front.
+        const u64 tag = TransitionTag(current_key);
+        for (size_t index = 0; index < transition_tags.size(); ++index) {
+            GraphicsPipeline* const next = transitions[index];
+            if (transition_tags[index] != tag || next->key != current_key) {
+                continue;
+            }
+            if (index != 0) {
+                std::swap(transition_tags[index], transition_tags[index - 1]);
+                std::swap(transitions[index], transitions[index - 1]);
+            }
+            return next;
+        }
+        return nullptr;
     }
 
     /// The frame the pipeline cache last handed this pipeline out (evicts long unused ones).
@@ -251,8 +317,8 @@ public:
 
     /// Forgets the transitions, which may point to pipelines the cache evicted.
     void ClearTransitions() noexcept {
-        transition_keys.clear();
         transitions.clear();
+        transition_tags.clear();
     }
 
     [[nodiscard]] bool IsBuilt() const noexcept {
@@ -285,7 +351,43 @@ private:
     bool ConfigureDraw(const RescalingPushConstant& rescaling,
                        const RenderAreaPushConstant& render_are);
 
-    void MakePipeline(VkRenderPass render_pass);
+    struct PipelineStates;
+
+    /// The fixed-function state of the pipeline (shared by the monolithic and library builds).
+    void FillStates(PipelineStates& states) const;
+
+    vk::Pipeline MakePipeline(VkRenderPass render_pass);
+
+    /// Library build: gets or builds the two shader libraries, then links them with this
+    /// pipeline's vertex input and fragment output parts.
+    /// False when a library failed; the caller then builds the pipeline the monolithic way.
+    bool MakeLibraryPipeline(VkRenderPass render_pass);
+
+    GplLibrary MakeShaderLibrary(GplPart part, const PipelineStates& states,
+                                 VkRenderPass render_pass) const;
+
+    /// `flags` as VkPipelineCreateFlags2 with DESCRIPTOR_HEAP_BIT_EXT, chained in front of `next`
+    /// (for heap mode).
+    [[nodiscard]] VkPipelineCreateFlags2CreateInfo HeapFlags(VkPipelineCreateFlags flags,
+                                                             const void* next) const noexcept;
+
+    /// In heap mode, the stage's descriptor mappings chained in front of `next` (stored in
+    /// `infos`); otherwise `next`.
+    [[nodiscard]] const void* ChainHeapMappings(
+        size_t stage, const void* next,
+        std::array<VkShaderDescriptorSetAndBindingMappingInfoEXT, NUM_STAGES>& infos)
+        const noexcept;
+
+    std::string ShaderLibraryKey(GplPart part, const PipelineStates& states,
+                                 VkRenderPass render_pass) const;
+
+    vk::Pipeline LinkLibraries(VkRenderPass render_pass, bool optimized);
+    /// Links the libraries again with link time optimization on the library cache's background
+    /// thread; the draws bind that pipeline once it exists.
+    void QueueOptimizedLink(VkRenderPass render_pass);
+
+    /// The library route failed: per-stage sets kept, with a layout a monolithic pipeline takes.
+    void FallBackToMonolithic(VkRenderPass render_pass);
 
     void Validate();
 
@@ -302,8 +404,8 @@ private:
 
     bool (*configure_func)(GraphicsPipeline*, bool){};
 
-    std::vector<GraphicsPipelineCacheKey> transition_keys;
     std::vector<GraphicsPipeline*> transitions;
+    std::vector<u64> transition_tags; ///< TransitionTag of each transition's key
     u64 last_use_frame{};
     bool used{};
 
@@ -319,6 +421,39 @@ private:
     bool fragment_has_color0_output{};
     u32 color_output_mask{};
     bool writes_storage{};
+    bool uses_page_table{};   ///< a stage reaches storage through the GPU page table
+    u64 page_table_address{}; ///< the page table of the draw being configured
+    bool uses_bank_table{};   ///< a stage reads constant buffers by device address
+    u64 bank_table_address{}; ///< the bank table of the draw being configured
+
+    /// Graphics pipeline libraries: one descriptor set per stage (set index =
+    /// stage index), the shader libraries, and this pipeline's own vertex input and fragment
+    /// output libraries.
+    GraphicsPipelineLibraryCache* const library_cache;
+    /// Creates the monolithic pipeline from stored driver binaries when it has them.
+    PipelineBinaryCache* const binary_cache;
+    std::array<u128, NUM_STAGES> spirv_hashes{};
+    std::array<vk::DescriptorSetLayout, NUM_STAGES> stage_set_layouts;
+    std::array<std::string, NUM_STAGES> stage_set_signatures;
+    std::array<DescriptorAllocator, NUM_STAGES> stage_allocators;
+    std::array<vk::DescriptorUpdateTemplate, NUM_STAGES> stage_templates;
+    std::array<size_t, NUM_STAGES> stage_descriptor_offsets{}; ///< Bytes into the update data
+    bool has_stage_sets{};
+    std::array<std::shared_ptr<const GplLibrary>, 2> shader_libraries;
+    vk::Pipeline vertex_input_library;
+    vk::Pipeline fragment_output_library;
+    vk::DescriptorSetLayout fallback_empty_set_layout;
+    bool linked{};
+    /// QueueOptimizedLink: the optimized link, bound instead of `pipeline` once built.
+    struct OptimizedLink {
+        std::mutex mutex;
+        std::condition_variable idle;
+        bool cancelled{};
+        bool running{};
+    };
+    std::shared_ptr<OptimizedLink> optimized_link;
+    vk::Pipeline optimized_pipeline;
+    std::atomic<VkPipeline> optimized_handle{VK_NULL_HANDLE};
 
     vk::DescriptorSetLayout descriptor_set_layout;
     DescriptorAllocator descriptor_allocator;
@@ -331,6 +466,27 @@ private:
     VkDeviceSize last_descriptor_buffer_offset{};
     u32 last_descriptor_buffer_chunk{};
     u64 last_descriptor_buffer_generation{};
+    /// Heap draws: resolves the draw's texture handles for the heap mirror, applies the
+    /// mirror's updates and writes each stage's index table (heap_table_addresses); sets the
+    /// views' ids (feedback checks, barriers) and the per-element rescaling. False when the heap
+    /// is not usable.
+    bool WriteHeapTables(std::span<VideoCommon::ImageViewInOut> views,
+                         std::span<const u32> sampler_handles, bool via_header_index);
+    /// EDEN_NX2_NATIVE_VERIFY=bindless: one texture element of a heap draw against what the
+    /// bound path binds for its handle (view, image and sampler descriptor bytes).
+    void VerifyHeapElement(const TextureHeap& heap, u32 tic, u32 tsc,
+                           const Shader::TextureDescriptor& desc, u32 image_index,
+                           u32 sampler_index, VideoCommon::ImageViewId heap_view);
+    /// ConfigureDraw for heap draws: binds the heaps and pushes the push block as push data.
+    bool ConfigureHeapDraw(const RescalingPushConstant& rescaling,
+                           const RenderAreaPushConstant& render_area);
+
+    bool heap_mode{};
+    std::array<u64, NUM_STAGES> heap_table_addresses{};
+    std::vector<u8> heap_rescaled; ///< per texture element of the last heap draw
+    HeapMappings::TableLayout heap_layout;
+    std::array<std::vector<VkDescriptorSetAndBindingMappingEXT>, NUM_STAGES> heap_mappings;
+    std::vector<u32> binding_kinds; ///< Binding memo kind per texture/image view, in read order
 
     const bool worker_only_build;
     bool uses_push_descriptor{false};

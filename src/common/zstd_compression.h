@@ -69,4 +69,20 @@ namespace Common::Compression {
  */
 [[nodiscard]] std::size_t DecompressDataZSTD(std::span<const u8> compressed, std::span<u8> output);
 
+/**
+ * Decompresses a single Zstandard frame that declares its content size, with a dictionary (the
+ * frames of games that compress their files against a shared dictionary).
+ *
+ * @return the decompressed data, or nullopt as for TryDecompressDataZSTD.
+ */
+[[nodiscard]] std::optional<std::vector<u8>> TryDecompressDataZSTDWithDictionary(
+    std::span<const u8> compressed, std::span<const u8> dictionary, std::size_t max_size);
+
+/**
+ * Compresses data against a dictionary, at the default level; the frame records the dictionary's
+ * id. Returns an empty vector on failure.
+ */
+[[nodiscard]] std::vector<u8> CompressDataZSTDWithDictionary(std::span<const u8> source,
+                                                             std::span<const u8> dictionary);
+
 } // namespace Common::Compression

@@ -139,6 +139,11 @@ public:
 
     void NotifyShutdown();
 
+    /// Stops the GPU thread taking commands until ReleaseCommands. The disk pipeline cache loads
+    /// on another thread meanwhile, and the GPU thread must not use the cache before it is done.
+    void HoldCommands();
+    void ReleaseCommands();
+
 private:
     /// Pushes a command to be executed by the GPU thread
     u64 PushCommand(CommandData&& command_data, bool block, bool is_async);
@@ -146,6 +151,9 @@ private:
     Core::System& system;
     VideoCore::RasterizerInterface* rasterizer = nullptr;
     SynchState state;
+    std::atomic_bool commands_held{false};
+    std::mutex hold_mutex;
+    std::condition_variable_any hold_cv;
     std::jthread thread;
 };
 

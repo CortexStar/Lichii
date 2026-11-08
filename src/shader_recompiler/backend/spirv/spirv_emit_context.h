@@ -323,9 +323,40 @@ public:
     u32 rescaling_downfactor_member_index{};
     u32 texture_rescaling_index{};
     u32 image_rescaling_index{};
+    u32 descriptor_set{}; ///< Set of every resource of the stage (Bindings::descriptor_set)
 
     Id render_area_push_constant{};
     u32 render_are_member_index{};
+
+    /// Info::storage_by_address: storage buffers and global memory through the GPU page table.
+    bool storage_by_address{};
+    /// Info::uniforms_by_address: constant buffers from the draw's bank table.
+    bool uniforms_by_address{};
+    const Info* program_info{};
+    Id bank_table_push_constant{};
+    u32 bank_table_member_index{};
+    Id page_table_push_constant{};
+    u32 page_table_member_index{};
+    Id page_table_func{};
+    Id psb_u32_pointer{};
+    Id psb_u64_pointer{};
+
+    /// The host device address (u64) the GPU page table gives for the guest address `va` (u64).
+    [[nodiscard]] Id PageTableAddress(Id va);
+    /// A PhysicalStorageBuffer pointer of `pointer_type` to the guest address `va` (u64).
+    [[nodiscard]] Id PageTablePointer(Id pointer_type, Id va);
+    /// The guest address (u64) storage buffer `binding`'s offsets count from: its pointer from the
+    /// constant buffer, aligned down as the buffer bound for it would be.
+    [[nodiscard]] Id StorageBaseAddress(u32 binding);
+    /// The guest address (u64) of byte `offset` (u32 id) of storage buffer `binding`, plus `bias`.
+    [[nodiscard]] Id StorageAddress(u32 binding, Id offset, u32 bias = 0);
+    /// A constant buffer read through the bank table (Info::uniforms_by_address): `binding` and
+    /// `byte_offset` are u32 ids, the offset already aligned down to `element_size`.
+    [[nodiscard]] Id BankLoad(Id result_type, u32 element_size, Id binding, Id byte_offset);
+    /// A load or store through a PhysicalStorageBuffer pointer: Aligned (and Volatile for
+    /// coherent global memory).
+    [[nodiscard]] Id LoadByAddress(Id type, Id pointer, u32 alignment);
+    void StoreByAddress(Id pointer, Id value, u32 alignment);
 
     Id local_memory{};
 
@@ -464,10 +495,10 @@ private:
     void DefineAttributeMemAccess(const Info& info);
     void DefineWriteStorageCasLoopFunction(const Info& info);
     void DefineGlobalMemoryFunctions(const IR::Program& program);
-    void DefineRescalingInput(const Info& info);
-    void DefineRescalingInputPushConstant();
+    void DefinePushConstants(const Info& info);
+    void DefinePageTable(const Info& info);
+    void DefineGlobalMemoryFunctionsByAddress(const IR::Program& program);
     void DefineRescalingInputUniformConstant();
-    void DefineRenderArea(const Info& info);
 
     void DefineInputs(const IR::Program& program);
     void DefineOutputs(const IR::Program& program);

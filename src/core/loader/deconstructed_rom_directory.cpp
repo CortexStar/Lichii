@@ -25,6 +25,7 @@
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/service/filesystem/filesystem.h"
+#include "core/load_timing.h"
 #include "core/loader/deconstructed_rom_directory.h"
 #include "core/loader/nso.h"
 
@@ -459,6 +460,7 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
     PatchCollection patch_ctx{is_application};
 
     // Use the NSO module loader to figure out the code layout
+    auto phase_start = Core::LoadTiming::Clock::now();
     for (size_t i = 0; i < static_modules.size(); i++) {
         const auto& module = static_modules[i];
         const FileSys::VirtualFile module_file{dir->GetFile(module)};
@@ -477,6 +479,7 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
         patch_ctx.SaveIndex(i);
         code_size = *tentative_next_load_addr;
     }
+    Core::LoadTiming::LogPhase("NSO code layout", phase_start);
 
     // Enable direct memory mapping in case of NCE.
     const u64 fastmem_base = [&]() -> size_t {
@@ -501,6 +504,7 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
     }
 
     // Load NSO modules
+    phase_start = Core::LoadTiming::Clock::now();
     modules.clear();
     const VAddr base_address{GetInteger(process.GetEntryPoint())};
     VAddr next_load_addr{base_address};
@@ -526,6 +530,7 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
         modules.insert_or_assign(load_addr, module);
         LOG_DEBUG(Loader, "loaded module {} @ {:#x}", module, load_addr);
     }
+    Core::LoadTiming::LogPhase("NSO modules", phase_start);
 
     if (standalone) {
         // Without this, fsp-srv SetCurrentProcess fails with ResultTargetNotFound.

@@ -142,6 +142,25 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            "other race conditions."));
 
     // Renderer
+    INSERT(Settings, hdr_mode, tr("HDR"),
+           tr("HDR output for games that render HDR. Requires Vulkan.\n"
+              "Auto: HDR while Windows HDR is on for the monitor that shows the game, SDR\n"
+              "otherwise (SDR on hosts that cannot tell).\n"
+              "On: always tell the game the display is HDR. Off: always SDR.\n"
+              "Supports native HDR10 and scRGB output; SDR content is not converted to HDR.\n"
+              "HDR uses bilinear presentation without post-processing or frame generation.\n"
+              "Takes effect when a game starts."));
+    INSERT(Settings, hdr_reference_white, tr("HDR Reference White"),
+           tr("Reference white in nits reported to the game, the brightness of its HUD and "
+              "menus. 0 (default): Windows' SDR content brightness for the monitor, so the game "
+              "matches the desktop; elsewhere the Switch 2 calibration, HDR Peak Luminance "
+              "divided by 1.5, rounded up and clamped to 50-300 nits.\n"
+              "Does not rescale the final image. Takes effect when a game starts."));
+    INSERT(Settings, hdr_peak_luminance, tr("HDR Peak Luminance"),
+           tr("Peak luminance in nits reported to the game, which tone maps to it. 0 (default): "
+              "the monitor's peak from its EDID as Windows reports it; elsewhere 300 nits, the "
+              "Switch 2 HDR calibration's starting value.\n"
+              "Does not rescale the final image. Takes effect when a game starts."));
     INSERT(Settings, renderer_backend, tr("API:"),
            tr("Changes the output graphics API.\nVulkan is recommended."));
     INSERT(Settings, vulkan_device, tr("Device:"),
@@ -229,6 +248,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, fps_limit, tr("FPS Limit"),
            tr("Caps how often the game presents, so the game itself runs at this rate. 0 leaves "
               "the frame rate to the game and the display."));
+    INSERT(Settings, variable_refresh_rate, tr("Variable Refresh Rate Display"),
+           tr("Tell Lichii the display runs with variable refresh (FreeSync, G-SYNC, HDMI VRR).\n"
+              "With the speed limit off, frames are presented immediately and the game is held "
+              "just below the refresh rate (224 FPS at 240 Hz), which keeps every frame inside "
+              "the display's range without tearing."));
     INSERT(Settings, vsync_mode, tr("VSync Mode:"),
            tr("FIFO (VSync) does not drop frames or exhibit tearing but is limited by the screen "
               "refresh rate.\nFIFO Relaxed allows tearing as it recovers from a slow down.\n"
@@ -264,6 +288,10 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, max_anisotropy, tr("Anisotropic Filtering:"),
            tr("Controls the quality of texture rendering at oblique angles.\nSafe to set at 16x on "
               "most GPUs."));
+    INSERT(Settings, perf_overlay, tr("Show performance overlay in game (Vulkan only)"),
+           tr("Draws the game's frame rate, the displayed frame rate (with generated frames), "
+              "frame times with their 1% low and the GPU threads' and GPU's time per frame over "
+              "the game, in fullscreen as well."));
     INSERT(Settings, gpu_accuracy, tr("GPU Mode:"),
            tr("Controls the GPU emulation mode.\nMost games render fine with Fast, but Accurate is still "
               "required for some.\nParticles tend to only render correctly with Accurate mode."));
@@ -301,8 +329,9 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, pin_gpu_threads, tr("Pin GPU threads to their own cores"),
            tr("Pins the emulator's GPU threads to dedicated physical CPU cores and keeps the "
               "emulated CPU cores off them.\n"
-              "Can hurt performance on CPUs with few cores. Skipped on CPUs with fewer than 6 "
-              "physical performance cores.\n"
+              "Can hurt performance on CPUs with few cores, and badly while other programs keep "
+              "the CPU busy: the pinned threads cannot move to a free core. Skipped on CPUs with "
+              "fewer than 6 physical performance cores.\n"
               "Windows and Linux only. Takes effect when a game starts."));
 
     INSERT(Settings, use_vulkan_driver_pipeline_cache, tr("Use Vulkan pipeline cache"),
@@ -596,6 +625,12 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                           {
                               PAIR(OotAntiAliasing, Game, tr("Game")),
                               PAIR(OotAntiAliasing, NoSharpening, tr("No sharpening")),
+                          }});
+    translations->insert({Settings::EnumMetadata<Settings::HdrMode>::Index(),
+                          {
+                              PAIR(HdrMode, Off, tr("Off")),
+                              PAIR(HdrMode, On, tr("On")),
+                              PAIR(HdrMode, Auto, tr("Auto")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::AspectRatio>::Index(),
                           {

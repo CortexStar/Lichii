@@ -21,6 +21,7 @@
 #include <optional>
 #include <regex>
 #include <string>
+#include <thread>
 #include "common/settings_enums.h"
 #include "core/launch_params.h"
 #ifdef __EMSCRIPTEN__
@@ -34,9 +35,11 @@
 #include "common/fs/fs_util.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
+#include "common/polyfill_thread.h"
 #include "common/scm_rev.h"
 #include "common/settings.h"
 #include "common/string_util.h"
+#include "common/thread.h"
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/cpu_manager.h"
@@ -47,6 +50,7 @@
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
+#include "core/load_timing.h"
 #include "core/loader/loader.h"
 #include "frontend_common/config.h"
 #include "input_common/drivers/keyboard.h"
@@ -258,6 +262,8 @@ struct SdlState {
 
 constexpr int kRestartExitCode = 75;
 static std::atomic_bool restart_requested{false};
+// Loads the disk pipeline cache while the guest boots (Vulkan).
+static std::jthread disk_cache_loader;
 
 // ExecuteProgram state for the restarted process: what the Qt frontend keeps in-process when it
 // reboots a game. Only read when the launcher sets EDEN_CLI_RESTART_HANDOFF, so a leftover file
@@ -550,8 +556,9 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     SetUnhandledExceptionFilter(WriteCrashDump);
 #endif
     // SDL calls SDL_AppIterate back to back by default, which kept a host core at 100% polling
-    // input; 240 Hz is plenty for input and the key script.
-    SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, "240");
+    // input. 1000 Hz, as the Qt frontend's 1 ms timer: at 240 Hz input waited ~2 ms on average
+    // before the game could see it, which matters on a 240 Hz display.
+    SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, "1000");
     SdlState* state = new SdlState();
     *appstate = state;
 
@@ -738,9 +745,29 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     state->system.GetCpuManager().OnGpuReady();
 
     if (Settings::values.use_disk_shader_cache.GetValue()) {
-        state->system.Renderer().ReadRasterizer()->LoadDiskResources(
-            state->system.GetApplicationProcessProgramID(), std::stop_token{},
-            [](VideoCore::LoadCallbackStage, size_t value, size_t total) {});
+        auto& system = state->system;
+        const u64 program_id = system.GetApplicationProcessProgramID();
+        if (Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Vulkan) {
+            // The guest boots while the cache loads: its first seconds are CPU work (Ocarina of
+            // Time sends its first GPU command ~1 s after it starts, the warm cache took 1.45 s).
+            // The GPU thread takes no command until the cache is loaded, as when the boot waited.
+            system.GPU().HoldCommands();
+            disk_cache_loader = std::jthread([&system, program_id](std::stop_token stop_token) {
+                Common::SetCurrentThreadName("DiskShaderCache");
+                {
+                    const Core::LoadTiming::ScopedPhase phase{"disk shader cache"};
+                    system.Renderer().ReadRasterizer()->LoadDiskResources(
+                        program_id, stop_token,
+                        [](VideoCore::LoadCallbackStage, size_t, size_t) {});
+                }
+                system.GPU().ReleaseCommands();
+            });
+        } else {
+            // OpenGL loads it with this thread's context.
+            const Core::LoadTiming::ScopedPhase phase{"disk shader cache"};
+            system.Renderer().ReadRasterizer()->LoadDiskResources(
+                program_id, std::stop_token{}, [](VideoCore::LoadCallbackStage, size_t, size_t) {});
+        }
     }
 
     // don't do anything, SDL3 already exists for us :D
@@ -779,6 +806,9 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
         }
 
         std::scoped_lock lk{shader_cache_reload_mutex};
+        if (disk_cache_loader.joinable()) {
+            disk_cache_loader.join();
+        }
 
         LOG_INFO(Frontend, "Reloading disk shader cache for {:016X}", changed_program_id);
 
@@ -877,6 +907,10 @@ extern "C" void SDL_AppQuit(void *appstate, SDL_AppResult result) {
         return;
     }
     state->system.DetachDebugger();
+    if (disk_cache_loader.joinable()) {
+        disk_cache_loader.request_stop();
+        disk_cache_loader.join();
+    }
     // SDL calls this even when SDL_AppInit never powered the system on (no ROM given, --help or
     // --version): the kernel is uninitialised then, and Pause()/ShutdownMainProcess() would
     // dereference it.

@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -31,13 +32,17 @@
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
+#include "video_core/nx2_profile.h"
 #include "common/logging.h"
+#include "common/thread.h"
 #include "common/settings.h"
 #include "shader_recompiler/exception.h"
 
 namespace Vulkan {
 
 using Shader::ImageBufferDescriptor;
+using Shader::Backend::SPIRV::BANK_TABLE_OFFSET;
+using Shader::Backend::SPIRV::PAGE_TABLE_OFFSET;
 using Shader::Backend::SPIRV::RESCALING_LAYOUT_WORDS_OFFSET;
 using Tegra::Texture::TexturePair;
 
@@ -201,24 +206,24 @@ void ComputePipeline::TickUpscalerTrace() {
     }
 }
 
-ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk::PipelineCache& pipeline_cache_,
-                                 DescriptorPool& descriptor_pool,
-                                 GuestDescriptorQueue& guest_descriptor_queue_,
-                                 DescriptorBufferRing& descriptor_buffer_ring_,
-                                 Common::ThreadWorker* thread_worker,
-                                 PipelineStatistics* pipeline_statistics,
-                                 VideoCore::ShaderNotify* shader_notify, const Shader::Info& info_,
-                                 vk::ShaderModule spv_module_, u64 shader_hash_)
-    : device{device_},
-      pipeline_cache(pipeline_cache_), guest_descriptor_queue{guest_descriptor_queue_},
-      descriptor_buffer_ring{descriptor_buffer_ring_}, info{info_},
-      shader_hash{shader_hash_}, spv_module(std::move(spv_module_)) {
+ComputePipeline::ComputePipeline(
+    const Device& device_, Scheduler& scheduler, vk::PipelineCache& pipeline_cache_,
+    DescriptorPool& descriptor_pool, GuestDescriptorQueue& guest_descriptor_queue_,
+    DescriptorBufferRing& descriptor_buffer_ring_, Common::ThreadWorker* thread_worker,
+    PipelineStatistics* pipeline_statistics, VideoCore::ShaderNotify* shader_notify,
+    const Shader::Info& info_, vk::ShaderModule spv_module_, u64 shader_hash_,
+    PipelineBinaryCache* binary_cache)
+    : device{device_}, pipeline_cache(pipeline_cache_),
+      guest_descriptor_queue{guest_descriptor_queue_},
+      descriptor_buffer_ring{descriptor_buffer_ring_}, info{info_}, shader_hash{shader_hash_},
+      spv_module(std::move(spv_module_)) {
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
     }
     std::copy_n(info.constant_buffer_used_sizes.begin(), uniform_buffer_sizes.size(),
                 uniform_buffer_sizes.begin());
     num_descriptor_entries = NumDescriptorEntries(info);
+    AppendBindingKinds(info, true, binding_kinds);
 
     DescriptorLayoutBuilder builder{device};
     builder.Add(info, VK_SHADER_STAGE_COMPUTE_BIT);
@@ -249,7 +254,7 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
         }
     }
 
-    auto func{[this, shader_notify, pipeline_statistics] {
+    auto func{[this, shader_notify, pipeline_statistics, binary_cache] {
         const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT subgroup_size_ci{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT,
             .pNext = nullptr,
@@ -262,7 +267,7 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
                                    info.uses_quad_shuffles || info.uses_fswzadd ||
                                    info.uses_cooperative_matrix;
         VkPipelineCreateFlags flags{};
-        if (device.IsKhrPipelineExecutablePropertiesEnabled() && Settings::values.renderer_debug.GetValue()) {
+        if (device.IsKhrPipelineExecutablePropertiesEnabled()) {
             flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
         }
         if (uses_descriptor_buffer) {
@@ -299,7 +304,9 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
             const bool unoptimized = (flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT) != 0;
             const auto trace_begin = std::chrono::steady_clock::now();
             TracePipelineBuild("BEGIN", "compute", shader_hash, traced, unoptimized);
-            pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
+            pipeline = binary_cache
+                           ? binary_cache->CreateComputePipeline(compute_ci, *pipeline_cache)
+                           : device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
             TracePipelineBuild("END", "compute", shader_hash, traced, unoptimized,
                                std::chrono::duration<double, std::milli>(
                                    std::chrono::steady_clock::now() - trace_begin)
@@ -326,9 +333,46 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
         if (pipeline_statistics) {
             pipeline_statistics->Collect(device, *pipeline);
         }
-        // Nothing reads the module once the pipeline exists; the driver keeps its SPIR-V while it
-        // lives.
-        spv_module.reset();
+        if ((flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT) != 0 &&
+            OptimizesInBackground(device.GetDriverID(), shader_hash)) {
+            // The unoptimized pipeline runs until the optimized one is built; the module stays
+            // for that build.
+            optimizer = std::jthread([this, compute_ci, subgroup_size_ci] {
+                Common::SetCurrentThreadName("VkPipelineOptimize");
+                Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+                VkComputePipelineCreateInfo optimized_ci = compute_ci;
+                optimized_ci.flags &= ~VkPipelineCreateFlags{VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT};
+                if (optimized_ci.stage.pNext != nullptr) {
+                    optimized_ci.stage.pNext = &subgroup_size_ci;
+                }
+                const std::array<u64, 1> traced{shader_hash};
+                const auto begin = std::chrono::steady_clock::now();
+                TracePipelineBuild("BEGIN", "compute", shader_hash, traced, false);
+                try {
+                    optimized_pipeline =
+                        device.GetLogical().CreateComputePipeline(optimized_ci, *pipeline_cache);
+                } catch (const vk::Exception& exception) {
+                    LOG_ERROR(Render_Vulkan, "Optimized build of compute shader {:016X} failed: {}",
+                              shader_hash, exception.what());
+                    spv_module.reset();
+                    return;
+                }
+                const double ms = std::chrono::duration<double, std::milli>(
+                                      std::chrono::steady_clock::now() - begin)
+                                      .count();
+                TracePipelineBuild("END", "compute", shader_hash, traced, false, ms);
+                spv_module.reset();
+                optimized_handle.store(*optimized_pipeline, std::memory_order_release);
+                LOG_INFO(Render_Vulkan,
+                         "Compute shader {:016X}: optimized pipeline built in {:.0f} ms, replaces "
+                         "the unoptimized one",
+                         shader_hash, ms);
+            });
+        } else {
+            // Nothing reads the module once the pipeline exists; the driver keeps its SPIR-V while
+            // it lives.
+            spv_module.reset();
+        }
         std::scoped_lock lock{build_mutex};
         is_built = true;
         build_condvar.notify_one();
@@ -339,24 +383,39 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
     build_task = std::move(func);
     if (thread_worker) {
         build_task_done = false;
-        thread_worker->QueueWork([this] {
-            RunBuild();
+        thread_worker->QueueWork([this, low = thread_worker->LowersPriority()] {
+            RunBuild(low);
             // The last access to this pipeline from the worker.
             build_task_done.store(true, std::memory_order::release);
         });
     } else {
-        RunBuild();
+        RunBuild(false);
     }
 }
 
-void ComputePipeline::RunBuild() {
+void ComputePipeline::RunBuild(bool low_priority_thread) {
     // A draw or dispatch that needs the pipeline builds it on the scheduler thread instead of
     // waiting for the worker queue, which can hold hundreds of builds, to reach it.
     if (build_claimed.exchange(true)) {
         return;
     }
+    {
+        std::scoped_lock lock{build_mutex};
+        if (build_priority.Start(low_priority_thread, Common::CurrentThreadPriorityTarget())) {
+            Common::SetCurrentThreadPriority(BuilderPriority::RaisedPriority);
+            builders_raised.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     build_task();
     build_task = nullptr;
+    bool lower;
+    {
+        std::scoped_lock lock{build_mutex};
+        lower = build_priority.Finish();
+    }
+    if (lower) {
+        Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+    }
 }
 
 bool ComputePipeline::CanReplaceOcarinaUpscale() const {
@@ -380,12 +439,13 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
 
     buffer_cache.SetComputeUniformBufferState(info.constant_buffer_mask, &uniform_buffer_sizes);
     buffer_cache.UnbindComputeStorageBuffers();
+    buffer_cache.SetComputeStorageByAddress(info.storage_by_address);
+    buffer_cache.SetComputeUniformsByAddress(info.uniforms_by_address);
     size_t ssbo_index{};
     for (const auto& desc : info.storage_buffers_descriptors) {
         ASSERT(desc.count == 1);
         buffer_cache.BindComputeStorageBuffer(ssbo_index, desc.cbuf_index, desc.cbuf_offset,
                                               desc.is_written, desc.indirect_offset,
-
                                               desc.write_extent);
         ++ssbo_index;
     }
@@ -394,23 +454,27 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
 
     boost::container::small_vector<VideoCommon::ImageViewInOut, 64> views;
     boost::container::small_vector<VideoCommon::SamplerId, 64> samplers;
+    // The sampler handles are kept to look the bindings up in the texture cache's memo.
+    const bool use_bind_memo = !binding_kinds.empty();
+    boost::container::small_vector<u32, 64> sampler_handles;
 
     const auto& qmd{kepler_compute.launch_description};
     const auto& cbufs{qmd.const_buffer_config};
     const bool via_header_index{qmd.linked_tsc != 0};
+    const auto cbuf_address{[&](u32 cbuf) -> GPUVAddr {
+        return cbuf < cbufs.size() && ((qmd.const_buffer_enable_mask >> cbuf) & 1) != 0
+                   ? cbufs[cbuf].Address()
+                   : GPUVAddr{};
+    }};
+    // Each constant buffer page holding handles is translated once a dispatch.
+    VideoCommon::GuestPageCache handle_pages;
+    const auto read_word{[&](GPUVAddr addr) { return handle_pages.ReadWord(gpu_memory, addr); }};
     const auto read_handle{[&](const auto& desc, u32 index) {
         if (desc.handle_program != ~0U) {
             // Read by the shader from a storage buffer: computed for this dispatch.
             return TexturePair(VideoCommon::EvaluateTextureHandle(
-                                   info, desc.handle_program, gpu_memory,
-                                   [&](u32 cbuf) -> GPUVAddr {
-                                       return cbuf < cbufs.size() &&
-                                                      ((qmd.const_buffer_enable_mask >> cbuf) &
-                                                       1) != 0
-                                                  ? cbufs[cbuf].Address()
-                                                  : GPUVAddr{};
-                                   },
-                                   device.GetStorageBufferAlignment()),
+                                   info, desc.handle_program, gpu_memory, cbuf_address,
+                                   device.GetStorageBufferAlignment(), index),
                                via_header_index);
         }
         ASSERT(((qmd.const_buffer_enable_mask >> desc.cbuf_index) & 1) != 0);
@@ -424,12 +488,12 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
                 const u32 secondary_offset{desc.secondary_cbuf_offset};
                 const GPUVAddr separate_addr{cbufs[desc.secondary_cbuf_index].Address() +
                                              secondary_offset};
-                const u32 lhs_raw{gpu_memory.Read<u32>(addr) << desc.shift_left};
-                const u32 rhs_raw{gpu_memory.Read<u32>(separate_addr) << desc.secondary_shift_left};
+                const u32 lhs_raw{read_word(addr) << desc.shift_left};
+                const u32 rhs_raw{read_word(separate_addr) << desc.secondary_shift_left};
                 return TexturePair(lhs_raw | rhs_raw, via_header_index);
             }
         }
-        return TexturePair(gpu_memory.Read<u32>(addr), via_header_index);
+        return TexturePair(read_word(addr), via_header_index);
     }};
     const auto add_image{[&](const auto& desc, bool blacklist) {
         for (u32 index = 0; index < desc.count; ++index) {
@@ -447,21 +511,91 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     for (const auto& desc : info.image_buffer_descriptors) {
         add_image(desc, false);
     }
+    u32 texture{};
     for (const auto& desc : info.texture_descriptors) {
+        if (desc.count > 1 && desc.handle_program != ~0U) {
+            // A table of handles the shader indexes, read in one go; elements repeating a
+            // sampler share its lookup.
+            const size_t first{views.size()};
+            u32 last_sampler_index{~0U};
+            VideoCommon::SamplerId sampler{};
+            VideoCommon::EvaluateTextureHandles(
+                info, desc.handle_program, gpu_memory, cbuf_address,
+                device.GetStorageBufferAlignment(), desc.count, [&](u32, u32 raw) {
+                    const auto handle{TexturePair(raw, via_header_index)};
+                    views.push_back({handle.first});
+                    if (use_bind_memo) {
+                        // The memo resolves samplers from the handles, as for the other
+                        // textures: a sampler pushed here would leave the two lists unequal.
+                        sampler_handles.push_back(handle.second);
+                        return;
+                    }
+                    if (handle.second != last_sampler_index) {
+                        sampler = texture_cache.GetSamplerId(handle.second, true);
+                        last_sampler_index = handle.second;
+                    }
+                    samplers.push_back(sampler);
+                });
+            if (VideoCommon::HandleTableNotes::Wanted()) [[unlikely]] {
+                std::vector<u32> tics(desc.count);
+                for (u32 index = 0; index < desc.count; ++index) {
+                    tics[index] = views[first + index].index;
+                }
+                VideoCommon::HandleTableNotes::Note(shader_hash, texture, tics);
+            }
+            ++texture;
+            continue;
+        }
         for (u32 index = 0; index < desc.count; ++index) {
             const auto handle{VideoCommon::HandleIsStoragePointer(info, desc, index)
                                   ? VideoCommon::NULL_TEXTURE_HANDLE
                                   : read_handle(desc, index)};
             views.push_back({handle.first});
 
+            if (use_bind_memo) {
+                sampler_handles.push_back(handle.second);
+                continue;
+            }
             VideoCommon::SamplerId sampler = texture_cache.GetSamplerId(handle.second, true);
             samplers.push_back(sampler);
         }
+        ++texture;
     }
     for (const auto& desc : info.image_descriptors) {
         add_image(desc, desc.is_written);
     }
-    texture_cache.FillImageViews(std::span(views.data(), views.size()), true);
+    // The bindings in the memo are taken from it, the others are resolved and recorded once
+    // their descriptors are pushed.
+    boost::container::small_vector<TextureCache::BindingMemo*, 64> memos;
+    BindingMisses misses;
+    TextureCache::BindingLookup lookup{};
+    bool aliased_hit = false;
+    const bool memo_usable =
+        use_bind_memo && binding_kinds.size() == views.size() &&
+        sampler_handles.size() == Shader::NumDescriptors(info.texture_descriptors);
+    if (memo_usable) {
+        VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::FillImageViews};
+        memos.resize(views.size());
+        samplers.resize(sampler_handles.size());
+        lookup = texture_cache.BeginBindingLookup(true);
+        FindImageBindings(texture_cache, lookup, binding_kinds,
+                          std::span(views.data(), views.size()),
+                          std::span(sampler_handles.data(), sampler_handles.size()),
+                          samplers.data(), memos.data(), misses, aliased_hit);
+        ResolveMissedBindings(texture_cache, lookup, std::span(views.data(), views.size()),
+                              std::span(sampler_handles.data(), sampler_handles.size()),
+                              std::span(samplers.data(), samplers.size()), memos.data(),
+                              std::span(misses.data(), misses.size()), aliased_hit, true);
+    } else {
+        if (use_bind_memo) {
+            samplers.clear();
+            for (const u32 handle : sampler_handles) {
+                samplers.push_back(texture_cache.GetSamplerId(handle, true));
+            }
+        }
+        VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::FillImageViews};
+        texture_cache.FillImageViews(std::span(views.data(), views.size()), true);
+    }
     if (auto& trace{GetUpscalerTrace()}; trace.enabled && kepler_compute.IsNativeMode()) {
         const u64 frame{trace.frame.load(std::memory_order_relaxed)};
         if (!trace.armed && frame >= trace.first_frame && info.uses_subgroup_shuffles) {
@@ -483,6 +617,29 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         for (size_t index = first; index < first + Shader::NumDescriptors(info.texture_descriptors);
              ++index) {
             sampled_images.push_back({views[index].index, views[index].id, samplers[index - first]});
+        }
+    }
+
+    image_accesses.clear();
+    {
+        const size_t first_image = Shader::NumDescriptors(info.texture_buffer_descriptors) +
+                                   Shader::NumDescriptors(info.image_buffer_descriptors);
+        const size_t first_storage =
+            first_image + Shader::NumDescriptors(info.texture_descriptors);
+        size_t index = first_storage;
+        const auto note = [&](size_t view_index, bool written) {
+            const ImageView& view{texture_cache.GetImageView(views[view_index].id)};
+            if (!view.IsBuffer()) {
+                image_accesses.push_back({view.ImageHandle(), written});
+            }
+        };
+        for (size_t i = first_image; i < first_storage; ++i) {
+            note(i, false);
+        }
+        for (const auto& desc : info.image_descriptors) {
+            for (u32 i = 0; i < desc.count; ++i, ++index) {
+                note(index, desc.is_written);
+            }
         }
     }
 
@@ -584,18 +741,43 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     std::ranges::for_each(info.image_buffer_descriptors, add_buffer);
 
     buffer_cache.UpdateComputeBuffers();
+    if (info.uniforms_by_address) {
+        buffer_cache.BeginBankTable(true);
+    }
     buffer_cache.BindHostComputeBuffers();
     if (buffer_cache.any_buffer_uploaded) {
         buffer_cache.runtime.PostCopyBarrier();
         buffer_cache.any_buffer_uploaded = false;
     }
+    const u64 page_table{info.storage_by_address ? buffer_cache.PageTableAddress() : 0};
+    const u64 bank_table{info.uniforms_by_address ? buffer_cache.BankTableAddress() : 0};
 
     RescalingPushConstant rescaling;
     const VideoCommon::SamplerId* samplers_it{samplers.data()};
     const VideoCommon::ImageViewInOut* views_it{views.data()};
     if (!shadow) {
+        // Resolved bindings leave their descriptors here to be remembered.
+        boost::container::small_vector<DescriptorUpdateEntry, 16> record_descriptors;
+        boost::container::small_vector<u8, 16> record_rescaled;
+        std::optional<ImageBindingRecord> record;
+        if (memo_usable) {
+            if (!misses.empty()) {
+                record_descriptors.resize(views.size());
+                record_rescaled.resize(views.size());
+            }
+            record = ImageBindingRecord{views.data(), memos.data(),
+                                        misses.empty() ? nullptr : record_descriptors.data(),
+                                        misses.empty() ? nullptr : record_rescaled.data()};
+        }
         PushImageDescriptors(texture_cache, guest_descriptor_queue, info, rescaling, samplers_it,
-                             views_it);
+                             views_it, record ? &*record : nullptr);
+        if (record && !misses.empty()) {
+            RecordImageBindings(texture_cache, lookup, binding_kinds,
+                                std::span(views.data(), views.size()),
+                                std::span(sampler_handles.data(), sampler_handles.size()),
+                                std::span(samplers.data(), samplers.size()), memos.data(),
+                                record_descriptors.data(), record_rescaled.data());
+        }
     } else {
         auto sampled_info{info};
         sampled_info.image_descriptors.clear();
@@ -623,9 +805,14 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
 
     if (!is_built.load(std::memory_order::relaxed)) {
         // Wait for the pipeline to be built
-        scheduler.Record([this](vk::CommandBuffer) {
-            RunBuild();
+        scheduler.RecordForDispatch([this](vk::CommandBuffer) {
+            RunBuild(false);
             std::unique_lock lock{build_mutex};
+            if (!is_built.load(std::memory_order::relaxed) && build_priority.Await()) {
+                Common::SetOtherThreadPriority(build_priority.Target(),
+                                               BuilderPriority::RaisedPriority);
+                builders_raised.fetch_add(1, std::memory_order_relaxed);
+            }
             build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
         });
     }
@@ -639,7 +826,19 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     const DescriptorUpdateEntry* const descriptor_data{guest_descriptor_queue.UpdateData()};
     VkDeviceSize descriptor_buffer_offset{};
     u32 descriptor_buffer_chunk{};
-    if (uses_descriptor_buffer) {
+    // The same descriptors as the previous dispatch, in the same generation of the ring, use
+    // that allocation again (as graphics pipelines do).
+    const bool reuse_allocation =
+        uses_descriptor_buffer && has_last_descriptor_buffer &&
+        last_descriptor_buffer_generation == descriptor_buffer_ring.CurrentGeneration() &&
+        last_descriptor_payload.size() == num_descriptor_entries &&
+        std::memcmp(last_descriptor_payload.data(), descriptor_data,
+                    num_descriptor_entries * sizeof(DescriptorUpdateEntry)) == 0;
+    if (reuse_allocation) {
+        descriptor_buffer_offset = last_descriptor_buffer_offset;
+        descriptor_buffer_chunk = last_descriptor_buffer_chunk;
+        descriptor_buffer_ring.TouchFrame(scheduler);
+    } else if (uses_descriptor_buffer) {
         const DescriptorBufferRing::Allocation alloc{
             descriptor_buffer_ring.Allocate(scheduler, descriptor_buffer_layout.size)};
         if (!alloc.host) {
@@ -649,6 +848,11 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         WriteDescriptorBuffer(device, descriptor_buffer_layout, descriptor_data, alloc.host);
         descriptor_buffer_offset = alloc.offset;
         descriptor_buffer_chunk = alloc.chunk;
+        has_last_descriptor_buffer = true;
+        last_descriptor_buffer_offset = alloc.offset;
+        last_descriptor_buffer_chunk = alloc.chunk;
+        last_descriptor_buffer_generation = alloc.generation;
+        last_descriptor_payload.assign(descriptor_data, descriptor_data + num_descriptor_entries);
     }
 
     const bool bind_descriptor_buffer{
@@ -671,8 +875,8 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
 
     const bool is_rescaling = !info.texture_descriptors.empty() || !info.image_descriptors.empty();
     auto bind = [this, descriptor_data, is_rescaling, descriptor_buffer_offset,
-                      descriptor_buffer_chunk, bind_descriptor_buffer,
-                      rescaling_data = rescaling.Data()](vk::CommandBuffer cmdbuf) {
+                 descriptor_buffer_chunk, bind_descriptor_buffer, page_table, bank_table,
+                 rescaling_data = rescaling.Data()](vk::CommandBuffer cmdbuf) {
         if (bind_descriptor_buffer) {
             const VkDescriptorBufferBindingInfoEXT binding_info{
                 descriptor_buffer_ring.BindingInfo(descriptor_buffer_chunk)};
@@ -681,7 +885,17 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         if (!pipeline) {
             return;
         }
-        cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
+        const VkPipeline optimized = optimized_handle.load(std::memory_order_acquire);
+        cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE,
+                            optimized != VK_NULL_HANDLE ? optimized : *pipeline);
+        if (page_table != 0) {
+            cmdbuf.PushConstants(*pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, PAGE_TABLE_OFFSET,
+                                 sizeof(page_table), &page_table);
+        }
+        if (bank_table != 0) {
+            cmdbuf.PushConstants(*pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, BANK_TABLE_OFFSET,
+                                 sizeof(bank_table), &bank_table);
+        }
         if (!descriptor_set_layout) {
             return;
         }
@@ -708,7 +922,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     if (deferred_bind) {
         *deferred_bind = std::move(bind);
     } else {
-        scheduler.Record(std::move(bind));
+        scheduler.RecordForDispatch(std::move(bind));
     }
     return true;
 }

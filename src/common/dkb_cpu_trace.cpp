@@ -4,7 +4,6 @@
 #include <mutex>
 
 #include "common/dkb_cpu_trace.h"
-#include "common/dkb_frame_trace.h"
 
 namespace Common::DkbCpuTrace {
 namespace {
@@ -22,10 +21,9 @@ Registry& GetRegistry() {
 
 } // namespace
 
-Registration::Registration(Role role_) : clock{DkbFrameTrace::Enabled()}, role{role_} {
-    if (!DkbFrameTrace::Enabled()) {
-        return;
-    }
+// Every role registers: a clock costs a thread handle when the thread starts and nothing until
+// someone reads it (EDEN_DKB_FRAME_TRACE's per-second lines, the performance overlay).
+Registration::Registration(Role role_) : role{role_} {
     auto& registry = GetRegistry();
     const auto index = static_cast<size_t>(role);
     std::scoped_lock lock{registry.mutex};

@@ -11,6 +11,7 @@
 #include <optional>
 
 #include "common/common_types.h"
+#include "dynarmic/interface/A64/host_function.h"
 
 namespace Dynarmic {
 
@@ -23,6 +24,7 @@ namespace A64 {
 class LocationDescriptor;
 
 using MemoryReadCodeFuncType = std::function<std::optional<u32>(u64 vaddr)>;
+using GetHostFunctionFuncType = std::function<std::optional<HostFunctionEntry>(u64 vaddr)>;
 
 struct TranslationOptions {
     /// This changes what IR we emit when we translate an unpredictable instruction.
@@ -38,6 +40,12 @@ struct TranslationOptions {
     /// If this is false, we treat the instruction as a NOP.
     /// If this is true, we emit an ExceptionRaised instruction.
     bool hook_hint_instructions = true;
+
+    /// DMB xxLD and DMB xxST are translated as NOPs (for TSO hosts).
+    bool elide_ld_st_barriers = false;
+
+    /// LSE atomics (not CASP) become AtomicRmwMemory/AtomicCasMemory (x64 backend only).
+    bool native_lse_atomics = false;
 };
 
 /**
@@ -47,7 +55,7 @@ struct TranslationOptions {
  * @param options Configures how certain instructions are translated.
  * @return A translated basic block in the intermediate representation.
  */
-void Translate(IR::Block& block, LocationDescriptor descriptor, MemoryReadCodeFuncType memory_read_code, TranslationOptions options);
+void Translate(IR::Block& block, LocationDescriptor descriptor, MemoryReadCodeFuncType memory_read_code, TranslationOptions options, const GetHostFunctionFuncType& get_host_function = {});
 
 /**
  * This function translates a single provided instruction into our intermediate representation.

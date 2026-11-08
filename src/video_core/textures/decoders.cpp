@@ -5,19 +5,140 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <array>
+#include <atomic>
+#include <bit>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
+#include <functional>
+#include <mutex>
 #include <span>
+#include <thread>
+#include <utility>
+#include <vector>
+#if defined(ARCHITECTURE_x86_64) && (defined(__GNUC__) || defined(__clang__))
+#include <immintrin.h>
+#endif
 
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/bit_util.h"
+#include "common/cpu_features.h"
 #include "common/div_ceil.h"
+#include "common/thread.h"
 #include "video_core/gpu.h"
 #include "video_core/textures/decoders.h"
 
 namespace Tegra::Texture {
 namespace {
+
+/// Large unswizzles (new textures while running through Ocarina of Time's Kokiri Forest: ~11% of
+/// the split GPU back thread) are split by lines over helper threads plus the caller, which waits
+/// for all of them: the result is the same, only sooner. A quarter of the host threads, at most 4
+/// (more competed with the guest cores and made busy spots drop harder).
+class LinePool {
+public:
+    static LinePool& Get() {
+        static LinePool pool;
+        return pool;
+    }
+
+    [[nodiscard]] bool Enabled() const {
+        return !workers.empty();
+    }
+
+    /// Calls func(begin, end) over [0, count) in chunks; returns once every chunk is done.
+    void Run(u32 count, const std::function<void(u32, u32)>& func) {
+        std::unique_lock busy{run_mutex, std::try_to_lock};
+        if (!busy || workers.empty()) {
+            func(0, count);
+            return;
+        }
+        {
+            std::scoped_lock lock{mutex};
+            job = &func;
+            total = count;
+            // Whole GOB rows (8 lines) per chunk, so the AVX-512 GOB path keeps them together.
+            chunk = Common::AlignUp(
+                (std::max)(8U, count / static_cast<u32>((workers.size() + 1) * 4)), 8U);
+            next.store(0, std::memory_order_relaxed);
+            pending = static_cast<u32>(workers.size());
+            ++generation;
+        }
+        work_cv.notify_all();
+        Work(func);
+        std::unique_lock lock{mutex};
+        done_cv.wait(lock, [this] { return pending == 0; });
+        job = nullptr;
+    }
+
+private:
+    LinePool() {
+        const u32 count = (std::min)(4U, std::thread::hardware_concurrency() / 4);
+        for (u32 i = 0; i < count; ++i) {
+            workers.emplace_back([this](std::stop_token stop) { Loop(stop); });
+        }
+    }
+
+    ~LinePool() {
+        {
+            // Under the mutex: a worker between its predicate check and its wait would otherwise
+            // miss the notification and never return to be joined.
+            std::scoped_lock lock{mutex};
+            for (auto& worker : workers) {
+                worker.request_stop();
+            }
+        }
+        work_cv.notify_all();
+        workers.clear();
+    }
+
+    void Work(const std::function<void(u32, u32)>& func) {
+        for (;;) {
+            const u32 begin = next.fetch_add(chunk, std::memory_order_relaxed);
+            if (begin >= total) {
+                return;
+            }
+            func(begin, (std::min)(begin + chunk, total));
+        }
+    }
+
+    void Loop(std::stop_token stop) {
+        Common::SetCurrentThreadName("Unswizzle");
+        u64 seen = 0;
+        for (;;) {
+            const std::function<void(u32, u32)>* func;
+            {
+                std::unique_lock lock{mutex};
+                work_cv.wait(lock, [&] { return stop.stop_requested() || generation != seen; });
+                if (stop.stop_requested()) {
+                    return;
+                }
+                seen = generation;
+                func = job;
+            }
+            Work(*func);
+            {
+                std::scoped_lock lock{mutex};
+                --pending;
+            }
+            done_cv.notify_one();
+        }
+    }
+
+    std::mutex run_mutex;
+    std::mutex mutex;
+    std::condition_variable work_cv;
+    std::condition_variable done_cv;
+    const std::function<void(u32, u32)>* job{};
+    u32 total{};
+    u32 chunk{1};
+    std::atomic<u32> next{};
+    u32 pending{};
+    u64 generation{};
+    std::vector<std::jthread> workers;
+};
+
 constexpr u32 NativeGobOffset(u32 offset, bool native_tiling) {
     if (!native_tiling) return offset;
     const u32 difference = ((offset >> 5) ^ (offset >> 6)) & 1;
@@ -41,6 +162,102 @@ void incrpdep(u32& value) {
     value = ((value | ~mask) + swizzled_incr) & mask;
 }
 
+// Where each 16-byte unit of a GOB row lies within the GOB, by row (y & 7) and unit (x / 16 & 3).
+// The 16 bytes of a unit are contiguous. A GOB's own offset is a multiple of GOB_SIZE, so the
+// native tiling's swap of bits 5 and 6 only moves units within it.
+std::array<u32, GOB_SIZE_Y * 4> GobUnitOffsets(bool native_tiling) {
+    std::array<u32, GOB_SIZE_Y * 4> offsets;
+    for (u32 row = 0; row < GOB_SIZE_Y; ++row) {
+        for (u32 unit = 0; unit < 4; ++unit) {
+            offsets[row * 4 + unit] = NativeGobOffset(
+                pdep<SWIZZLE_X_BITS>(unit * 16) | pdep<SWIZZLE_Y_BITS>(row), native_tiling);
+        }
+    }
+    return offsets;
+}
+
+#if defined(ARCHITECTURE_x86_64) && (defined(__GNUC__) || defined(__clang__))
+#define DECODERS_AVX512_GOBS 1
+
+// A whole GOB of 16-byte units (8 rows of 64 bytes) in AVX-512 registers: 8 loads, then each of
+// the 8 outputs is put together from the unit table with two two-source permutes and a blend.
+
+struct GobUnitSource {
+    u32 reg;  ///< Input register: a GOB line (64 bytes) or a linear row of the GOB
+    u32 lane; ///< 16-byte lane in it
+};
+
+constexpr u32 GobUnitOffset(u32 row, u32 unit, bool native_tiling) {
+    return NativeGobOffset(pdep<SWIZZLE_X_BITS>(unit * 16) | pdep<SWIZZLE_Y_BITS>(row),
+                           native_tiling);
+}
+
+/// Where each 16-byte lane of each output register comes from. TO_GOB: the outputs are the GOB's
+/// 8 lines and the inputs its 8 linear rows; otherwise the other way round.
+template <bool TO_GOB, bool NATIVE>
+constexpr std::array<std::array<GobUnitSource, 4>, 8> GobPermuteMap() {
+    std::array<std::array<GobUnitSource, 4>, 8> map{};
+    for (u32 row = 0; row < GOB_SIZE_Y; ++row) {
+        for (u32 unit = 0; unit < 4; ++unit) {
+            const u32 offset = GobUnitOffset(row, unit, NATIVE);
+            const u32 line = offset / 64;
+            const u32 lane = (offset / 16) % 4;
+            if constexpr (TO_GOB) {
+                map[line][lane] = {row, unit};
+            } else {
+                map[row][unit] = {line, lane};
+            }
+        }
+    }
+    return map;
+}
+
+template <bool TO_GOB, bool NATIVE, u32 OUT>
+__attribute__((target("avx512f"))) inline __m512i GobOutput(const __m512i* in) {
+    constexpr auto map = GobPermuteMap<TO_GOB, NATIVE>()[OUT];
+    // Qword indices into (a, b): 0-7 pick from a, 8-15 from b. Lanes 0-1 come from the first
+    // permute, lanes 2-3 from the second.
+    const __m512i low = _mm512_set_epi64(0, 0, 0, 0, 8 + map[1].lane * 2 + 1, 8 + map[1].lane * 2,
+                                         map[0].lane * 2 + 1, map[0].lane * 2);
+    const __m512i high = _mm512_set_epi64(8 + map[3].lane * 2 + 1, 8 + map[3].lane * 2,
+                                          map[2].lane * 2 + 1, map[2].lane * 2, 0, 0, 0, 0);
+    const __m512i first = _mm512_permutex2var_epi64(in[map[0].reg], low, in[map[1].reg]);
+    const __m512i second = _mm512_permutex2var_epi64(in[map[2].reg], high, in[map[3].reg]);
+    return _mm512_mask_blend_epi64(0xF0, first, second);
+}
+
+template <bool TO_GOB, bool NATIVE, u32... OUT>
+__attribute__((target("avx512f"))) inline void StoreGob(const __m512i* in, u8* output, u32 gob,
+                                                        u32 linear, u32 pitch,
+                                                        std::integer_sequence<u32, OUT...>) {
+    ((_mm512_storeu_si512(TO_GOB ? output + gob + OUT * 64 : output + linear + OUT * pitch,
+                          GobOutput<TO_GOB, NATIVE, OUT>(in))),
+     ...);
+}
+
+/// Moves `gobs` whole GOBs of one GOB row, the first at `gob` in the block linear buffer and at
+/// `linear` in the linear one (rows `pitch` apart), the next ones `gob_stride` and 64 bytes on.
+template <bool TO_GOB, bool NATIVE>
+__attribute__((target("avx512f"))) void MoveGobsAvx512(u8* output, const u8* input, u32 gobs,
+                                                       u32 gob, u32 gob_stride, u32 linear,
+                                                       u32 pitch) {
+    for (u32 index = 0; index < gobs; ++index, gob += gob_stride, linear += 64) {
+        __m512i in[GOB_SIZE_Y];
+        for (u32 row = 0; row < GOB_SIZE_Y; ++row) {
+            in[row] =
+                _mm512_loadu_si512(TO_GOB ? input + linear + row * pitch : input + gob + row * 64);
+        }
+        StoreGob<TO_GOB, NATIVE>(in, output, gob, linear, pitch,
+                                 std::make_integer_sequence<u32, GOB_SIZE_Y>{});
+    }
+}
+
+bool HasAvx512() {
+    static const bool has = Common::g_cpu_caps.avx512f;
+    return has;
+}
+#endif
+
 template <bool TO_LINEAR, u32 BYTES_PER_PIXEL>
 void SwizzleImpl(std::span<u8> output, std::span<const u8> input, u32 width, u32 height, u32 depth,
                  u32 block_height, u32 block_depth, u32 stride, bool native_tiling) {
@@ -63,11 +280,71 @@ void SwizzleImpl(std::span<u8> output, std::span<const u8> input, u32 width, u32
     const u32 block_depth_mask = (1U << block_depth) - 1;
     const u32 x_shift = GOB_SIZE_SHIFT + block_height + block_depth;
 
-    for (u32 slice = 0; slice < depth; ++slice) {
-        const u32 z = slice + origin_z;
-        const u32 offset_z = (z >> block_depth) * slice_size +
-                             ((z & block_depth_mask) << (GOB_SIZE_SHIFT + block_height));
-        for (u32 line = 0; line < height; ++line) {
+    // 16-byte units (UnswizzleTexture and SwizzleTexture widen to them when a row allows it):
+    // their offsets in a GOB come from a table instead of being computed one by one.
+    constexpr bool unit_table = BYTES_PER_PIXEL == 16 && origin_x == 0 && origin_y == 0;
+    [[maybe_unused]] const auto unit_offsets = GobUnitOffsets(native_tiling);
+
+    // Each (slice, line) writes its own bytes of the output: lines can go to other threads.
+    const auto lines = [&](u32 first, u32 end) {
+        for (u32 index = first; index < end; ++index) {
+            const u32 slice = index / height;
+            const u32 line = index % height;
+            const u32 z = slice + origin_z;
+            const u32 offset_z = (z >> block_depth) * slice_size +
+                                 ((z & block_depth_mask) << (GOB_SIZE_SHIFT + block_height));
+            if constexpr (unit_table) {
+                const u32 block_y = line >> GOB_SIZE_Y_SHIFT;
+                const u32 offset_y = (block_y >> block_height) * block_size +
+                                     ((block_y & block_height_mask) << GOB_SIZE_SHIFT);
+                const u32* const row_offsets = &unit_offsets[(line & (GOB_SIZE_Y - 1)) * 4];
+                const u32 row_linear = slice * pitch * height + line * pitch;
+                const u32 gobs_wide = Common::DivCeil(width, 4U);
+#ifdef DECODERS_AVX512_GOBS
+                // The first line of a GOB row whose 8 lines are all here: its whole GOBs go
+                // 512 bytes at a time, and the partial GOB at the end (if any) goes unit by unit
+                // for each of the 8 lines.
+                if (HasAvx512() && (line & (GOB_SIZE_Y - 1)) == 0 && line + GOB_SIZE_Y <= height &&
+                    index + GOB_SIZE_Y <= end) {
+                    const u32 whole = width / 4;
+                    const auto move = native_tiling ? MoveGobsAvx512<TO_LINEAR, true>
+                                                    : MoveGobsAvx512<TO_LINEAR, false>;
+                    move(output.data(), input.data(), whole, offset_z + offset_y, 1U << x_shift,
+                         row_linear, pitch);
+                    if (whole != gobs_wide) {
+                        const u32 gob_offset = offset_z + offset_y + (whole << x_shift);
+                        for (u32 row = 0; row < GOB_SIZE_Y; ++row) {
+                            for (u32 unit = 0; unit < width - whole * 4; ++unit) {
+                                const u32 swizzled_offset =
+                                    gob_offset + unit_offsets[row * 4 + unit];
+                                const u32 unswizzled_offset =
+                                    row_linear + row * pitch + (whole * 4 + unit) * 16;
+                                u8* const dst =
+                                    &output[TO_LINEAR ? swizzled_offset : unswizzled_offset];
+                                const u8* const src =
+                                    &input[TO_LINEAR ? unswizzled_offset : swizzled_offset];
+                                std::memcpy(dst, src, 16);
+                            }
+                        }
+                    }
+                    index += GOB_SIZE_Y - 1;
+                    continue;
+                }
+#endif
+                for (u32 gob_x = 0; gob_x < gobs_wide; ++gob_x) {
+                    const u32 gob_offset = offset_z + offset_y + (gob_x << x_shift);
+                    const u32 units = (std::min)(4U, width - gob_x * 4);
+                    for (u32 unit = 0; unit < units; ++unit) {
+                        const u32 swizzled_offset = gob_offset + row_offsets[unit];
+                        const u32 unswizzled_offset = row_linear + (gob_x * 4 + unit) * 16;
+                        u8* const dst = &output[TO_LINEAR ? swizzled_offset : unswizzled_offset];
+                        const u8* const src =
+                            &input[TO_LINEAR ? unswizzled_offset : swizzled_offset];
+                        std::memcpy(dst, src, 16);
+                    }
+                }
+                continue;
+            }
             const u32 y = line + origin_y;
             const u32 swizzled_y = pdep<SWIZZLE_Y_BITS>(y);
 
@@ -93,6 +370,14 @@ void SwizzleImpl(std::span<u8> output, std::span<const u8> input, u32 width, u32
                 std::memcpy(dst, src, BYTES_PER_PIXEL);
             }
         }
+    };
+    const u32 total_lines = depth * height;
+    // From 1 MiB: splitting medium textures too (256 KiB) made busy spots drop harder.
+    constexpr u64 min_bytes = u64{1} << 20;
+    if (!TO_LINEAR && LinePool::Get().Enabled() && u64{pitch} * total_lines >= min_bytes) {
+        LinePool::Get().Run(total_lines, lines);
+    } else {
+        lines(0, total_lines);
     }
 }
 
@@ -120,6 +405,10 @@ void SwizzleSubrectImpl(std::span<u8> output, std::span<const u8> input, u32 wid
 
     u32 unprocessed_lines = num_lines;
     u32 extent_y = (std::min)(num_lines, height - origin_y);
+    // Power of two pixels never straddle a 16-byte unit: copy each row in runs of whole units
+    // (and the partial ones at its ends) from the unit table.
+    constexpr bool unit_runs = std::has_single_bit(BYTES_PER_PIXEL);
+    [[maybe_unused]] const auto unit_offsets = GobUnitOffsets(native_tiling);
 
     for (u32 slice = 0; slice < depth; ++slice) {
         const u32 z = slice + origin_z;
@@ -133,6 +422,25 @@ void SwizzleSubrectImpl(std::span<u8> output, std::span<const u8> input, u32 wid
             const u32 block_y = y >> GOB_SIZE_Y_SHIFT;
             const u32 offset_y = (block_y >> block_height) * block_size +
                                  ((block_y & block_height_mask) << GOB_SIZE_SHIFT);
+
+            if constexpr (unit_runs) {
+                const u32* const row_offsets = &unit_offsets[(y & (GOB_SIZE_Y - 1)) * 4];
+                const u32 x_begin = origin_x * BYTES_PER_PIXEL;
+                const u32 x_end = (origin_x + extent_x) * BYTES_PER_PIXEL;
+                const u32 row_linear = slice * pitch * height + line * pitch;
+                for (u32 x = x_begin; x < x_end;) {
+                    const u32 run = (std::min)(16 - (x & 15), x_end - x);
+                    const u32 swizzled_offset = offset_z + offset_y +
+                                                ((x >> GOB_SIZE_X_SHIFT) << x_shift) +
+                                                row_offsets[(x >> 4) & 3] + (x & 15);
+                    const u32 unswizzled_offset = row_linear + (x - x_begin);
+                    u8* const dst = &output[TO_LINEAR ? swizzled_offset : unswizzled_offset];
+                    const u8* const src = &input[TO_LINEAR ? unswizzled_offset : swizzled_offset];
+                    std::memcpy(dst, src, run);
+                    x += run;
+                }
+                continue;
+            }
 
             u32 swizzled_x = pdep<SWIZZLE_X_BITS>(origin_x * BYTES_PER_PIXEL);
             for (u32 column = 0; column < extent_x;

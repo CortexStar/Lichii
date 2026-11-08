@@ -190,6 +190,8 @@ struct InstanceDispatch {
     PFN_vkGetPhysicalDeviceToolProperties vkGetPhysicalDeviceToolProperties{};
     PFN_vkGetPhysicalDeviceQueueFamilyProperties vkGetPhysicalDeviceQueueFamilyProperties{};
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR vkGetPhysicalDeviceSurfaceCapabilitiesKHR{};
+    /// Null unless the instance enabled VK_KHR_get_surface_capabilities2.
+    PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR vkGetPhysicalDeviceSurfaceCapabilities2KHR{};
     PFN_vkGetPhysicalDeviceSurfaceFormatsKHR vkGetPhysicalDeviceSurfaceFormatsKHR{};
     PFN_vkGetPhysicalDeviceSurfacePresentModesKHR vkGetPhysicalDeviceSurfacePresentModesKHR{};
     PFN_vkGetPhysicalDeviceSurfaceSupportKHR vkGetPhysicalDeviceSurfaceSupportKHR{};
@@ -282,6 +284,15 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkCmdSetStencilWriteMask vkCmdSetStencilWriteMask{};
     PFN_vkCmdSetVertexInputEXT vkCmdSetVertexInputEXT{};
     PFN_vkCmdSetViewport vkCmdSetViewport{};
+    PFN_vkCmdSetViewportWithCountEXT vkCmdSetViewportWithCountEXT{};
+    PFN_vkCmdSetScissorWithCountEXT vkCmdSetScissorWithCountEXT{};
+    PFN_vkCmdSetPolygonModeEXT vkCmdSetPolygonModeEXT{};
+    PFN_vkCmdSetRasterizationSamplesEXT vkCmdSetRasterizationSamplesEXT{};
+    PFN_vkCmdSetSampleMaskEXT vkCmdSetSampleMaskEXT{};
+    PFN_vkCmdSetTessellationDomainOriginEXT vkCmdSetTessellationDomainOriginEXT{};
+    PFN_vkCmdSetDepthClipEnableEXT vkCmdSetDepthClipEnableEXT{};
+    PFN_vkCmdSetDepthClipNegativeOneToOneEXT vkCmdSetDepthClipNegativeOneToOneEXT{};
+    PFN_vkCmdSetProvokingVertexModeEXT vkCmdSetProvokingVertexModeEXT{};
     PFN_vkCmdSetColorWriteMaskEXT vkCmdSetColorWriteMaskEXT{};
     PFN_vkCmdSetColorWriteEnableEXT vkCmdSetColorWriteEnableEXT{};
     PFN_vkCmdSetColorBlendEnableEXT vkCmdSetColorBlendEnableEXT{};
@@ -357,6 +368,7 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkResetFences vkResetFences{};
     PFN_vkResetQueryPool vkResetQueryPool{};
     PFN_vkSetDebugUtilsObjectNameEXT vkSetDebugUtilsObjectNameEXT{};
+    PFN_vkSetHdrMetadataEXT vkSetHdrMetadataEXT{};
     PFN_vkSetDebugUtilsObjectTagEXT vkSetDebugUtilsObjectTagEXT{};
     PFN_vkUnmapMemory vkUnmapMemory{};
     PFN_vkUpdateDescriptorSetWithTemplate vkUpdateDescriptorSetWithTemplate{};
@@ -365,9 +377,22 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkGetDescriptorSetLayoutBindingOffsetEXT vkGetDescriptorSetLayoutBindingOffsetEXT{};
     PFN_vkGetDescriptorEXT vkGetDescriptorEXT{};
     PFN_vkCmdBindDescriptorBuffersEXT vkCmdBindDescriptorBuffersEXT{};
+    PFN_vkWriteResourceDescriptorsEXT vkWriteResourceDescriptorsEXT{};
+    PFN_vkWriteSamplerDescriptorsEXT vkWriteSamplerDescriptorsEXT{};
+    PFN_vkCmdBindResourceHeapEXT vkCmdBindResourceHeapEXT{};
+    PFN_vkCmdBindSamplerHeapEXT vkCmdBindSamplerHeapEXT{};
+    PFN_vkCmdPushDataEXT vkCmdPushDataEXT{};
+    PFN_vkRegisterCustomBorderColorEXT vkRegisterCustomBorderColorEXT{};
+    PFN_vkUnregisterCustomBorderColorEXT vkUnregisterCustomBorderColorEXT{};
     PFN_vkCmdSetDescriptorBufferOffsetsEXT vkCmdSetDescriptorBufferOffsetsEXT{};
     PFN_vkUpdateDescriptorSets vkUpdateDescriptorSets{};
+    PFN_vkCreatePipelineBinariesKHR vkCreatePipelineBinariesKHR{};
+    PFN_vkDestroyPipelineBinaryKHR vkDestroyPipelineBinaryKHR{};
+    PFN_vkGetPipelineKeyKHR vkGetPipelineKeyKHR{};
+    PFN_vkGetPipelineBinaryDataKHR vkGetPipelineBinaryDataKHR{};
+    PFN_vkReleaseCapturedPipelineDataKHR vkReleaseCapturedPipelineDataKHR{};
     PFN_vkWaitForFences vkWaitForFences{};
+    PFN_vkWaitForPresent2KHR vkWaitForPresent2KHR{};
     PFN_vkWaitSemaphores vkWaitSemaphores{};
 };
 
@@ -1171,10 +1196,49 @@ public:
         dld->vkGetDescriptorEXT(handle, &info, size, descriptor);
     }
 
+    /// Writes resource descriptors for VK_EXT_descriptor_heap at host addresses.
+    void WriteResourceDescriptorsEXT(Span<VkResourceDescriptorInfoEXT> resources,
+                                     const VkHostAddressRangeEXT* descriptors) const {
+        Check(dld->vkWriteResourceDescriptorsEXT(handle, resources.size(), resources.data(),
+                                                 descriptors));
+    }
+
+    /// Registers a custom border color for heap sampler descriptors; returns its index.
+    VkResult RegisterCustomBorderColorEXT(const VkSamplerCustomBorderColorCreateInfoEXT& color,
+                                          u32* index) const noexcept {
+        return dld->vkRegisterCustomBorderColorEXT(handle, &color, VK_TRUE, index);
+    }
+
+    void UnregisterCustomBorderColorEXT(u32 index) const noexcept {
+        dld->vkUnregisterCustomBorderColorEXT(handle, index);
+    }
+
+    /// Writes sampler descriptors for VK_EXT_descriptor_heap at host addresses.
+    void WriteSamplerDescriptorsEXT(Span<VkSamplerCreateInfo> samplers,
+                                    const VkHostAddressRangeEXT* descriptors) const {
+        Check(dld->vkWriteSamplerDescriptorsEXT(handle, samplers.size(), samplers.data(),
+                                                descriptors));
+    }
+
     VkResult AcquireNextImageKHR(VkSwapchainKHR swapchain, u64 timeout, VkSemaphore semaphore,
                                  VkFence fence, u32* image_index) const noexcept {
         return dld->vkAcquireNextImageKHR(handle, swapchain, timeout, semaphore, fence,
                                           image_index);
+    }
+
+    void SetHdrMetadataEXT(VkSwapchainKHR swapchain, const VkHdrMetadataEXT& metadata) const noexcept {
+        dld->vkSetHdrMetadataEXT(handle, 1, &swapchain, &metadata);
+    }
+
+    VkResult WaitForPresent2KHR(VkSwapchainKHR swapchain, u64 present_id,
+                                u64 timeout) const noexcept {
+        const VkPresentWait2InfoKHR info{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_WAIT_2_INFO_KHR,
+            .pNext = nullptr,
+            .presentId = present_id,
+            .timeout = timeout,
+        };
+        return dld->vkWaitForPresent2KHR(handle, swapchain, &info);
     }
 
     VkResult WaitIdle() const noexcept {
@@ -1229,6 +1293,11 @@ public:
     bool GetSurfaceSupportKHR(u32 queue_family_index, VkSurfaceKHR) const;
 
     VkSurfaceCapabilitiesKHR GetSurfaceCapabilitiesKHR(VkSurfaceKHR) const;
+
+    /// Fills capabilities (and its pNext chain) through VK_KHR_get_surface_capabilities2. Returns
+    /// false when the instance does not have it.
+    bool GetSurfaceCapabilities2KHR(VkSurfaceKHR surface,
+                                    VkSurfaceCapabilities2KHR& capabilities) const;
 
     std::vector<VkSurfaceFormatKHR> GetSurfaceFormatsKHR(VkSurfaceKHR) const;
 
@@ -1500,6 +1569,24 @@ public:
         dld->vkCmdBindDescriptorBuffersEXT(handle, bindings.size(), bindings.data());
     }
 
+    void BindResourceHeapEXT(const VkBindHeapInfoEXT& info) const noexcept {
+        dld->vkCmdBindResourceHeapEXT(handle, &info);
+    }
+
+    void BindSamplerHeapEXT(const VkBindHeapInfoEXT& info) const noexcept {
+        dld->vkCmdBindSamplerHeapEXT(handle, &info);
+    }
+
+    void PushDataEXT(u32 offset, const void* data, size_t size) const noexcept {
+        const VkPushDataInfoEXT info{
+            .sType = VK_STRUCTURE_TYPE_PUSH_DATA_INFO_EXT,
+            .pNext = nullptr,
+            .offset = offset,
+            .data = {.address = data, .size = size},
+        };
+        dld->vkCmdPushDataEXT(handle, &info);
+    }
+
     void SetDescriptorBufferOffsetsEXT(VkPipelineBindPoint bind_point, VkPipelineLayout layout,
                                        u32 first_set, Span<u32> buffer_indices,
                                        Span<VkDeviceSize> offsets) const noexcept {
@@ -1560,6 +1647,42 @@ public:
 
     void SetScissor(u32 first, Span<VkRect2D> scissors) const noexcept {
         dld->vkCmdSetScissor(handle, first, scissors.size(), scissors.data());
+    }
+
+    void SetViewportWithCount(Span<VkViewport> viewports) const noexcept {
+        dld->vkCmdSetViewportWithCountEXT(handle, viewports.size(), viewports.data());
+    }
+
+    void SetScissorWithCount(Span<VkRect2D> scissors) const noexcept {
+        dld->vkCmdSetScissorWithCountEXT(handle, scissors.size(), scissors.data());
+    }
+
+    void SetPolygonModeEXT(VkPolygonMode mode) const noexcept {
+        dld->vkCmdSetPolygonModeEXT(handle, mode);
+    }
+
+    void SetRasterizationSamplesEXT(VkSampleCountFlagBits samples) const noexcept {
+        dld->vkCmdSetRasterizationSamplesEXT(handle, samples);
+    }
+
+    void SetSampleMaskEXT(VkSampleCountFlagBits samples, u32 mask) const noexcept {
+        dld->vkCmdSetSampleMaskEXT(handle, samples, &mask);
+    }
+
+    void SetTessellationDomainOriginEXT(VkTessellationDomainOrigin origin) const noexcept {
+        dld->vkCmdSetTessellationDomainOriginEXT(handle, origin);
+    }
+
+    void SetDepthClipEnableEXT(bool enable) const noexcept {
+        dld->vkCmdSetDepthClipEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
+    }
+
+    void SetDepthClipNegativeOneToOneEXT(bool enable) const noexcept {
+        dld->vkCmdSetDepthClipNegativeOneToOneEXT(handle, enable ? VK_TRUE : VK_FALSE);
+    }
+
+    void SetProvokingVertexModeEXT(VkProvokingVertexModeEXT mode) const noexcept {
+        dld->vkCmdSetProvokingVertexModeEXT(handle, mode);
     }
 
     void SetBlendConstants(const float blend_constants[4]) const noexcept {

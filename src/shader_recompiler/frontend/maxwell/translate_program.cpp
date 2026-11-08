@@ -90,6 +90,18 @@ void CollectInterpolationInfo(Environment& env, IR::Program& program) {
     }
 }
 
+/// With the GPU page table, a program that reaches guest memory reads the table's address and
+/// leaves its storage buffer descriptors unbound.
+void MarkStorageByAddress(IR::Program& program, const HostTranslateInfo& host_info) {
+    program.info.storage_by_address =
+        host_info.gpu_page_table &&
+        (program.info.uses_global_memory || !program.info.storage_buffers_descriptors.empty());
+    // Mesh and task programs bind in other stages' slots: their banks stay descriptors.
+    program.info.uniforms_by_address = host_info.uniforms_by_address &&
+                                       !program.info.constant_buffer_descriptors.empty() &&
+                                       program.stage != Stage::Mesh && program.stage != Stage::Task;
+}
+
 void AddNVNStorageBuffers(IR::Program& program, const HostTranslateInfo& host_info) {
     if (!program.info.uses_global_memory) {
         return;
@@ -486,6 +498,7 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
     CollectInterpolationInfo(env, program);
     AddNVNStorageBuffers(program, normalized_host_info);
     Optimization::LimitSampledTextureArrays(program, normalized_host_info);
+    MarkStorageByAddress(program, normalized_host_info);
     return program;
 }
 
@@ -512,15 +525,21 @@ IR::Program MergeDualVertexPrograms(IR::Program& vertex_a, IR::Program& vertex_b
     result.info.loads.mask |= vertex_b.info.loads.mask;
     result.info.stores.mask |= vertex_b.info.stores.mask;
 
-    Optimization::JoinTextureInfo(result.info, vertex_b.info);
-    // The two halves are one stage: their storage buffers share its limit.
-    Optimization::JoinStorageInfo(result.info, vertex_b.info,
-                                  Optimization::StorageBufferLimit(host_info));
+    // Vertex B's descriptors and storage buffers join Vertex A's, which keep their indices; its
+    // handle programs and the instructions of its blocks read them where they are here. The two
+    // halves are one stage: their storage buffers share its limit.
+    const auto storage_bindings{Optimization::JoinStorageInfo(
+        result.info, vertex_b.info, Optimization::StorageBufferLimit(host_info))};
+    const auto descriptors{
+        Optimization::JoinTextureInfo(result.info, vertex_b.info, storage_bindings)};
+    Optimization::RemapTextureDescriptors(vertex_b, descriptors);
+    Optimization::RemapStorageBindings(vertex_b, storage_bindings);
     Optimization::DeadCodeEliminationPass(result);
     if (Settings::values.renderer_debug) {
         Optimization::VerificationPass(result);
     }
     Optimization::CollectShaderInfoPass(env_vertex_b, result);
+    MarkStorageByAddress(result, host_info);
     return result;
 }
 

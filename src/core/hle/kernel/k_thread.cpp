@@ -8,8 +8,6 @@
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
-#include <condition_variable>
-#include <mutex>
 #include <optional>
 #include <vector>
 #include <array>
@@ -20,11 +18,13 @@
 #include "common/common_types.h"
 #include "common/fiber.h"
 #include "common/logging.h"
+#include "common/nx2_address_wait.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/random.h"
 #include "core/core.h"
 #include "core/cpu_manager.h"
+#include "core/guest_cpu_experiment.h"
 #include "core/hardware_properties.h"
 #include "core/hle/kernel/k_condition_variable.h"
 #include "core/hle/kernel/k_handle_table.h"
@@ -48,6 +48,9 @@
 namespace {
 
 constexpr inline s32 TerminatingThreadPriority = Kernel::Svc::SystemThreadPriorityHighest - 1;
+
+/// How long a dummy thread's host thread stays on the CPU before it sleeps (see DummyThreadBeginWait).
+constexpr std::chrono::microseconds DummyThreadSpin{20};
 
 static void ResetThreadContext32(Kernel::Svc::ThreadContext& ctx, u64 stack_top, u64 entry_point, u64 arg) {
     ctx = {};
@@ -1373,8 +1376,7 @@ namespace Kernel {
         ASSERT(this->IsDummyThread());
 
         // We will block when the scheduler lock is released.
-        std::scoped_lock lock{m_dummy_thread_mutex};
-        m_dummy_thread_runnable = false;
+        m_dummy_thread_runnable.store(0, std::memory_order_relaxed);
     }
 
     void KThread::DummyThreadBeginWait(KernelCore& kernel) {
@@ -1383,9 +1385,13 @@ namespace Kernel {
             return;
         }
 
-        // Block until runnable is no longer false.
-        std::unique_lock lock{m_dummy_thread_mutex};
-        m_dummy_thread_cv.wait(lock, [this] { return m_dummy_thread_runnable; });
+        // Block until runnable. HLE service threads wait here for every request: a short spin
+        // on the word before sleeping saves the OS wake-up (~5-10 us) of each request that
+        // follows the last one closely, on the IPC round trip of the client.
+        static const bool svcwait_off = Core::GuestCpuExperimentOff("svcwait");
+        Common::Nx2AddressWait::WaitSpinning(m_dummy_thread_runnable, 0,
+                                             svcwait_off ? std::chrono::microseconds{0}
+                                                         : DummyThreadSpin);
     }
 
     void KThread::DummyThreadEndWait(KernelCore& kernel) {
@@ -1393,11 +1399,8 @@ namespace Kernel {
         ASSERT(this->IsDummyThread());
 
         // Wake up the waiting thread.
-        {
-            std::scoped_lock lock{m_dummy_thread_mutex};
-            m_dummy_thread_runnable = true;
-        }
-        m_dummy_thread_cv.notify_one();
+        m_dummy_thread_runnable.store(1, std::memory_order_release);
+        Common::Nx2AddressWait::WakeOne(m_dummy_thread_runnable);
     }
 
     void KThread::BeginWait(KernelCore& kernel, KThreadQueue* queue) {

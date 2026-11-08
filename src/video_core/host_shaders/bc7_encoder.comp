@@ -1,0 +1,466 @@
+// SPDX-FileCopyrightText: Copyright (c) Microsoft Corporation.
+// SPDX-License-Identifier: MIT
+
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// Compresses one level of an RGBA8 image (the ASTC decoder's output) to BC7, 16 invocations per
+// 4x4 block. A GLSL port of the single-subset path of DirectXTex's GPU BC7 encoder
+// (DirectXTex/Shaders/BC7Encode.hlsl, MIT, github.com/microsoft/DirectXTex, c0cb977): its
+// TryMode456CS and EncodeBlockCS in one dispatch. Every block tries mode 4 (both index selectors),
+// mode 5 (four channel rotations each) and mode 6 (four p-bit pairs) from the block's bounding
+// box and keeps the mode with the smallest error. Modes 0-3 and 7 (partitioned) are left out to
+// keep the encode a single fast pass at load time. Values are encoded as stored (sRGB data stays
+// sRGB, like the BC1/BC3 encoder).
+//
+// Differences from the HLSL: texels are rounded to 8 bits instead of truncated, edge blocks
+// repeat the last row and column, and the alpha error weight is fixed at 1.
+
+#version 460 core
+
+layout (local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout (set = 0, binding = 0, rgba8) uniform readonly image2DArray source;
+
+layout (std430, set = 0, binding = 1) writeonly buffer Output {
+    uvec4 blocks[];
+};
+
+layout (push_constant) uniform PushConstants {
+    uint blocks_x;
+    uint blocks_y;
+    uint width;
+    uint height;
+    uint out_offset; // in 16-byte units
+};
+
+const uint BLOCKS_PER_GROUP = 4u;
+
+const uint aWeight[3][16] = {
+    {0u, 4u, 9u, 13u, 17u, 21u, 26u, 30u, 34u, 38u, 43u, 47u, 51u, 55u, 60u, 64u},
+    {0u, 9u, 18u, 27u, 37u, 46u, 55u, 64u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u},
+    {0u, 21u, 43u, 64u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u},
+};
+
+const uint aStep[3][64] = {
+    // 4-bit index: 0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64
+    {0u, 0u, 0u, 1u, 1u, 1u, 1u, 2u, 2u, 2u, 2u, 2u, 3u, 3u, 3u, 3u,
+     4u, 4u, 4u, 4u, 5u, 5u, 5u, 5u, 6u, 6u, 6u, 6u, 6u, 7u, 7u, 7u,
+     7u, 8u, 8u, 8u, 8u, 9u, 9u, 9u, 9u, 10u, 10u, 10u, 10u, 10u, 11u, 11u,
+     11u, 11u, 12u, 12u, 12u, 12u, 13u, 13u, 13u, 13u, 14u, 14u, 14u, 14u, 15u, 15u},
+    // 3-bit index: 0, 9, 18, 27, 37, 46, 55, 64
+    {0u, 0u, 0u, 0u, 0u, 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u, 2u, 2u,
+     2u, 2u, 2u, 2u, 2u, 2u, 2u, 3u, 3u, 3u, 3u, 3u, 3u, 3u, 3u, 3u,
+     3u, 4u, 4u, 4u, 4u, 4u, 4u, 4u, 4u, 4u, 5u, 5u, 5u, 5u, 5u, 5u,
+     5u, 5u, 5u, 6u, 6u, 6u, 6u, 6u, 6u, 6u, 6u, 6u, 7u, 7u, 7u, 7u},
+    // 2-bit index: 0, 21, 43, 64
+    {0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u, 1u, 1u, 1u, 1u,
+     1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u,
+     1u, 2u, 2u, 2u, 2u, 2u, 2u, 2u, 2u, 2u, 2u, 2u, 2u, 2u, 2u, 2u,
+     2u, 2u, 2u, 2u, 2u, 2u, 3u, 3u, 3u, 3u, 3u, 3u, 3u, 3u, 3u, 3u},
+};
+
+struct BufferShared {
+    uvec4 pixel;
+    uint error;
+    uint mode;
+    uint index_selector;
+    uint rotation;
+    uvec4 endpoint_low;
+    uvec4 endpoint_high;
+    uvec4 endpoint_low_quantized;
+    uvec4 endpoint_high_quantized;
+};
+shared BufferShared shared_temp[64];
+
+void Sync() {
+    memoryBarrierShared();
+    barrier();
+}
+
+int Dot3(ivec3 a, ivec3 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+int Dot4(ivec4 a, ivec4 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+}
+
+uint ComputeError(uvec4 a) {
+    return a.r * a.r + a.g * a.g + a.b * a.b + a.a * a.a;
+}
+
+void EnsureAIsLarger(inout uvec4 a, inout uvec4 b) {
+    const uvec4 hi = max(a, b);
+    b = min(a, b);
+    a = hi;
+}
+
+uvec4 Rotate(uvec4 v, uint rotation) {
+    if (rotation == 1u) {
+        v.ra = v.ar;
+    } else if (rotation == 2u) {
+        v.ga = v.ag;
+    } else if (rotation == 3u) {
+        v.ba = v.ab;
+    }
+    return v;
+}
+
+uvec4 Quantize(uvec4 color, uint prec) {
+    return (((color << 8u) + color) * ((1u << prec) - 1u) + 32768u) >> 16u;
+}
+
+uvec4 Unquantize(uvec4 color, uint prec) {
+    color = color << (8u - prec);
+    return color | (color >> prec);
+}
+
+// Endpoints are returned quantized and shifted to the top of their byte; `endpoint` becomes what
+// the decoder reconstructs from them.
+void CompressEndpoints4(inout uvec4 endpoint[2], out uvec4 quantized[2]) {
+    for (uint j = 0u; j < 2u; ++j) {
+        quantized[j].rgb = Quantize(endpoint[j].rgbb, 5u).rgb;
+        quantized[j].a = Quantize(uvec4(endpoint[j].a), 6u).r;
+        endpoint[j].rgb = Unquantize(quantized[j].rgbb, 5u).rgb;
+        endpoint[j].a = Unquantize(uvec4(quantized[j].a), 6u).r;
+        quantized[j].rgb <<= 3u;
+        quantized[j].a <<= 2u;
+    }
+}
+
+void CompressEndpoints5(inout uvec4 endpoint[2], out uvec4 quantized[2]) {
+    for (uint j = 0u; j < 2u; ++j) {
+        quantized[j].rgb = Quantize(endpoint[j].rgbb, 7u).rgb;
+        quantized[j].a = endpoint[j].a;
+        endpoint[j].rgb = Unquantize(quantized[j].rgbb, 7u).rgb;
+        quantized[j].rgb <<= 1u;
+    }
+}
+
+void CompressEndpoints6(inout uvec4 endpoint[2], uvec2 p, out uvec4 quantized[2]) {
+    for (uint j = 0u; j < 2u; ++j) {
+        quantized[j] = (endpoint[j] & 0xFFFFFFFEu) | p[j];
+        endpoint[j] = quantized[j];
+    }
+}
+
+uint Step(uint prec, int dot_product, int span_norm_sqr) {
+    if (span_norm_sqr <= 0 || dot_product <= 0) {
+        return 0u;
+    }
+    if (dot_product >= span_norm_sqr) {
+        return aStep[prec][63];
+    }
+    return aStep[prec][uint(float(dot_product) * 63.49999 / float(span_norm_sqr))];
+}
+
+void ReduceEndpoints(uint gi, uint thread_in_block) {
+    for (uint stride = 8u; stride > 0u; stride >>= 1u) {
+        if (thread_in_block < stride) {
+            shared_temp[gi].endpoint_low =
+                min(shared_temp[gi].endpoint_low, shared_temp[gi + stride].endpoint_low);
+            shared_temp[gi].endpoint_high =
+                max(shared_temp[gi].endpoint_high, shared_temp[gi + stride].endpoint_high);
+        }
+        Sync();
+    }
+}
+
+#define EP_L shared_temp[thread_base].endpoint_low_quantized
+#define EP_H shared_temp[thread_base].endpoint_high_quantized
+#define CI(i) shared_temp[thread_base + (i)].error
+#define AI(i) shared_temp[thread_base + (i)].mode
+
+uvec4 Package4(uint rotation, uint index_selector, uint thread_base) {
+    uvec4 block;
+    block.x = 0x10u | ((rotation & 3u) << 5) | ((index_selector & 1u) << 7) |
+              ((EP_L.r & 0xF8u) << 5) | ((EP_H.r & 0xF8u) << 10) | ((EP_L.g & 0xF8u) << 15) |
+              ((EP_H.g & 0xF8u) << 20) | ((EP_L.b & 0xF8u) << 25);
+    block.y = ((EP_L.b & 0xF8u) >> 7) | ((EP_H.b & 0xF8u) >> 2) | ((EP_L.a & 0xFCu) << 4) |
+              ((EP_H.a & 0xFCu) << 10) | ((CI(0) & 1u) << 18) | (CI(1) << 19) | (CI(2) << 21) |
+              (CI(3) << 23) | (CI(4) << 25) | (CI(5) << 27) | (CI(6) << 29) | (CI(7) << 31);
+    block.z = (CI(7) >> 1) | (CI(8) << 1) | (CI(9) << 3) | (CI(10) << 5) | (CI(11) << 7) |
+              (CI(12) << 9) | (CI(13) << 11) | (CI(14) << 13) | (CI(15) << 15) |
+              ((AI(0) & 3u) << 17) | (AI(1) << 19) | (AI(2) << 22) | (AI(3) << 25) |
+              (AI(4) << 28) | (AI(5) << 31);
+    block.w = (AI(5) >> 1) | (AI(6) << 2) | (AI(7) << 5) | (AI(8) << 8) | (AI(9) << 11) |
+              (AI(10) << 14) | (AI(11) << 17) | (AI(12) << 20) | (AI(13) << 23) |
+              (AI(14) << 26) | (AI(15) << 29);
+    return block;
+}
+
+uvec4 Package5(uint rotation, uint thread_base) {
+    uvec4 block;
+    block.x = 0x20u | (rotation << 6) | ((EP_L.r & 0xFEu) << 7) | ((EP_H.r & 0xFEu) << 14) |
+              ((EP_L.g & 0xFEu) << 21) | ((EP_H.g & 0xFEu) << 28);
+    block.y = ((EP_H.g & 0xFEu) >> 4) | ((EP_L.b & 0xFEu) << 3) | ((EP_H.b & 0xFEu) << 10) |
+              (EP_L.a << 18) | (EP_H.a << 26);
+    block.z = (EP_H.a >> 6) | (CI(0) << 2) | (CI(1) << 3) | (CI(2) << 5) | (CI(3) << 7) |
+              (CI(4) << 9) | (CI(5) << 11) | (CI(6) << 13) | (CI(7) << 15) | (CI(8) << 17) |
+              (CI(9) << 19) | (CI(10) << 21) | (CI(11) << 23) | (CI(12) << 25) | (CI(13) << 27) |
+              (CI(14) << 29) | (CI(15) << 31);
+    block.w = (CI(15) >> 1) | (AI(0) << 1) | (AI(1) << 2) | (AI(2) << 4) | (AI(3) << 6) |
+              (AI(4) << 8) | (AI(5) << 10) | (AI(6) << 12) | (AI(7) << 14) | (AI(8) << 16) |
+              (AI(9) << 18) | (AI(10) << 20) | (AI(11) << 22) | (AI(12) << 24) |
+              (AI(13) << 26) | (AI(14) << 28) | (AI(15) << 30);
+    return block;
+}
+
+uvec4 Package6(uint thread_base) {
+    uvec4 block;
+    block.x = 0x40u | ((EP_L.r & 0xFEu) << 6) | ((EP_H.r & 0xFEu) << 13) |
+              ((EP_L.g & 0xFEu) << 20) | ((EP_H.g & 0xFEu) << 27);
+    block.y = ((EP_H.g & 0xFEu) >> 5) | ((EP_L.b & 0xFEu) << 2) | ((EP_H.b & 0xFEu) << 9) |
+              ((EP_L.a & 0xFEu) << 16) | ((EP_H.a & 0xFEu) << 23) | ((EP_L.r & 0x01u) << 31);
+    block.z = (EP_H.r & 0x01u) | (CI(0) << 1) | (CI(1) << 4) | (CI(2) << 8) | (CI(3) << 12) |
+              (CI(4) << 16) | (CI(5) << 20) | (CI(6) << 24) | (CI(7) << 28);
+    block.w = CI(8) | (CI(9) << 4) | (CI(10) << 8) | (CI(11) << 12) | (CI(12) << 16) |
+              (CI(13) << 20) | (CI(14) << 24) | (CI(15) << 28);
+    return block;
+}
+
+void main() {
+    const uint gi = gl_LocalInvocationIndex;
+    const uint block_in_group = gi / 16u;
+    const uint thread_base = block_in_group * 16u;
+    const uint thread_in_block = gi - thread_base;
+    const uint block_x = gl_WorkGroupID.x * BLOCKS_PER_GROUP + block_in_group;
+    const uint block_y = gl_WorkGroupID.y;
+    const uint layer = gl_WorkGroupID.z;
+    // Blocks past the right edge still take part in the barriers; only their store is skipped.
+    const bool valid = block_x < blocks_x;
+
+    const ivec2 last = ivec2(width, height) - 1;
+    const ivec2 coord = min(ivec2(min(block_x, blocks_x - 1u) * 4u + thread_in_block % 4u,
+                                  block_y * 4u + thread_in_block / 4u),
+                            last);
+    const uvec4 texel =
+        uvec4(round(clamp(imageLoad(source, ivec3(coord, int(layer))), 0.0, 1.0) * 255.0));
+
+    // TryMode456CS: pick the mode, rotation and index selector.
+    shared_temp[gi].pixel = texel;
+    shared_temp[gi].endpoint_low = texel;
+    shared_temp[gi].endpoint_high = texel;
+    Sync();
+    ReduceEndpoints(gi, thread_in_block);
+
+    uvec4 endpoint[2];
+    endpoint[0] = shared_temp[thread_base].endpoint_low;
+    endpoint[1] = shared_temp[thread_base].endpoint_high;
+
+    uint error = 0xFFFFFFFFu;
+    uint mode = 0u;
+    uint index_selector = 0u;
+    uint rotation = 0u;
+    uvec2 index_prec = uvec2(2u, 2u);
+    if (thread_in_block < 8u) {
+        // Mode 4: even threads 2-bit colour and 3-bit alpha indices, odd threads the reverse.
+        index_selector = thread_in_block & 1u;
+        index_prec = index_selector == 0u ? uvec2(2u, 1u) : uvec2(1u, 2u);
+    }
+    uvec4 quantized[2];
+    if (thread_in_block < 12u) {
+        // Modes 4 (threads 0-7) and 5 (threads 8-11), each with the four channel rotations.
+        rotation = thread_in_block < 8u ? thread_in_block / 2u : thread_in_block - 8u;
+        endpoint[0] = Rotate(endpoint[0], rotation);
+        endpoint[1] = Rotate(endpoint[1], rotation);
+        if (thread_in_block < 8u) {
+            mode = 4u;
+            CompressEndpoints4(endpoint, quantized);
+        } else {
+            mode = 5u;
+            CompressEndpoints5(endpoint, quantized);
+        }
+
+        uvec4 pixel = Rotate(shared_temp[thread_base].pixel, rotation);
+        ivec4 span = ivec4(endpoint[1]) - ivec4(endpoint[0]);
+        const ivec2 span_norm_sqr = ivec2(Dot3(span.rgb, span.rgb), span.a * span.a);
+
+        // Endpoint 0 has to be the one closer to texel 0, whose index has no top bit.
+        ivec3 d0 = ivec3(pixel.rgb) - ivec3(endpoint[0].rgb);
+        ivec3 d1 = ivec3(pixel.rgb) - ivec3(endpoint[1].rgb);
+        if (Dot3(d0, d0) > Dot3(d1, d1)) {
+            span.rgb = -span.rgb;
+            const uvec3 t = endpoint[0].rgb;
+            endpoint[0].rgb = endpoint[1].rgb;
+            endpoint[1].rgb = t;
+        }
+        const int a0 = int(pixel.a) - int(endpoint[0].a);
+        const int a1 = int(pixel.a) - int(endpoint[1].a);
+        if (a0 * a0 > a1 * a1) {
+            span.a = -span.a;
+            const uint t = endpoint[0].a;
+            endpoint[0].a = endpoint[1].a;
+            endpoint[1].a = t;
+        }
+
+        error = 0u;
+        for (uint i = 0u; i < 16u; ++i) {
+            pixel = Rotate(shared_temp[thread_base + i].pixel, rotation);
+            const uint color_index =
+                Step(index_prec.x, Dot3(span.rgb, ivec3(pixel.rgb) - ivec3(endpoint[0].rgb)),
+                     span_norm_sqr.x);
+            const uint alpha_index = Step(
+                index_prec.y, span.a * (int(pixel.a) - int(endpoint[0].a)), span_norm_sqr.y);
+            uvec4 pixel_r;
+            pixel_r.rgb = ((64u - aWeight[index_prec.x][color_index]) * endpoint[0].rgb +
+                           aWeight[index_prec.x][color_index] * endpoint[1].rgb + 32u) >>
+                          6u;
+            pixel_r.a = ((64u - aWeight[index_prec.y][alpha_index]) * endpoint[0].a +
+                         aWeight[index_prec.y][alpha_index] * endpoint[1].a + 32u) >>
+                        6u;
+            EnsureAIsLarger(pixel_r, pixel);
+            error += ComputeError(pixel_r - pixel);
+        }
+    } else {
+        // Mode 6 in threads 12-15, one p-bit pair each (kept in rotation).
+        const uint p = thread_in_block - 12u;
+        CompressEndpoints6(endpoint, uvec2(p, p >> 1u) & 1u, quantized);
+
+        uvec4 pixel = shared_temp[thread_base].pixel;
+        ivec4 span = ivec4(endpoint[1]) - ivec4(endpoint[0]);
+        const int span_norm_sqr = Dot4(span, span);
+        const int dot_product = Dot4(span, ivec4(pixel) - ivec4(endpoint[0]));
+        if (span_norm_sqr > 0 && dot_product >= 0 &&
+            uint(float(dot_product) * 63.49999) > uint(32 * span_norm_sqr)) {
+            span = -span;
+            const uvec4 t = endpoint[0];
+            endpoint[0] = endpoint[1];
+            endpoint[1] = t;
+        }
+
+        error = 0u;
+        for (uint i = 0u; i < 16u; ++i) {
+            pixel = shared_temp[thread_base + i].pixel;
+            const uint color_index =
+                Step(0u, Dot4(span, ivec4(pixel) - ivec4(endpoint[0])), span_norm_sqr);
+            uvec4 pixel_r = ((64u - aWeight[0][color_index]) * endpoint[0] +
+                             aWeight[0][color_index] * endpoint[1] + 32u) >>
+                            6u;
+            EnsureAIsLarger(pixel_r, pixel);
+            error += ComputeError(pixel_r - pixel);
+        }
+        mode = 6u;
+        rotation = p;
+    }
+
+    shared_temp[gi].error = error;
+    shared_temp[gi].mode = mode;
+    shared_temp[gi].index_selector = index_selector;
+    shared_temp[gi].rotation = rotation;
+    Sync();
+    for (uint stride = 8u; stride > 0u; stride >>= 1u) {
+        if (thread_in_block < stride && shared_temp[gi].error > shared_temp[gi + stride].error) {
+            shared_temp[gi].error = shared_temp[gi + stride].error;
+            shared_temp[gi].mode = shared_temp[gi + stride].mode;
+            shared_temp[gi].index_selector = shared_temp[gi + stride].index_selector;
+            shared_temp[gi].rotation = shared_temp[gi + stride].rotation;
+        }
+        Sync();
+    }
+
+    // EncodeBlockCS for the chosen single-subset mode.
+    mode = shared_temp[thread_base].mode;
+    index_selector = shared_temp[thread_base].index_selector;
+    rotation = shared_temp[thread_base].rotation;
+    Sync();
+
+    const uvec4 pixel = mode == 6u ? texel : Rotate(texel, rotation);
+    shared_temp[gi].pixel = pixel;
+    shared_temp[gi].endpoint_low = pixel;
+    shared_temp[gi].endpoint_high = pixel;
+    Sync();
+    ReduceEndpoints(gi, thread_in_block);
+
+    if (thread_in_block == 0u) {
+        endpoint[0] = shared_temp[thread_base].endpoint_low;
+        endpoint[1] = shared_temp[thread_base].endpoint_high;
+        if (mode == 4u) {
+            CompressEndpoints4(endpoint, quantized);
+        } else if (mode == 5u) {
+            CompressEndpoints5(endpoint, quantized);
+        } else {
+            CompressEndpoints6(endpoint, uvec2(rotation, rotation >> 1u) & 1u, quantized);
+        }
+        const ivec4 span = ivec4(endpoint[1]) - ivec4(endpoint[0]);
+        const ivec4 first = ivec4(shared_temp[thread_base].pixel) - ivec4(endpoint[0]);
+        if (mode == 6u) {
+            const int span_norm_sqr = Dot4(span, span);
+            const int dot_product = Dot4(span, first);
+            if (span_norm_sqr > 0 && dot_product > 0 &&
+                uint(float(dot_product) * 63.49999) > uint(32 * span_norm_sqr)) {
+                uvec4 t = endpoint[0];
+                endpoint[0] = endpoint[1];
+                endpoint[1] = t;
+                t = quantized[0];
+                quantized[0] = quantized[1];
+                quantized[1] = t;
+            }
+        } else {
+            const ivec2 span_norm_sqr = ivec2(Dot3(span.rgb, span.rgb), span.a * span.a);
+            const ivec2 dot_product = ivec2(Dot3(span.rgb, first.rgb), span.a * first.a);
+            if (span_norm_sqr.x > 0 && dot_product.x > 0 &&
+                uint(float(dot_product.x) * 63.49999) > uint(32 * span_norm_sqr.x)) {
+                uvec3 t = endpoint[0].rgb;
+                endpoint[0].rgb = endpoint[1].rgb;
+                endpoint[1].rgb = t;
+                t = quantized[0].rgb;
+                quantized[0].rgb = quantized[1].rgb;
+                quantized[1].rgb = t;
+            }
+            if (span_norm_sqr.y > 0 && dot_product.y > 0 &&
+                uint(float(dot_product.y) * 63.49999) > uint(32 * span_norm_sqr.y)) {
+                uint t = endpoint[0].a;
+                endpoint[0].a = endpoint[1].a;
+                endpoint[1].a = t;
+                t = quantized[0].a;
+                quantized[0].a = quantized[1].a;
+                quantized[1].a = t;
+            }
+        }
+        shared_temp[gi].endpoint_low = endpoint[0];
+        shared_temp[gi].endpoint_high = endpoint[1];
+        shared_temp[gi].endpoint_low_quantized = quantized[0];
+        shared_temp[gi].endpoint_high_quantized = quantized[1];
+    }
+    Sync();
+
+    {
+        endpoint[0] = shared_temp[thread_base].endpoint_low;
+        endpoint[1] = shared_temp[thread_base].endpoint_high;
+        const ivec4 span = ivec4(endpoint[1]) - ivec4(endpoint[0]);
+        const ivec4 offset = ivec4(pixel) - ivec4(endpoint[0]);
+        uint color_index;
+        uint alpha_index = 0u;
+        if (mode == 6u) {
+            color_index = Step(0u, Dot4(span, offset), Dot4(span, span));
+        } else {
+            const uvec2 prec =
+                mode == 5u ? uvec2(2u, 2u) : (index_selector == 0u ? uvec2(2u, 1u) : uvec2(1u, 2u));
+            color_index = Step(prec.x, Dot3(span.rgb, offset.rgb), Dot3(span.rgb, span.rgb));
+            alpha_index = Step(prec.y, span.a * offset.a, span.a * span.a);
+            if (index_selector != 0u) {
+                const uint t = color_index;
+                color_index = alpha_index;
+                alpha_index = t;
+            }
+        }
+        Sync();
+        shared_temp[gi].error = color_index;
+        shared_temp[gi].mode = alpha_index;
+    }
+    Sync();
+
+    if (thread_in_block == 0u && valid) {
+        uvec4 block;
+        if (mode == 4u) {
+            block = Package4(rotation, index_selector, thread_base);
+        } else if (mode == 5u) {
+            block = Package5(rotation, thread_base);
+        } else {
+            block = Package6(thread_base);
+        }
+        blocks[out_offset + (layer * blocks_y + block_y) * blocks_x + block_x] = block;
+    }
+}

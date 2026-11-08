@@ -6,12 +6,17 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdio>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <span>
 #include <thread>
 #include <utility>
 #include <queue>
@@ -26,7 +31,9 @@
 #include "common/settings.h"
 #include "video_core/gpu_split.h"
 #include "video_core/renderer_vulkan/fragment_barrier_state.h"
+#include "video_core/renderer_vulkan/render_pass_barrier_tracker.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#include "video_core/vulkan_common/gpu_markers.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace VideoCommon {
@@ -40,7 +47,9 @@ class CommandPool;
 class Device;
 class Framebuffer;
 class GraphicsPipeline;
+class ReorderedUploadBatch;
 class StateTracker;
+class UploadBatch;
 
 struct QueryCacheParams;
 
@@ -66,6 +75,10 @@ public:
     bool DeferFlush();
     /// Submits deferred work (the split's back, from its idle hook).
     void FlushDeferred();
+    /// The split's back: the work so far is submitted with the next submission, when the back
+    /// goes idle or when another thread waits for it (WaitSubmitted), with no time window. False
+    /// on other threads (the caller submits).
+    bool DeferFlushUntilWanted();
     /// Threads other than the split's back: waits until tick is submitted, asking the back to
     /// submit deferred work (logged every 2 s while it waits). False only when the back thread
     /// is not running, so nothing will submit it: the caller then submits it itself.
@@ -79,7 +92,15 @@ public:
     /// safe to touch worker resources.
     void WaitWorker();
 
+    /// Ends frame `frame` (counted by the caller): about once a second the next frame's
+    /// submissions are timed, for EDEN_DKB_FRAME_TRACE and GpuFrameMs.
     void MarkFrameEnd(u64 frame);
+
+    /// GPU time of the last timed frame (the sum of its submissions), or nullopt before one.
+    [[nodiscard]] std::optional<float> GpuFrameMs() const {
+        const float ms = gpu_frame_ms.load(std::memory_order_relaxed);
+        return ms >= 0.0f ? std::optional{ms} : std::nullopt;
+    }
     void TraceGraphicsPipeline(const std::array<u64, 6>& hashes);
     void TraceComputePipeline(u64 hash);
     /// Worker thread, inside a recorded command: timestamps one draw or dispatch of a sampled
@@ -87,6 +108,23 @@ public:
     template <typename Func>
     void TraceGpuWork(vk::CommandBuffer cmdbuf, u64 hash, u64 fragment_hash,
                       std::array<u32, 3> size, Func&& work) {
+        if (GpuMarkers::Enabled()) {
+            std::array<char, 40> label{};
+            std::snprintf(label.data(), label.size(), "%016llx %016llx",
+                          static_cast<unsigned long long>(hash),
+                          static_cast<unsigned long long>(fragment_hash));
+            std::array<float, 4> color{0.2f, 0.6f, 1.0f, 1.0f};
+            cmdbuf.BeginDebugUtilsLabelEXT(label.data(), color);
+        }
+        TraceGpuWorkTimed(cmdbuf, hash, fragment_hash, size, work);
+        if (GpuMarkers::Enabled()) {
+            cmdbuf.EndDebugUtilsLabelEXT();
+        }
+    }
+
+    template <typename Func>
+    void TraceGpuWorkTimed(vk::CommandBuffer cmdbuf, u64 hash, u64 fragment_hash,
+                           std::array<u32, 3> size, Func&& work) {
         if (!trace_gpu_recording || !trace_work_pool || trace_work_count == TraceMaxWork) {
             work();
             return;
@@ -98,12 +136,34 @@ public:
         cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *trace_work_pool, query + 1);
     }
 
-    /// Sends currently recorded work to the worker thread.
-    void DispatchWork();
+    /// Sends currently recorded work to the worker thread. `lazy`: a sleeping worker is woken
+    /// only once two chunks wait; submissions and WaitWorker always wake it.
+    void DispatchWork(bool lazy = false);
 
-    /// Requests to begin a renderpass.
+    /// Requests to begin a renderpass. Everything recorded before it is ordered before its draws.
     void RequestRenderpass(const Framebuffer* framebuffer,
-                           std::source_location location = std::source_location::current());
+                           std::source_location location = std::source_location::current()) {
+        RequestRenderpass(framebuffer, false, location);
+    }
+
+    /// Requests to begin a renderpass for draws that report their images with PrepareDrawImages.
+    /// Earlier render passes are ordered before it only where their images meet.
+    void RequestDrawRenderpass(const Framebuffer* framebuffer,
+                               std::source_location location = std::source_location::current()) {
+        RequestRenderpass(framebuffer, true, location);
+    }
+
+    /**
+     * Reports the images the next draw samples or uses as storage images, before its
+     * RequestDrawRenderpass. Records the deferred render pass barrier first when the draw needs it.
+     * @param other_writes The draw writes storage memory or transform feedback buffers.
+     */
+    void PrepareDrawImages(std::span<const VkImage> images, bool other_writes);
+    /// The same for a draw whose image set the caller names by a generation it bumps whenever the
+    /// set changes: `images` is only read for a generation not seen last.
+    void PrepareDrawImages(u64 generation, std::span<const VkImage> images, bool other_writes);
+    /// The same for a draw reusing the image set of `generation`, handed over before.
+    void PrepareDrawImages(u64 generation, bool other_writes);
 
     /// Defers a full-attachment color clear so it becomes the next render pass.
     bool DeferColorClear(const Framebuffer* framebuffer, u32 rt_slot, const VkClearValue& value);
@@ -135,6 +195,12 @@ public:
         return render_pass_has_stores;
     }
 
+    /// Transform feedback began in the active render pass: its end orders the writes before
+    /// vertex input and transfers.
+    void NoteRenderPassTransformFeedback() {
+        render_pass_has_xfb = true;
+    }
+
     /// A dispatch was recorded: the next render pass must see what it wrote.
     void NoteComputeWrites() {
         compute_writes_pending = true;
@@ -144,6 +210,9 @@ public:
     bool IsRenderPassActive() const {
         return state.renderpass != VK_NULL_HANDLE;
     }
+
+    /// Whether the active render pass is the one RequestRenderpass(framebuffer) would keep.
+    bool RenderPassMatches(const Framebuffer* framebuffer) const;
 
     /// Update the pipeline to the current execution context.
     bool UpdateGraphicsPipeline(GraphicsPipeline* pipeline);
@@ -162,6 +231,12 @@ public:
 
     /// Returns true when the descriptor buffer chunk has to be bound into the command buffer.
     bool UpdateDescriptorBufferChunk(u32 descriptor_chunk);
+
+    /// A descriptor heap was bound (it invalidates descriptor buffer bindings): the next
+    /// descriptor buffer draw binds its chunk again.
+    void InvalidateDescriptorBuffer() noexcept {
+        state.descriptor_buffer_bound = false;
+    }
 
     /// Invalidates current command buffer state except for render passes
     void InvalidateState();
@@ -183,12 +258,39 @@ public:
         if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
             VideoCommon::GpuSplit::CheckOwner("Scheduler::Record");
         }
+        // Before the upload flush below: its own record must not take this command's flag, and it
+        // counts as other work before a dispatch.
+        const bool counted = !std::exchange(next_record_uncounted, false);
+        if (uploads_pending) {
+            // Uploads recorded before this command go before it.
+            FlushUploads();
+        }
+        if (pass_barriers.Pending() && state.renderpass == VK_NULL_HANDLE) {
+            // Anything recorded outside a render pass may use what the deferred passes wrote.
+            RecordRenderPassBarrier();
+        }
+        recorded_commands += counted ? 1 : 0;
         if (chunk->Record(command)) {
             return;
         }
-        DispatchWork();
+        DispatchWork(true);
         (void)chunk->Record(command);
     }
+
+    /// An upload in order: copies into dst after the work recorded before them and before the
+    /// work recorded after them (the barriers of an in-order buffer copy). Uploads with no other
+    /// command between them share one command and one pair of barriers, unless one would write
+    /// bytes another writes, or a buffer another reads. Call outside a render pass.
+    void RecordUpload(VkBuffer src, VkBuffer dst, std::span<const VkBufferCopy> copies);
+
+    /// An upload ahead of all the work of this submission's main command buffer: it runs in the
+    /// upload command buffer, which the submission's reordered uploads are recorded into as one
+    /// command when it is submitted. The caller guarantees that no work recorded in this
+    /// submission uses the bytes it writes, nor work of an earlier submission after prior_tick
+    /// (0: of any). Unless the host GPU has finished submission prior_tick by then, the upload
+    /// command buffer begins with a barrier on the work of earlier submissions.
+    void RecordReorderedUpload(VkBuffer src, VkBuffer dst, std::span<const VkBufferCopy> copies,
+                               u64 prior_tick);
 
     template <typename T>
         requires std::is_invocable_v<T, vk::CommandBuffer>
@@ -197,6 +299,22 @@ public:
             [command = std::move(c)](vk::CommandBuffer cmdbuf, vk::CommandBuffer) {
                 command(cmdbuf);
             });
+    }
+
+    /// Records a command of a guest dispatch that touches no memory but the dispatch's own (its
+    /// binds, the wait for its pipeline, the dispatch and its barrier): RecordedCommands does not
+    /// count it.
+    template <typename T>
+        requires std::is_invocable_v<T, vk::CommandBuffer>
+    void RecordForDispatch(T&& c) {
+        next_record_uncounted = true;
+        Record(std::forward<T>(c));
+    }
+
+    /// Commands recorded so far, except RecordForDispatch's. Unchanged between two dispatches
+    /// means nothing else ran between them.
+    [[nodiscard]] u64 RecordedCommands() const noexcept {
+        return recorded_commands;
     }
 
     /// Whether the recording thread submitted `tick` within 20 ms.
@@ -358,6 +476,8 @@ private:
         bool Record(T& command) {
             using FuncType = TypedCommand<T>;
             static_assert(sizeof(FuncType) < sizeof(data), "Lambda is too large");
+            // The offset is aligned within data, so data itself must be aligned at least as much.
+            static_assert(alignof(FuncType) <= DataAlignment, "Lambda needs more alignment");
 
             command_offset = Common::AlignUp(command_offset, alignof(FuncType));
             if (command_offset > sizeof(data) - sizeof(FuncType)) {
@@ -393,7 +513,12 @@ private:
 
         size_t command_offset = 0;
         bool submit = false;
-        alignas(std::max_align_t) std::array<u8, 0x8000> data{};
+        /// Commands are constructed in data at offsets aligned for their type. Some hold
+        /// alignas(16) members (the ASTC decoder pass's BlockLinearSwizzle2DParams), and
+        /// std::max_align_t is only 8 on MSVC and clang-cl, so data asks for 16 itself rather
+        /// than depending on where the members before it happen to end.
+        static constexpr size_t DataAlignment = (std::max)(alignof(std::max_align_t), size_t{16});
+        alignas(DataAlignment) std::array<u8, 0x8000> data{};
     };
 
     struct State {
@@ -418,11 +543,23 @@ private:
     };
 
     /// Begins a render pass for the given framebuffer, optionally with clear values.
+    /// @param tracked The pass's draws report their images (RequestDrawRenderpass).
     void BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass renderpass,
-                             const VkClearValue* clear_values, u32 clear_value_count);
+                             const VkClearValue* clear_values, u32 clear_value_count,
+                             bool tracked);
 
     /// If a deferred clear is pending.
-    void RealizeDeferredClear();
+    void RealizeDeferredClear(bool tracked = true);
+
+    void RequestRenderpass(const Framebuffer* framebuffer, bool tracked,
+                           std::source_location location);
+
+    /// Records the barrier that orders the render passes ended so far before later work.
+    void RecordRenderPassBarrier();
+    /// PrepareDrawImages for the set the pass barrier tracker remembers.
+    void PrepareRememberedDraw(bool other_writes);
+    /// The full check of a draw's images against the pending passes, and their note.
+    void CheckDrawImages(std::span<const VkImage> images, bool other_writes);
 
     void WorkerThread(std::stop_token stop_token);
 
@@ -447,11 +584,27 @@ private:
 
     std::unique_ptr<MasterSemaphore> master_semaphore;
     FragmentBarrierState fragment_barrier;
+    RenderPassBarrierTracker pass_barriers;
+    bool pass_reads_known{}; ///< Every draw of the active render pass reported its images.
     bool render_pass_has_stores{};
+    bool render_pass_has_xfb{};
     bool compute_writes_pending{};
     bool graphics_pipeline_missing{};
     std::unique_ptr<CommandPool> command_pool;
 
+    /// RecordUpload's copies not recorded yet; uploads_pending while it holds any.
+    std::unique_ptr<UploadBatch> upload_batch;
+    bool uploads_pending{};
+    /// Records the pending uploads as one command.
+    void FlushUploads();
+    /// RecordReorderedUpload's copies, recorded when the submission is.
+    std::unique_ptr<ReorderedUploadBatch> reordered_uploads;
+    bool reordered_uploads_pending{};
+    /// Records the reordered uploads into the upload command buffer as one command.
+    void FlushReorderedUploads();
+
+    const bool trace_details = Common::DkbFrameTrace::Enabled();
+    std::atomic<float> gpu_frame_ms{-1.0f};
     vk::QueryPool trace_query_pool;
     static constexpr u32 TraceMaxSubmissions = 512;
     struct SubmissionTrace {
@@ -503,6 +656,8 @@ private:
 
     State state;
     u64 recording_epoch = 0;
+    u64 recorded_commands = 0;
+    bool next_record_uncounted = false;
 
     u32 num_renderpass_images = 0;
     std::array<VkImage, 9> renderpass_images{};
@@ -515,6 +670,7 @@ private:
     std::mutex queue_mutex;
     std::condition_variable_any event_cv;
     bool worker_waiting{}; ///< The worker is waiting for work (guarded by queue_mutex)
+    bool lazy_queued{}; ///< A lazily queued chunk may wait for a sleeping worker (recording thread)
     std::jthread worker_thread;
 
     std::chrono::steady_clock::duration frame_interval{};

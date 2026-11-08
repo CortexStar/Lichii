@@ -11,6 +11,7 @@
 #include "common/assert.h"
 #include "common/bit_field.h"
 #include "common/common_types.h"
+#include "common/input_latency.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "core/core_timing.h"
@@ -23,6 +24,7 @@
 #include "hid_core/hid_util.h"
 #include "hid_core/resources/applet_resource.h"
 #include "hid_core/resources/npad/npad.h"
+#include "hid_core/resources/npad/npad_input_publish.h"
 #include "hid_core/resources/npad/npad_vibration.h"
 #include "hid_core/resources/shared_memory_format.h"
 
@@ -144,6 +146,16 @@ void NPad::FreeAppletResourceId(u64 aruid) {
 }
 
 void NPad::ControllerUpdate(Kernel::KernelCore& kernel, Core::HID::ControllerTriggerType type, std::size_t controller_idx) {
+    if (type == Core::HID::ControllerTriggerType::Button) {
+        Common::InputLatency::Changed();
+    }
+    if (NpadInputPublish::Publishes(type)) {
+        std::scoped_lock lock{input_changed_mutex};
+        if (input_changed) {
+            input_changed();
+        }
+    }
+
     // Input callbacks can arrive before SetNpadExternals installs the applet resource.
     const auto applet_resource = applet_resource_holder.applet_resource;
     if (applet_resource == nullptr) {
@@ -652,6 +664,17 @@ void NPad::OnUpdate(Kernel::KernelCore& kernel, const Core::Timing::CoreTiming& 
             press_state |= static_cast<u64>(pad_state.npad_buttons.raw);
         }
     }
+}
+
+bool NpadInputPublish::Publishes(Core::HID::ControllerTriggerType type) {
+    return type == Core::HID::ControllerTriggerType::Button ||
+           type == Core::HID::ControllerTriggerType::Stick ||
+           type == Core::HID::ControllerTriggerType::Trigger;
+}
+
+void NPad::SetInputChangedCallback(std::function<void()> callback) {
+    std::scoped_lock lock{input_changed_mutex};
+    input_changed = std::move(callback);
 }
 
 Result NPad::SetSupportedNpadStyleSet(Kernel::KernelCore& kernel, u64 aruid, Core::HID::NpadStyleSet supported_style_set) {

@@ -133,7 +133,9 @@ public:
     YUZU_NON_COPYABLE(Decoder);
     YUZU_NON_MOVEABLE(Decoder);
 
-    explicit Decoder(Tegra::Host1x::NvdecCommon::VideoCodec codec);
+    /// `hardware_only`: for AV1, FFmpeg's own decoder, which decodes only on a host GPU (FFmpeg
+    /// picks libdav1d otherwise). Codec is null when FFmpeg was built without it.
+    explicit Decoder(Tegra::Host1x::NvdecCommon::VideoCodec codec, bool hardware_only = false);
     ~Decoder() = default;
 
     bool SupportsDecodingOnDevice(AVPixelFormat* out_pix_fmt, AVHWDeviceType type) const;
@@ -157,16 +159,26 @@ public:
     explicit HardwareContext() = default;
     ~HardwareContext();
 
+    /// Attaches the first host device, in the codec's preference order, that FFmpeg can decode it
+    /// on. Devices are created once per process.
     bool InitializeForDecoder(DecoderContext& decoder_context, const Decoder& decoder);
+
+    /// The same from the `first`-th device type of the codec's order on; returns the index of
+    /// the type attached.
+    std::optional<size_t> InitializeForDecoder(DecoderContext& decoder_context,
+                                               const Decoder& decoder, size_t first);
+
+    AVHWDeviceType GetType() const {
+        return m_type;
+    }
 
     AVBufferRef* GetBufferRef() const {
         return m_gpu_decoder;
     }
 
 private:
-    bool InitializeWithType(AVHWDeviceType type);
-
     AVBufferRef* m_gpu_decoder{};
+    AVHWDeviceType m_type{AV_HWDEVICE_TYPE_NONE};
 };
 
 // Wraps an AVCodecContext.
@@ -178,7 +190,9 @@ public:
     explicit DecoderContext(const Decoder& decoder);
     ~DecoderContext();
 
-    void InitializeHardwareDecoder(const HardwareContext& context, AVPixelFormat hw_pix_fmt);
+    void InitializeHardwareDecoder(const HardwareContext& context);
+    /// Threads FFmpeg (or libdav1d) decodes with; 0, the default, is one per logical CPU.
+    void SetThreadCount(int count);
     bool OpenContext(const Decoder& decoder, std::span<const u8> extradata = {});
     bool SendPacket(const Packet& packet);
     std::shared_ptr<Frame> ReceiveFrame();
@@ -191,11 +205,23 @@ public:
         return m_decode_order;
     }
 
+    /// A host GPU decoder was attached and could not decode the stream (no hardware format for
+    /// it, or a decode error).
+    bool HardwareFailed() const {
+        return m_hardware_failed;
+    }
+
+    void MarkHardwareFailed() {
+        m_hardware_failed = m_hardware;
+    }
+
 private:
     const Decoder& m_decoder;
     AVCodecContext* m_codec_context{};
     std::shared_ptr<Frame> m_final_frame{};
     bool m_decode_order{};
+    bool m_hardware{};
+    bool m_hardware_failed{};
 };
 
 struct FrameOffsets {

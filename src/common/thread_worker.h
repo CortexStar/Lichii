@@ -39,7 +39,8 @@ class StatefulThreadWorker {
 public:
     explicit StatefulThreadWorker(size_t num_workers, std::string name, StateMaker func = {},
                                   ThreadPlacement placement = ThreadPlacement::Default)
-        : workers_queued{num_workers}, thread_name{std::move(name)} {
+        : workers_queued{num_workers}, thread_name{std::move(name)},
+          lowers_priority{placement != ThreadPlacement::Default} {
         const auto lambda = [this, func, placement](std::stop_token stop_token) {
             Common::SetCurrentThreadName(thread_name.c_str());
             if (placement != ThreadPlacement::Default) {
@@ -133,6 +134,11 @@ public:
         });
     }
 
+    /// True when the workers run at ThreadPriority::Low.
+    [[nodiscard]] bool LowersPriority() const noexcept {
+        return lowers_priority;
+    }
+
 private:
     std::queue<Task> requests;
     std::mutex queue_mutex;
@@ -143,6 +149,7 @@ private:
     std::atomic<size_t> workers_stopped{};
     std::atomic<size_t> workers_queued{};
     std::string thread_name;
+    bool lowers_priority;
     std::vector<std::jthread> threads;
 };
 

@@ -140,6 +140,12 @@ public:
     void LoadDiskResources(u64 title_id, std::stop_token stop_loading,
                            const VideoCore::DiskResourceLoadCallback& callback);
 
+    /// A channel's dirty tables were (re)built: the state watch must patch them again.
+    void ResetStateWatch() noexcept {
+        state_watch.Reset();
+        key_pipeline = nullptr;
+    }
+
 private:
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipelineSlowPath();
 
@@ -214,7 +220,24 @@ private:
     EmissionBudget emission_budget;
 
     GraphicsPipelineCacheKey graphics_key{};
+    u64 vertex_attribute_types{}; ///< graphics_key's attribute types before the program's mask
+    /// Static vertex input: graphics_key's attributes and divisors before the program's mask.
+    std::array<FixedPipelineState::VertexAttribute, Maxwell::NumVertexAttributes>
+        static_vertex_attributes{};
+    std::array<u32, Maxwell::NumVertexArrays> static_binding_divisors{};
     GraphicsPipeline* current_pipeline{};
+    /// The pipeline graphics_key was last resolved to, and what its state
+    /// was refreshed from. While both stand, a draw reuses it without a refresh or lookup.
+    GraphicsPipeline* key_pipeline{};
+    PipelineStateWatch state_watch;
+
+    /// Shader libraries shared by the graphics pipelines built during play. Declared before the
+    /// pipelines, so it outlives them.
+    GraphicsPipelineLibraryCache graphics_libraries;
+
+    /// Driver binaries of the pipelines built, kept by Lichii (VK_KHR_pipeline_binary). Declared
+    /// before the workers that use it.
+    PipelineBinaryCache binary_cache;
 
     /// Destroys graphics pipelines unused for a while, once the GPU is done with them.
     void EvictUnusedPipelines();

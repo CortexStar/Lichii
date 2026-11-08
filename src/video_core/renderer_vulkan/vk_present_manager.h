@@ -13,6 +13,8 @@
 
 #include "common/common_types.h"
 #include "common/polyfill_thread.h"
+#include "common/thread.h"
+#include "video_core/renderer_vulkan/present_cadence.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -30,6 +32,10 @@ struct Frame {
     u32 width;
     u32 height;
     u32 index;
+    // Requested presentation view format and underlying image format may differ for SDR.
+    VkFormat format{VK_FORMAT_UNDEFINED};
+    VkFormat image_format{VK_FORMAT_UNDEFINED};
+    VkColorSpaceKHR color_space{VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
     vk::Image image;
     vk::ImageView image_view;
     vk::ImageView storage_view;
@@ -37,7 +43,10 @@ struct Frame {
     vk::CommandBuffer cmdbuf;
     vk::Semaphore render_ready;
     vk::Fence present_done;
+    u64 ready_tick{}; ///< Scheduler tick of the submission that renders it
     bool storage_capable{};
+    /// The button change the guest frame shown sampled (Common::InputLatency), 0 for none.
+    u64 input_ns{};
 };
 
 class PresentManager {
@@ -63,27 +72,58 @@ public:
 
     [[nodiscard]] bool NeedsStorage(const Frame* frame, bool required) const;
 
+    /// Selects the backing image format, preserving the cached SDR format or explicit HDR format.
+    [[nodiscard]] VkFormat GetFrameImageFormat(VkFormat image_view_format) const;
+
     /// Waits for the present thread to finish presenting all queued frames.
     void WaitPresent();
 
     /// How many additional frames can be queued without stalling the render thread
     [[nodiscard]] size_t MaxExtraFrames() const;
 
+    /// The rate the guest's presents are paced at, 0 when they are not (see PresentCadence).
+    void SetGuestPresentRate(u32 hz) {
+        guest_present_rate.store(hz, std::memory_order_relaxed);
+    }
+
     [[nodiscard]] std::size_t SwapchainImageCount() const { return swapchain_image_count; }
     [[nodiscard]] VkFormat SwapchainImageFormat() const { return swapchain_image_format; }
 
 private:
+    enum class TransferMode { Unsupported, Copy, Blit };
+
     void PresentThread(std::stop_token token);
+
+    /// Presents one frame on the next tick of the cadence at `rate` ticks per second: the oldest
+    /// queued frame the GPU has finished, or the last presented one again.
+    void PresentOnTick(std::stop_token token, u32 rate);
+
+    /// Returns the frame kept for re-presenting to the free queue.
+    void ReleaseHeldFrame();
+
+    /// Logs the cadence's work every 10 s.
+    void ReportCadence(PresentCadence::Clock::time_point now, u32 rate);
 
     void CopyToSwapchain(Frame* frame);
 
     void CopyToSwapchainImpl(Frame* frame);
 
-    void RecreateSwapchain(Frame* frame);
+    // Returns false after discarding the frame if creation or transfer cannot proceed.
+    bool RecreateSwapchain(Frame* frame);
+
+    /// Caches a copy, blit, or unsupported transfer decision for this frame and active swapchain.
+    void ConfigureTransfer(const Frame* frame);
 
     void DiscardFrame(Frame* frame);
 
+    /// Sends the HDR10 metadata of the monitor's current state to an HDR10 swapchain.
+    void UpdateHdrMetadata();
+
     void SetImageCount();
+
+    /// Waits until the copy that last waited on the current swapchain slot's acquire semaphore has
+    /// run (present thread only).
+    void WaitForSlot();
 
 private:
     const vk::Instance& instance;
@@ -103,12 +143,29 @@ private:
     std::mutex queue_mutex;
     std::mutex free_mutex;
     std::jthread present_thread;
-    bool blit_supported;
+    VkFormat transfer_source_format{VK_FORMAT_UNDEFINED};
+    TransferMode transfer_mode{TransferMode::Unsupported};
+    u64 hdr_metadata_generation{}; ///< DisplayHdrMonitor generation of the metadata sent
     bool storage_supported;
     bool use_present_thread;
     std::atomic<std::size_t> image_count{};
     std::atomic<std::size_t> swapchain_image_count{};
     std::atomic<VkFormat> swapchain_image_format{};
+
+    /// Per swapchain slot (Swapchain::GetFrameIndex): signaled once the present thread's copy
+    /// that waited on that slot's acquire semaphore has run.
+    std::vector<vk::Fence> slot_fences;
+
+    std::atomic<u32> guest_present_rate{};
+    PresentCadence cadence;
+    Common::Event cadence_wake; ///< Set to end a tick wait early (shutdown)
+    Frame* held_frame{};      ///< Last presented frame, presented again on ticks without a new one
+    bool presenting_repeat{}; ///< CopyToSwapchain is presenting held_frame again
+    struct CadenceStats {
+        PresentCadence::Clock::time_point since{};
+        u32 frames{}, repeats{}, late_frames{}, max_queued{};
+        s64 max_late_us{};
+    } cadence_stats;
 };
 
 } // namespace Vulkan

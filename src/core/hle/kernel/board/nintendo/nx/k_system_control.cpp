@@ -10,6 +10,7 @@
 #include "common/random.h"
 #include "common/settings.h"
 
+#include "core/oot_ultrawide.h"
 #include "core/hle/kernel/board/nintendo/nx/k_system_control.h"
 #include "core/hle/kernel/board/nintendo/nx/secure_monitor.h"
 #include "core/hle/kernel/k_memory_manager.h"
@@ -94,7 +95,10 @@ size_t KSystemControl::Init::GetIntendedMemorySize() {
     case Smc::MemorySize_10GB:
         return 10_GiB;
     case Smc::MemorySize_12GB:
-        return 12_GiB + KSystemControl::Nx2GraphicsServerMemorySize;
+        // Ocarina at 21:9 grows its render-target heap; the application pool grows by as much
+        // (GetApplicationPoolSize), so the DRAM does too.
+        return 12_GiB + KSystemControl::Nx2GraphicsServerMemorySize +
+               Core::OotUltrawide::ApplicationMemoryExtra();
     }
 }
 
@@ -133,7 +137,7 @@ std::size_t KSystemControl::Init::GetApplicationPoolSize() {
         case Smc::MemoryArrangement_10GB:
             return 8178_MiB;
         case Smc::MemoryArrangement_12GB:
-            return 9809_MiB;
+            return 9809_MiB + Core::OotUltrawide::ApplicationMemoryExtra();
         }
     }();
 

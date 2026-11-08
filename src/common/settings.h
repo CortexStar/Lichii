@@ -65,6 +65,7 @@ SETTING(u16, false);
 SWITCHABLE(AnisotropyMode, true);
 SWITCHABLE(AntiAliasing, false);
 SWITCHABLE(OotAntiAliasing, false);
+SWITCHABLE(HdrMode, false);
 SWITCHABLE(AspectRatio, true);
 SWITCHABLE(AstcDecodeMode, true);
 SWITCHABLE(AstcRecompression, true);
@@ -339,6 +340,19 @@ struct Values {
                                                                 linkage, true, "cpuopt_unsafe_ignore_global_monitor", Category::CpuUnsafe};
 
     // Renderer
+    // Off: the game always renders SDR. On: the game is told the display is HDR. Auto: HDR while
+    // the monitor showing the game runs in HDR, where the host can tell (Windows; elsewhere SDR).
+    SwitchableSetting<HdrMode> hdr_mode{linkage,
+#ifdef _WIN32
+                                        HdrMode::Auto,
+#else
+                                        HdrMode::Off,
+#endif
+                                        "hdr_mode", Category::Renderer};
+    SwitchableSetting<u16, true> hdr_reference_white{linkage, 0, 0, 1000, "hdr_reference_white",
+                                                  Category::Renderer, Specialization::Scalar};
+    SwitchableSetting<u16, true> hdr_peak_luminance{linkage, 0, 0, 10000, "hdr_peak_luminance",
+                                                 Category::Renderer, Specialization::Scalar};
     SwitchableSetting<RendererBackend, true> renderer_backend{linkage,
 #if defined(__sun__) || defined(__managarm__)
         RendererBackend::OpenGL_GLSL,
@@ -372,6 +386,12 @@ struct Values {
                                            Specialization::Countable,
                                            true,
                                            true};
+
+    // Lichii: the display runs with variable refresh (FreeSync, G-SYNC, HDMI VRR). With the speed
+    // limit off, presents go out immediately and the game is held just below the refresh rate so
+    // every frame stays inside the display's range.
+    SwitchableSetting<bool> variable_refresh_rate{linkage, false, "variable_refresh_rate",
+                                                  Category::Renderer};
 
     SwitchableSetting<ScalingFilter> scaling_filter{linkage,
                                                     ScalingFilter::ScaleForce,
@@ -598,6 +618,10 @@ struct Values {
                                                            "vram_usage_mode",
                                                            Category::RendererAdvanced};
 
+    // Real and displayed frame rates, frame times and GPU thread loads, drawn over the game by
+    // the presenter. EDEN_NX2_PERF_OVERLAY=1 turns it on as well.
+    Setting<bool> perf_overlay{linkage, false, "perf_overlay", Category::RendererAdvanced};
+
     SwitchableSetting<NvdecEmulation> nvdec_emulation{linkage, NvdecEmulation::Cpu,
                                                       "nvdec_emulation", Category::RendererAdvanced};
 
@@ -776,7 +800,9 @@ struct Values {
     SwitchableSetting<bool> gpu_unswizzle_enabled{linkage, false, "gpu_unswizzle_enabled",
                                                   Category::RendererHacks};
 
-    SwitchableSetting<bool> pin_gpu_threads{linkage, true, "pin_gpu_threads",
+    // Off by default: hard CPU-set pinning keeps the pinned threads on their cores while other
+    // processes use them too (9800X3D under background load: 12.3 fps pinned, 216 unpinned).
+    SwitchableSetting<bool> pin_gpu_threads{linkage, false, "pin_gpu_threads",
                                             Category::RendererHacks};
 
     SwitchableSetting<ExtendedDynamicState> dyna_state{linkage,

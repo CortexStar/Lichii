@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <functional>
@@ -52,6 +53,20 @@ struct GpuSplitTestAccess {
 
     static u64 NearWrap() {
         return GpuSplit::RingWords - 1;
+    }
+
+    /// The narrow drains' write index without a back thread: writes are noted at `position`.
+    static void InitializeNarrow(GpuSplit& split) {
+        split.front_macros = true;
+        split.page_slots = std::make_unique<GpuSplit::PageSlot[]>(GpuSplit::PageBuckets * 4);
+        split.word_slots = std::make_unique<GpuSplit::WordSlot[]>(GpuSplit::WordBuckets * 4);
+    }
+    static void SetPositions(GpuSplit& split, u64 written, u64 consumed) {
+        split.write_position = written;
+        split.consumed_cache = consumed;
+    }
+    static u64 Target(const GpuSplit& split, const void* space, GPUVAddr address, u64 size) {
+        return split.PendingWriteTarget(space, address, size, 0);
     }
 
     static u64 Execute(GpuSplit& split, u64 position, u64 available) {
@@ -779,6 +794,54 @@ TEST_CASE("Split restart resets writer positions without replaying old releases"
     }
 }
 
+TEST_CASE("Split fence releases skip the drain only at a position the back found quiet",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    Fixture f;
+    f.system.Initialize();
+    VideoCommon::GpuSplit split;
+    struct Check {
+        std::atomic<bool> quiet{true};
+        std::atomic<u64> epoch{7};
+    } check;
+    split.SetFenceQuietCheck(
+        [](void* argument, u64* epoch) {
+            auto& state = *static_cast<Check*>(argument);
+            *epoch = state.epoch.load();
+            return state.quiet.load();
+        },
+        &check);
+    Access::Start(split, f.system);
+    SCOPE_EXIT { split.Stop(); };
+    u64 epoch{};
+    split.Defer([] {});
+    split.Drain(VideoCommon::DrainSite::Acquire);
+    REQUIRE(split.FencesQuietNow(epoch));
+    REQUIRE(epoch == 7);
+    // Work sent since the check: not quiet until the back has run it and checked again.
+    std::atomic<bool> release{};
+    split.Defer([&] {
+        while (!release.load()) {
+            std::this_thread::yield();
+        }
+    });
+    split.Publish();
+    REQUIRE_FALSE(split.FencesQuietNow(epoch));
+    check.quiet = false;
+    release = true;
+    split.Drain(VideoCommon::DrainSite::Acquire);
+    REQUIRE_FALSE(split.FencesQuietNow(epoch));
+    check.quiet = true;
+    check.epoch = 8;
+    split.Defer([] {});
+    split.Drain(VideoCommon::DrainSite::Acquire);
+    REQUIRE(split.FencesQuietNow(epoch));
+    REQUIRE(epoch == 8);
+    split.Stop();
+    REQUIRE_FALSE(split.FencesQuietNow(epoch));
+    split.SetFenceQuietCheck(nullptr, nullptr);
+}
+
 TEST_CASE("Maxwell3D takes its macros back from the split's front once the split stops",
           "[video_core][gpu_split_dependencies]") {
     using Access = VideoCommon::GpuSplitTestAccess;
@@ -836,4 +899,90 @@ TEST_CASE("Maxwell3D's split front uploads macro code sent as one multi-method r
     const auto& macros = engine.GetNativeMacroEngine();
     REQUIRE(macros.native_write_offset == pointer * 3 + code.size());
     CHECK(std::equal(code.begin(), code.end(), macros.native_code.begin() + pointer * 3));
+}
+
+TEST_CASE("GpuSplit narrow drains wait only for the recorded writes that may overlap a read",
+          "[video_core][gpu_split]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    VideoCommon::GpuSplit split;
+    Access::InitializeNarrow(split);
+    int space_a = 0;
+    int space_b = 0;
+    // A page-granular write (an inline upload) at position 10.
+    Access::SetPositions(split, 10, 0);
+    split.NoteWrite(&space_a, 0x10'0000, 0x40);
+    // A release (word-granular) at position 20, in another page.
+    Access::SetPositions(split, 20, 0);
+    split.NoteWrite(&space_a, 0x20'0010, 4, true);
+
+    // A read in the uploaded page waits for the upload, one in an untouched page for nothing.
+    REQUIRE(Access::Target(split, &space_a, 0x10'0800, 4) == 10);
+    REQUIRE(Access::Target(split, &space_a, 0x30'0000, 4) == 0);
+    // Small reads go by the word: the word next to the release doesn't wait for it.
+    REQUIRE(Access::Target(split, &space_a, 0x20'0010, 4) == 20);
+    REQUIRE(Access::Target(split, &space_a, 0x20'0014, 4) == 0);
+    // Another address space may map the same memory: it waits for every recorded write.
+    REQUIRE(Access::Target(split, &space_b, 0x30'0000, 4) == 20);
+    // Once the back consumed past them, nothing is waited for.
+    Access::SetPositions(split, 30, 25);
+    REQUIRE(Access::Target(split, &space_a, 0x10'0800, 4) <= 25);
+}
+
+TEST_CASE("Maxwell3D's split front sends plain draw runs as one entry the back replays",
+          "[video_core][gpu_split_dispatch]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    Fixture f;
+    VideoCommon::GpuSplit split;
+    Access::Initialize(split, f.system);
+    constexpr u32 IndexAddressLow = MAXWELL3D_REG_INDEX(index_buffer.start_addr_low);
+    constexpr u32 IndexFirst = MAXWELL3D_REG_INDEX(index_buffer.first);
+    constexpr u32 IndexCount = MAXWELL3D_REG_INDEX(index_buffer.count);
+    constexpr u32 BaseVertex = MAXWELL3D_REG_INDEX(global_base_vertex_index);
+    constexpr u32 DepthWrite = MAXWELL3D_REG_INDEX(depth_write_enabled);
+    struct Write {
+        u32 method;
+        u32 value;
+    };
+    // Six indexed draws with new draw parameters and constant buffer data before each; a depth
+    // write (pipeline state) after the fourth ends its run.
+    std::vector<Write> stream;
+    for (u32 draw = 0; draw < 6; ++draw) {
+        stream.push_back({BaseVertex, 7 + draw * 3});
+        stream.push_back({IndexAddressLow, 0x1000 + draw * 0x100});
+        stream.push_back({CbOffset, 0x40});
+        stream.push_back({CbData, 0x100 + draw});
+        stream.push_back({CbData + 1, 0x200 + draw});
+        stream.push_back({DrawBegin, 4}); // Triangles, instance id First
+        stream.push_back({IndexFirst, 1 + draw});
+        stream.push_back({IndexCount, 3 + draw});
+        stream.push_back({DrawEnd, 0});
+        if (draw == 3) {
+            stream.push_back({DepthWrite, 1});
+        }
+    }
+    for (const Write& write : stream) {
+        f.fast.FrontCallMethod(f.system, split, write.method, write.value, true);
+        f.slow.CallMethod(f.system, write.method, write.value, true);
+    }
+    split.RunPendingFlush();
+    const u64 end = Access::End(split);
+    u64 position = 0;
+    u32 entries = 0;
+    while (position < end) {
+        position = Access::Execute(split, position, end);
+        ++entries;
+    }
+    REQUIRE(position == end);
+    // One entry per method would be 9 per draw. With the runs: the engine, the first draw's
+    // held state and data, a run of four draws, the state after it, the data and a run of two.
+    CHECK(entries <= 8);
+    REQUIRE(f.fast.regs.reg_array == f.slow.regs.reg_array);
+    REQUIRE(f.fast.shadow_state.reg_array == f.slow.shadow_state.reg_array);
+    const auto& a = f.fast.draw_manager.draw_state;
+    const auto& b = f.slow.draw_manager.draw_state;
+    CHECK(a.draw_mode == b.draw_mode);
+    CHECK(a.draw_indexed == b.draw_indexed);
+    CHECK(a.base_index == b.base_index);
+    CHECK(a.base_instance == b.base_instance);
+    CHECK(std::memcmp(&a.index_buffer, &b.index_buffer, sizeof(a.index_buffer)) == 0);
 }

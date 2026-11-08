@@ -62,8 +62,25 @@ or log a two-second timeout when the GPU needs more guest work.
 Unset it or set it to `0` for the normal path.
 
 Repeat with the emulator's video-decoder setting on CPU and then GPU.
-Keep the logs separate. AV1 requires an FFmpeg build with an AV1 decoder;
-the existing MSVC/Linux AV1 package selection does not establish MinGW support.
+Keep the logs separate. AV1 on the CPU needs FFmpeg with libdav1d (`Using decoder
+libdav1d`, then `AV1 on the CPU with <n> threads`). AV1 on the GPU needs FFmpeg's
+native `av1` decoder and an AV1 hwaccel (the MinGW package from
+`tools/windows/build-ffmpeg-mingw.sh`): the log shows `Created vulkan decode device`,
+`Using vulkan GPU decoder`, `Using decoder av1` and `decoder for "video/av1" open on
+the GPU`. A GPU decoder that fails logs `GPU decoder for "video/av1" failed, decoding
+on the CPU`. The `frame <n>` lines count late frames dropped and early replies held.
+
+## Check a decoder against the stream
+
+`EDEN_NX2_VDEC_STREAM_DUMP=<dir>` saves every packet the game submits as one IVF file per
+stream (`nx2-vdec-<syncpoint>-<n>.ivf`). With `EDEN_NX2_VDEC_TRACE=1` each written frame logs
+`frame hash ... pts=<us> picture=<hash> written=<hash> memory=same`: `picture` is the decoded
+frame, `written` the NV12 image built from it (same value when nothing was lost converting),
+`memory` whether guest memory holds what was written. Any difference is logged as an error.
+Keep the dumps on the PC. Decode one with `tools/nx2/av1_hw_probe.c` and
+`PROBE_FRAME_HASHES=1` on `none` (libdav1d), `vulkan`, `d3d12va` and `d3d11va`: its
+`frame <n> pts <pts> <hash>` lines use the same hash, so the decoder that differs from
+libdav1d, and the frame where it starts, show up by pts.
 
 Unset all trace/capture variables after testing. `EDEN_NX2_VDEC_TRACE` is enabled
 by presence, so setting it to `0` does not disable it. Restart after changing

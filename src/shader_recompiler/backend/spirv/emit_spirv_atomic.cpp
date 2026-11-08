@@ -43,9 +43,24 @@ Id StoragePointer(EmitContext& ctx, const StorageTypeDefinition& type_def,
     if (!binding.IsImmediate()) {
         throw NotImplementedException("Dynamic storage buffer indexing");
     }
+    if (ctx.storage_by_address) {
+        return ctx.PageTablePointer(type_def.element,
+                                    ctx.StorageAddress(binding.U32(), ctx.Def(offset)));
+    }
     const Id ssbo{ctx.ssbos[binding.U32()].*member_ptr};
     const Id index{StorageIndex(ctx, offset, element_size)};
     return ctx.OpAccessChain(type_def.element, ssbo, ctx.u32_zero_value, index);
+}
+
+/// The word array and index a CAS loop function takes for the word at `offset`: through the page
+/// table, an array starting at the word.
+std::pair<Id, Id> StorageWord(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset) {
+    if (ctx.storage_by_address) {
+        const Id array{ctx.PageTablePointer(ctx.storage_types.U32.array,
+                                            ctx.StorageAddress(binding.U32(), ctx.Def(offset)))};
+        return {array, ctx.u32_zero_value};
+    }
+    return {ctx.ssbos[binding.U32()].U32, StorageIndex(ctx, offset, sizeof(u32))};
 }
 
 std::pair<Id, Id> AtomicArgs(EmitContext& ctx) {
@@ -216,15 +231,13 @@ Id EmitStorageAtomicUMax32(EmitContext& ctx, const IR::Value& binding, const IR:
 
 Id EmitStorageAtomicInc32(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
                           Id value) {
-    const Id ssbo{ctx.ssbos[binding.U32()].U32};
-    const Id base_index{StorageIndex(ctx, offset, sizeof(u32))};
+    const auto [ssbo, base_index]{StorageWord(ctx, binding, offset)};
     return ctx.OpFunctionCall(ctx.U32[1], ctx.increment_cas_ssbo, base_index, value, ssbo);
 }
 
 Id EmitStorageAtomicDec32(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
                           Id value) {
-    const Id ssbo{ctx.ssbos[binding.U32()].U32};
-    const Id base_index{StorageIndex(ctx, offset, sizeof(u32))};
+    const auto [ssbo, base_index]{StorageWord(ctx, binding, offset)};
     return ctx.OpFunctionCall(ctx.U32[1], ctx.decrement_cas_ssbo, base_index, value, ssbo);
 }
 
@@ -374,55 +387,48 @@ Id EmitStorageAtomicExchange32x2(EmitContext& ctx, const IR::Value& binding,
 
 Id EmitStorageAtomicAddF32(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
                            Id value) {
-    const Id ssbo{ctx.ssbos[binding.U32()].U32};
-    const Id base_index{StorageIndex(ctx, offset, sizeof(u32))};
+    const auto [ssbo, base_index]{StorageWord(ctx, binding, offset)};
     return ctx.OpFunctionCall(ctx.F32[1], ctx.f32_add_cas, base_index, value, ssbo);
 }
 
 Id EmitStorageAtomicAddF16x2(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
                              Id value) {
-    const Id ssbo{ctx.ssbos[binding.U32()].U32};
-    const Id base_index{StorageIndex(ctx, offset, sizeof(u32))};
+    const auto [ssbo, base_index]{StorageWord(ctx, binding, offset)};
     const Id result{ctx.OpFunctionCall(ctx.F16[2], ctx.f16x2_add_cas, base_index, value, ssbo)};
     return ctx.OpBitcast(ctx.U32[1], result);
 }
 
 Id EmitStorageAtomicAddF32x2(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
                              Id value) {
-    const Id ssbo{ctx.ssbos[binding.U32()].U32};
-    const Id base_index{StorageIndex(ctx, offset, sizeof(u32))};
+    const auto [ssbo, base_index]{StorageWord(ctx, binding, offset)};
     const Id result{ctx.OpFunctionCall(ctx.F32[2], ctx.f32x2_add_cas, base_index, value, ssbo)};
     return ctx.OpPackHalf2x16(ctx.U32[1], result);
 }
 
 Id EmitStorageAtomicMinF16x2(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
                              Id value) {
-    const Id ssbo{ctx.ssbos[binding.U32()].U32};
-    const Id base_index{StorageIndex(ctx, offset, sizeof(u32))};
+    const auto [ssbo, base_index]{StorageWord(ctx, binding, offset)};
     const Id result{ctx.OpFunctionCall(ctx.F16[2], ctx.f16x2_min_cas, base_index, value, ssbo)};
     return ctx.OpBitcast(ctx.U32[1], result);
 }
 
 Id EmitStorageAtomicMinF32x2(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
                              Id value) {
-    const Id ssbo{ctx.ssbos[binding.U32()].U32};
-    const Id base_index{StorageIndex(ctx, offset, sizeof(u32))};
+    const auto [ssbo, base_index]{StorageWord(ctx, binding, offset)};
     const Id result{ctx.OpFunctionCall(ctx.F32[2], ctx.f32x2_min_cas, base_index, value, ssbo)};
     return ctx.OpPackHalf2x16(ctx.U32[1], result);
 }
 
 Id EmitStorageAtomicMaxF16x2(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
                              Id value) {
-    const Id ssbo{ctx.ssbos[binding.U32()].U32};
-    const Id base_index{StorageIndex(ctx, offset, sizeof(u32))};
+    const auto [ssbo, base_index]{StorageWord(ctx, binding, offset)};
     const Id result{ctx.OpFunctionCall(ctx.F16[2], ctx.f16x2_max_cas, base_index, value, ssbo)};
     return ctx.OpBitcast(ctx.U32[1], result);
 }
 
 Id EmitStorageAtomicMaxF32x2(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
                              Id value) {
-    const Id ssbo{ctx.ssbos[binding.U32()].U32};
-    const Id base_index{StorageIndex(ctx, offset, sizeof(u32))};
+    const auto [ssbo, base_index]{StorageWord(ctx, binding, offset)};
     const Id result{ctx.OpFunctionCall(ctx.F32[2], ctx.f32x2_max_cas, base_index, value, ssbo)};
     return ctx.OpPackHalf2x16(ctx.U32[1], result);
 }

@@ -10,14 +10,17 @@
 
 #include <boost/container/small_vector.hpp>
 
+#include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/memory_tracker_base.h"
-#include "video_core/buffer_cache/usage_tracker.h"
+#include "video_core/buffer_cache/upload_order.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/gpu_page_table.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
 #include "video_core/renderer_vulkan/vk_multi_range_buffer.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
+#include "video_core/renderer_vulkan/vk_upload_reorder_check.h"
 #include "video_core/surface.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -55,19 +58,18 @@ public:
         return buffer.Location();
     }
 
-    [[nodiscard]] bool IsRegionUsed(u64 offset, u64 size) const noexcept {
-        return tracker.IsUsed(offset, size);
+    /// The bytes that work recorded in the current submission uses, and the newest earlier
+    /// submission whose work used the buffer (BufferCacheRuntime::DecideUploadOrder).
+    [[nodiscard]] const VideoCommon::SubmissionUses& Uses() const noexcept {
+        return uses;
     }
 
+    /// GPU work recorded now reads or writes [offset, offset + size).
     void MarkUsage(u64 offset, u64 size) noexcept;
 
-    void ResetUsageTracking() noexcept {
-        tracker.Reset();
-    }
-
-    [[nodiscard]] u64 LastUsageTick() const noexcept {
-        return last_usage_tick;
-    }
+    /// An upload recorded now writes [offset, offset + size): uploads of these bytes after it in
+    /// this submission run after it (DecideUploadOrder). The check hears of it from the copy.
+    void TrackUploadWrite(u64 offset, u64 size) noexcept;
 
     [[nodiscard]] std::span<const u8> Mapped() const noexcept {
         return buffer.IsHostCoherent() ? buffer.Mapped() : std::span<const u8>{};
@@ -89,9 +91,8 @@ private:
     Scheduler* scheduler{};
     vk::Buffer buffer;
     std::vector<BufferView> views;
-    VideoCommon::UsageTracker tracker;
+    VideoCommon::SubmissionUses uses;
     VkDeviceAddress device_address{};
-    u64 last_usage_tick{};
     bool is_null{};
     bool sparse_compatible{};
 };
@@ -140,9 +141,13 @@ public:
 
     bool CanReportMemoryUsage() const;
 
-    u32 GetUniformBufferAlignment() const;
+    u32 GetUniformBufferAlignment() const {
+        return uniform_buffer_alignment;
+    }
 
-    u32 GetStorageBufferAlignment() const;
+    u32 GetStorageBufferAlignment() const {
+        return storage_buffer_alignment;
+    }
 
     /// Largest range a storage buffer binding may have
     u64 GetMaxStorageBufferRange() const;
@@ -151,15 +156,22 @@ public:
 
     [[nodiscard]] StagingBufferRef DownloadStagingBuffer(size_t size, bool deferred = false);
 
-    bool CanReorderUpload(const Buffer& buffer, std::span<const VideoCommon::BufferCopy> copies);
+    /// Where an upload of `copies` into buffer runs (VideoCommon::DecideUploadOrder): in order
+    /// when work recorded in this submission uses a byte it writes, otherwise in the upload
+    /// command buffer. Tracks the copies as uses of their bytes.
+    [[nodiscard]] VideoCommon::UploadOrder DecideUploadOrder(
+        Buffer& buffer, std::span<const VideoCommon::BufferCopy> copies);
 
     void FreeDeferredStagingBuffer(StagingBufferRef& ref);
 
     void PreCopyBarrier();
 
+    /// order: where an upload from the stream buffer runs (DecideUploadOrder); other copies run
+    /// in order. location: the caller, named by EDEN_NX2_UPLOAD_REORDER_CHECK.
     void CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
                     std::span<const VideoCommon::BufferCopy> copies, bool barrier,
-                    bool can_reorder_upload = false);
+                    VideoCommon::UploadOrder order = {},
+                    std::source_location location = std::source_location::current());
 
     void PostCopyBarrier();
 
@@ -190,6 +202,7 @@ public:
         VkBuffer buffer;
         VkDeviceAddress device_address; // base of `buffer`, 0 without buffer device address
         u32 offset;
+        const u8* mapped; // the allocation's bytes (host-visible stream memory)
     };
 
     std::span<u8> BindMappedUniformBuffer([[maybe_unused]] size_t stage,
@@ -200,6 +213,7 @@ public:
             .buffer = ref.buffer,
             .device_address = ref.device_address,
             .offset = static_cast<u32>(ref.offset),
+            .mapped = ref.mapped_span.data(),
         };
         RebindStreamUniform(last_stream_uniform, size);
         return ref.mapped_span;
@@ -215,6 +229,11 @@ public:
     /// live: made on the scheduler tick that is current now, so the staging pool has not recycled
     /// it and the GPU has not even started on it.
     void RebindStreamUniform(const StreamUniformRef& ref, u32 size) {
+        if (bank_entry != nullptr) {
+            FillBankEntry(ref.device_address != 0 ? ref.device_address + ref.offset : 0, size);
+            last_bank_bytes = ref.mapped;
+            return;
+        }
         guest_descriptor_queue.AddBuffer(ref.buffer, ref.device_address, ref.offset, size);
     }
 
@@ -235,6 +254,7 @@ public:
     }
 
     void PushMultiRangeSource(const Buffer& buffer, u32 offset, u32 size) {
+        NoteCheckUse(buffer.Handle(), offset, size, UploadReorderCheck::Source::MultiRange);
         const vk::MemoryLocation location = buffer.Location();
         multi_range_sources.push_back(MultiRangeSource{
             .handle = buffer.Handle(),
@@ -259,7 +279,28 @@ public:
     }
 
     void BindUniformBuffer(const Buffer& buffer, u32 offset, u32 size) {
+        if (bank_entry != nullptr) {
+            FillBankEntry(buffer.Handle() != VK_NULL_HANDLE ? buffer.DeviceAddress() + offset : 0,
+                          size);
+            last_bank_bytes = nullptr;
+            return;
+        }
         BindBuffer(buffer, offset, size);
+    }
+
+    /// Constant buffers by device address: while set, uniform binds fill this bank table entry
+    /// instead of adding a descriptor.
+    void SetBankEntry(Shader::Backend::SPIRV::BankTableEntry* entry) noexcept {
+        bank_entry = entry;
+    }
+
+    /// A draw's (or dispatch's) bank table: `size` bytes in the stream buffer, written now and
+    /// read by the shaders of the work recorded next. Returns its bytes and device address.
+    std::pair<std::span<u8>, u64> AllocateBankTable(u32 size);
+
+    /// The host-visible bytes the last bank entry points at (stream allocations), else nullptr.
+    [[nodiscard]] const u8* LastBankBytes() const noexcept {
+        return last_bank_bytes;
     }
 
     void BindStorageBuffer(const Buffer& buffer, u32 offset, u32 size,
@@ -273,6 +314,7 @@ public:
         if (format == VideoCore::Surface::PixelFormat::Invalid) {
             format = VideoCore::Surface::PixelFormat::R8_UNORM;
         }
+        NoteCheckUse(buffer.Handle(), offset, size, UploadReorderCheck::Source::Texel);
         guest_descriptor_queue.AddTexelBuffer(buffer.View(offset, size, format),
                                               buffer.DeviceAddress(), offset, size,
                                               TexelBufferFormat(format));
@@ -286,9 +328,28 @@ public:
         return max_dynamic_storage_buffers;
     }
 
+    /// GPU page table (VideoCommon::GpuPageTable): whether shaders can reach storage by device
+    /// address (buffer device address, 64-bit integers and atomics).
+    [[nodiscard]] bool SupportsGpuPageTable() const noexcept;
+
+    /// The device address of a zeroed page every unmapped page table entry points at.
+    [[nodiscard]] u64 NullPageAddress();
+
+    /// Brings the device copy of page table `id` up to `table`, with copies recorded in command
+    /// order (a draw recorded before never reads a new entry). Returns its device address.
+    u64 SyncPageTable(size_t id, VideoCommon::GpuPageTable& table);
+
 private:
+    /// EDEN_NX2_UPLOAD_REORDER_CHECK: work recorded now uses these bytes.
+    void NoteCheckUse(VkBuffer handle, u64 offset, u64 size, UploadReorderCheck::Source source) {
+        if (reorder_check) [[unlikely]] {
+            reorder_check->NoteUse(handle, offset, size, source);
+        }
+    }
+
     void BindBuffer(const Buffer& buffer, u32 offset, u32 size) {
         const VkBuffer handle = buffer.Handle();
+        NoteCheckUse(handle, offset, size, UploadReorderCheck::Source::Descriptor);
         if (handle == VK_NULL_HANDLE) {
             guest_descriptor_queue.AddBuffer(handle, 0, 0, VK_WHOLE_SIZE);
         } else {
@@ -297,6 +358,15 @@ private:
     }
 
     VkFormat TexelBufferFormat(VideoCore::Surface::PixelFormat format) const;
+
+    /// A bank without memory reads zeroes from the null page.
+    void FillBankEntry(u64 address, u32 size) {
+        *bank_entry = Shader::Backend::SPIRV::BankTableEntry{
+            .address = address != 0 ? address : NullPageAddress(),
+            .size = address != 0 ? size : 0,
+            .reserved = 0,
+        };
+    }
 
     void ReserveNullBuffer();
     vk::Buffer CreateNullBuffer();
@@ -323,6 +393,24 @@ private:
     VkDeviceSize multi_range_total{};
 
     StreamUniformRef last_stream_uniform{};
+
+    struct PageTableBuffer {
+        vk::Buffer buffer;
+        u64 address{};
+        u64 size{};
+    };
+    std::vector<PageTableBuffer> page_tables;
+    std::vector<VideoCommon::GpuPageTable::Update> page_table_updates;
+    vk::Buffer null_page;
+    u64 null_page_address{};
+    Shader::Backend::SPIRV::BankTableEntry* bank_entry{};
+    const u8* last_bank_bytes{};
+
+    u32 uniform_buffer_alignment{1}; ///< Asked once per bound uniform buffer: kept here
+    u32 storage_buffer_alignment{1};
+
+    /// EDEN_NX2_UPLOAD_REORDER_CHECK (diagnostic, null when off)
+    std::unique_ptr<UploadReorderCheck> reorder_check;
 
     bool limit_dynamic_storage_buffers = false;
     u32 max_dynamic_storage_buffers = (std::numeric_limits<u32>::max)();

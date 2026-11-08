@@ -35,6 +35,33 @@ TEST_CASE("NX2 FPS limit only lengthens a vblank it is below", "[core][nx2_prese
     REQUIRE(PacedInterval(TwoVblanks, 20) == 50'000'000ns);
 }
 
+TEST_CASE("NX2 FPS limit is lowered to the host's VRR cap", "[core][nx2_present_pacer]") {
+    using Service::EffectiveFpsLimit;
+    REQUIRE(EffectiveFpsLimit(0, 0) == 0);
+    REQUIRE(EffectiveFpsLimit(60, 0) == 60);
+    REQUIRE(EffectiveFpsLimit(0, 224) == 224);
+    REQUIRE(EffectiveFpsLimit(240, 224) == 224);
+    REQUIRE(EffectiveFpsLimit(120, 224) == 120);
+}
+
+TEST_CASE("NX2 present word paces only at the console's vsync rate", "[core][nx2_present_pacer]") {
+    using Service::PresentWordInterval;
+    // At 60 Hz the word's swap interval paces, scaled by the speed limit.
+    REQUIRE(PresentWordInterval(1, 60, 60, 100) == OneVblank);
+    REQUIRE(PresentWordInterval(2, 60, 60, 100) == TwoVblanks);
+    REQUIRE(PresentWordInterval(1, 60, 60, 200) == 8'333'333ns);
+    REQUIRE(PresentWordInterval(1, 60, 60, 50) == TwoVblanks);
+    // Speed limit off: only an FPS limit can pace.
+    REQUIRE(PresentWordInterval(1, 60, 60, 0) == 0ns);
+    // A faster or slower vsync event paces the game by itself, whatever the word says.
+    REQUIRE(PresentWordInterval(2, 60, 120, 100) == 0ns);
+    REQUIRE(PresentWordInterval(1, 60, 240, 100) == 0ns);
+    REQUIRE(PresentWordInterval(1, 60, 30, 100) == 0ns);
+    // An FPS limit still holds a timer-paced game: 240 Hz event, limit 120 or 60.
+    REQUIRE(Service::PacedInterval(PresentWordInterval(2, 60, 240, 100), 120) == 8'333'333ns);
+    REQUIRE(Service::PacedInterval(PresentWordInterval(2, 60, 120, 100), 60) == OneVblank);
+}
+
 TEST_CASE("NX2 interval decreases apply to the current present", "[core][nx2_present_pacer]") {
     Pacer pacer;
     REQUIRE(pacer.Advance(Start, ThreeVblanks).reset);
@@ -107,4 +134,20 @@ TEST_CASE("NX2 fixed-period pacing matches the previous algorithm", "[core][nx2_
             old_next += period;
         }
     }
+}
+
+TEST_CASE("NX2 movie cadence paces at a multiple of the movie rate", "[core][nx2_present_pacer]") {
+    using Service::MovieCadenceRate;
+    // No movie, or no limit: unchanged.
+    REQUIRE(MovieCadenceRate(112, 0) == 112);
+    REQUIRE(MovieCadenceRate(0, 60) == 0);
+    // A 60 fps movie: 112 -> 60, 224 -> 180, 240 -> 240, 120 -> 120.
+    REQUIRE(MovieCadenceRate(112, 60) == 60);
+    REQUIRE(MovieCadenceRate(224, 60) == 180);
+    REQUIRE(MovieCadenceRate(240, 60) == 240);
+    REQUIRE(MovieCadenceRate(120, 60) == 120);
+    // Below the movie's rate the late frames are dropped instead: unchanged.
+    REQUIRE(MovieCadenceRate(50, 60) == 50);
+    // 30 fps movies.
+    REQUIRE(MovieCadenceRate(112, 30) == 90);
 }

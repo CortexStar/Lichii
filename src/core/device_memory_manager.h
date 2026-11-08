@@ -10,6 +10,7 @@
 #include <atomic>
 #include <bit>
 #include <deque>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <source_location>
@@ -62,6 +63,12 @@ public:
     DAddr Allocate(size_t size);
     void AllocateFixed(DAddr start, size_t size);
     void Free(DAddr start, size_t size);
+
+    /// [address, +size) reads zero where nothing backs it, by design: Switch 2 sparse and GPU-only
+    /// regions get memory a block at a time as they are written. Unmapped reads there are not
+    /// reported. Free of the range forgets it.
+    void AddZeroReadRange(DAddr address, size_t size);
+    [[nodiscard]] bool IsZeroReadRange(DAddr address) const;
 
     void Map(DAddr address, VAddr virtual_address, size_t size, Asid asid, bool track = false);
 
@@ -141,6 +148,31 @@ public:
 
     /// Traps the next guest CPU read of these pages, to learn which GPU writes the CPU reads.
     void ArmReadTraps(DAddr addr, size_t size);
+
+    /// Changes whenever Map or Unmap changed a translation.
+    [[nodiscard]] u64 MappingGeneration() const {
+        return translation_generation.load(std::memory_order_acquire);
+    }
+
+    /// False only when ArmReadTraps never covered a page of [addr, addr + size). The bits are
+    /// set before the traps (and the read area generation) change, and never cleared, so a
+    /// guest read that finds them clear needs no flush.
+    [[nodiscard]] bool MayHaveArmedReadTraps(DAddr addr, size_t size) const {
+        if (size == 0) {
+            return false;
+        }
+        const u64 first = addr >> page_bits;
+        const u64 last = (addr + size - 1) >> page_bits;
+        if (last < first || last >= armed_page_count) {
+            return true;
+        }
+        for (u64 page = first; page <= last; ++page) {
+            if ((armed_pages[page / 64].load(std::memory_order_relaxed) >> (page % 64)) & 1) {
+                return true;
+            }
+        }
+        return false;
+    }
 
 private:
     struct TranslationEntry {
@@ -246,6 +278,10 @@ private:
     }
 
     std::atomic<u64> translation_generation{1}; ///< Bumped by Map and Unmap
+    static constexpr u64 armed_page_count = device_as_size >> page_bits;
+    /// Pages ArmReadTraps ever covered, one bit each (MayHaveArmedReadTraps).
+    std::unique_ptr<std::atomic<u64>[]> armed_pages{
+        std::make_unique<std::atomic<u64>[]>(armed_page_count / 64)};
     using CounterType = u8;
     using CounterAtomicType = std::atomic_uint8_t;
     static constexpr size_t subentries = 8 / sizeof(CounterType);
@@ -276,6 +312,8 @@ private:
     std::unique_ptr<CachedPages> cached_pages;
     Common::RangeMutex counter_guard;
     std::mutex mapping_guard;
+    mutable std::mutex zero_read_guard;
+    std::map<DAddr, size_t> zero_read_ranges; ///< Start -> size (AddZeroReadRange)
 
 
 };

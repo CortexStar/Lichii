@@ -52,6 +52,17 @@
 
 namespace Kernel {
 
+namespace {
+
+// Plain (constinit, trivially destructible) copies of the hot fields of ThreadLocalData.
+// ThreadLocalData holds an optional KThread, so every access to it goes through the TLS init
+// guard; SVCs, scheduler locks and memory traps read the current thread and the host thread ID
+// many times each.
+constinit thread_local KThread* t_nx2_current_thread = nullptr;
+constinit thread_local u8 t_nx2_host_thread_id = UINT8_MAX;
+
+} // Anonymous namespace
+
 // Can only be used by a single implementation PER THREAD
 struct ThreadLocalData {
     std::optional<KThread> raw_thread;
@@ -270,13 +281,17 @@ struct KernelCore::Impl {
     }
 
     void InitializePreemption(KernelCore& kernel) {
-        preemption_event = Core::Timing::CreateEvent("PreemptionCallback", [this, &kernel](s64 time, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
-            {
-                KScopedSchedulerLock lock(kernel);
-                global_scheduler_context->PreemptThreads(kernel);
-            }
-            return std::nullopt;
-        });
+        // Round-robin preemption every 10 ms: an OS timer tick late changes nothing.
+        preemption_event = Core::Timing::CreateRelaxedEvent(
+            "PreemptionCallback",
+            [this, &kernel](s64 time,
+                            std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
+                {
+                    KScopedSchedulerLock lock(kernel);
+                    global_scheduler_context->PreemptThreads(kernel);
+                }
+                return std::nullopt;
+            });
 
         const auto time_interval = std::chrono::nanoseconds{std::chrono::milliseconds(10)};
         system.CoreTiming().ScheduleLoopingEvent(time_interval, time_interval, preemption_event);
@@ -386,12 +401,13 @@ struct KernelCore::Impl {
         // The first four slots are reserved for CPU core threads
         ASSERT(core_id < Core::Hardware::NUM_CPU_CORES);
         tls_data.host_thread_id = u8(core_id);
+        t_nx2_host_thread_id = u8(core_id);
         return tls_data.host_thread_id;
     }
 
     /// Gets the host thread ID for the caller
     u32 GetHostThreadId() const {
-        return tls_data.host_thread_id;
+        return t_nx2_host_thread_id;
     }
 
     // Gets the dummy KThread for the caller, allocating a new one if this is the first time
@@ -442,11 +458,19 @@ struct KernelCore::Impl {
     }
 
     KThread* GetCurrentEmuThread(ThreadLocalData& t) {
-        return t.current_thread ? t.current_thread : (t.current_thread = GetHostDummyThread(t, nullptr));
+        if (KThread* const cached = t_nx2_current_thread; cached != nullptr) {
+            return cached;
+        }
+        if (t.current_thread == nullptr) {
+            t.current_thread = GetHostDummyThread(t, nullptr);
+        }
+        t_nx2_current_thread = t.current_thread;
+        return t.current_thread;
     }
 
     void SetCurrentEmuThread(KThread* thread) {
         tls_data.current_thread = thread;
+        t_nx2_current_thread = thread;
     }
 
     void DeriveInitialMemoryLayout() {
@@ -957,7 +981,7 @@ const Kernel::PhysicalCore& KernelCore::PhysicalCore(std::size_t id) const {
     return *impl->cores[id];
 }
 
-size_t KernelCore::CurrentPhysicalCoreIndex() const {
+YUZU_NO_INLINE size_t KernelCore::CurrentPhysicalCoreIndex() const {
     const u32 core_id = impl->GetCurrentHostThreadID();
     if (core_id >= Core::Hardware::NUM_CPU_CORES) {
         return Core::Hardware::NUM_CPU_CORES - 1;
@@ -973,7 +997,7 @@ const Kernel::PhysicalCore& KernelCore::CurrentPhysicalCore() const {
     return *impl->cores[CurrentPhysicalCoreIndex()];
 }
 
-Kernel::KScheduler* KernelCore::CurrentScheduler() {
+YUZU_NO_INLINE Kernel::KScheduler* KernelCore::CurrentScheduler() {
     if (auto const core_id = impl->GetCurrentHostThreadID(); core_id < Core::Hardware::NUM_CPU_CORES)
         return std::addressof(*impl->schedulers[core_id]);
     return {}; // This is expected when called from not a guest thread
@@ -1153,15 +1177,20 @@ void KernelCore::RunOnGuestCoreProcess(std::string&& process_name, std::function
     ASSERT(R_SUCCEEDED(thread->Run(*this)));
 }
 
-u32 KernelCore::GetCurrentHostThreadID() const {
+// Every KernelCore function that reads the thread-local data stays out of line. A guest thread's
+// fiber yields in KScheduler::ScheduleImpl and resumes on whichever host core thread schedules it
+// next, and LLVM keeps a function's TLS block address (gs:[0x58][_tls_index] on Windows) in a
+// callee-saved register across calls. Inlined (ThinLTO) into code that yields, a read after the
+// switch would use the previous host thread's TLS: the wrong current KThread or core.
+YUZU_NO_INLINE u32 KernelCore::GetCurrentHostThreadID() const {
     return impl->GetCurrentHostThreadID();
 }
 
-KThread* KernelCore::GetCurrentEmuThread() const {
+YUZU_NO_INLINE KThread* KernelCore::GetCurrentEmuThread() const {
     return impl->GetCurrentEmuThread(Impl::tls_data);
 }
 
-void KernelCore::SetCurrentEmuThread(KThread* thread) {
+YUZU_NO_INLINE void KernelCore::SetCurrentEmuThread(KThread* thread) {
     impl->SetCurrentEmuThread(thread);
 }
 
@@ -1310,11 +1339,11 @@ const KMemoryLayout& KernelCore::MemoryLayout() const {
     return *impl->memory_layout;
 }
 
-bool KernelCore::IsPhantomModeForSingleCore() const {
+YUZU_NO_INLINE bool KernelCore::IsPhantomModeForSingleCore() const {
     return impl->IsPhantomModeForSingleCore();
 }
 
-void KernelCore::SetIsPhantomModeForSingleCore(bool value) {
+YUZU_NO_INLINE void KernelCore::SetIsPhantomModeForSingleCore(bool value) {
     impl->SetIsPhantomModeForSingleCore(value);
 }
 

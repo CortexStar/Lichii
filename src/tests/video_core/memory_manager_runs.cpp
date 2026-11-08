@@ -12,8 +12,11 @@
 #include "core/core.h"
 #include "core/device_memory.h"
 #include "tests/core/system_test_context.h"
+#include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
+#include "video_core/texture_cache/util.h"
+#include "video_core/textures/texture.h"
 
 namespace {
 
@@ -256,4 +259,87 @@ TEST_CASE("Reads of GPU pages over unmapped device memory return zeros", "[memor
     std::ranges::fill(bytes, u8{0xcd});
     memory.ReadBlock(window, bytes.data(), size);
     REQUIRE(std::ranges::all_of(bytes, [](u8 value) { return value == 0; }));
+}
+
+TEST_CASE("A texture header with format 0 is not a valid entry", "[memory_manager]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    Core::DeviceMemory physical;
+    Tegra::MaxwellDeviceMemoryManager device_memory{physical};
+    NullRasterizer rasterizer;
+    Tegra::MemoryManager memory{system, device_memory, 32, 1ULL << 31, 16};
+    memory.BindRasterizer(&rasterizer);
+
+    constexpr GPUVAddr gpu = 0x4000'0000;
+    memory.Map(gpu, 0x1000'0000, 0x10000, Tegra::PTEKind::PITCH, false);
+
+    // Ocarina of Time's header: format 0 with four UNORM components, over mapped memory.
+    Tegra::Texture::TICEntry entry{};
+    entry.raw.fill(0);
+    entry.address_low = static_cast<u32>(gpu);
+    entry.r_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    entry.g_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    entry.b_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    entry.a_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    entry.header_version.Assign(Tegra::Texture::TICHeaderVersion::BlockLinear);
+    entry.texture_type.Assign(Tegra::Texture::TextureType::Texture2D);
+    REQUIRE(entry.HasNoFormat());
+    REQUIRE_FALSE(VideoCommon::IsValidEntry(memory, entry));
+
+    entry.format.Assign(Tegra::Texture::TextureFormat::A8B8G8R8);
+    REQUIRE_FALSE(entry.HasNoFormat());
+    REQUIRE(VideoCommon::IsValidEntry(memory, entry));
+}
+
+TEST_CASE("Zero-read device ranges cover their bytes until freed", "[memory_manager]") {
+    Core::DeviceMemory physical;
+    Tegra::MaxwellDeviceMemoryManager device_memory{physical};
+
+    // A Switch 2 sparse or GPU-only region: its device range is allocated whole, unbacked.
+    constexpr size_t size = 0x60000;
+    const DAddr range = device_memory.Allocate(size);
+    REQUIRE(range != 0);
+    REQUIRE_FALSE(device_memory.IsZeroReadRange(range));
+
+    device_memory.AddZeroReadRange(range, size);
+    REQUIRE(device_memory.IsZeroReadRange(range));
+    REQUIRE(device_memory.IsZeroReadRange(range + size - 1));
+    REQUIRE_FALSE(device_memory.IsZeroReadRange(range + size));
+    REQUIRE_FALSE(device_memory.IsZeroReadRange(range - 1));
+
+    // Reads there still return zeros.
+    std::vector<u8> bytes(0x2000, 0xcd);
+    device_memory.ReadBlockUnsafe(range + 0x1000, bytes.data(), bytes.size());
+    REQUIRE(std::ranges::all_of(bytes, [](u8 value) { return value == 0; }));
+
+    device_memory.Free(range, size);
+    REQUIRE_FALSE(device_memory.IsZeroReadRange(range));
+}
+
+TEST_CASE("Uniform banks are bound only as far as their mapping reaches", "[memory_manager]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    Core::DeviceMemory physical;
+    Tegra::MaxwellDeviceMemoryManager device_memory{physical};
+    NullRasterizer rasterizer;
+    Tegra::MemoryManager memory{system, device_memory, 32, 1ULL << 31, 16};
+    memory.BindRasterizer(&rasterizer);
+
+    // Ocarina of Time binds 64 KiB banks at unaligned addresses near the end of a 48 KiB
+    // allocation: the bank's tail lies past the mapping.
+    constexpr GPUVAddr allocation = 0x4000'0000;
+    constexpr u64 allocation_size = 0xC000;
+    constexpr GPUVAddr bank = allocation + 0xA800;
+    memory.Map(allocation, 0x1000'0000, allocation_size, Tegra::PTEKind::PITCH, false);
+    CHECK(VideoCommon::MappedUniformSize(memory, bank, 0x10000) == allocation_size - 0xA800);
+    // A bank inside the allocation keeps its size.
+    CHECK(VideoCommon::MappedUniformSize(memory, allocation, 0x8000) == 0x8000);
+
+    // The next GPU pages mapped to device memory elsewhere: still a different range.
+    memory.Map(allocation + allocation_size, 0x3000'0000, 0x10000, Tegra::PTEKind::PITCH, false);
+    CHECK(VideoCommon::MappedUniformSize(memory, bank, 0x10000) == allocation_size - 0xA800);
+    // Mapped right after it in device memory too: one range, the whole bank.
+    memory.Map(allocation + allocation_size, 0x1000'0000 + allocation_size, 0x10000,
+               Tegra::PTEKind::PITCH, false);
+    CHECK(VideoCommon::MappedUniformSize(memory, bank, 0x10000) == 0x10000);
 }

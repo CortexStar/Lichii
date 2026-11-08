@@ -17,6 +17,9 @@
 #include <bit>
 #include <string>
 #include <utility>
+#if defined(_MSC_VER) && !defined(__clang__) && (defined(_M_X64) || defined(_M_IX86))
+#include <xmmintrin.h>
+#endif
 #include "common/container/unordered_map.h"
 #include <boost/container/small_vector.hpp>
 
@@ -29,7 +32,9 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/native_verify.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_bindmemo_stats.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/render_trace.h"
 #include "video_core/texture_cache/conversion.h"
@@ -41,6 +46,19 @@
 #include "video_core/textures/decoders.h"
 
 namespace VideoCommon {
+
+// EXPERIMENT (do not merge): EDEN_NX2_TEXPOOL=0 keeps the old per-draw path for side-by-side
+// runs: no pool page is watched, so no entry becomes resident, and deleting an image or
+// invalidating its scale invalidates every image table.
+namespace TexturePoolExperiment {
+inline bool Enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_TEXPOOL");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+} // namespace TexturePoolExperiment
 
 /// EDEN_NATIVE_DRAW_DIAGNOSTICS is read once: getenv scans the whole environment block on Windows.
 [[nodiscard]] inline bool NativeDrawDiagnostics() {
@@ -211,11 +229,30 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
         if constexpr (requires(const Image& image) { image.MemoryBlock(); }) {
             std::vector<ImageId> candidates;
             const size_t limit = num_iterations * 8;
+            candidates.reserve(limit);
             lru_cache.ForEachItemBelow(frame_tick - ticks_to_destroy, [&](ImageId image_id) {
                 candidates.push_back(image_id);
                 return candidates.size() >= limit;
             });
             if (candidates.empty()) {
+                return;
+            }
+            // When Cleanup would refuse every candidate under the current modes (decoding,
+            // costly or still to download, the old images steady gameplay leaves), the pass
+            // deletes nothing in any order: skip ranking them, the block recount and the sort, a
+            // pass every frame. Exact: Cleanup refusing changes nothing but its own iteration
+            // count, and the modes only change after a deletion.
+            if (std::none_of(candidates.begin(), candidates.end(), [&](ImageId image_id) {
+                    const auto& image = slot_images[image_id];
+                    if (True(image.flags & ImageFlagBits::IsDecoding)) {
+                        return false;
+                    }
+                    const bool must_download =
+                        IsDownloadable(image) && False(image.flags & ImageFlagBits::BadOverlap);
+                    return !((!aggressive_mode && !evict_old_costly &&
+                              True(image.flags & ImageFlagBits::CostlyLoad)) ||
+                             (!high_priority_mode && must_download));
+                })) {
                 return;
             }
             if (block_image_bytes_frame == ~0ULL || frame_tick - block_image_bytes_frame >= 60) {
@@ -348,9 +385,14 @@ void TextureCache<P>::ApplyThresholdOverrides(bool log) {
     }
     expected_memory = (std::min)(expected_memory, critical_memory);
     if (log) {
-        LOG_INFO(HW_GPU, "Texture cache thresholds: expected {} MiB, critical {} MiB, minimum {} MiB",
-                 expected_memory >> 20, critical_memory >> 20, minimum_memory >> 20);
+        LogThresholds();
     }
+}
+
+template <class P>
+void TextureCache<P>::LogThresholds() const {
+    LOG_INFO(HW_GPU, "Texture cache thresholds: expected {} MiB, critical {} MiB, minimum {} MiB",
+             expected_memory >> 20, critical_memory >> 20, minimum_memory >> 20);
 }
 
 template <class P>
@@ -424,14 +466,16 @@ void TextureCache<P>::TickFrame() {
                     critical_memory =
                         budget - (std::min)(margin + pressure_margin + slack_margin, budget / 2);
                     expected_memory = critical_memory - (std::min)(margin, critical_memory / 2);
+                    ApplyThresholdOverrides(false);
                     // Log the first values and real changes (the budget moves by a few MiB all
-                    // the time).
+                    // the time). Both sides are after the cap, which is far below the budget on
+                    // large cards.
                     const u64 change = critical_memory > old_critical
                                            ? critical_memory - old_critical
                                            : old_critical - critical_memory;
                     const bool log = budget_check_frames == 1 || change >= 256_MiB;
-                    ApplyThresholdOverrides(log);
                     if (log) {
+                        LogThresholds();
                         LOG_INFO(HW_GPU,
                                  "Memory margins: base {} MiB, out of memory {} MiB, block slack {} MiB",
                                  margin >> 20, pressure_margin >> 20, slack_margin >> 20);
@@ -462,6 +506,14 @@ void TextureCache<P>::TickFrame() {
     // Skip expensive heap allocation, map construction, and sorting unless debug logging is explicitly enabled.
     static const bool log_tc = std::getenv("EDEN_NX2_TC_LOG") != nullptr;
     static u64 frames{};
+    // Compare modes: every 10 s at 60 fps, 2.5 s at 240.
+    if ((NativeVerify::Textures() || NativeVerify::Bindless()) && frame_tick % 600 == 0) {
+        LOG_INFO(HW_GPU,
+                 "Native verify textures: {} resident hits checked, {} view and {} sampler "
+                 "differences; bindless: {} heap checks, {} differences",
+                 verify_stats.checks, verify_stats.view_mismatches, verify_stats.sampler_mismatches,
+                 verify_stats.mirror_checks, verify_stats.mirror_mismatches);
+    }
     if (log_tc && ++frames % 600 == 0) {
         u64 image_bytes{};
         size_t images{};
@@ -512,6 +564,21 @@ void TextureCache<P>::TickFrame() {
                  "for buffer-written pages; {} MiB of pages marked stale",
                  tc_stale_skips, tc_stale_skip_bytes >> 20, tc_stale_gpu_written,
                  (stale_pages.Count() << StalePages::PAGE_BITS) >> 20);
+        if (channel_state != nullptr) {
+            const auto& tic = channel_state->graphics_image_table;
+            const auto& tsc = channel_state->graphics_sampler_table;
+            LOG_INFO(HW_GPU,
+                     "Texture pools last 600 frames: views {} resident / {} resolved, samplers {} "
+                     "/ {}; {} pages armed, {} written, {} GPU-written, {} rebinds, {} image "
+                     "events, {} forgets; now {} watched pages, TIC limit {} ({} armed pages), "
+                     "TSC limit {} ({})",
+                     pool_stats.view_hits, pool_stats.view_resolves, pool_stats.sampler_hits,
+                     pool_stats.sampler_resolves, pool_stats.arms, pool_stats.write_disarms,
+                     pool_stats.gpu_written_disarms, pool_stats.rebinds, pool_stats.image_events,
+                     pool_stats.forgets, pool_watch.NumPages(), tic.current_limit, tic.ArmedPages(),
+                     tsc.current_limit, tsc.ArmedPages());
+        }
+        pool_stats = {};
         tc_stale_skips = tc_stale_skip_bytes = tc_stale_gpu_written = 0;
         images_uploaded = uploaded_bytes = largest_upload = layer_uploads = 0;
         astc_opaque_images = astc_alpha_images = 0;
@@ -549,7 +616,16 @@ void TextureCache<P>::TickFrame() {
             channel_storage[c].graphics_image_table.Invalidate();
             channel_storage[c].compute_image_table.Invalidate();
         }
+        // Binding memos of their null views would skip that read.
+        BumpBindingEpoch();
     }
+    // The first use of each resident image next frame takes the full path, which touches the
+    // collector's LRU.
+    for (const size_t c : active_channel_ids) {
+        channel_storage[c].graphics_image_table.ClearAllResident();
+        channel_storage[c].compute_image_table.ClearAllResident();
+    }
+    ++pool_generation;
     sentenced_images.Tick();
     sentenced_image_index = (sentenced_image_index + 1) % TICKS_TO_DESTROY;
     sentenced_image_bytes[sentenced_image_index] = 0;
@@ -557,7 +633,9 @@ void TextureCache<P>::TickFrame() {
     sentenced_image_view.Tick();
     TickAsyncDecode();
     TickAsyncUnswizzle();
-    if (frame_tick % 600 == 0 && !uploaded_ranges.empty()) {
+    // Half a period after the buffer cache's own hint and the pipeline cache's eviction check, so
+    // the three do not land on the same frame.
+    if (frame_tick % 600 == 300 && !uploaded_ranges.empty()) {
         for (const auto& [address, size] : uploaded_ranges) {
             device_memory.HintCold(address, size);
         }
@@ -566,6 +644,9 @@ void TextureCache<P>::TickFrame() {
 
     runtime.TickFrame();
     ++frame_tick;
+    // Cached bindings skip the LRU touch of their images: keep them to one frame.
+    ++bindings_epoch;
+    ++frame_epoch_bumps;
 
     if constexpr (IMPLEMENTS_ASYNC_DOWNLOADS) {
         for (auto& buffer : async_buffers_death_ring) {
@@ -628,8 +709,16 @@ void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compu
         if (blacklist) {
             has_blacklisted = false;
         }
+        const ImageViewInOut* previous{};
         for (ImageViewInOut& view : views) {
-            view.id = VisitImageView(view.index, compute);
+            // An element repeating the one before (a handle table holding one shadow map in
+            // many elements, say) is the same view: visiting it again only prepares it again.
+            // Not once this pass has deleted image views (scaling an image down below does):
+            // that view may have gone with them.
+            view.id = previous != nullptr && previous->index == view.index && !has_deleted_images
+                          ? previous->id
+                          : VisitImageView(view.index, compute);
+            previous = &view;
             if (blacklist) {
                 if (view.blacklist && view.id != NULL_IMAGE_VIEW_ID) {
                     const ImageViewBase& image_view = slot_image_views[view.id];
@@ -760,13 +849,446 @@ SamplerId TextureCache<P>::GetSamplerId(u32 index, bool compute) {
         LOG_TRACE(HW_GPU, "Invalid sampler index={}", index);
         return NULL_SAMPLER_ID;
     }
+    if (table.IsResident(index)) {
+        ++pool_stats.sampler_hits;
+        if (NativeVerify::Textures()) {
+            const SamplerId resident_id = table.bound_ids[index];
+            table.ClearResident(index);
+            const SamplerId full_id = GetSamplerId(index, compute);
+            ++verify_stats.checks;
+            if (full_id != resident_id && verify_stats.sampler_mismatches++ < 64) {
+                LOG_ERROR(HW_GPU,
+                          "Native verify textures: TSC {} resident sampler {}, full path {}", index,
+                          resident_id.index, full_id.index);
+            }
+            return full_id;
+        }
+        return table.bound_ids[index];
+    }
+    ++pool_stats.sampler_resolves;
+    // Watched before the read: a write after it reaches WriteMemory and clears the entry.
+    const bool watched = ArmPoolEntry(table, PoolTableId(compute, true), index);
     auto const [descriptor, is_new] = table.Read(*gpu_memory, index);
     if (is_new) {
-        auto const id = FindSampler(descriptor, compute);
-        table.bound_ids[index] = id;
-        return id;
+        table.Bind(index, FindSampler(descriptor, compute));
+    }
+    if (watched) {
+        // Samplers are never deleted and depend on the entry only.
+        table.SetResident(index);
     }
     return table.bound_ids[index];
+}
+
+namespace BindingMemoDetail {
+constexpr size_t NUM_SETS = 2048;
+constexpr size_t NUM_WAYS = 4;
+
+[[nodiscard]] inline u64 KeyHash(u32 tic_handle, u32 tsc_index, u32 kind) noexcept {
+    u64 hash = ((u64{tsc_index} << 32) | tic_handle) ^ (u64{kind} * 0x9E3779B97F4A7C15ULL);
+    hash = (hash ^ (hash >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    hash = (hash ^ (hash >> 27)) * 0x94D049BB133111EBULL;
+    return hash ^ (hash >> 31);
+}
+
+/// The first way of the key's set.
+[[nodiscard]] inline size_t FirstWay(u64 hash) noexcept {
+    return static_cast<size_t>(hash & (NUM_SETS - 1)) * NUM_WAYS;
+}
+
+/// Never 0, which marks an empty way.
+[[nodiscard]] inline u32 Tag(u64 hash) noexcept {
+    return static_cast<u32>(hash >> 32) | 1U;
+}
+
+/// Reads a TIC or TSC entry from guest memory, through the draw's translated pages when given.
+template <typename T>
+void ReadGuest(const Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, T& out,
+               GuestPageCache* pages = nullptr) noexcept {
+    if (pages != nullptr) {
+        if (const u8* const host = pages->Get(gpu_memory, gpu_addr, sizeof(T), false)) {
+            std::memcpy(&out, host, sizeof(T));
+            return;
+        }
+    }
+    const bool one_page =
+        (gpu_addr & Core::Memory::YUZU_PAGEMASK) + sizeof(T) <= Core::Memory::YUZU_PAGESIZE;
+    if (const u8* const host = one_page ? gpu_memory.GetPointer(gpu_addr) : nullptr) {
+        std::memcpy(&out, host, sizeof(T));
+        return;
+    }
+    gpu_memory.ReadBlockUnsafe(gpu_addr, &out, sizeof(T));
+}
+
+inline void PrefetchLine(const void* address) noexcept {
+#if defined(__clang__) || defined(__GNUC__)
+    __builtin_prefetch(address, 0, 3);
+#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+    _mm_prefetch(reinterpret_cast<const char*>(address), _MM_HINT_T0);
+#else
+    (void)address;
+#endif
+}
+} // namespace BindingMemoDetail
+
+template <class P>
+void TextureCache<P>::BumpBindingSerial(ImageId image_id) {
+    const size_t index = image_id.Value();
+    if (index >= image_binding_serials.size()) {
+        image_binding_serials.resize((std::max)(index + 1, image_binding_serials.size() * 2), 0);
+    }
+    image_binding_serials[index] = ++binding_clock;
+}
+
+template <class P>
+typename TextureCache<P>::BindingLookup TextureCache<P>::BeginBindingLookup(
+    bool compute) const noexcept {
+    const auto& image_table =
+        compute ? channel_state->compute_image_table : channel_state->graphics_image_table;
+    const auto& sampler_table =
+        compute ? channel_state->compute_sampler_table : channel_state->graphics_sampler_table;
+    return BindingLookup{
+        .channel = channel_state,
+        .tic_pool = image_table.current_gpu_addr,
+        .tsc_pool = sampler_table.current_gpu_addr,
+        .tic_limit = image_table.current_limit,
+        .tsc_limit = sampler_table.current_limit,
+        .map_serial = gpu_memory->MapSerial(),
+        .clock = binding_clock,
+        .compute = compute,
+    };
+}
+
+template <class P>
+typename TextureCache<P>::BindingProbe TextureCache<P>::ProbeBinding(u32 tic_handle, u32 tsc_index,
+                                                                     u32 kind) const noexcept {
+    using namespace BindingMemoDetail;
+    const u64 hash = KeyHash(tic_handle, tsc_index, kind);
+    const BindingProbe probe{.hash = hash, .first = FirstWay(hash), .tag = Tag(hash)};
+    if (!binding_tags.empty()) {
+        PrefetchLine(&binding_tags[probe.first]);
+    }
+    return probe;
+}
+
+template <class P>
+void TextureCache<P>::PrefetchBinding(const BindingLookup& lookup, const BindingProbe& probe,
+                                      u32 tic_handle, u32 tsc_index) const noexcept {
+    using namespace BindingMemoDetail;
+    if (binding_memos.empty()) {
+        return;
+    }
+    bool candidate = false;
+    for (size_t way = 0; way < NUM_WAYS; ++way) {
+        if (binding_tags[probe.first + way] != probe.tag) {
+            continue;
+        }
+        const auto* const memo = reinterpret_cast<const u8*>(&binding_memos[probe.first + way]);
+        for (size_t line = 0; line < sizeof(BindingMemo); line += 64) {
+            PrefetchLine(memo + line);
+        }
+        candidate = true;
+    }
+    if (!candidate) {
+        return;
+    }
+    // The entries RecordBinding took for this key: the handle's header index and the TSC index,
+    // when inside the pools. Only a guess for the lines; FindBinding reads what the memo names.
+    const u32 header_index = Tegra::Texture::TextureHeaderIndex(tic_handle, lookup.tic_limit,
+                                                                gpu_memory->UsesNativeTiling());
+    if (header_index <= lookup.tic_limit) {
+        if (const u8* const host = lookup.pages.Get(
+                *gpu_memory, lookup.tic_pool + u64{header_index} * sizeof(TICEntry),
+                sizeof(TICEntry), false)) {
+            PrefetchLine(host);
+        }
+    }
+    if (tsc_index != ~0U && tsc_index <= lookup.tsc_limit) {
+        if (const u8* const host =
+                lookup.pages.Get(*gpu_memory, lookup.tsc_pool + u64{tsc_index} * sizeof(TSCEntry),
+                                 sizeof(TSCEntry), false)) {
+            PrefetchLine(host);
+        }
+    }
+}
+
+template <class P>
+typename TextureCache<P>::BindingMemo* TextureCache<P>::FindBinding(const BindingLookup& lookup,
+                                                                    u32 tic_handle, u32 tsc_index,
+                                                                    u32 kind,
+                                                                    const BindingProbe& probe) {
+    using Nx2BindMemo::Note;
+    using Nx2BindMemo::Stat;
+    using namespace BindingMemoDetail;
+    Note(Stat::Lookups);
+    if (binding_memos.empty()) {
+        Note(Stat::MissNoEntry);
+        return nullptr;
+    }
+    const size_t first = probe.first;
+    const u32 tag = probe.tag;
+    GuestPageCache* const pages = &lookup.pages;
+    Stat miss = Stat::MissNoEntry;
+    // Read once for every candidate of the key (one memo per key and contents).
+    TICEntry guest_tic{};
+    TSCEntry guest_tsc{};
+    u32 guest_tic_entry = ~0U;
+    u32 guest_tsc_entry = ~0U;
+    for (size_t way = 0; way < NUM_WAYS; ++way) {
+        if (binding_tags[first + way] != tag) {
+            continue;
+        }
+        BindingMemo& memo = binding_memos[first + way];
+        if (memo.kind != kind || memo.tic_handle != tic_handle || memo.tsc_index != tsc_index) {
+            continue;
+        }
+        if (memo.channel != lookup.channel) {
+            miss = Stat::MissChannel;
+            continue;
+        }
+        if (memo.tic_pool != lookup.tic_pool || memo.tic_limit != lookup.tic_limit ||
+            (tsc_index != ~0U &&
+             (memo.tsc_pool != lookup.tsc_pool || memo.tsc_limit != lookup.tsc_limit))) {
+            miss = Stat::MissPool;
+            continue;
+        }
+        if (memo.epoch != binding_memo_epoch) {
+            miss = Stat::MissEpoch;
+            continue;
+        }
+        const ImageId image_id = memo.image;
+        const bool has_image = image_id && image_id != NULL_IMAGE_ID;
+        if (has_image) {
+            const size_t index = image_id.Value();
+            if (index >= image_binding_serials.size() ||
+                image_binding_serials[index] != memo.image_serial) {
+                miss = Stat::MissImage;
+                continue;
+            }
+        } else if (memo.map_dependent != 0 && memo.map_serial != lookup.map_serial) {
+            // Null and buffer views: whether the TIC entry's address is mapped decided them.
+            miss = Stat::MissMap;
+            continue;
+        }
+        if (memo.tic_entry != ~0U) {
+            if (guest_tic_entry != memo.tic_entry) {
+                ReadGuest(*gpu_memory, lookup.tic_pool + u64{memo.tic_entry} * sizeof(TICEntry),
+                          guest_tic, pages);
+                guest_tic_entry = memo.tic_entry;
+            }
+            if (std::memcmp(&guest_tic, &memo.tic, sizeof(TICEntry)) != 0) {
+                miss = Stat::MissTic;
+                continue;
+            }
+        }
+        if (tsc_index != ~0U && memo.tsc_entry != ~0U) {
+            if (guest_tsc_entry != memo.tsc_entry) {
+                ReadGuest(*gpu_memory, lookup.tsc_pool + u64{memo.tsc_entry} * sizeof(TSCEntry),
+                          guest_tsc, pages);
+                guest_tsc_entry = memo.tsc_entry;
+            }
+            if (std::memcmp(&guest_tsc, &memo.tsc, sizeof(TSCEntry)) != 0) {
+                miss = Stat::MissTsc;
+                continue;
+            }
+        }
+        if (has_image && memo.aliased != 0) {
+            // PrepareImage would copy from an alias newer than the image (SynchronizeAliases).
+            const ImageBase& image = slot_images[image_id];
+            bool newer_alias = false;
+            for (const AliasedImage& alias : image.aliased_images) {
+                if (slot_images[alias.id].modification_tick > image.modification_tick) {
+                    newer_alias = true;
+                    break;
+                }
+            }
+            if (newer_alias) {
+                miss = Stat::MissAlias;
+                continue;
+            }
+        }
+        if (memo.touch_tick != frame_tick) {
+            if (has_image) {
+                lru_cache.Touch(slot_images[image_id].lru_index, frame_tick);
+            }
+            memo.touch_tick = frame_tick;
+        }
+        Note(Stat::Hits);
+        return &memo;
+    }
+    Note(miss);
+    return nullptr;
+}
+
+template <class P>
+void TextureCache<P>::RecordBinding(const BindingLookup& lookup, u32 tic_handle, u32 tsc_index,
+                                    u32 kind, ImageViewId view_id, SamplerId sampler_id,
+                                    const void* payload, size_t payload_size, bool rescaled) {
+    using Nx2BindMemo::Note;
+    using Nx2BindMemo::Stat;
+    using namespace BindingMemoDetail;
+    if (payload_size > sizeof(BindingMemo::payload) || kind == 0 || !view_id) {
+        Note(Stat::RefuseOther);
+        return;
+    }
+    if (binding_memo_epoch > lookup.clock || channel_state != lookup.channel) {
+        Note(Stat::RefuseEpoch);
+        return;
+    }
+    const bool compute = lookup.compute;
+    // The entries the resolution read are in the tables; they must still give these ids.
+    const auto read_entry = [](const auto& table, u32 index, auto id) {
+        return !table.invalidated && index / 64 < table.read_descriptors.size() &&
+               index < table.descriptors.size() &&
+               (table.read_descriptors[index / 64] & (1ULL << (index % 64))) != 0 &&
+               table.bound_ids[index] == id;
+    };
+    const auto& image_table =
+        compute ? channel_state->compute_image_table : channel_state->graphics_image_table;
+    const auto& sampler_table =
+        compute ? channel_state->compute_sampler_table : channel_state->graphics_sampler_table;
+    if (image_table.current_gpu_addr != lookup.tic_pool ||
+        image_table.current_limit != lookup.tic_limit ||
+        (tsc_index != ~0U && (sampler_table.current_gpu_addr != lookup.tsc_pool ||
+                              sampler_table.current_limit != lookup.tsc_limit))) {
+        Note(Stat::RefuseOther);
+        return;
+    }
+    u32 tic_entry = ~0U;
+    const u32 header_index = Tegra::Texture::TextureHeaderIndex(
+        tic_handle, image_table.current_limit, gpu_memory->UsesNativeTiling());
+    if (header_index <= image_table.current_limit) {
+        if (!read_entry(image_table, header_index, view_id)) {
+            Note(Stat::RefuseTable);
+            return;
+        }
+        tic_entry = header_index;
+    } else if (view_id != NULL_IMAGE_VIEW_ID) {
+        Note(Stat::RefuseOther);
+        return;
+    }
+    u32 tsc_entry = ~0U;
+    if (tsc_index != ~0U) {
+        if (tsc_index <= sampler_table.current_limit) {
+            if (!read_entry(sampler_table, tsc_index, sampler_id)) {
+                Note(Stat::RefuseTable);
+                return;
+            }
+            tsc_entry = tsc_index;
+        } else if (sampler_id != NULL_SAMPLER_ID) {
+            Note(Stat::RefuseOther);
+            return;
+        }
+    }
+    const ImageId image_id = slot_image_views[view_id].image_id;
+    const bool has_image = image_id && image_id != NULL_IMAGE_ID;
+    u64 image_serial = 0;
+    bool aliased = false;
+    if (has_image) {
+        const ImageBase& image = slot_images[image_id];
+        if (True(image.flags & ImageFlagBits::CpuModified)) {
+            Note(Stat::RefuseCpuModified);
+            return;
+        }
+        if (!image.aliased_images.empty()) {
+            aliased = true;
+        }
+        const size_t index = image_id.Value();
+        if (index >= image_binding_serials.size()) {
+            image_binding_serials.resize((std::max)(index + 1, image_binding_serials.size() * 2),
+                                         0);
+        }
+        image_serial = image_binding_serials[index];
+        // Drawn from the clock: newer than the lookups means an event on it during this draw,
+        // perhaps after it was prepared.
+        if (image_serial > lookup.clock) {
+            Note(Stat::RefuseImageEvent);
+            return;
+        }
+    }
+    const TICEntry tic = tic_entry != ~0U ? image_table.descriptors[tic_entry] : TICEntry{};
+    const TSCEntry tsc = tsc_entry != ~0U ? sampler_table.descriptors[tsc_entry] : TSCEntry{};
+    bool map_dependent = !has_image;
+    if (map_dependent && view_id == NULL_IMAGE_VIEW_ID) {
+        // VisitImageView and IsValidEntry give the null view for these whatever is mapped.
+        const GPUVAddr address = tic.Address();
+        map_dependent = !(tic_entry == ~0U || address == 0 || address >= (1ULL << 40));
+    }
+    if (binding_memos.empty()) {
+        binding_memos.resize(NUM_SETS * NUM_WAYS);
+        binding_tags.assign(NUM_SETS * NUM_WAYS, 0);
+        binding_victims.assign(NUM_SETS, 0);
+    }
+    const u64 hash = KeyHash(tic_handle, tsc_index, kind);
+    const size_t first = FirstWay(hash);
+    const u32 tag = Tag(hash);
+    size_t target = NUM_WAYS;
+    for (size_t way = 0; way < NUM_WAYS; ++way) {
+        if (binding_tags[first + way] != tag) {
+            continue;
+        }
+        const BindingMemo& memo = binding_memos[first + way];
+        if (memo.kind != kind || memo.tic_handle != tic_handle || memo.tsc_index != tsc_index) {
+            continue;
+        }
+        // One entry per key and contents (a descriptor slot holding another texture).
+        if ((memo.channel == lookup.channel && memo.tic_pool == image_table.current_gpu_addr &&
+             memo.tic_limit == image_table.current_limit &&
+             memo.tsc_pool == sampler_table.current_gpu_addr &&
+             memo.tsc_limit == sampler_table.current_limit &&
+             std::memcmp(&memo.tic, &tic, sizeof(TICEntry)) == 0 &&
+             std::memcmp(&memo.tsc, &tsc, sizeof(TSCEntry)) == 0)) {
+            target = way;
+            break;
+        }
+    }
+    if (target == NUM_WAYS) {
+        for (size_t way = 0; way < NUM_WAYS; ++way) {
+            if (binding_tags[first + way] == 0) {
+                target = way;
+                break;
+            }
+        }
+    }
+    if (target == NUM_WAYS) {
+        const size_t set = first / NUM_WAYS;
+        target = binding_victims[set];
+        binding_victims[set] = static_cast<u8>((target + 1) % NUM_WAYS);
+        if (binding_memos[first + target].touch_tick == frame_tick) {
+            Note(Stat::EvictedLive);
+        }
+    }
+    binding_tags[first + target] = tag;
+    BindingMemo& memo = binding_memos[first + target];
+    memo.tic_handle = tic_handle;
+    memo.tsc_index = tsc_index;
+    memo.kind = kind;
+    memo.view = view_id;
+    memo.sampler = sampler_id;
+    memo.image = image_id;
+    memo.tic_limit = image_table.current_limit;
+    memo.tsc_limit = sampler_table.current_limit;
+    memo.tic_pool = image_table.current_gpu_addr;
+    memo.tsc_pool = sampler_table.current_gpu_addr;
+    memo.channel = channel_state;
+    memo.tic_entry = tic_entry;
+    memo.tsc_entry = tsc_entry;
+    memo.epoch = binding_memo_epoch;
+    memo.image_serial = image_serial;
+    memo.map_serial = lookup.map_serial;
+    memo.touch_tick = frame_tick;
+    memo.payload = {};
+    if (payload_size != 0) {
+        std::memcpy(memo.payload.data(), payload, payload_size);
+    }
+    memo.rescaled = static_cast<u16>(rescaled ? 1 : 0);
+    memo.aliased = static_cast<u8>(aliased ? 1 : 0);
+    memo.map_dependent = static_cast<u8>(map_dependent ? 1 : 0);
+    memo.tic = tic;
+    memo.tsc = tsc;
+    Note(Stat::Records);
+    if (aliased) {
+        Note(Stat::RecordsAliased);
+    }
 }
 
 template <class P>
@@ -781,29 +1303,50 @@ typename P::Sampler& TextureCache<P>::GetSampler(SamplerId id) noexcept {
 
 template <class P>
 void TextureCache<P>::SynchronizeDescriptors(bool compute) {
+    // Pages the GPU has written since are no longer watched: their entries are read again.
+    const u64 gpu_written = Tegra::g_nx2_gpu_written_generation.load(std::memory_order_acquire);
+    if (gpu_written != seen_gpu_written_generation && !pool_watch.Empty()) {
+        pool_watch.TakeIf(
+            [](u64 device_page) {
+                return Tegra::Nx2MayBeGpuWritten(device_page
+                                                     << DescriptorTable<TICEntry>::PAGE_BITS,
+                                                 DescriptorTable<TICEntry>::PAGE_SIZE);
+            },
+            [this](u64 device_page, PoolPageWatch::Ref ref) {
+                DisarmPoolPage(device_page, ref, false);
+                ++pool_stats.gpu_written_disarms;
+            });
+    }
+    seen_gpu_written_generation = gpu_written;
     if (compute) {
         const bool linked_tsc = kepler_compute->launch_description.linked_tsc;
         const u32 tic_limit = kepler_compute->regs.tic.limit;
         const u32 tsc_limit = linked_tsc ? tic_limit : kepler_compute->regs.tsc.limit;
         bool bindings_changed = false;
-        if (channel_state->compute_sampler_table.Synchronize(kepler_compute->regs.tsc.Address(), tsc_limit))
+        if (SyncPoolTable(channel_state->compute_sampler_table, PoolTableId(true, true),
+                          kepler_compute->regs.tsc.Address(), tsc_limit))
             bindings_changed = true;
-        if (channel_state->compute_image_table.Synchronize(kepler_compute->regs.tic.Address(), tic_limit))
+        if (SyncPoolTable(channel_state->compute_image_table, PoolTableId(true, false),
+                          kepler_compute->regs.tic.Address(), tic_limit))
             bindings_changed = true;
         if (bindings_changed) {
             ++texture_bindings_serial;
+            ++bindings_epoch;
         }
     } else {
         const bool linked_tsc = maxwell3d->regs.sampler_binding == Tegra::Engines::Maxwell3D::Regs::SamplerBinding::ViaHeaderBinding;
         const u32 tic_limit = maxwell3d->regs.tex_header.limit;
         const u32 tsc_limit = linked_tsc ? tic_limit : maxwell3d->regs.tex_sampler.limit;
         bool bindings_changed = false;
-        if (channel_state->graphics_sampler_table.Synchronize(maxwell3d->regs.tex_sampler.Address(), tsc_limit))
+        if (SyncPoolTable(channel_state->graphics_sampler_table, PoolTableId(false, true),
+                          maxwell3d->regs.tex_sampler.Address(), tsc_limit))
             bindings_changed = true;
-        if (channel_state->graphics_image_table.Synchronize(maxwell3d->regs.tex_header.Address(), tic_limit))
+        if (SyncPoolTable(channel_state->graphics_image_table, PoolTableId(false, false),
+                          maxwell3d->regs.tex_header.Address(), tic_limit))
             bindings_changed = true;
         if (bindings_changed) {
             ++texture_bindings_serial;
+            ++bindings_epoch;
         }
     }
 }
@@ -916,14 +1459,23 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     clearing_render_targets = is_clear;
     auto& flags = maxwell3d->dirty.flags;
     if (!flags[Dirty::RenderTargets]) {
+        if (!is_clear && RenderTargetsStillPrepared()) {
+            return;
+        }
         for (size_t index = 0; index < NUM_RT; ++index) {
             ImageViewId& color_buffer_id = render_targets.color_buffer_ids[index];
             PrepareImageView(color_buffer_id, true, is_clear && IsFullClear(color_buffer_id));
         }
         const ImageViewId depth_buffer_id = render_targets.depth_buffer_id;
         PrepareImageView(depth_buffer_id, true, is_clear && IsFullClear(depth_buffer_id));
+        if (is_clear) {
+            rt_prepared.valid = false;
+        } else {
+            NoteRenderTargetsPrepared();
+        }
         return;
     }
+    rt_prepared.valid = false;
 
     const VideoCommon::RenderTargets previous_render_targets = render_targets;
     const bool rescaled = RescaleRenderTargets();
@@ -979,6 +1531,55 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
 }
 
 template <class P>
+bool TextureCache<P>::RenderTargetsStillPrepared() const {
+    const auto& prepared = rt_prepared;
+    if (!prepared.valid || prepared.serial != render_targets_serial ||
+        prepared.modification_tick != modification_tick || prepared.frame_tick != frame_tick ||
+        prepared.bindings_epoch != bindings_epoch) {
+        return false;
+    }
+    for (size_t index = 0; index <= NUM_RT; ++index) {
+        const ImageViewId id = index < NUM_RT ? render_targets.color_buffer_ids[index]
+                                              : render_targets.depth_buffer_id;
+        if (id != prepared.views[index]) {
+            return false;
+        }
+        if (!id) {
+            continue;
+        }
+        const ImageViewBase& image_view = slot_image_views[id];
+        if (image_view.IsBuffer()) {
+            continue;
+        }
+        // What PrepareImage(is_modification, !invalidate) would act on.
+        const ImageBase& image = slot_images[image_view.image_id];
+        if (False(image.flags & ImageFlagBits::GpuModified) ||
+            True(image.flags & (ImageFlagBits::CpuModified | ImageFlagBits::SparseTiles |
+                                ImageFlagBits::SparseLayers | ImageFlagBits::UnwrittenSparse)) ||
+            !image.aliased_images.empty()) {
+            return false;
+        }
+    }
+    // MarkModification would give them the newest ticks again, in the same order: they have them,
+    // nothing was marked since. LRU touches within a frame are no-ops.
+    return true;
+}
+
+template <class P>
+void TextureCache<P>::NoteRenderTargetsPrepared() {
+    auto& prepared = rt_prepared;
+    prepared.valid = true;
+    prepared.serial = render_targets_serial;
+    prepared.modification_tick = modification_tick;
+    prepared.frame_tick = frame_tick;
+    prepared.bindings_epoch = bindings_epoch;
+    for (size_t index = 0; index < NUM_RT; ++index) {
+        prepared.views[index] = render_targets.color_buffer_ids[index];
+    }
+    prepared.views[NUM_RT] = render_targets.depth_buffer_id;
+}
+
+template <class P>
 typename P::Framebuffer* TextureCache<P>::GetFramebuffer() {
     if (last_framebuffer_id && last_framebuffer_serial == render_targets_serial) {
         return &slot_framebuffers[last_framebuffer_id];
@@ -998,6 +1599,25 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
         LOG_TRACE(HW_GPU, "Invalid image view index={}", index);
         return NULL_IMAGE_VIEW_ID;
     }
+    if (table.IsResident(index)) {
+        ++pool_stats.view_hits;
+        if (NativeVerify::Textures()) {
+            // The full path must find the same view.
+            const ImageViewId resident_id = table.bound_ids[index];
+            table.ClearResident(index);
+            const ImageViewId full_id = VisitImageView(index, compute);
+            ++verify_stats.checks;
+            if (full_id != resident_id && verify_stats.view_mismatches++ < 64) {
+                LOG_ERROR(HW_GPU, "Native verify textures: TIC {} resident view {}, full path {}",
+                          index, resident_id.index, full_id.index);
+            }
+            return full_id;
+        }
+        return table.bound_ids[index];
+    }
+    ++pool_stats.view_resolves;
+    // Watched before the read: a write after it reaches WriteMemory and clears the entry.
+    const bool watched = ArmPoolEntry(table, PoolTableId(compute, false), index);
     auto const [descriptor, is_new] = table.Read(*gpu_memory, index);
     if (is_new) {
         if (IsValidEntry(*gpu_memory, descriptor)) {
@@ -1016,7 +1636,7 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
                     // No memory for its image: TickFrame invalidates the table after collecting,
                     // and the descriptor's next read makes the image again.
                     channel_state->image_views.erase(pair);
-                    table.bound_ids[index] = NULL_IMAGE_VIEW_ID;
+                    table.Bind(index, NULL_IMAGE_VIEW_ID);
                     return NULL_IMAGE_VIEW_ID;
                 }
                 if (pair->second != NULL_IMAGE_VIEW_ID) {
@@ -1025,16 +1645,462 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
                 }
             }
             PrepareImageView(pair->second, false, false);
-            table.bound_ids[index] = pair->second;
+            table.Bind(index, pair->second);
+            NotePoolRef(pair->second, index, compute);
+            if (watched) {
+                MakeViewResident(table, index, pair->second);
+            }
             return pair->second;
         }
-        table.bound_ids[index] = NULL_IMAGE_VIEW_ID;
+        table.Bind(index, NULL_IMAGE_VIEW_ID);
         return NULL_IMAGE_VIEW_ID;
     }
     const auto id = table.bound_ids[index];
-    if (id != NULL_IMAGE_VIEW_ID)
+    if (id != NULL_IMAGE_VIEW_ID) {
         PrepareImageView(id, false, false);
+        if (watched) {
+            MakeViewResident(table, index, id);
+        }
+    }
     return id;
+}
+
+template <class P>
+template <typename Func>
+void TextureCache<P>::VisitPoolTable(u32 table_id, Func&& func) {
+    const size_t channel = table_id / 4;
+    if (channel >= channel_storage.size()) {
+        return;
+    }
+    auto& info = channel_storage[channel];
+    switch (table_id % 4) {
+    case POOL_GRAPHICS_TIC:
+        func(info.graphics_image_table);
+        break;
+    case POOL_GRAPHICS_TSC:
+        func(info.graphics_sampler_table);
+        break;
+    case POOL_COMPUTE_TIC:
+        func(info.compute_image_table);
+        break;
+    default:
+        func(info.compute_sampler_table);
+        break;
+    }
+}
+
+template <class P>
+template <typename Table>
+bool TextureCache<P>::SyncPoolTable(Table& table, u32 table_id, GPUVAddr gpu_addr, u32 limit) {
+    if (!table.NeedsRefresh(gpu_addr, limit)) {
+        return false;
+    }
+    DisarmPoolTable(table, table_id);
+    table.Refresh(gpu_addr, limit);
+    ++pool_stats.rebinds;
+    ++pool_generation;
+    return true;
+}
+
+template <class P>
+template <typename Table>
+bool TextureCache<P>::ArmPoolEntry(Table& table, u32 table_id, u32 index) {
+    if (!table.InOnePage(index)) {
+        return false;
+    }
+    const u32 page = table.PageOf(index);
+    if (table.pages[page].armed) {
+        return true;
+    }
+    if (!TexturePoolExperiment::Enabled() || !table.MayArm(page, frame_tick)) {
+        return false;
+    }
+    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(table.PageAddress(page));
+    // Pages the GPU writes through the buffer cache are left out: their CPU writes may be
+    // collected and applied later instead of reaching WriteMemory at once.
+    if (!device_addr || (*device_addr & (Table::PAGE_SIZE - 1)) != 0 ||
+        Tegra::Nx2MayBeGpuWritten(*device_addr, Table::PAGE_SIZE)) {
+        return false;
+    }
+    device_memory.UpdatePagesCachedCount(*device_addr, Table::PAGE_SIZE, 1);
+    page_filter.Mark(*device_addr, Table::PAGE_SIZE);
+    const u64 device_page = *device_addr >> Table::PAGE_BITS;
+    pool_watch.Add(device_page, {table_id, page});
+    table.NoteArmed(page, device_page, frame_tick);
+    ++pool_stats.arms;
+    return true;
+}
+
+template <class P>
+template <typename Table>
+void TextureCache<P>::DisarmPoolTable(Table& table, u32 table_id) {
+    if (table.ArmedPages() == 0) {
+        return;
+    }
+    for (u32 page = 0; page < table.pages.size(); ++page) {
+        const DescriptorPoolPage& state = table.pages[page];
+        if (!state.armed) {
+            continue;
+        }
+        if (pool_watch.Remove(state.device_page, {table_id, page})) {
+            device_memory.UpdatePagesCachedCount(state.device_page << Table::PAGE_BITS,
+                                                 Table::PAGE_SIZE, -1);
+        }
+        table.NoteDisarmed(page, frame_tick, false);
+    }
+    ++pool_generation;
+}
+
+template <class P>
+void TextureCache<P>::DisarmPoolPage(u64 device_page, PoolPageWatch::Ref ref, bool written) {
+    using Table = DescriptorTable<TICEntry>;
+    device_memory.UpdatePagesCachedCount(device_page << Table::PAGE_BITS, Table::PAGE_SIZE, -1);
+    VisitPoolTable(ref.table, [&](auto& table) {
+        // A ref of a page armed again since (or of a reused channel) only clears more.
+        if (ref.page < table.pages.size() && table.pages[ref.page].armed &&
+            table.pages[ref.page].device_page == device_page) {
+            table.NoteDisarmed(ref.page, frame_tick, written);
+        }
+    });
+    ++pool_generation;
+}
+
+template <class P>
+template <typename Table>
+void TextureCache<P>::MakeViewResident(Table& table, u32 index, ImageViewId view_id) {
+    const ImageViewBase& image_view = slot_image_views[view_id];
+    if (image_view.image_id == NULL_IMAGE_ID) {
+        return;
+    }
+    // Images with aliases synchronize them on each use, and a CpuModified one is uploaded on its
+    // next use: both keep the full path.
+    const ImageBase& image = slot_images[image_view.image_id];
+    if (True(image.flags & ImageFlagBits::CpuModified) || !image.aliased_images.empty()) {
+        return;
+    }
+    table.SetResident(index);
+}
+
+template <class P>
+void TextureCache<P>::NotePoolRef(ImageViewId view_id, u32 index, bool compute) {
+    if (!view_id) {
+        return;
+    }
+    const ImageId image_id = slot_image_views[view_id].image_id;
+    if (!image_id) {
+        return;
+    }
+    const PoolRef ref{static_cast<u32>(current_channel_id), index, compute};
+    auto& refs = image_pool_refs[image_id];
+    if (std::ranges::find(refs, ref) == refs.end()) {
+        refs.push_back(ref);
+    }
+}
+
+template <class P>
+void TextureCache<P>::ClearPoolResidency(ImageId image_id) {
+    const auto it = image_pool_refs.find(image_id);
+    if (it == image_pool_refs.end()) {
+        return;
+    }
+    for (const PoolRef& ref : it->second) {
+        VisitPoolTable(ref.channel * 4 + (ref.compute ? POOL_COMPUTE_TIC : POOL_GRAPHICS_TIC),
+                       [&](auto& table) { table.ClearResident(ref.index); });
+    }
+    ++pool_stats.image_events;
+    ++pool_generation;
+}
+
+template <class P>
+u32 TextureCache<P>::MirrorMeta(ImageViewId view_id) {
+    namespace Meta = PoolMirror::Meta;
+    if (!view_id) {
+        return Meta::NULL_ENTRY;
+    }
+    ImageView& image_view = slot_image_views[view_id];
+    u64 class_key = 0;
+    u32 meta = 0;
+    // Backends that mirror the pools must name the view's sampler class and depth rules: a
+    // missing member is a compile error, not class 0 for every view.
+    if constexpr (P::MIRRORS_POOLS) {
+        class_key = image_view.SamplerClassKey();
+        meta = image_view.PoolMetaBits();
+    }
+    meta |= sampler_classes.Find(class_key);
+    if (IsRescaling(image_view)) {
+        meta |= Meta::RESCALED;
+    }
+    return meta;
+}
+
+template <class P>
+bool TextureCache<P>::ResolveForDraw(std::span<const u32> raw_handles, bool via_header_index,
+                                     bool compute, std::span<ResolvedHandle> out) {
+    auto& image_table =
+        compute ? channel_state->compute_image_table : channel_state->graphics_image_table;
+    auto& sampler_table =
+        compute ? channel_state->compute_sampler_table : channel_state->graphics_sampler_table;
+    PoolMirrorState& mirror =
+        compute ? channel_state->compute_mirror : channel_state->graphics_mirror;
+    const bool native = gpu_memory->UsesNativeTiling();
+    // Preparing one entry's image can delete views resolved before it (rescaling an alias):
+    // resolve again until a pass deletes nothing, as FillImageViews does.
+    do {
+        has_deleted_images = false;
+        for (size_t i = 0; i < raw_handles.size(); ++i) {
+            const auto [raw_tic, tsc] =
+                Tegra::Texture::TexturePair(raw_handles[i], via_header_index);
+            const u32 tic =
+                Tegra::Texture::TextureHeaderIndex(raw_tic, image_table.current_limit, native);
+            const ImageViewId view_id = VisitImageView(raw_tic, compute);
+            const SamplerId sampler_id = GetSamplerId(tsc, compute);
+            u32 meta = PoolMirror::Meta::NULL_ENTRY;
+            if (tic <= image_table.current_limit) {
+                // What the heap will hold once the pending updates are taken.
+                meta = tic < mirror.meta.size() && image_table.mirrored_ids[tic] == view_id
+                           ? mirror.meta[tic]
+                           : MirrorMeta(view_id);
+            }
+            out[i] = {tic, tsc, meta, ~0U, {~0U, ~0U}, view_id};
+            if (tic <= image_table.current_limit) {
+                // The layout after the pending reset, if any.
+                out[i].image_slot = tic;
+            }
+            if (!view_id || tsc > sampler_table.current_limit) {
+                continue;
+            }
+            const u32 sampler_class = meta & PoolMirror::Meta::CLASS_MASK;
+            const PoolMirror::Layout layout{.tic_stride = image_table.current_limit + 1,
+                                            .tsc_stride = sampler_table.current_limit + 1,
+                                            .num_classes = sampler_classes.Size()};
+            for (u32 depth_use = 0; depth_use < 2; ++depth_use) {
+                out[i].sampler_slots[depth_use] =
+                    layout.SamplerSlot(sampler_class, depth_use != 0, tsc);
+                const size_t variant = size_t{sampler_class} * 2 + depth_use;
+                if (variant >= mirror.samplers.size() || tsc >= mirror.samplers[variant].size() ||
+                    mirror.samplers[variant][tsc] != sampler_id) {
+                    mirror.wanted_samplers.push_back({sampler_class, depth_use, tsc});
+                }
+            }
+        }
+    } while (has_deleted_images);
+    return image_table.HasMirrorUpdates() || sampler_table.HasMirrorUpdates() ||
+           !mirror.wanted_samplers.empty() || mirror.layout.num_classes != sampler_classes.Size();
+}
+
+template <class P>
+template <typename Func>
+void TextureCache<P>::TakeMirrorUpdates(bool compute, u64 draw_seq, Func&& func) {
+    using namespace PoolMirror;
+    auto& image_table =
+        compute ? channel_state->compute_image_table : channel_state->graphics_image_table;
+    auto& sampler_table =
+        compute ? channel_state->compute_sampler_table : channel_state->graphics_sampler_table;
+    PoolMirrorState& mirror =
+        compute ? channel_state->compute_mirror : channel_state->graphics_mirror;
+    u64 tick = 0;
+    if constexpr (requires { runtime.CurrentTick(); }) {
+        tick = runtime.CurrentTick();
+    }
+    const auto is_free = [this](u64 value) {
+        if constexpr (requires { runtime.IsFree(value); }) {
+            return runtime.IsFree(value);
+        } else {
+            return true;
+        }
+    };
+    const auto counted = [&](const MirrorUpdate& update) {
+        ++mirror.version;
+        func(update);
+    };
+    const auto emit = [&](UpdateKind kind, Heap heap) {
+        MirrorUpdate update{};
+        update.kind = kind;
+        update.heap = heap;
+        counted(update);
+    };
+    if (image_table.TakeMirrorReset() || mirror.layout.tic_stride == 0) {
+        mirror.layout.tic_stride = image_table.current_limit + 1;
+        mirror.image_pages.Reset(tick);
+        mirror.meta_pages.Reset(tick);
+        mirror.meta.assign(mirror.layout.tic_stride, Meta::NULL_ENTRY);
+        emit(UpdateKind::Reset, Heap::Image);
+        emit(UpdateKind::Reset, Heap::Meta);
+    }
+    if (sampler_table.TakeMirrorReset() || mirror.layout.tsc_stride == 0) {
+        mirror.layout.tsc_stride = sampler_table.current_limit + 1;
+        mirror.sampler_pages.Reset(tick);
+        mirror.samplers.assign(size_t{mirror.layout.num_classes} * 2,
+                               std::vector<SamplerId>(mirror.layout.tsc_stride, NULL_SAMPLER_ID));
+        emit(UpdateKind::Reset, Heap::Sampler);
+    }
+    image_table.TakeMirrorUpdates([&](u32 tic, ImageViewId view_id) {
+        if (tic >= mirror.layout.tic_stride) {
+            return;
+        }
+        for (u32 type = 0; type < NUM_IMAGE_TYPES; ++type) {
+            const u32 slot = mirror.layout.ImageSlot(type, tic);
+            const auto target =
+                mirror.image_pages.Write(Layout::ImagePage(slot), draw_seq, tick, is_free);
+            MirrorUpdate update{};
+            update.kind = UpdateKind::Image;
+            update.heap = Heap::Image;
+            update.type = static_cast<u8>(type);
+            update.index = tic;
+            update.slot = slot;
+            update.physical = target.physical;
+            update.copy_from = target.copy_from;
+            update.fresh = target.fresh;
+            update.view = view_id;
+            counted(update);
+        }
+        const u32 meta = MirrorMeta(view_id);
+        if (meta == mirror.meta[tic]) {
+            return;
+        }
+        mirror.meta[tic] = meta;
+        const auto target =
+            mirror.meta_pages.Write(tic / META_WORDS_PER_PAGE, draw_seq, tick, is_free);
+        MirrorUpdate update{};
+        update.kind = UpdateKind::Meta;
+        update.heap = Heap::Meta;
+        update.index = tic;
+        update.slot = tic;
+        update.physical = target.physical;
+        update.copy_from = target.copy_from;
+        update.fresh = target.fresh;
+        update.view = view_id;
+        update.meta = meta;
+        counted(update);
+    });
+    if (mirror.layout.num_classes != sampler_classes.Size()) {
+        // Classes are appended: the region grows, existing slots stay where they are.
+        mirror.layout.num_classes = sampler_classes.Size();
+        mirror.samplers.resize(size_t{mirror.layout.num_classes} * 2,
+                               std::vector<SamplerId>(mirror.layout.tsc_stride, NULL_SAMPLER_ID));
+        emit(UpdateKind::Layout, Heap::Sampler);
+    }
+    const auto write_sampler = [&](u32 sampler_class, u32 depth_use, u32 tsc, SamplerId id) {
+        mirror.samplers[size_t{sampler_class} * 2 + depth_use][tsc] = id;
+        const u32 slot = mirror.layout.SamplerSlot(sampler_class, depth_use != 0, tsc);
+        const auto target =
+            mirror.sampler_pages.Write(Layout::SamplerPage(slot), draw_seq, tick, is_free);
+        MirrorUpdate update{};
+        update.kind = UpdateKind::Sampler;
+        update.heap = Heap::Sampler;
+        update.depth_use = depth_use != 0;
+        update.index = tsc;
+        update.slot = slot;
+        update.physical = target.physical;
+        update.copy_from = target.copy_from;
+        update.fresh = target.fresh;
+        update.sampler = id;
+        update.class_key = sampler_classes.Key(sampler_class);
+        counted(update);
+    };
+    // A TSC entry that changed: every slot written for it takes the new sampler.
+    sampler_table.TakeMirrorUpdates([&](u32 tsc, SamplerId id) {
+        if (tsc >= mirror.layout.tsc_stride) {
+            return;
+        }
+        for (size_t variant = 0; variant < mirror.samplers.size(); ++variant) {
+            const SamplerId held = mirror.samplers[variant][tsc];
+            if (held != NULL_SAMPLER_ID && held != id) {
+                write_sampler(static_cast<u32>(variant / 2), static_cast<u32>(variant % 2), tsc,
+                              id);
+            }
+        }
+    });
+    for (const auto& [sampler_class, depth_use, tsc] : mirror.wanted_samplers) {
+        if (tsc >= mirror.layout.tsc_stride || sampler_class >= mirror.layout.num_classes) {
+            continue;
+        }
+        const SamplerId id = sampler_table.bound_ids[tsc];
+        if (mirror.samplers[size_t{sampler_class} * 2 + depth_use][tsc] != id) {
+            write_sampler(sampler_class, depth_use, tsc, id);
+        }
+    }
+    mirror.wanted_samplers.clear();
+    // Tables last: the pages they point to are written above.
+    if (mirror.image_pages.TakeTableChanged()) {
+        emit(UpdateKind::Table, Heap::Image);
+    }
+    if (mirror.sampler_pages.TakeTableChanged()) {
+        emit(UpdateKind::Table, Heap::Sampler);
+    }
+    if (mirror.meta_pages.TakeTableChanged()) {
+        emit(UpdateKind::Table, Heap::Meta);
+    }
+    if (NativeVerify::Bindless() && (++verify_stats.mirror_drains & 63) == 0) {
+        ++verify_stats.mirror_checks;
+        verify_stats.mirror_mismatches += VerifyMirror(mirror, image_table, sampler_table);
+    }
+}
+
+template <class P>
+u64 TextureCache<P>::VerifyMirror(const PoolMirrorState& mirror,
+                                  const DescriptorTable<TICEntry, ImageViewId>& tic,
+                                  const DescriptorTable<TSCEntry, SamplerId>& tsc) {
+    u64 mismatches = tic.MirrorMismatches() + tsc.MirrorMismatches();
+    const auto is_read = [](const auto& table, size_t index) {
+        return !table.invalidated && index <= table.current_limit &&
+               ((table.read_descriptors[index / 64] >> (index % 64)) & 1) != 0;
+    };
+    for (size_t index = 0; index < mirror.meta.size(); ++index) {
+        if (!is_read(tic, index) || tic.mirrored_ids[index] != tic.bound_ids[index]) {
+            continue;
+        }
+        if (mirror.meta[index] != MirrorMeta(tic.bound_ids[index])) {
+            if (mismatches++ < 32) {
+                LOG_ERROR(HW_GPU, "Native verify bindless: TIC {} meta {:#x}, view now {:#x}",
+                          index, mirror.meta[index], MirrorMeta(tic.bound_ids[index]));
+            }
+        }
+    }
+    for (size_t variant = 0; variant < mirror.samplers.size(); ++variant) {
+        for (size_t index = 0; index < mirror.samplers[variant].size(); ++index) {
+            const SamplerId held = mirror.samplers[variant][index];
+            if (held != NULL_SAMPLER_ID && is_read(tsc, index) &&
+                tsc.mirrored_ids[index] == tsc.bound_ids[index] && held != tsc.bound_ids[index]) {
+                if (mismatches++ < 32) {
+                    LOG_ERROR(HW_GPU,
+                              "Native verify bindless: TSC {} class slot {} holds {}, "
+                              "entry {}",
+                              index, variant, held.index, tsc.bound_ids[index].index);
+                }
+            }
+        }
+    }
+    return mismatches;
+}
+
+template <class P>
+void TextureCache<P>::ForgetPoolRefs(ImageId image_id) {
+    if (!TexturePoolExperiment::Enabled()) {
+        for (const size_t c : active_channel_ids) {
+            channel_storage[c].graphics_image_table.Invalidate();
+            channel_storage[c].compute_image_table.Invalidate();
+        }
+        image_pool_refs.erase(image_id);
+        return;
+    }
+    const auto it = image_pool_refs.find(image_id);
+    if (it == image_pool_refs.end()) {
+        return;
+    }
+    for (const PoolRef& ref : it->second) {
+        if (std::ranges::find(active_channel_ids, ref.channel) == active_channel_ids.end()) {
+            continue;
+        }
+        VisitPoolTable(ref.channel * 4 + (ref.compute ? POOL_COMPUTE_TIC : POOL_GRAPHICS_TIC),
+                       [&](auto& table) {
+                           // A ref whose entry was re-pointed since only makes it resolve again.
+                           table.Forget(ref.index);
+                       });
+        ++pool_stats.forgets;
+    }
+    image_pool_refs.erase(it);
+    ++pool_generation;
 }
 
 template <class P>
@@ -1056,8 +2122,23 @@ FramebufferId TextureCache<P>::GetFramebufferId(const RenderTargets& key) {
 
 template <class P>
 void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
+    if (!pool_watch.Empty() && size != 0) {
+        using Table = DescriptorTable<TICEntry>;
+        pool_watch.TakeRange(cpu_addr >> Table::PAGE_BITS,
+                             (cpu_addr + size - 1) >> Table::PAGE_BITS,
+                             [this](u64 device_page, PoolPageWatch::Ref ref) {
+                                 DisarmPoolPage(device_page, ref, true);
+                                 ++pool_stats.write_disarms;
+                             });
+    }
     ClearStale(cpu_addr, size);
     ForEachImageInRegion(cpu_addr, size, [this, cpu_addr, size](ImageId image_id, Image& image) {
+        ++bindings_epoch;
+        if (False(image.flags & ImageFlagBits::CpuModified)) {
+            // Each branch below leaves it CPU modified: binding memos of it need the upload.
+            BumpBindingSerial(image_id);
+        }
+        ClearPoolResidency(image_id);
         if (True(image.flags & ImageFlagBits::UnwrittenSparse)) {
             // Written at last: a backed image replaces it where it is used next.
             image.flags |= ImageFlagBits::CpuModified | ImageFlagBits::Remapped;
@@ -1181,6 +2262,14 @@ std::optional<VideoCore::RasterizerDownloadArea> TextureCache<P>::GetFlushArea(D
 
 template <class P>
 void TextureCache<P>::UnmapMemory(DAddr cpu_addr, size_t size) {
+    if (!pool_watch.Empty() && size != 0) {
+        using Table = DescriptorTable<TICEntry>;
+        pool_watch.TakeRange(cpu_addr >> Table::PAGE_BITS,
+                             (cpu_addr + size - 1) >> Table::PAGE_BITS,
+                             [this](u64 device_page, PoolPageWatch::Ref ref) {
+                                 DisarmPoolPage(device_page, ref, false);
+                             });
+    }
     boost::container::small_vector<ImageId, 16> deleted_images;
     ForEachImageInRegion(cpu_addr, size, [&](ImageId id, Image&) { deleted_images.push_back(id); });
     for (const ImageId id : deleted_images) {
@@ -1196,11 +2285,28 @@ void TextureCache<P>::UnmapMemory(DAddr cpu_addr, size_t size) {
 
 template <class P>
 void TextureCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t size) {
+    // Pools in the remapped range now read other memory than their watches cover.
+    for (const size_t channel : active_channel_ids) {
+        for (u32 kind = 0; kind < 4; ++kind) {
+            const u32 table_id = static_cast<u32>(channel) * 4 + kind;
+            VisitPoolTable(table_id, [&](auto& table) {
+                using Entry = std::remove_cvref_t<decltype(table.descriptors[0])>;
+                const GPUVAddr pool_end =
+                    table.current_gpu_addr + (u64{table.current_limit} + 1) * sizeof(Entry);
+                if (table.current_gpu_addr < gpu_addr + size && gpu_addr < pool_end) {
+                    DisarmPoolTable(table, table_id);
+                }
+            });
+        }
+    }
     boost::container::small_vector<ImageId, 16> deleted_images;
     ForEachImageInRegionGPU(as_id, gpu_addr, size,
                             [&](ImageId id, Image&) { deleted_images.push_back(id); });
     for (const ImageId id : deleted_images) {
+        ClearPoolResidency(id);
         Image& image = slot_images[id];
+        ++bindings_epoch;
+        BumpBindingSerial(id);
         if (False(image.flags & ImageFlagBits::CpuModified)) {
             image.flags |= ImageFlagBits::CpuModified;
             if (True(image.flags & ImageFlagBits::Tracked)) {
@@ -1527,6 +2633,10 @@ std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImage
             return PixelFormat::R5G6B5_UNORM;
         case Service::android::PixelFormat::Bgra8888:
             return PixelFormat::B8G8R8A8_UNORM;
+        case Service::android::PixelFormat::Rgba1010102:
+            return PixelFormat::A2B10G10R10_UNORM;
+        case Service::android::PixelFormat::RgbaFp16:
+            return PixelFormat::R16G16B16A16_FLOAT;
         default:
             return PixelFormat::A8B8G8R8_UNORM;
         }
@@ -1878,11 +2988,29 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
 
     // Made where a dropped GPU-written image left stale bytes (MarkStale): nothing to upload.
     // Pages the buffer cache wrote on the GPU may hold data written back since: upload those.
-    if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed) && image.dirty_layers.empty() &&
+    // EXPERIMENT (do not merge): EDEN_NX2_TC_SKIP_STALE=0 uploads these images as before #463,
+    // for the A/B of the tile artefacts under Ocarina's Load menu.
+    static const bool skip_stale = [] {
+        const char* value = std::getenv("EDEN_NX2_TC_SKIP_STALE");
+        return value == nullptr || std::string_view{value} != "0";
+    }();
+    if (skip_stale && Tegra::g_nx2_ampere.load(std::memory_order_relaxed) &&
+        image.dirty_layers.empty() &&
         False(image.flags & (ImageFlagBits::Sparse | ImageFlagBits::SparseLayers |
                              ImageFlagBits::SparseTiles | ImageFlagBits::Unbacked)) &&
         stale_pages.IsAll(image.cpu_addr, image.guest_size_bytes)) {
         if (!Tegra::Nx2MayBeGpuWritten(image.cpu_addr, image.guest_size_bytes)) {
+            if (debug_stats) {
+                static u32 logged{};
+                if (logged++ < 64) {
+                    LOG_INFO(HW_GPU,
+                             "Texture cache: stale upload skipped for {}x{} format {} at {:#x} "
+                             "({} KiB): its contents stay undefined until drawn",
+                             image.info.size.width, image.info.size.height,
+                             static_cast<u32>(image.info.format), image.gpu_addr,
+                             image.guest_size_bytes >> 10);
+                }
+            }
             ++tc_stale_skips;
             tc_stale_skip_bytes += image.guest_size_bytes;
             runtime.TransitionImageLayout(image);
@@ -2296,6 +3424,7 @@ ImageViewId TextureCache<P>::CreateImageView(const TICEntry& raw_config) {
     }
     const TICEntry config = TextureViewHeader(raw_config, native);
     const ImageInfo info(config);
+    ++bindings_epoch;
     if (info.type == ImageType::Buffer) {
         const ImageViewInfo view_info(config, 0);
         return slot_image_views.insert(runtime, info, view_info, config.Address());
@@ -2329,6 +3458,7 @@ ImageId TextureCache<P>::FindOrInsertImage(const ImageInfo& info, GPUVAddr gpu_a
 template <class P>
 ImageId TextureCache<P>::FindImage(const ImageInfo& info, GPUVAddr gpu_addr,
                                    RelaxedOptions options) {
+    find_image_matches = 0;
     const std::optional<DAddr> cpu_addr = ImageCpuAddress(gpu_addr, CalculateGuestSizeInBytes(info));
     if (!cpu_addr) {
         return ImageId{};
@@ -2365,6 +3495,7 @@ ImageId TextureCache<P>::FindImage(const ImageInfo& info, GPUVAddr gpu_addr,
         return false;
     };
     ForEachImageInRegion(*cpu_addr, CalculateGuestSizeInBytes(info), lambda);
+    find_image_matches = static_cast<u32>(image_ids.size());
     if (image_ids.size() <= 1) [[likely]] {
         return image_id;
     }
@@ -2416,10 +3547,15 @@ bool TextureCache<P>::ImageCanRescale(ImageBase& image) {
 
 template <class P>
 void TextureCache<P>::InvalidateScale(Image& image) {
+    ++bindings_epoch;
+    BumpBindingEpoch();
     if (image.scale_tick <= frame_tick) {
         image.scale_tick = frame_tick + 1;
     }
     const std::span<const ImageViewId> image_view_ids = image.image_view_ids;
+    // Pool entries are bound to views, so an image without views has none.
+    const ImageId image_id =
+        image_view_ids.empty() ? ImageId{} : slot_image_views[image_view_ids.front()].image_id;
     auto& dirty = maxwell3d->dirty.flags;
     dirty[Dirty::RenderTargets] = true;
     dirty[Dirty::ZetaBuffer] = true;
@@ -2440,17 +3576,8 @@ void TextureCache<P>::InvalidateScale(Image& image) {
     }
     image.image_view_ids.clear();
     image.image_view_infos.clear();
-    for (size_t c : active_channel_ids) {
-        auto& channel_info = channel_storage[c];
-
-#ifndef NDEBUG
-        if constexpr (ENABLE_VALIDATION) {
-            std::ranges::fill(channel_info.graphics_image_table.LiveBoundIds(), CORRUPT_ID);
-            std::ranges::fill(channel_info.compute_image_table.LiveBoundIds(), CORRUPT_ID);
-        }
-#endif
-        channel_info.graphics_image_table.Invalidate();
-        channel_info.compute_image_table.Invalidate();
+    if (image_id) {
+        ForgetPoolRefs(image_id);
     }
     has_deleted_images = true;
 }
@@ -2866,6 +3993,8 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         }
     }
     Image& new_image = slot_images[new_image_id];
+    ++bindings_epoch;
+    BumpBindingSerial(new_image_id);
 
     new_image.allocation_tick = frame_tick;
     {
@@ -2964,6 +4093,8 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         if (!AddImageAlias(new_image_base, aliased, new_image_id, aliased_id)) {
             continue;
         }
+        BumpBindingSerial(aliased_id);
+        ClearPoolResidency(aliased_id);
         join_alias_indices.emplace(aliased_id, alias_index);
         new_image.flags |= ImageFlagBits::Alias;
     }
@@ -2973,6 +4104,8 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         if (!AddImageAlias(aliased, new_image_base, aliased_id, new_image_id)) {
             continue;
         }
+        BumpBindingSerial(aliased_id);
+        ClearPoolResidency(aliased_id);
         join_alias_indices.emplace(aliased_id, alias_index);
         new_image.flags |= ImageFlagBits::Alias;
     }
@@ -3059,6 +4192,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             continue;
         }
         if (True(overlap.flags & ImageFlagBits::GpuModified)) {
+            NoteGpuModified(new_image);
             new_image.flags |= ImageFlagBits::GpuModified;
             const auto& resolution = Settings::values.resolution_info;
             const SubresourceBase base = new_image.TryFindBase(overlap.gpu_addr).value();
@@ -3266,7 +4400,14 @@ ImageViewId TextureCache<P>::FindColorBuffer(size_t index) {
         return ImageViewId{};
     }
     const ImageInfo info(regs.rt[index], regs.anti_alias_samples_mode);
-    return FindRenderTargetView(info, gpu_addr);
+    // address, size, format, tile mode, depth, array pitch, base layer, mark_ieee_clean
+    static constexpr size_t RtWords = 10;
+    static_assert(sizeof(rt) >= RtWords * sizeof(u32));
+    RenderTargetLookupKey key{};
+    key[0] = static_cast<u32>(index) + 1;
+    std::memcpy(&key[1], &rt, RtWords * sizeof(u32));
+    key[1 + RtWords] = static_cast<u32>(regs.anti_alias_samples_mode);
+    return FindRenderTargetViewMemo(key, info, gpu_addr);
 }
 
 template <class P>
@@ -3280,7 +4421,47 @@ ImageViewId TextureCache<P>::FindDepthBuffer() {
         return ImageViewId{};
     }
     const ImageInfo info(regs.zeta, regs.zeta_size, regs.anti_alias_samples_mode);
-    return FindRenderTargetView(info, gpu_addr);
+    static_assert(sizeof(regs.zeta) == 5 * sizeof(u32) &&
+                  sizeof(regs.zeta_size) == 3 * sizeof(u32));
+    RenderTargetLookupKey key{};
+    key[0] = 0x100;
+    std::memcpy(&key[1], &regs.zeta, sizeof(regs.zeta));
+    std::memcpy(&key[6], &regs.zeta_size, sizeof(regs.zeta_size));
+    key[9] = static_cast<u32>(regs.anti_alias_samples_mode);
+    return FindRenderTargetViewMemo(key, info, gpu_addr);
+}
+
+template <class P>
+ImageViewId TextureCache<P>::FindRenderTargetViewMemo(const RenderTargetLookupKey& key,
+                                                      const ImageInfo& info, GPUVAddr gpu_addr) {
+    // Linear targets match images by their Strong flag too, which changes without an epoch.
+    if (info.type == ImageType::Linear) {
+        return FindRenderTargetView(info, gpu_addr);
+    }
+    u64 hash = 0xcbf29ce484222325ULL;
+    for (const u32 word : key) {
+        hash = (hash ^ word) * 0x100000001b3ULL;
+    }
+    RenderTargetLookupMemo& memo = rt_lookup_memos[(hash ^ (hash >> 29)) % rt_lookup_memos.size()];
+    // Valid while every epoch increment since was a frame's (no image or view changed).
+    if (memo.epoch != 0 && memo.channel == channel_state && memo.memory == gpu_memory &&
+        bindings_epoch - memo.epoch == frame_epoch_bumps - memo.frame_bumps && memo.key == key) {
+        return memo.view;
+    }
+    const u64 epoch = bindings_epoch;
+    find_image_matches = 0;
+    const ImageViewId view = FindRenderTargetView(info, gpu_addr);
+    // Nothing created, deleted or remapped, and one candidate: the same registers find the same
+    // image and view until bindings_epoch moves.
+    if (bindings_epoch == epoch && find_image_matches == 1 && view && view != NULL_IMAGE_VIEW_ID) {
+        memo.key = key;
+        memo.epoch = epoch;
+        memo.frame_bumps = frame_epoch_bumps;
+        memo.channel = channel_state;
+        memo.memory = gpu_memory;
+        memo.view = view;
+    }
+    return view;
 }
 
 template <class P>
@@ -3524,6 +4705,7 @@ ImageViewId TextureCache<P>::FindOrEmplaceImageView(ImageId image_id, const Imag
     }
     const ImageViewId image_view_id = slot_image_views.insert(runtime, info, image_id, image, slot_images);
     image.InsertView(info, image_view_id);
+    ++bindings_epoch;
     return image_view_id;
 }
 
@@ -3736,6 +4918,8 @@ template <class P>
 void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     ImageBase& image = slot_images[image_id];
     ++images_deleted;
+    ++bindings_epoch;
+    BumpBindingSerial(image_id);
     // Drop every decode still queued for it, whatever IsDecoding says: an image re-decoded while
     // a decode was in flight has two, and the first to finish clears the flag. A decode left
     // behind was uploaded into the next image to take this slot (another texture's data: garbage
@@ -3832,22 +5016,13 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
         image_allocs_table.erase(alloc_it);
         slot_image_allocs.erase(alloc_id);
     }
-    for (size_t c : active_channel_ids) {
-        auto& channel_info = channel_storage[c];
-#ifndef NDEBUG
-        if constexpr (ENABLE_VALIDATION) {
-            std::ranges::fill(channel_info.graphics_image_table.LiveBoundIds(), CORRUPT_ID);
-            std::ranges::fill(channel_info.compute_image_table.LiveBoundIds(), CORRUPT_ID);
-        }
-#endif
-        channel_info.graphics_image_table.Invalidate();
-        channel_info.compute_image_table.Invalidate();
-    }
+    ForgetPoolRefs(image_id);
     has_deleted_images = true;
 }
 
 template <class P>
 void TextureCache<P>::RemoveImageViewReferences(std::span<const ImageViewId> removed_views) {
+    ++bindings_epoch;
     for (const ImageViewId removed : removed_views) {
         const auto refs = image_view_descriptors.find(removed);
         if (refs == image_view_descriptors.end()) {
@@ -3891,8 +5066,21 @@ void TextureCache<P>::RemoveFramebuffers(std::span<const ImageViewId> removed_vi
 
 template <class P>
 void TextureCache<P>::MarkModification(ImageBase& image) noexcept {
+    NoteGpuModified(image);
     image.flags |= ImageFlagBits::GpuModified;
     image.modification_tick = ++modification_tick;
+}
+
+template <class P>
+void TextureCache<P>::NoteGpuModified(const ImageBase& image) noexcept {
+    if (True(image.flags & ImageFlagBits::GpuModified)) {
+        return;
+    }
+    if (True(image.flags & ImageFlagBits::Sparse)) {
+        gpu_modified_sparse.store(true, std::memory_order_relaxed);
+        return;
+    }
+    gpu_modified_filter.Mark(image.cpu_addr, image.cpu_addr_end - image.cpu_addr);
 }
 
 template <class P>
@@ -3924,6 +5112,7 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
     }
     image.modification_tick = most_recent_tick;
     if (any_modified) {
+        NoteGpuModified(image);
         image.flags |= ImageFlagBits::GpuModified;
     }
     std::ranges::sort(aliased_images, [this](const AliasedImage* lhs, const AliasedImage* rhs) {
@@ -3995,6 +5184,9 @@ void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool 
                         image.gpu_addr);
             Tegra::Nx2SparseMarkWritten(image.gpu_addr, image.guest_size_bytes);
             image.flags |= ImageFlagBits::CpuModified | ImageFlagBits::Remapped;
+            ++bindings_epoch;
+            BumpBindingSerial(image_id);
+            ClearPoolResidency(image_id);
         }
         MarkModification(image);
     }
@@ -4026,6 +5218,14 @@ void TextureCache<P>::CopyImage(ImageId dst_id, ImageId src_id, std::vector<Imag
         // BC1 and BC3 blocks differ in size, so the host can't copy between them; both hold the
         // same guest data, which is uploaded from guest memory instead.
         return;
+    }
+    if constexpr (requires { runtime.SameAstcHostFormat(dst.info, src.info); }) {
+        // The same for ASTC kept in other host formats (BC7 from the GPU encoder, BC3 from the
+        // CPU, RGBA8): the bits of one mean nothing in the other.
+        if (IsPixelFormatASTC(dst.info.format) && IsPixelFormatASTC(src.info.format) &&
+            !runtime.SameAstcHostFormat(dst.info, src.info)) {
+            return;
+        }
     }
     // As in BlitImage: land a parked deferred clear before the copy overwrites the image.
     runtime.FlushDeferredClear();

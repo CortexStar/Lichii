@@ -4,10 +4,13 @@
 // SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <optional>
+
 #include "core/frontend/framebuffer_layout.h"
 #include "video_core/framebuffer_config.h"
 #include "video_core/host_shaders/vulkan_present_vert_spv.h"
 #include "video_core/renderer_vulkan/present/layer.h"
+#include "video_core/renderer_vulkan/present/perf_overlay_pass.h"
 #include "video_core/renderer_vulkan/present/present_push_constants.h"
 #include "video_core/renderer_vulkan/present/util.h"
 #include "video_core/renderer_vulkan/present/window_adapt_pass.h"
@@ -31,10 +34,11 @@ WindowAdaptPass::WindowAdaptPass(const Device& device, VkFormat frame_format, vk
 
 WindowAdaptPass::~WindowAdaptPass() = default;
 
-void WindowAdaptPass::Draw(const Device& device, RasterizerVulkan& rasterizer, Scheduler& scheduler, size_t image_index,
-                           std::list<Layer>& layers,
+void WindowAdaptPass::Draw(const Device& device, RasterizerVulkan& rasterizer, Scheduler& scheduler,
+                           size_t image_index, std::list<Layer>& layers,
                            std::span<const Tegra::FramebufferConfig> configs,
-                           const Layout::FramebufferLayout& layout, Frame* dst) {
+                           const Layout::FramebufferLayout& layout, Frame* dst, bool hdr_output,
+                           const PerfOverlayDraw* overlay) {
 
     const VkFramebuffer host_framebuffer{*dst->framebuffer};
     const VkRenderPass renderpass{*render_pass};
@@ -65,10 +69,12 @@ void WindowAdaptPass::Draw(const Device& device, RasterizerVulkan& rasterizer, S
         }
 
         layer_it->ConfigureDraw(device, &push_constants[i], &descriptor_sets[i], rasterizer, *sampler,
-                                image_index, configs[i], layout);
+                                image_index, configs[i], layout, hdr_output);
         layer_it++;
     }
 
+    const std::optional<PerfOverlayDraw> overlay_draw =
+        overlay ? std::optional{*overlay} : std::nullopt;
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
         const f32 bg_red = Settings::values.bg_red.GetValue() / 255.0f;
         const f32 bg_green = Settings::values.bg_green.GetValue() / 255.0f;
@@ -101,6 +107,9 @@ void WindowAdaptPass::Draw(const Device& device, RasterizerVulkan& rasterizer, S
             cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline_layout, 0,
                                       descriptor_sets[i], {});
             cmdbuf.Draw(4, 1, 0, 0);
+        }
+        if (overlay_draw) {
+            RecordPerfOverlay(cmdbuf, *overlay_draw);
         }
 
         cmdbuf.EndRenderPass();

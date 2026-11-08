@@ -14,6 +14,8 @@
 
 #include <fmt/ranges.h>
 
+#include "common/display_hdr.h"
+#include "common/dkb_cpu_trace.h"
 #include "common/logging.h"
 #include <ranges>
 #include "common/scope_exit.h"
@@ -28,6 +30,7 @@
 #ifdef HAS_RESHADE
 #include "video_core/post_processing/fx_chain.h"
 #endif
+#include "video_core/hdr_capture.h"
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
 #include "video_core/renderer_vulkan/vk_blit_screen.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -153,6 +156,7 @@ try
     , state_tracker()
     , scheduler(device, state_tracker)
     , swapchain(*surface,
+                render_window.GetWindowInfo().render_surface,
                 device,
                 scheduler,
                render_window.GetFramebufferLayout().width,
@@ -230,38 +234,84 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     }
 
     RenderScreenshot(framebuffers);
+    const bool overlay = VideoCore::PerfOverlay::Enabled();
+    if (overlay) {
+        perf_overlay_stats.OnFrame(std::chrono::steady_clock::now());
+    }
     const auto acquiring = trace ? std::chrono::steady_clock::now()
                                  : std::chrono::steady_clock::time_point{};
     Frame* frame = present_manager.GetRenderFrame();
+    frame->input_ns = 0;
+    for (const auto& framebuffer : framebuffers) {
+        frame->input_ns = (std::max)(frame->input_ns, framebuffer.input_ns);
+    }
     const auto acquired = trace ? std::chrono::steady_clock::now()
                                 : std::chrono::steady_clock::time_point{};
+
+#ifdef __ANDROID__
+    VkFormat output_format = VK_FORMAT_R8G8B8A8_UNORM;
+#else
+    VkFormat output_format = VK_FORMAT_B8G8R8A8_UNORM;
+#endif
+    const bool hdr_output =
+        Settings::values.hdr_mode.GetValue() != Settings::HdrMode::Off && framebuffers.size() == 1 &&
+        framebuffers.front().color_space != Tegra::ColorSpace::RGB709;
+    if (hdr_output) {
+        // The guest sees HDR availability, not individual encodings. Presentation must reject an
+        // unavailable pair rather than reinterpret an already-rendered HDR frame as SDR.
+        switch (framebuffers.front().color_space) {
+        case Tegra::ColorSpace::RGB2020_PQ:
+            output_format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+            frame->color_space = VK_COLOR_SPACE_HDR10_ST2084_EXT;
+            break;
+        case Tegra::ColorSpace::RGB709_Linear:
+            output_format = VK_FORMAT_R16G16B16A16_SFLOAT;
+            frame->color_space = VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
+            break;
+        default:
+            break;
+        }
+    }
+
+    std::optional<PerfOverlayInput> overlay_input;
+    if (overlay) {
+        if (const auto now = std::chrono::steady_clock::now(); perf_overlay_stats.RefreshDue(now)) {
+            RefreshPerfOverlay(now, hdr_output);
+        }
+        overlay_input =
+            PerfOverlayInput{.stats = &perf_overlay_stats, .white_nits = perf_overlay_white};
+    }
 
     scheduler.RequestOutsideRenderPassOperationContext();
     blit_swapchain.DrawToFrame(device, rasterizer, frame, framebuffers,
                                render_window.GetFramebufferLayout(),
-                               present_manager.SwapchainImageCount(),
-                               swapchain.GetImageViewFormat());
+                               present_manager.SwapchainImageCount(), output_format, hdr_output,
+                               overlay_input ? &*overlay_input : nullptr);
 
 #ifdef HAS_LSFG
-    void(frame_gen.WantedGenerations(present_manager.MaxExtraFrames()));
+    if (hdr_output) {
+        frame_gen.Pause();
+    } else {
+        void(frame_gen.WantedGenerations(present_manager.MaxExtraFrames()));
 
-    frame_gen.Process(device, frame, present_manager.SwapchainImageFormat(),
-                      GuestExtent(framebuffers));
+        frame_gen.Process(device, frame, frame->image_format, GuestExtent(framebuffers));
 
-    const size_t generated_frames = frame_gen.GeneratedFrameCount();
-    for (size_t generation = 0; generation < generated_frames; ++generation) {
-        Frame* generated = present_manager.GetRenderFrame();
-        blit_swapchain.PrepareFrame(device, generated, render_window.GetFramebufferLayout());
-        frame_gen.GenerateInto(device, generated, generation);
-        scheduler.Flush(*generated->render_ready);
-        present_manager.Present(generated);
+        const size_t generated_frames = frame_gen.GeneratedFrameCount();
+        for (size_t generation = 0; generation < generated_frames; ++generation) {
+            Frame* generated = present_manager.GetRenderFrame();
+            generated->input_ns = 0;
+            blit_swapchain.PrepareFrame(device, generated, render_window.GetFramebufferLayout());
+            frame_gen.GenerateInto(device, generated, generation);
+            generated->ready_tick = scheduler.Flush(*generated->render_ready);
+            present_manager.Present(generated);
+        }
     }
 #endif
 
-    if (trace) {
+    if (trace || overlay) {
         scheduler.MarkFrameEnd(++trace_frame);
     }
-    scheduler.Flush(*frame->render_ready);
+    frame->ready_tick = scheduler.Flush(*frame->render_ready);
 
     const auto presenting = trace ? std::chrono::steady_clock::now()
                                   : std::chrono::steady_clock::time_point{};
@@ -297,6 +347,36 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     }
 }
 
+void RendererVulkan::RefreshPerfOverlay(std::chrono::steady_clock::time_point now,
+                                        bool hdr_output) {
+    using Common::DkbCpuTrace::Role;
+    const auto snapshot = Common::DkbCpuTrace::ReadSnapshot();
+    const auto cpu_ns = [&snapshot](Role role) {
+        const auto& thread = snapshot.threads[static_cast<size_t>(role)];
+        return thread.active ? thread.cpu_ns : std::nullopt;
+    };
+    // HDR text takes the brightness the game was told for its HUD (nx2:vi2's reference white).
+    perf_overlay_white =
+        hdr_output ? static_cast<f32>(
+                         Common::ResolveHdrOutput(Common::DisplayHdrMonitor::Instance().Current(),
+                                                  Settings::HdrMode::On,
+                                                  Settings::values.hdr_peak_luminance.GetValue(),
+                                                  Settings::values.hdr_reference_white.GetValue())
+                             .reference_white)
+                   : 0.0f;
+    perf_overlay_stats.Refresh(now, {
+                                        .generated_frames = GetFrameGenStatus().generated_frames,
+                                        .threads =
+                                            {
+                                                .front = cpu_ns(Role::GpuCommand),
+                                                .back = cpu_ns(Role::GpuBack),
+                                                .worker = cpu_ns(Role::VulkanWorker),
+                                            },
+                                        .gpu_frame_ms = scheduler.GpuFrameMs(),
+                                        .white_nits = perf_overlay_white,
+                                    });
+}
+
 void RendererVulkan::Report() const {
     using namespace Common::Literals;
 
@@ -323,7 +403,7 @@ void RendererVulkan::Report() const {
 
 vk::Buffer RendererVulkan::RenderToBuffer(std::span<const Tegra::FramebufferConfig> framebuffers,
                                           const Layout::FramebufferLayout& layout, VkFormat format,
-                                          VkDeviceSize buffer_size) {
+                                          VkDeviceSize buffer_size, bool hdr_output) {
     auto frame = [&]() {
         Frame f{};
         f.image =
@@ -334,7 +414,8 @@ vk::Buffer RendererVulkan::RenderToBuffer(std::span<const Tegra::FramebufferConf
     }();
 
     auto dst_buffer = CreateWrappedBuffer(memory_allocator, buffer_size, MemoryUsage::Download);
-    blit_capture.DrawToFrame(device, rasterizer, &frame, framebuffers, layout, 1, format);
+    blit_capture.DrawToFrame(device, rasterizer, &frame, framebuffers, layout, 1, format,
+                             hdr_output);
 
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([&](vk::CommandBuffer cmdbuf) {
@@ -359,11 +440,36 @@ void RendererVulkan::RenderScreenshot(std::span<const Tegra::FramebufferConfig> 
         framebuffers, renderer_settings.screenshot_layer_stack, screenshot_layer_scratch);
 
     const auto& layout{renderer_settings.screenshot_framebuffer_layout};
-    const auto dst_buffer = RenderToBuffer(screenshot_layers, layout, VK_FORMAT_B8G8R8A8_UNORM,
-                                           layout.width * layout.height * 4);
-
-    std::memcpy(renderer_settings.screenshot_bits, dst_buffer.Mapped().data(),
-                dst_buffer.Mapped().size());
+    const size_t pixels = size_t{layout.width} * layout.height;
+    const auto hdr_layer = std::ranges::find_if(screenshot_layers, [](const auto& framebuffer) {
+        return framebuffer.color_space != Tegra::ColorSpace::RGB709;
+    });
+    if (hdr_layer != screenshot_layers.end()) {
+        // The HDR image drawn unchanged into a float frame, then converted to what the game's
+        // SDR output would look like (an 8-bit copy of PQ codes looks grey and washed out).
+        const auto dst_buffer = RenderToBuffer(screenshot_layers, layout,
+                                               VK_FORMAT_R16G16B16A16_SFLOAT, pixels * 8, true);
+        const auto output = Common::ResolveHdrOutput(
+            Common::QueryDisplayHdr(render_window.GetWindowInfo().render_surface),
+            Settings::HdrMode::On, Settings::values.hdr_peak_luminance.GetValue(),
+            Settings::values.hdr_reference_white.GetValue());
+        const std::span<const u8> mapped = dst_buffer.Mapped();
+        VideoCore::HdrCapture::Convert(
+            std::span{reinterpret_cast<const u16*>(mapped.data()), pixels * 4},
+            std::span{static_cast<u8*>(renderer_settings.screenshot_bits), pixels * 4},
+            {
+                .color_space = hdr_layer->color_space,
+                .reference_white = static_cast<f32>(output.reference_white),
+                .nits_per_unit = hdr_layer->linear_unit_luminance != 0
+                                     ? static_cast<f32>(hdr_layer->linear_unit_luminance)
+                                     : 80.0f,
+            });
+    } else {
+        const auto dst_buffer =
+            RenderToBuffer(screenshot_layers, layout, VK_FORMAT_B8G8R8A8_UNORM, pixels * 4);
+        std::memcpy(renderer_settings.screenshot_bits, dst_buffer.Mapped().data(),
+                    dst_buffer.Mapped().size());
+    }
     renderer_settings.screenshot_complete_callback(false);
     renderer_settings.screenshot_requested = false;
 }
@@ -413,7 +519,7 @@ void RendererVulkan::RenderAppletCaptureLayer(
 
     scheduler.RequestOutsideRenderPassOperationContext();
     blit_applet.DrawToFrame(device, rasterizer, &applet_frame, capture_layers, VideoCore::Capture::Layout, 1,
-                            CaptureFormat);
+                            CaptureFormat, false);
 }
 
 } // namespace Vulkan

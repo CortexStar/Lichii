@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <random>
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -1274,6 +1275,19 @@ Result KProcess::LoadFromMetadata(KernelCore& kernel, const FileSys::ProgramMeta
 
     // We succeeded.
     R_SUCCEED();
+}
+
+void KProcess::AddGuestFunctions(std::string_view build_id, u64 base) {
+    for (const auto& site : Core::GuestFunctionSites(build_id)) {
+        m_guest_functions.emplace_back(base + site.offset, &site);
+    }
+    std::ranges::sort(m_guest_functions);
+}
+
+const Core::GuestFunctionSite* KProcess::FindGuestFunction(u64 address) const {
+    const auto it = std::ranges::lower_bound(m_guest_functions, address, {},
+                                             &std::pair<u64, const Core::GuestFunctionSite*>::first);
+    return it != m_guest_functions.end() && it->first == address ? it->second : nullptr;
 }
 
 void KProcess::LoadModule(KernelCore& kernel, CodeSet code_set, KProcessAddress base_addr) {

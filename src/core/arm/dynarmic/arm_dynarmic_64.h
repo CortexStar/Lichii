@@ -6,8 +6,10 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <memory>
+#include <optional>
 #include "common/container/unordered_map.h"
 
 #include <dynarmic/interface/A64/a64.h>
@@ -15,6 +17,7 @@
 #include "common/common_types.h"
 #include "common/hash.h"
 #include "core/arm/arm_interface.h"
+#include "core/arm/spin_wait.h"
 #include "core/arm/dynarmic/dynarmic_exclusive_monitor.h"
 #include "dynarmic/interface/A64/config.h"
 
@@ -56,12 +59,22 @@ public:
     bool MemoryWriteExclusive128(u64 vaddr, Dynarmic::A64::Vector value, Dynarmic::A64::Vector expected) override;
     void InstructionCacheOperationRaised(Dynarmic::A64::InstructionCacheOperation op, u64 value) override;
     void ExceptionRaised(u64 pc, Dynarmic::A64::Exception exception) override;
+    std::optional<Dynarmic::A64::HostFunctionEntry> GetHostFunction(u64 vaddr) override;
     void CallSVC(u32 svc) override;
     void AddTicks(u64 ticks) override;
     u64 GetTicksRemaining() override;
     u64 GetCNTPCT() override;
     bool CheckMemoryAccess(u64 addr, u64 size, Kernel::DebugWatchpointType type);
     void ReturnException(u64 pc, Dynarmic::HaltReason hr);
+    void OnSpinHint(u64 pc);
+    bool WaitForPolledWord(u64 pc);
+    /// Host pointer to [vaddr, vaddr + size) if every page of it is plain memory, contiguous on
+    /// the host: what the JIT's fast path would access. nullptr otherwise.
+    u8* HostSpan(u64 vaddr, u64 size) const;
+    static bool HostMemmove(void* user, const Dynarmic::A64::HostFunctionState& state);
+    static bool HostMemset(void* user, const Dynarmic::A64::HostFunctionState& state);
+    static bool HostMurmurHash3String(void* user, const Dynarmic::A64::HostFunctionState& state);
+    static bool HostFmodf(void* user, const Dynarmic::A64::HostFunctionState& state);
 
     Dynarmic::CodePage cached_code_page;
     u64 last_code_addr = u64(-1);
@@ -71,7 +84,16 @@ public:
     u64 m_tpidr_el0{};
     u64 m_last_cntpct{}; ///< The previous counter read (GetCNTPCT spin detection)
     u64 m_spin_ticks{32}; ///< Reads closer than this (~1.7 us) count as a polling loop
+    SpinEpisode m_spin_episode;
+    u64 m_spin_gap_tsc{}; ///< YIELDs closer than this (TSC ticks) are one spin-wait
+    u32 m_spin_wait_tsc{}; ///< Longest MonitorWait per YIELD (TSC ticks); 0: no MonitorWait
+    struct SpinSite {
+        u64 pc{~u64{0}};
+        std::optional<SpinWatch> watch;
+    };
+    std::array<SpinSite, 16> m_spin_sites{}; ///< DecodeSpinWatch results by YIELD address
     Kernel::KProcess* m_process{};
+    const Common::PageTable* m_page_table{}; ///< Set when guest functions may run as host code
     std::shared_ptr<WindowTrace::Session> m_window_trace;
     const bool m_debugger_enabled{};
     const bool m_check_memory_access{};

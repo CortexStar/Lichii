@@ -102,6 +102,17 @@ public:
     /// Release all pending fences.
     virtual void ReleaseFences(bool force = true) = 0;
 
+    /// The split's back, between entries: whether ReleaseFences() would only wait for fences
+    /// that complete without it (FenceManager::FencesQuiet). `epoch` gets FenceWorkEpoch().
+    virtual bool FencesQuiet([[maybe_unused]] u64& epoch) {
+        return false;
+    }
+
+    /// Any thread: changes whenever a fence or a fence operation is added.
+    [[nodiscard]] virtual u64 FenceWorkEpoch() const {
+        return 0;
+    }
+
     /// Writes the region's query reports to guest memory, waiting for pending host results.
     virtual void FlushQueryResults(DAddr addr, u64 size) {
         FlushRegion(addr, size, VideoCommon::CacheType::QueryCache);
@@ -154,6 +165,14 @@ public:
                                  VideoCommon::CacheType which = VideoCommon::CacheType::All) = 0;
 
     virtual RasterizerDownloadArea GetFlushArea(DAddr addr, u64 size) = 0;
+
+    /// On the GPU thread for a guest read: queues the GPU-written buffer data in the range for
+    /// download at a fence submitted now, without waiting for the host GPU; the reader waits for
+    /// it to land (GPU::WaitForLanding). False when it can't (image data, nothing queued): the
+    /// caller flushes.
+    virtual bool QueueFlushRegion([[maybe_unused]] DAddr addr, [[maybe_unused]] u64 size) {
+        return false;
+    }
 
     /// Whether reports in the range wait for host query results not yet in guest memory.
     [[nodiscard]] virtual bool HasPendingQueries([[maybe_unused]] DAddr addr,

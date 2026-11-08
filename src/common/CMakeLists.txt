@@ -44,11 +44,17 @@ add_library(
     demangle.h
     device_power_state.cpp
     device_power_state.h
+    display_hdr.cpp
+    display_hdr.h
+    display_refresh.cpp
+    display_refresh.h
     div_ceil.h
     dkb_cpu_trace.cpp
     dkb_cpu_trace.h
     nx2_sampler.cpp
     nx2_sampler.h
+    nx2_address_wait.cpp
+    nx2_address_wait.h
     dynamic_library.cpp
     dynamic_library.h
     elf.h
@@ -69,6 +75,8 @@ add_library(
     fs/fs_types.h
     fs/fs_util.cpp
     fs/fs_util.h
+    fs/mapped_file.cpp
+    fs/mapped_file.h
     fs/path_util.cpp
     fs/path_util.h
     hash.h
@@ -78,7 +86,10 @@ add_library(
     hex_util.h
     host_memory.cpp
     host_memory.h
+    input_watch.h
     input.h
+    input_latency.cpp
+    input_latency.h
     intrusive_red_black_tree.h
     literals.h
     logging.cpp
@@ -171,7 +182,7 @@ set_source_files_properties(zbic_compression.cpp PROPERTIES
 if(WIN32)
     target_sources(common PRIVATE windows/timer_resolution.cpp
         windows/timer_resolution.h)
-    target_link_libraries(common PRIVATE ntdll)
+    target_link_libraries(common PRIVATE dxgi ntdll)
 endif()
 
 if(NOT WIN32)
@@ -199,6 +210,8 @@ if(ARCHITECTURE_x86_64)
     target_sources(
         common
         PRIVATE
+        x64/monitor_wait.cpp
+        x64/monitor_wait.h
         x64/rdtsc.cpp
         x64/rdtsc.h
         x64/xbyak.h)

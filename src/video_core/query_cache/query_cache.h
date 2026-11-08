@@ -282,9 +282,19 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     };
     u8* pointer = impl->device_memory.template GetPointer<u8>(cpu_addr);
     u8* pointer_timestamp = impl->device_memory.template GetPointer<u8>(cpu_addr + 8);
-    std::function<void()> operation([this, streamer, query_base = query, query_location,
-                                     pointer, pointer_timestamp, cpu_addr, addr,
-                                     asid = gpu_memory->GetID(), counter_type] {
+    // FlushQueryResults and the split front's DMA reads wait for these: completed on every way
+    // out of the operation, written or discarded, and when the operation is dropped without
+    // running.
+    auto report = std::make_shared<Tegra::Nx2AsyncReport>(cpu_addr);
+    std::function<void()> operation([this, streamer, query_base = query, query_location, pointer,
+                                     pointer_timestamp, cpu_addr, addr, asid = gpu_memory->GetID(),
+                                     counter_type, report] {
+        struct Complete {
+            Tegra::Nx2AsyncReport& report;
+            ~Complete() {
+                report.Complete();
+            }
+        } const complete{*report};
         if (True(query_base->flags & QueryFlagBits::IsInvalidated)) {
             if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Discard)) {
                 LOG_INFO(HW_GPU,
@@ -332,6 +342,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         impl->pending_unregister.push_back(query_location);
     });
     if (is_fence) {
+        report->Issue();
         VideoCore::g_signaling_query_report_fence = true;
         impl->rasterizer.SignalFence(std::move(operation));
         VideoCore::g_signaling_query_report_fence = false;
@@ -357,6 +368,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
             streamer->Free(new_query_id);
             return;
         }
+        report->Issue();
         impl->rasterizer.SyncOperation(std::move(operation));
     }
     auto [cont_addr, base] = gen_caching_indexing(cpu_addr);
@@ -554,10 +566,12 @@ bool QueryCacheBase<Traits>::HasUncommittedFlushes() const {
 }
 
 template <typename Traits>
-bool QueryCacheBase<Traits>::HasPendingFenceWork() const {
+bool QueryCacheBase<Traits>::HasPendingFenceWork(bool ignore_payload_sync) const {
     bool result = false;
-    impl->ForEachStreamer([&result](StreamerInterface* streamer) {
-        result |= streamer->HasUnsyncedQueries() || streamer->HasPendingSync();
+    StreamerInterface* const payload = impl->streamers[static_cast<size_t>(QueryType::Payload)];
+    impl->ForEachStreamer([&](StreamerInterface* streamer) {
+        result |= streamer->HasUnsyncedQueries() ||
+                  ((!ignore_payload_sync || streamer != payload) && streamer->HasPendingSync());
         return result;
     });
     return result;

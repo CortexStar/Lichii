@@ -21,6 +21,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/div_ceil.h"
+#include "common/memory_detect.h"
 #include "common/paged_scalar.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -143,8 +144,8 @@ struct EmptyAllocator {
 
 } // namespace
 
-// An unmapped read returns zeros. The first 16 are logged with their caller, every one with
-// EDEN_NX2_READBLOCK_TRACE=1.
+// An unmapped read returns zeros. The first 16 outside zero-read ranges are logged with their
+// caller, every one with EDEN_NX2_READBLOCK_TRACE=1.
 inline void ReportUnmappedRead(DAddr first_unmapped, DAddr address, size_t size,
                                size_t unmapped_bytes, const std::source_location& caller) {
     static const bool trace = [] {
@@ -213,6 +214,18 @@ DeviceMemoryManager<Traits>::~DeviceMemoryManager() = default;
 
 template <typename Traits>
 void DeviceMemoryManager<Traits>::HintCold(DAddr address, size_t size) {
+    // The hint takes the pages out of the working set at once (VirtualUnlock), whether or not
+    // the host needs the RAM, and an image made again over them faults them all back in during
+    // its upload (Ocarina of Time: 1% lows). Only when RAM is short.
+    // EXPERIMENT (do not merge): EDEN_NX2_EXP_COLD_ALWAYS=1 hints whatever the RAM.
+    static const bool cold_always = [] {
+        const char* const value = std::getenv("EDEN_NX2_EXP_COLD_ALWAYS");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!cold_always && !Common::IsLowOnMemory(Common::GetAvailablePhysicalMemory(),
+                                               Common::GetMemInfo().TotalPhysicalMemory)) {
+        return;
+    }
     struct Run {
         u64 physical_offset;
         VAddr virtual_address; ///< 0: no CPU mapping known
@@ -271,7 +284,28 @@ void DeviceMemoryManager<Traits>::AllocateFixed(DAddr start, size_t size) {
 
 template <typename Traits>
 void DeviceMemoryManager<Traits>::Free(DAddr start, size_t size) {
+    {
+        std::scoped_lock lk(zero_read_guard);
+        zero_read_ranges.erase(start);
+    }
     impl->Free(start, size);
+}
+
+template <typename Traits>
+void DeviceMemoryManager<Traits>::AddZeroReadRange(DAddr address, size_t size) {
+    std::scoped_lock lk(zero_read_guard);
+    zero_read_ranges[address] = size;
+}
+
+template <typename Traits>
+bool DeviceMemoryManager<Traits>::IsZeroReadRange(DAddr address) const {
+    std::scoped_lock lk(zero_read_guard);
+    auto it = zero_read_ranges.upper_bound(address);
+    if (it == zero_read_ranges.begin()) {
+        return false;
+    }
+    --it;
+    return address - it->first < it->second;
 }
 
 template <typename Traits>
@@ -530,7 +564,7 @@ void DeviceMemoryManager<Traits>::ReadBlock(DAddr address, void* dest_pointer, s
         [&](const std::size_t copy_amount) {
             dest_pointer = static_cast<u8*>(dest_pointer) + copy_amount;
         });
-    if (unmapped_bytes != 0) {
+    if (unmapped_bytes != 0 && !IsZeroReadRange(first_unmapped)) {
         ReportUnmappedRead(first_unmapped, address, size, unmapped_bytes, caller);
     }
 }
@@ -598,7 +632,7 @@ void DeviceMemoryManager<Traits>::ReadBlockUnsafe(DAddr address, void* dest_poin
         [&](const std::size_t copy_amount) {
             dest_pointer = static_cast<u8*>(dest_pointer) + copy_amount;
         });
-    if (unmapped_bytes != 0) {
+    if (unmapped_bytes != 0 && !IsZeroReadRange(first_unmapped)) {
         ReportUnmappedRead(first_unmapped, address, size, unmapped_bytes, caller);
     }
 }
@@ -800,6 +834,18 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedBatch(std::span<const std::pa
 
 template <typename Traits>
 void DeviceMemoryManager<Traits>::ArmReadTraps(DAddr addr, size_t size) {
+    if (size != 0) {
+        // Before the traps: a read that sees the new read area generation also sees these bits.
+        const u64 first = addr >> page_bits;
+        const u64 last = (std::min)((addr + size - 1) >> page_bits, armed_page_count - 1);
+        for (u64 page = first; page <= last; ++page) {
+            auto& word = armed_pages[page / 64];
+            const u64 bit = u64{1} << (page % 64);
+            if ((word.load(std::memory_order_relaxed) & bit) == 0) {
+                word.fetch_or(bit, std::memory_order_release);
+            }
+        }
+    }
     const auto MarkRegionReadTrap = &DeviceMemoryManager<Traits>::DeviceMethods::MarkRegionReadTrap;
     Memory::Memory* run_inter = nullptr;
     u64 run_begin = 0;

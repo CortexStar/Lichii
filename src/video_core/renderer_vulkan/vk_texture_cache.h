@@ -23,6 +23,7 @@
 #endif
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
+#include "video_core/renderer_vulkan/vk_texture_heap.h"
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -104,6 +105,11 @@ public:
     /// GPU progress: the texture cache frees a deleted image once the GPU is past its last use.
     [[nodiscard]] u64 CurrentTick() const noexcept;
 
+    /// The descriptor heaps that mirror the guest pools, when the device can use them.
+    [[nodiscard]] TextureHeap* Heap() noexcept {
+        return texture_heap && texture_heap->Usable() ? &*texture_heap : nullptr;
+    }
+
     [[nodiscard]] bool IsFree(u64 tick) const noexcept;
 
     u64 GetDeviceMemoryBudget() const;
@@ -125,6 +131,10 @@ public:
 
     /// True when ASTC is re-compressed to BC3 and opaque images may use BC1 instead.
     bool UseOpaqueAstcFormat() const;
+
+    /// True when two images of the same ASTC format have the same host format (BC1, BC3, BC7
+    /// or RGBA8 depending on the image), so the host can copy between them.
+    bool SameAstcHostFormat(const VideoCommon::ImageInfo& a, const VideoCommon::ImageInfo& b) const;
 
     bool CanDownloadMsaa(const VideoCommon::ImageInfo& info) const;
 
@@ -240,6 +250,7 @@ public:
     VkFormat GetSupportedFormat(VkFormat requested_format, VkFormatFeatureFlags required_features) const;
 
     const Device& device;
+    std::optional<TextureHeap> texture_heap;
     Scheduler& scheduler;
     MemoryAllocator& memory_allocator;
     StagingBufferPool& staging_buffer_pool;
@@ -285,9 +296,11 @@ public:
 
     std::optional<ASTCDecoderPass> astc_decoder_pass;
     std::optional<BcEncoderPass> bc_encoder_pass;
+    std::optional<Bc7EncoderPass> bc7_encoder_pass;
 
-    /// ASTC decoded on the GPU and re-compressed to BC1/BC3 there (accelerate_astc=Gpu with
-    /// astc_recompression=Bc1/Bc3): decode into a temporary RGBA8 image, encode, copy.
+    /// ASTC decoded on the GPU and re-compressed to BC1/BC3/BC7 there (accelerate_astc=Gpu with
+    /// astc_recompression=Bc1/Bc3; BC7 in place of BC3): decode into a temporary RGBA8 image,
+    /// encode, copy.
     void TranscodeAstcToBcn(Image& image, const StagingBufferRef& map,
                             std::span<const VideoCommon::SwizzleParameters> swizzles);
 
@@ -726,6 +739,20 @@ public:
         return *image_views[static_cast<size_t>(texture_type)];
     }
 
+    /// VK_EXT_descriptor_heap writes image descriptors from the view's create info, not its
+    /// handle: the create info of one view type and the structures it chains.
+    struct HeapViewInfo {
+        VkImageViewCreateInfo create_info;
+        VkImageViewUsageCreateInfo usage;
+        VkImageViewASTCDecodeModeEXT astc_decode;
+    };
+
+    /// Fills `out` with what this view's `texture_type` view was created from (pNext pointing
+    /// into `out`). False when the view has no such view type: a null descriptor, as Handle()
+    /// gives VK_NULL_HANDLE there.
+    [[nodiscard]] bool HeapViewCreateInfo(Shader::TextureType texture_type,
+                                          HeapViewInfo& out) const;
+
     [[nodiscard]] VkImage ImageHandle() const noexcept {
         return image_handle;
     }
@@ -762,6 +789,13 @@ public:
         return has_identity_swizzle;
     }
 
+    /// The view's part of a host sampler variant (Sampler::MakeKey): views with equal keys get
+    /// the same host sampler from one guest TSC. Sampler classes of the pool-mirroring heap.
+    [[nodiscard]] u64 SamplerClassKey() const noexcept;
+
+    /// PoolMirror::Meta bits for the depth-compare rules of IsUncomparable.
+    [[nodiscard]] u32 PoolMetaBits() const noexcept;
+
     [[nodiscard]] GPUVAddr GpuAddr() const noexcept {
         return gpu_addr;
     }
@@ -783,6 +817,12 @@ private:
     const SlotVector<Image>* slot_images = nullptr;
 
     std::array<vk::ImageView, Shader::NUM_TEXTURE_TYPES> image_views;
+    /// HeapViewCreateInfo: the shared part of the sampled views' create infos, and per view type
+    /// the layer count it was created with (0: not created).
+    VkImageViewCreateInfo heap_view_base{};
+    VkImageUsageFlags heap_view_usage{};
+    bool heap_astc_decode{};
+    std::array<u32, Shader::NUM_TEXTURE_TYPES> heap_view_layers{};
     std::optional<StorageViews> storage_views;
     vk::ImageView typeless_storage_view;
     vk::ImageView depth_view;
@@ -834,6 +874,9 @@ public:
 
     [[nodiscard]] VkSampler HandleFor(const ImageView& image_view, bool is_depth);
 
+    /// HandleFor for any view whose SamplerClassKey is view_key.
+    [[nodiscard]] VkSampler HandleForClass(u64 view_key, bool is_depth);
+
     /// The guest descriptor and the host state built from it, for EDEN_NX2_FRAME_DUMP_SAMPLED.
     [[nodiscard]] const Tegra::Texture::TSCEntry& Descriptor() const noexcept {
         return descriptor;
@@ -842,6 +885,20 @@ public:
     [[nodiscard]] const VkSamplerCreateInfo& CreateInfo() const noexcept {
         return base_ci;
     }
+
+    /// VK_EXT_descriptor_heap writes sampler descriptors from create infos: the one a variant
+    /// handle (as HandleFor returns) was created from, and the structures it chains.
+    struct HeapSamplerInfo {
+        VkSamplerCreateInfo create_info;
+        VkSamplerReductionModeCreateInfoEXT reduction;
+        VkSamplerBorderColorComponentMappingCreateInfoEXT mapping;
+        VkSamplerCustomBorderColorCreateInfoEXT border;
+        VkSamplerCustomBorderColorIndexCreateInfoEXT border_index;
+    };
+
+    /// Fills `out` with what `variant` was created from (pNext pointing into `out`). False when
+    /// `variant` is not one of this sampler's.
+    [[nodiscard]] bool HeapSamplerCreateInfo(VkSampler variant, HeapSamplerInfo& out) const;
 
 private:
     struct VariantKey {
@@ -860,14 +917,45 @@ private:
         }
     };
 
+    /// A custom border color registered for heap descriptors, released with its variant.
+    class RegisteredBorderColor {
+    public:
+        RegisteredBorderColor() = default;
+        RegisteredBorderColor(const Device& device, u32 index)
+            : device_ptr{&device}, value{index} {}
+        ~RegisteredBorderColor();
+        RegisteredBorderColor(const RegisteredBorderColor&) = delete;
+        RegisteredBorderColor& operator=(const RegisteredBorderColor&) = delete;
+        RegisteredBorderColor(RegisteredBorderColor&& rhs) noexcept
+            : device_ptr{std::exchange(rhs.device_ptr, nullptr)}, value{rhs.value} {}
+        RegisteredBorderColor& operator=(RegisteredBorderColor&& rhs) noexcept;
+
+        [[nodiscard]] bool Valid() const noexcept {
+            return device_ptr != nullptr;
+        }
+        [[nodiscard]] u32 Index() const noexcept {
+            return value;
+        }
+
+    private:
+        const Device* device_ptr = nullptr;
+        u32 value = 0;
+    };
+
     struct Variant {
         VariantKey key;
         vk::Sampler sampler;
+        /// HeapSamplerCreateInfo: what it was created from (pNext left out) and its chain.
+        VkSamplerCreateInfo create_info{};
+        bool custom_border{};
+        bool reduction{};
+        std::array<float, 4> color{};
+        RegisteredBorderColor border_index;
     };
 
     static constexpr size_t MAX_VARIANTS = 32;
 
-    [[nodiscard]] VariantKey MakeKey(const ImageView& image_view, bool is_depth) const noexcept;
+    [[nodiscard]] VariantKey MakeKey(u64 view_key, bool is_depth) const noexcept;
     [[nodiscard]] VkSampler Find(const VariantKey& key) const noexcept;
     VkSampler Emplace(VariantKey key);
 
@@ -893,6 +981,8 @@ private:
 
 struct TextureCacheParams {
     static constexpr bool ENABLE_VALIDATION = true;
+    /// The texture cache feeds a descriptor heap mirroring the guest pools.
+    static constexpr bool MIRRORS_POOLS = true;
     static constexpr bool FRAMEBUFFER_BLITS = false;
     static constexpr bool HAS_EMULATED_COPIES = false;
     static constexpr bool HAS_DEVICE_MEMORY_INFO = true;

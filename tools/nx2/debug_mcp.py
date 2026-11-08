@@ -55,12 +55,14 @@ TOOLS = [
     },
     {
         "name": "screenshot",
-        "description": "PNG of the next presented frame (16:9, default 720 lines). Fails when no "
-                       "frame is presented within timeout_s (paused or loading).",
+        "description": "PNG of the next presented frame (default 16:9 at 720 lines; width sets "
+                       "another shape). Fails when no frame is presented within timeout_s "
+                       "(paused or loading).",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "height": {"type": "integer", "minimum": 144, "maximum": 2160},
+                "width": {"type": "integer", "minimum": 144, "maximum": 5120},
                 "save": {"type": "boolean", "description": "Also write it into the dump directory."},
                 "timeout_s": {"type": "integer", "minimum": 1, "maximum": 30},
             },
@@ -208,10 +210,11 @@ TOOLS = [
     {
         "name": "input",
         "description": "Holds buttons and sticks on player 1 (or the handheld controller) for "
-                       "'frames' presented frames from the next present on, then releases; returns "
-                       "when done. Buttons are added to the owner's; a given stick replaces the "
-                       "owner's. Fails and releases when frames stop (paused or loading) for "
-                       "timeout_s (default frames / 20 + 10).",
+                       "'frames' presented frames or 'ms' milliseconds of wall time (exactly one) "
+                       "from the next present on, then releases; returns when done. Buttons are "
+                       "added to the owner's; a given stick replaces the owner's. Fails and "
+                       "releases when the step does not end within timeout_s (default frames / 20 "
+                       "+ ms / 1000 + 10).",
         "inputSchema": {
             "type": "object",
             "properties": {**{
@@ -219,17 +222,19 @@ TOOLS = [
                 "left_stick": STICK,
                 "right_stick": STICK,
                 "frames": {"type": "integer", "minimum": 1, "maximum": 36000},
+                "ms": {"type": "integer", "minimum": 1, "maximum": 600000},
             },
                            "timeout_s": {"type": "integer", "minimum": 1, "maximum": 900}},
-            "required": ["frames"],
+            "oneOf": [{"required": ["frames"]}, {"required": ["ms"]}],
         },
     },
     {
         "name": "input_sequence",
         "description": "Runs input steps back to back, each for exactly its 'frames' presented "
-                       "frames, so a camera pan or walk replays identically for an A/B test. A "
-                       "step without buttons or sticks leaves the owner's input alone. At most "
-                       "1000 steps and 36000 frames.",
+                       "frames or its 'ms' milliseconds of wall time, so a camera pan or walk "
+                       "replays identically for an A/B test ('ms' for a game that runs in real "
+                       "time at any frame rate). A step without buttons or sticks leaves the "
+                       "owner's input alone. At most 1000 steps, 36000 frames and 600000 ms.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -239,8 +244,9 @@ TOOLS = [
                 "left_stick": STICK,
                 "right_stick": STICK,
                 "frames": {"type": "integer", "minimum": 1, "maximum": 36000},
+                "ms": {"type": "integer", "minimum": 1, "maximum": 600000},
             },
-                                    "required": ["frames"]}},
+                                    "oneOf": [{"required": ["frames"]}, {"required": ["ms"]}]}},
                 "timeout_s": {"type": "integer", "minimum": 1, "maximum": 900},
             },
             "required": ["steps"],
@@ -317,7 +323,9 @@ def default_timeout(name, params):
         return int(params.get("seconds", 10)) + 90
     if name in ("input", "input_sequence"):
         steps = params.get("steps", []) if name == "input_sequence" else [params]
-        return sum(int(step.get("frames", 0)) for step in steps) // 20 + 10
+        frames = sum(int(step.get("frames", 0)) for step in steps)
+        ms = sum(int(step.get("ms", 0)) for step in steps)
+        return min(frames // 20 + ms // 1000 + 10, 900)
     return 5
 
 

@@ -157,6 +157,41 @@ TEST_CASE("Debug server requests map to handlers", "[core][nx2_debug_server]") {
     REQUIRE(bad_params.contains("error"));
 }
 
+TEST_CASE("Debug server answers a client while another client's request waits",
+          "[core][nx2_debug_server]") {
+    std::atomic<bool> release{};
+    Handlers handlers = EchoHandlers();
+    handlers.emplace("wait", [&release](const json&, const ClientGone&) {
+        for (int i = 0; i < 500 && !release.load(); ++i) {
+            std::this_thread::sleep_for(10ms);
+        }
+        return json{{"released", release.load()}};
+    });
+    Core::Nx2Debug::Server server{{"127.0.0.1", 0}, std::move(handlers)};
+    boost::asio::io_context io;
+    const boost::asio::ip::tcp::endpoint endpoint{boost::asio::ip::make_address("127.0.0.1"),
+                                                  server.Port()};
+    boost::asio::ip::tcp::socket waiting{io};
+    boost::asio::ip::tcp::socket other{io};
+    waiting.connect(endpoint);
+    other.connect(endpoint);
+    const auto request = [](boost::asio::ip::tcp::socket& socket, std::string_view line) {
+        boost::asio::write(socket, boost::asio::buffer(std::string{line} + "\n"));
+    };
+    const auto response = [](boost::asio::ip::tcp::socket& socket) {
+        std::string buffer;
+        boost::asio::read_until(socket, boost::asio::dynamic_buffer(buffer), '\n');
+        return json::parse(buffer.substr(0, buffer.find('\n')));
+    };
+    request(waiting, R"({"id":1,"method":"wait"})");
+    std::this_thread::sleep_for(50ms);
+    request(other, R"({"id":2,"method":"echo","params":{"b":2}})");
+    // Answered while "wait" still holds its worker: before the release.
+    REQUIRE(response(other) == json{{"id", 2}, {"result", {{"b", 2}}}});
+    release = true;
+    REQUIRE(response(waiting) == json{{"id", 1}, {"result", {{"released", true}}}});
+}
+
 TEST_CASE("Debug server shader hashes need all 16 hex digits", "[core][nx2_debug_server]") {
     REQUIRE(Core::Nx2Debug::ParseShaderHash("00000000621c4755") == 0x621c4755);
     REQUIRE(Core::Nx2Debug::ParseShaderHash("3DDFB1D7621C4755") == 0x3ddfb1d7621c4755);
@@ -403,37 +438,103 @@ TEST_CASE("Debug server tells a waiting handler that its client left", "[core][n
     REQUIRE(noticed);
 }
 
-TEST_CASE("Debug input steps parse buttons, sticks and frames", "[core][nx2_debug_server]") {
+TEST_CASE("Debug input steps parse buttons, sticks, frames and ms", "[core][nx2_debug_server]") {
     const auto step = Core::Nx2Debug::ParseInputStep(
         json{{"buttons", {"A", "ZL"}}, {"left_stick", {1.0, -0.5}}, {"frames", 3}});
     REQUIRE(step.frames == 3);
+    REQUIRE(step.ms == 0);
     REQUIRE(step.input.buttons == (Core::HID::NpadButton::A | Core::HID::NpadButton::ZL));
     REQUIRE(step.input.left->x == Core::HID::HID_JOYSTICK_MAX);
     REQUIRE(step.input.left->y == -16384);
     REQUIRE_FALSE(step.input.right);
     const auto idle = Core::Nx2Debug::ParseInputStep(json{{"frames", 1}});
     REQUIRE(idle.input.buttons == Core::HID::NpadButton::None);
-    for (const json& bad : {json{{"buttons", {"A"}}}, json{{"frames", 0}}, json{{"frames", 36001}},
-                            json{{"frames", 1}, {"buttons", {"Home"}}},
-                            json{{"frames", 1}, {"stick_l", {0, 0}}},
-                            json{{"frames", 1}, {"left_stick", {1.5, 0}}},
-                            json{{"frames", 1}, {"right_stick", {0}}}, json::array()}) {
+    const auto timed =
+        Core::Nx2Debug::ParseInputStep(json{{"right_stick", {1.0, 0}}, {"ms", 2500}});
+    REQUIRE(timed.ms == 2500);
+    REQUIRE(timed.frames == 0);
+    REQUIRE(timed.input.right->x == Core::HID::HID_JOYSTICK_MAX);
+    REQUIRE(Core::Nx2Debug::ParseInputStep(json{{"ms", 600000}}).ms == 600000);
+    for (const json& bad :
+         {json{{"buttons", {"A"}}}, json{{"frames", 0}}, json{{"frames", 36001}}, json{{"ms", 0}},
+          json{{"ms", 600001}}, json{{"ms", 1.5}}, json{{"ms", -1}}, json{{"frames", 1}, {"ms", 1}},
+          json{{"frames", 1}, {"buttons", {"Home"}}}, json{{"frames", 1}, {"stick_l", {0, 0}}},
+          json{{"frames", 1}, {"left_stick", {1.5, 0}}}, json{{"frames", 1}, {"right_stick", {0}}},
+          json::array()}) {
         CAPTURE(bad.dump());
         REQUIRE_THROWS_AS(Core::Nx2Debug::ParseInputStep(bad), std::exception);
     }
 }
 
-TEST_CASE("Debug input steps follow the present count exactly", "[core][nx2_debug_server]") {
+TEST_CASE("Debug input frame steps follow the present count exactly", "[core][nx2_debug_server]") {
     std::vector<Core::Nx2Debug::InputStep> steps(3);
-    steps[0] = {.input = {.buttons = Core::HID::NpadButton::A, .left = {}, .right = {}}, .frames = 2};
-    steps[1] = {.input = {}, .frames = 1};
-    steps[2] = {.input = {.buttons = Core::HID::NpadButton::B, .left = {}, .right = {}}, .frames = 1};
-    REQUIRE_FALSE(Core::Nx2Debug::InputAt(steps, 10, 9));
-    REQUIRE(Core::Nx2Debug::InputAt(steps, 10, 10)->buttons == Core::HID::NpadButton::A);
-    REQUIRE(Core::Nx2Debug::InputAt(steps, 10, 11)->buttons == Core::HID::NpadButton::A);
-    REQUIRE(Core::Nx2Debug::InputAt(steps, 10, 12)->buttons == Core::HID::NpadButton::None);
-    REQUIRE(Core::Nx2Debug::InputAt(steps, 10, 13)->buttons == Core::HID::NpadButton::B);
-    REQUIRE_FALSE(Core::Nx2Debug::InputAt(steps, 10, 14));
+    steps[0] = {.input = {.buttons = Core::HID::NpadButton::A, .left = {}, .right = {}},
+                .frames = 2,
+                .ms = 0};
+    steps[1] = {.input = {}, .frames = 1, .ms = 0};
+    steps[2] = {.input = {.buttons = Core::HID::NpadButton::B, .left = {}, .right = {}},
+                .frames = 1,
+                .ms = 0};
+    Core::Nx2Debug::InputScript script{steps, 10};
+    // Time does not matter for frame steps, so it jumps around freely here.
+    REQUIRE_FALSE(script.At(9, 0));
+    REQUIRE(script.Step(9, 0) == 0);
+    REQUIRE(script.At(10, 5)->buttons == Core::HID::NpadButton::A);
+    REQUIRE(script.At(11, 1'000'000'000'000)->buttons == Core::HID::NpadButton::A);
+    REQUIRE(script.At(12, 7)->buttons == Core::HID::NpadButton::None);
+    REQUIRE(script.At(13, 8)->buttons == Core::HID::NpadButton::B);
+    REQUIRE_FALSE(script.At(14, 9));
+    REQUIRE(script.Step(14, 9) == 3);
+}
+
+TEST_CASE("Debug input ms steps follow wall time whatever the frame rate",
+          "[core][nx2_debug_server]") {
+    constexpr u64 MS = 1'000'000;
+    std::vector<Core::Nx2Debug::InputStep> steps(3);
+    steps[0] = {.input = {.buttons = Core::HID::NpadButton::A, .left = {}, .right = {}},
+                .frames = 0,
+                .ms = 100};
+    steps[1] = {.input = {}, .frames = 0, .ms = 50};
+    steps[2] = {.input = {.buttons = Core::HID::NpadButton::B, .left = {}, .right = {}},
+                .frames = 0,
+                .ms = 10};
+    Core::Nx2Debug::InputScript script{steps, 10};
+    // Nothing until the start present; the clock starts at the first look from it on.
+    REQUIRE_FALSE(script.At(9, 0));
+    REQUIRE(script.At(10, 1000 * MS)->buttons == Core::HID::NpadButton::A);
+    // Presents do not move an ms step on, however many there are.
+    REQUIRE(script.At(5000, 1099 * MS)->buttons == Core::HID::NpadButton::A);
+    REQUIRE(script.Step(5000, 1099 * MS) == 0);
+    // Looked at 3 ms late: the next step still ends 50 ms after the first one's end, so a polling
+    // delay does not accumulate.
+    REQUIRE(script.At(5001, 1103 * MS)->buttons == Core::HID::NpadButton::None);
+    REQUIRE(script.At(5001, 1149 * MS)->buttons == Core::HID::NpadButton::None);
+    REQUIRE(script.At(5001, 1150 * MS)->buttons == Core::HID::NpadButton::B);
+    REQUIRE_FALSE(script.At(5001, 1160 * MS));
+    REQUIRE(script.Step(5001, 1160 * MS) == 3);
+}
+
+TEST_CASE("Debug input mixes frame and ms steps", "[core][nx2_debug_server]") {
+    constexpr u64 MS = 1'000'000;
+    std::vector<Core::Nx2Debug::InputStep> steps(3);
+    steps[0] = {.input = {.buttons = Core::HID::NpadButton::A, .left = {}, .right = {}},
+                .frames = 2,
+                .ms = 0};
+    steps[1] = {.input = {.buttons = Core::HID::NpadButton::B, .left = {}, .right = {}},
+                .frames = 0,
+                .ms = 20};
+    steps[2] = {.input = {.buttons = Core::HID::NpadButton::X, .left = {}, .right = {}},
+                .frames = 1,
+                .ms = 0};
+    Core::Nx2Debug::InputScript script{steps, 10};
+    REQUIRE(script.At(10, 0)->buttons == Core::HID::NpadButton::A);
+    // The ms step's clock starts at the first look after the frame step's last present.
+    REQUIRE(script.At(12, 5 * MS)->buttons == Core::HID::NpadButton::B);
+    REQUIRE(script.At(20, 24 * MS)->buttons == Core::HID::NpadButton::B);
+    // The frame step after it counts from the next present, not the one already shown.
+    REQUIRE(script.At(20, 25 * MS)->buttons == Core::HID::NpadButton::X);
+    REQUIRE(script.At(21, 26 * MS)->buttons == Core::HID::NpadButton::X);
+    REQUIRE_FALSE(script.At(22, 27 * MS));
 }
 
 TEST_CASE("Injected input merges buttons and replaces sticks while installed", "[core][nx2_debug_server]") {

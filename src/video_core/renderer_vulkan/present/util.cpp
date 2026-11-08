@@ -44,7 +44,8 @@ vk::Image CreateWrappedImage(MemoryAllocator& allocator, VkExtent2D dimensions, 
         .pQueueFamilyIndices = nullptr,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
-    return allocator.CreateImage(image_ci);
+    // Written and read by every presented frame.
+    return allocator.CreateImage(image_ci, false, MemoryAllocator::RenderTargetPriority);
 }
 
 void TransitionImageLayout(vk::CommandBuffer& cmdbuf, VkImage image, VkImageLayout target_layout,

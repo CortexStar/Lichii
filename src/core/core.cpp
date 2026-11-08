@@ -15,6 +15,7 @@
 #include "common/logging.h"
 #include "common/nx2_sampler.h"
 #include "common/adpf.h"
+#include "common/game_presets.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "common/string_util.h"
@@ -63,6 +64,7 @@
 #include "core/hle/service/set/system_settings_server.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/internal_network/network.h"
+#include "core/load_timing.h"
 #include "core/loader/loader.h"
 #include "core/memory.h"
 #include "core/memory/cheat_engine.h"
@@ -128,7 +130,8 @@ namespace {
 bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id, std::size_t program_index) {
     FileSys::ProgramMetadata metadata;
     if (FileSys::NupContainer::IsNupFile(file)) {
-        FileSys::NupContainer nup{file};
+        auto container = FileSys::NupContainer::Open(file);
+        auto& nup = *container;
         if (nup.GetStatus() != Loader::ResultStatus::Success) {
             return false;
         }
@@ -142,8 +145,12 @@ bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id, std::siz
         }
         const auto exefs = program ? nup.GetExeFSDir(*program) : nullptr;
         const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
-        return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
-               metadata.IsSwitch2();
+        const bool switch2 = npdm != nullptr &&
+                             metadata.Load(npdm) == Loader::ResultStatus::Success &&
+                             metadata.IsSwitch2();
+        // The loader takes this container instead of parsing the file again.
+        FileSys::NupContainer::KeepParsed(std::move(container));
+        return switch2;
     }
     const auto type = file != nullptr ? Loader::IdentifyFile(file) : Loader::FileType::Unknown;
     if (type == Loader::FileType::XCI || type == Loader::FileType::XCZ) {
@@ -381,6 +388,8 @@ struct System::Impl {
     }
 
     SystemResultStatus Load(System& system, Frontend::EmuWindow& emu_window, const std::string& filepath, Service::AM::FrontendAppletParameters& params) {
+        LoadTiming::BeginBoot();
+        auto phase_start = LoadTiming::Clock::now();
         if (params.launch_type == Service::AM::LaunchType::FrontendInitiated) {
             fs_controller.InitTempStorage();
         }
@@ -391,6 +400,7 @@ struct System::Impl {
                              params.program_index);
         Settings::SetCurrentProgramIsSwitch2(switch2_program);
         Settings::SetAstcRecompressionOverride(std::nullopt);
+        LoadTiming::LogPhase("program detection", phase_start);
 
         // Switch 2 titles size their heap from the total memory and need the 12 GiB layout. Set it
         // as a per-game value, so RestoreGlobalState brings back the configured layout afterwards.
@@ -399,6 +409,10 @@ struct System::Impl {
             LOG_INFO(Core, "Switch 2 program: using the 12 GiB memory layout");
             Settings::values.memory_layout_mode.SetGlobal(false);
             Settings::values.memory_layout_mode.SetValue(Settings::MemoryLayout::Memory_12Gb);
+        }
+
+        if (Settings::ApplySwitch2ConsoleMode(Settings::values, switch2_program)) {
+            LOG_INFO(Core, "Switch 2 program: running docked");
         }
 
         // The Switch 2 counter runs at 31.25 MHz and its SDK converts ticks with that constant
@@ -423,10 +437,12 @@ struct System::Impl {
                  Common::g_cpu_caps.max_frequency, Common::g_cpu_caps.invariant_tsc);
 #endif
 
+        phase_start = LoadTiming::Clock::now();
         const auto kernel_result = InitializeKernel(system);
         if (kernel_result != SystemResultStatus::Success) {
             return kernel_result;
         }
+        LoadTiming::LogPhase("kernel and guest memory", phase_start);
 
         if (params.applet_type == Service::AM::AppletType::Application) {
             current_application_filepath = filepath;
@@ -435,9 +451,11 @@ struct System::Impl {
         const auto file = GetGameFileFromPath(virtual_filesystem, filepath);
 
         // Create the application process
+        phase_start = LoadTiming::Clock::now();
         Loader::ResultStatus load_result{};
         std::vector<u8> control;
         auto process = Service::AM::CreateApplicationProcess(control, app_loader, load_result, system, file, params.program_id, params.program_index);
+        LoadTiming::LogPhase("application process", phase_start);
         if (load_result != Loader::ResultStatus::Success) {
             LOG_CRITICAL(Core, "Failed to load ROM (Error {})!", load_result);
             ShutdownMainProcess();
@@ -470,12 +488,15 @@ struct System::Impl {
         kernel.SetApplicationProcess(process->GetHandle());
 
         // Set up the rest of the system.
+        phase_start = LoadTiming::Clock::now();
         SystemResultStatus init_result{SetupForApplicationProcess(system, emu_window)};
         if (init_result != SystemResultStatus::Success) {
             LOG_CRITICAL(Core, "Failed to initialize system (Error {})!", int(init_result));
             ShutdownMainProcess();
             return init_result;
         }
+        LoadTiming::LogPhase("GPU and services", phase_start);
+        phase_start = LoadTiming::Clock::now();
         // Waiting for GPU before initializing CPU
         cpu_manager.Initialize();
 
@@ -520,6 +541,7 @@ struct System::Impl {
         }
         debug_service = Nx2Debug::MaybeStartService(system, name, params.program_id);
         Nx2Sampler::StartFromEnvironment();
+        LoadTiming::LogPhase("CPU cores and applet start", phase_start);
         return SystemResultStatus::Success;
     }
 
@@ -625,7 +647,10 @@ struct System::Impl {
     std::optional<Tools::RenderdocAPI> renderdoc_api;
     std::optional<Tegra::GPU> gpu_core;
 
-    std::array<Core::GPUDirtyMemoryManager, Core::Hardware::NUM_CPU_CORES> gpu_dirty_memory_managers;
+    // One per guest core, one for the other threads (core/memory.cpp) and the last for the
+    // buffer cache's write handoff (GPU::CollectHandoffWrite).
+    std::array<Core::GPUDirtyMemoryManager, Core::Hardware::NUM_CPU_CORES + 2>
+        gpu_dirty_memory_managers;
     std::vector<std::vector<u8>> user_channel;
     std::vector<std::vector<u8>> general_channel;
 

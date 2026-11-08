@@ -29,6 +29,7 @@
 #include "core/hle/service/service.h"
 #include "core/hle/service/nx2_stub_interface.h"
 #include "core/hle/service/sm/sm.h"
+#include "core/load_timing.h"
 #include "core/reporter.h"
 
 namespace Service {
@@ -265,7 +266,9 @@ void CountRequest(const std::string& service, u32 command, u32 type, u32 result)
 Result ServiceFrameworkBase::HandleSyncRequest(Kernel::KServerSession& session,
                                                HLERequestContext& ctx) {
     const auto guard = LockService();
+    const auto handler_start = Core::LoadTiming::Clock::now();
     SCOPE_EXIT {
+        Core::LoadTiming::CountServiceCall(Core::LoadTiming::Clock::now() - handler_start);
         const auto* cmd_buf = ctx.CommandBuffer();
         u32 result_word = 0;
         const u32 type = static_cast<u32>(ctx.GetCommandType());

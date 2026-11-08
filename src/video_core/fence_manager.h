@@ -26,9 +26,11 @@
 #include "common/thread.h"
 #include "video_core/delayed_destruction_ring.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_split.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_reactive.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace VideoCommon {
@@ -58,6 +60,7 @@ public:
     void TickFrame() {
         std::unique_lock lock(ring_guard);
         delayed_destruction_ring.Tick();
+        Nx2Reactive::g_frame.fetch_add(1, std::memory_order_relaxed);
     }
 
     // Unlike other fences, this one doesn't
@@ -78,12 +81,21 @@ public:
         // Not only the GPU thread queues these (query cache work runs elsewhere too), while
         // SignalFence moves the list into pending_operations: unguarded, the list was corrupted
         // and the fencing thread crashed walking it. Its own lock, held for no callbacks.
-        std::scoped_lock lock{uncommitted_guard};
-        uncommitted_operations.emplace_back(std::move(func));
+        {
+            std::scoped_lock lock{uncommitted_guard};
+            uncommitted_operations.emplace_back(std::move(func));
+        }
+        work_epoch.fetch_add(1, std::memory_order_release);
     }
 
     void SignalFence(std::function<void()>&& func) {
         Nx2Profile::Scope profile_scope{Nx2Profile::Zone::Fence};
+        work_epoch.fetch_add(1, std::memory_order_release);
+        // A guest read waits for downloads to land (GPU::WaitForLanding): submit the deferred
+        // work now rather than at the end of the batching window.
+        if (Nx2Reactive::GetLanding().waiters.load(std::memory_order_relaxed) != 0) {
+            SubmitDeferredWork();
+        }
         // A fence that writes a fence-flagged query report is never skipped as empty: a skipped
         // fence runs its operation at once, before the host GPU has run the work the report
         // follows, and Ocarina of Time then reads a wrong report (white flashes on leaves and walls
@@ -109,7 +121,25 @@ public:
         skipped_fences = 0;
         should_flush |= query_cache.HasUncommittedFlushes();
         query_cache.CommitAsyncFlushes();
-        TFence new_fence = CreateFence(!should_flush);
+        // A query report's fence is a real host fence even with nothing to flush: its operation
+        // runs once the host GPU has run the work before it, not when a stubbed fence is popped.
+        const bool stubbed = !should_flush && !VideoCore::g_signaling_query_report_fence;
+        if constexpr (can_async_check) {
+            // Never a query report's fence (#337): its operation must wait for the host GPU.
+            if (stubbed && committed_flushes == 0) {
+                // As the made fence below: its callback runs now, before its queued work.
+                if (!delay_fence) {
+                    func();
+                }
+                FoldStubbedFence(delay_fence, func);
+                if (delay_fence) {
+                    SubmitDeferredWork();
+                }
+                rasterizer.InvalidateGPUCache();
+                return;
+            }
+        }
+        TFence new_fence = CreateFence(stubbed);
         if constexpr (can_async_check) {
             guard.lock();
         }
@@ -122,12 +152,20 @@ public:
             uncommitted_operations.clear(); // moved-from: make it empty explicitly
         }
         pending_flushes.push_back(committed_flushes);
+        if constexpr (can_async_check) {
+            pending_query_pops.push_back(1);
+        }
         QueueFence(new_fence);
         if (!delay_fence) {
             func();
         }
         fences.push(std::move(new_fence));
-        if (should_flush) {
+        // EXPERIMENT (do not merge): EDEN_NX2_EXP_FENCE_FLUSH_TWICE=1 flushes again here.
+        static const bool flush_twice = [] {
+            const char* const value = std::getenv("EDEN_NX2_EXP_FENCE_FLUSH_TWICE");
+            return value != nullptr && value[0] == '1';
+        }();
+        if (flush_twice && should_flush) {
             rasterizer.FlushCommands();
         }
         if constexpr (can_async_check) {
@@ -177,6 +215,56 @@ public:
             wait_cv.wait(
                 lk, [&wait_finished] { return wait_finished.load(std::memory_order_relaxed); });
         }
+    }
+
+    /// The split's back, between entries: whether WaitPendingFences(true) would only make an
+    /// empty fence and wait for the fences already made, as no download, query or fence
+    /// operation is uncommitted and fences don't hold operations back (no delayed fences); those
+    /// fences then complete on the fencing thread without it. A cache lock held elsewhere counts
+    /// as work. `epoch`: FenceWorkEpoch() as of the check.
+    bool FencesQuiet(u64& epoch) {
+        epoch = work_epoch.load(std::memory_order_acquire);
+        if constexpr (!can_async_check) {
+            return false;
+        }
+        if (VideoCore::g_signaling_query_report_fence ||
+            (Settings::IsGPUFenceBehaviorDefault() ? Settings::IsGPULevelHigh()
+                                                   : Settings::IsGPUFenceBehaviorBalanced() ||
+                                                         Settings::IsGPUFenceBehaviorAccurate())) {
+            return false;
+        }
+        {
+            std::unique_lock lock{uncommitted_guard, std::try_to_lock};
+            if (!lock || !uncommitted_operations.empty()) {
+                return false;
+            }
+        }
+        {
+            std::unique_lock lock{texture_cache.mutex, std::try_to_lock};
+            if (!lock || texture_cache.HasAsyncFlushWork()) {
+                return false;
+            }
+        }
+        {
+            std::unique_lock lock{buffer_cache.mutex, std::try_to_lock};
+            if (!lock || buffer_cache.HasUncommittedFlushes()) {
+                return false;
+            }
+        }
+        if (query_cache.HasUncommittedFlushes()) {
+            return false;
+        }
+        if constexpr (requires { query_cache.HasPendingFenceWork(); }) {
+            if (query_cache.HasPendingFenceWork()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Any thread: changes whenever a fence or a fence operation is added.
+    [[nodiscard]] u64 FenceWorkEpoch() const {
+        return work_epoch.load(std::memory_order_acquire);
     }
 
 protected:
@@ -263,24 +351,31 @@ private:
             TFence fence;
             std::deque<std::function<void()>> operations;
             u8 flushes;
+            u32 query_pops; ///< Query cache entries: one per fence, folded ones included
         };
         std::vector<Released> batch;
         batch.reserve(MaxBatch);
         const auto take_front = [&] {
             batch.push_back({std::move(fences.front()), std::move(pending_operations.front()),
-                             pending_flushes.front()});
+                             pending_flushes.front(), pending_query_pops.front()});
             fences.pop();
             pending_operations.pop_front();
             pending_flushes.pop_front();
+            pending_query_pops.pop_front();
         };
         while (!stop_token.stop_requested()) {
             {
                 std::unique_lock lock(guard);
-                cv.wait(lock, [&] { return stop_token.stop_requested() || !fences.empty(); });
+                // Work the GPU thread runs inline (FoldStubbedFence) goes before any fence
+                // queued meanwhile.
+                cv.wait(lock, [&] {
+                    return stop_token.stop_requested() || (!fences.empty() && !inline_running);
+                });
                 if (stop_token.stop_requested()) [[unlikely]] {
                     return;
                 }
                 take_front();
+                fence_thread_busy = true;
             }
             if (!batch.front().fence->IsStubbed()) {
                 WaitFence(batch.front().fence);
@@ -312,7 +407,9 @@ private:
             }
             // Queries and operations keep their per-fence order.
             for (Released& released : batch) {
-                query_cache.PopAsyncFlushes();
+                for (u32 i = 0; i < released.query_pops; ++i) {
+                    query_cache.PopAsyncFlushes();
+                }
                 for (auto& operation : released.operations) {
                     operation();
                 }
@@ -324,7 +421,80 @@ private:
                 }
             }
             batch.clear();
+            {
+                std::scoped_lock lock(guard);
+                fence_thread_busy = false;
+            }
         }
+    }
+
+    /// A fence with nothing to wait for on the host GPU (no downloads, no query results) carries
+    /// only queued work: the query cache's slot cleanup, operations, and with accurate fences its
+    /// callback (a syncpoint's host increment). The fencing thread runs that work as soon as
+    /// every fence before it is released, so instead of a fence of its own (an allocation, a
+    /// queue entry and a wake of the fencing thread, ~2,000 a second in Ocarina):
+    /// - with fences queued, the work joins the newest one: the fencing thread releases a fence
+    ///   without a host wait together with the one before it, in order;
+    /// - with nothing queued or being released, the split's back runs it at once (the same
+    ///   order);
+    /// - otherwise (the fencing thread is releasing fences it took) it gets a fence as before.
+    void FoldStubbedFence(bool delay_fence, std::function<void()>& func) {
+        std::unique_lock lock{guard};
+        if (!fences.empty()) {
+            {
+                std::scoped_lock ops_lock{uncommitted_guard};
+                auto& operations = pending_operations.back();
+                for (auto& operation : uncommitted_operations) {
+                    operations.emplace_back(std::move(operation));
+                }
+                uncommitted_operations.clear();
+                if (delay_fence) {
+                    operations.emplace_back(std::move(func));
+                }
+            }
+            // This fence's query cache entry (no queries: CommitAsyncFlushes found none).
+            ++pending_query_pops.back();
+            return;
+        }
+        if (!fence_thread_busy && !inline_running && GpuSplit::OnBackThread()) {
+            inline_running = true;
+            std::deque<std::function<void()>> operations;
+            {
+                std::scoped_lock ops_lock{uncommitted_guard};
+                operations.swap(uncommitted_operations);
+            }
+            lock.unlock();
+            query_cache.PopAsyncFlushes();
+            for (auto& operation : operations) {
+                operation();
+            }
+            if (delay_fence) {
+                func();
+            }
+            lock.lock();
+            inline_running = false;
+            const bool queued = !fences.empty();
+            lock.unlock();
+            if (queued) {
+                cv.notify_all();
+            }
+            return;
+        }
+        TFence new_fence = CreateFence(true);
+        {
+            std::scoped_lock ops_lock{uncommitted_guard};
+            if (delay_fence) {
+                uncommitted_operations.emplace_back(std::move(func));
+            }
+            pending_operations.emplace_back(std::move(uncommitted_operations));
+            uncommitted_operations.clear();
+        }
+        pending_flushes.push_back(0);
+        pending_query_pops.push_back(1);
+        QueueFence(new_fence);
+        fences.push(std::move(new_fence));
+        lock.unlock();
+        cv.notify_all();
     }
 
     bool ShouldWait() const {
@@ -426,8 +596,11 @@ private:
     }
 
     bool SkipEmptyFence() {
-        if constexpr (requires { query_cache.HasPendingFenceWork(); }) {
-            if (skipped_fences >= 64 || query_cache.HasPendingFenceWork()) {
+        if constexpr (requires { query_cache.HasPendingFenceWork(true); }) {
+            // Payload releases (QMD releases, ~4,300 a second in Ocarina) write guest memory at
+            // once anyway; their host buffer syncs (a render pass end and two barriers each) go
+            // together with the next fence made or host wait.
+            if (skipped_fences >= 64 || query_cache.HasPendingFenceWork(true)) {
                 return false;
             }
             {
@@ -447,11 +620,15 @@ private:
     std::deque<std::function<void()>> uncommitted_operations;
     std::deque<std::deque<std::function<void()>>> pending_operations;
     std::deque<u8> pending_flushes; ///< Per fence: the caches that committed downloads
+    std::deque<u32> pending_query_pops; ///< Async check, per fence: query cache entries to pop
+    bool fence_thread_busy{}; ///< Guarded by guard: the fencing thread releases fences it took
+    bool inline_running{};    ///< Guarded by guard: FoldStubbedFence runs a fence's work inline
     u32 skipped_fences{}; ///< Empty fences skipped since the last one made (GPU thread only)
 
     std::mutex guard;
     std::mutex ring_guard;
     std::mutex uncommitted_guard; ///< Guards uncommitted_operations
+    std::atomic<u64> work_epoch{}; ///< Bumped by every fence and fence operation added
     std::condition_variable cv;
 
     std::jthread fence_thread;

@@ -92,8 +92,8 @@
         "ci": true,
         "name": "ffmpeg",
         "package": "FFmpeg",
-        "repo": "Djihads80/Eglantine",
-        "version": "9.0.2-av1-mingw-1"
+        "repo": "zortos293/Lichii",
+        "version": "9.0.2-av1hw-mingw-2"
     },
     "fmt": {
         "hash": "f0da82c545b01692e9fd30fdfb613dbb8dd9716983dcd0ff19ac2a8d36f74beb5540ef38072fdecc1e34191b3682a8542ecbf3a61ef287dbba0a2679d4e023f2",
@@ -284,6 +284,10 @@
         "hash": "b7cd6885acae3fc8698288d19febba0dd45e4a02a2b6563d2eb995a988d0847046e8d16a5dea7e0bf832b4321bcec134cdbafc553f6ede039e4cf34525c5dce5",
         "options": [
             "SIRIT_USE_SYSTEM_SPIRV_HEADERS ON"
+        ],
+        "patches": [
+            "0001-include-cstdlib.patch",
+            "0002-descriptor-heap.patch"
         ],
         "repo": "eden-emulator/sirit",
         "version": "v1.0.5"

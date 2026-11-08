@@ -8,6 +8,7 @@
 #include <array>
 #include <bit>
 #include <climits>
+#include <cstdlib>
 
 #include <boost/container/static_vector.hpp>
 
@@ -292,7 +293,7 @@ void DefineConstBuffers(EmitContext& ctx, const Info& info, Id UniformDefinition
     for (const ConstantBufferDescriptor& desc : info.constant_buffer_descriptors) {
         const Id id{ctx.AddGlobalVariable(struct_pointer_type, spv::StorageClass::Uniform)};
         ctx.Decorate(id, spv::Decoration::Binding, binding);
-        ctx.Decorate(id, spv::Decoration::DescriptorSet, 0U);
+        ctx.Decorate(id, spv::Decoration::DescriptorSet, ctx.descriptor_set);
         ctx.Name(id, fmt::format("c{}", desc.index));
         for (size_t i = 0; i < desc.count; ++i) {
             ctx.cbufs[desc.index + i].*member_type = id;
@@ -313,6 +314,12 @@ void DefineSsbos(EmitContext& ctx, StorageTypeDefinition& type_def,
     const Id struct_type{ctx.TypeStruct(array_type)};
     ctx.Decorate(struct_type, spv::Decoration::Block);
     ctx.MemberDecorate(struct_type, 0, spv::Decoration::Offset, 0U);
+    if (ctx.storage_by_address) {
+        // No buffers: accesses convert the page table's device address to these pointer types.
+        type_def.array = ctx.TypePointer(spv::StorageClass::PhysicalStorageBuffer, struct_type);
+        type_def.element = ctx.TypePointer(spv::StorageClass::PhysicalStorageBuffer, type);
+        return;
+    }
     if (info.requires_coherent_global_memory) {
         ctx.MemberDecorate(struct_type, 0, spv::Decoration::Coherent);
     }
@@ -325,7 +332,7 @@ void DefineSsbos(EmitContext& ctx, StorageTypeDefinition& type_def,
     for (const StorageBufferDescriptor& desc : info.storage_buffers_descriptors) {
         const Id id{ctx.AddGlobalVariable(struct_pointer, spv::StorageClass::StorageBuffer)};
         ctx.Decorate(id, spv::Decoration::Binding, binding);
-        ctx.Decorate(id, spv::Decoration::DescriptorSet, 0U);
+        ctx.Decorate(id, spv::Decoration::DescriptorSet, ctx.descriptor_set);
         ctx.Name(id, fmt::format("ssbo{}", index));
         if (ctx.profile.supported_spirv >= 0x00010400) {
             ctx.interfaces.push_back(id);
@@ -403,7 +410,9 @@ Id CasLoop(EmitContext& ctx, Operation operation, Id array_pointer, Id element_p
         ctx.TypePointer(spv::StorageClass::Function, ctx.U32[1]), spv::StorageClass::Function)};
     const Id word_pointer{is_struct ? ctx.OpAccessChain(element_pointer, base, zero, index)
                                     : ctx.OpAccessChain(element_pointer, base, index)};
-    ctx.OpStore(expected_var, ctx.OpLoad(ctx.U32[1], word_pointer));
+    ctx.OpStore(expected_var, !is_shared && ctx.storage_by_address
+                                  ? ctx.LoadByAddress(ctx.U32[1], word_pointer, 4)
+                                  : ctx.OpLoad(ctx.U32[1], word_pointer));
     ctx.OpBranch(loop_header);
     ctx.AddLabel(loop_header);
 
@@ -477,7 +486,12 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
       requires_coherent_global_memory{program.info.requires_coherent_global_memory},
       requires_coherent_image_memory{program.info.requires_coherent_image_memory},
       stage{program.stage}, texture_rescaling_index{bindings.texture_scaling_index},
-      image_rescaling_index{bindings.image_scaling_index} {
+      image_rescaling_index{bindings.image_scaling_index}, descriptor_set{bindings.descriptor_set},
+      storage_by_address{program.info.storage_by_address && profile_.gpu_page_table &&
+                         profile_.support_int64},
+      uniforms_by_address{program.info.uniforms_by_address && profile_.uniforms_by_address &&
+                          profile_.support_int64},
+      program_info{&program.info} {
     const bool is_unified{profile.unified_descriptor_binding};
     u32& uniform_binding{is_unified ? bindings.unified : bindings.uniform_buffer};
     u32& storage_binding{is_unified ? bindings.unified : bindings.storage_buffer};
@@ -486,6 +500,8 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     AddCapability(spv::Capability::Shader);
     DefineCommonTypes(program.info);
     DefineCommonConstants();
+    DefinePushConstants(program.info);
+    DefinePageTable(program.info);
     DefineInterfaces(program);
     DefineMesh(program);
     DefineLocalMemory(program);
@@ -502,8 +518,6 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineWriteStorageCasLoopFunction(program.info);
     DefineGlobalMemoryFunctions(program);
     DefineMeshEmulationOutput();
-    DefineRescalingInput(program.info);
-    DefineRenderArea(program.info);
 }
 
 EmitContext::~EmitContext() = default;
@@ -574,7 +588,8 @@ void EmitContext::DefineCommonTypes(const Info& info) {
         U16 = Name(TypeInt(16, false), "u16");
         S16 = Name(TypeInt(16, true), "s16");
     }
-    if (info.uses_int64 && profile.support_int64) {
+    if ((info.uses_int64 || info.storage_by_address || info.uniforms_by_address) &&
+        profile.support_int64) {
         AddCapability(spv::Capability::Int64);
         U64 = Name(TypeInt(64, false), "u64");
     }
@@ -920,7 +935,8 @@ void EmitContext::DefineWriteStorageCasLoopFunction(const Info& info) {
 
     AddCapability(spv::Capability::VariablePointersStorageBuffer);
 
-    const Id ptr_type{TypePointer(spv::StorageClass::StorageBuffer, U32[1])};
+    const Id ptr_type{storage_by_address ? storage_types.U32.element
+                                         : TypePointer(spv::StorageClass::StorageBuffer, U32[1])};
     const Id func_type{TypeFunction(void_id, ptr_type, U32[1], U32[1], U32[1])};
     const Id func{OpFunction(void_id, spv::FunctionControlMask::MaskNone, func_type)};
     const Id pointer{OpFunctionParameter(ptr_type)};
@@ -932,7 +948,8 @@ void EmitContext::DefineWriteStorageCasLoopFunction(const Info& info) {
     // Each attempt expects the word the previous compare-exchange returned (see CasLoop).
     const Id expected_var{
         AddLocalVariable(TypePointer(spv::StorageClass::Function, U32[1]), spv::StorageClass::Function)};
-    OpStore(expected_var, OpLoad(U32[1], pointer));
+    OpStore(expected_var,
+            storage_by_address ? LoadByAddress(U32[1], pointer, 4) : OpLoad(U32[1], pointer));
     const Id scope_device{Const(1u)};
     const Id ordering_relaxed{u32_zero_value};
     const Id body_label{OpLabel()};
@@ -965,6 +982,39 @@ void EmitContext::DefineWriteStorageCasLoopFunction(const Info& info) {
     write_storage_cas_loop_func = func;
 }
 
+/// The 32-bit global atomic `opcode` performs, if it is one.
+static std::optional<EmitContext::GlobalAtomic> GlobalAtomicKind(IR::Opcode opcode) {
+    using enum EmitContext::GlobalAtomic;
+    switch (opcode) {
+    case IR::Opcode::GlobalAtomicIAdd32:
+        return IAdd;
+    case IR::Opcode::GlobalAtomicSMin32:
+        return SMin;
+    case IR::Opcode::GlobalAtomicUMin32:
+        return UMin;
+    case IR::Opcode::GlobalAtomicSMax32:
+        return SMax;
+    case IR::Opcode::GlobalAtomicUMax32:
+        return UMax;
+    case IR::Opcode::GlobalAtomicInc32:
+        return Inc;
+    case IR::Opcode::GlobalAtomicDec32:
+        return Dec;
+    case IR::Opcode::GlobalAtomicAnd32:
+        return And;
+    case IR::Opcode::GlobalAtomicOr32:
+        return Or;
+    case IR::Opcode::GlobalAtomicXor32:
+        return Xor;
+    case IR::Opcode::GlobalAtomicExchange32:
+        return Exchange;
+    case IR::Opcode::GlobalAtomicAddF32:
+        return AddF32;
+    default:
+        return std::nullopt;
+    }
+}
+
 /// Defines the functions that route global memory accesses and atomics to the storage buffer
 /// holding the address at run time.
 void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
@@ -972,7 +1022,21 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
     if (!info.uses_global_memory || !profile.support_int64) {
         return;
     }
+    if (storage_by_address) {
+        DefineGlobalMemoryFunctionsByAddress(program);
+        return;
+    }
     using DefPtr = Id StorageDefinitions::*;
+    // Each helper scans every global storage buffer. Inlined at every call site, a compute shader
+    // with many global accesses takes NVIDIA's compiler seconds (Ocarina of Time: up to 7.6 s
+    // each), so compute keeps them DontInline. Other stages inline them: with DontInline, NVIDIA
+    // 580.x let a second helper call clobber the first call's live result in a mesh shader.
+    // EXPERIMENT, A/B only, never merges: EDEN_NX2_EXP_GLOBAL_INLINE=1 keeps them inlinable in
+    // compute too.
+    static const bool inline_all = std::getenv("EDEN_NX2_EXP_GLOBAL_INLINE") != nullptr;
+    const spv::FunctionControlMask function_control = stage == Stage::Compute && !inline_all
+                                                          ? spv::FunctionControlMask::DontInline
+                                                          : spv::FunctionControlMask::MaskNone;
     const Id zero{u32_zero_value};
     const auto define_body{[&](DefPtr ssbo_member, Id addr, Id element_pointer, u32 shift,
                                auto&& callback) {
@@ -1061,7 +1125,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
     }};
     const auto define_load{[&](DefPtr ssbo_member, Id element_pointer, Id type, u32 shift) {
         const Id function_type{TypeFunction(type, U64)};
-        const Id func_id{OpFunction(type, spv::FunctionControlMask::MaskNone, function_type)};
+        const Id func_id{OpFunction(type, function_control, function_type)};
         const Id addr{OpFunctionParameter(U64)};
         if (!profile.support_descriptor_aliasing && shift > 2) {
             AddLabel();
@@ -1105,7 +1169,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
     }};
     const auto define_write{[&](DefPtr ssbo_member, Id element_pointer, Id type, u32 shift) {
         const Id function_type{TypeFunction(void_id, U64, type)};
-        const Id func_id{OpFunction(void_id, spv::FunctionControlMask::MaskNone, function_type)};
+        const Id func_id{OpFunction(void_id, function_control, function_type)};
         const Id addr{OpFunctionParameter(U64)};
         const Id data{OpFunctionParameter(type)};
         if (!profile.support_descriptor_aliasing && shift > 2) {
@@ -1168,27 +1232,10 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
     // Atomics the storage buffer pass could not track: the same routing, with the operation on
     // the routed word (INC, DEC and F32 add through their storage buffer CAS loops).
     using enum GlobalAtomic;
-    const auto kind_of = [](IR::Opcode opcode) -> std::optional<GlobalAtomic> {
-        switch (opcode) {
-        case IR::Opcode::GlobalAtomicIAdd32: return IAdd;
-        case IR::Opcode::GlobalAtomicSMin32: return SMin;
-        case IR::Opcode::GlobalAtomicUMin32: return UMin;
-        case IR::Opcode::GlobalAtomicSMax32: return SMax;
-        case IR::Opcode::GlobalAtomicUMax32: return UMax;
-        case IR::Opcode::GlobalAtomicInc32: return Inc;
-        case IR::Opcode::GlobalAtomicDec32: return Dec;
-        case IR::Opcode::GlobalAtomicAnd32: return And;
-        case IR::Opcode::GlobalAtomicOr32: return Or;
-        case IR::Opcode::GlobalAtomicXor32: return Xor;
-        case IR::Opcode::GlobalAtomicExchange32: return Exchange;
-        case IR::Opcode::GlobalAtomicAddF32: return AddF32;
-        default: return std::nullopt;
-        }
-    };
     std::array<bool, static_cast<size_t>(Count)> used{};
     for (const IR::Block* const block : program.blocks) {
         for (const IR::Inst& inst : block->Instructions()) {
-            if (const auto kind = kind_of(inst.GetOpcode())) {
+            if (const auto kind = GlobalAtomicKind(inst.GetOpcode())) {
                 used[static_cast<size_t>(*kind)] = true;
             }
         }
@@ -1200,8 +1247,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
         }
         const auto kind = static_cast<GlobalAtomic>(index);
         const Id type{kind == AddF32 ? F32[1] : U32[1]};
-        const Id func_id{OpFunction(type, spv::FunctionControlMask::MaskNone,
-                                    TypeFunction(type, U64, type))};
+        const Id func_id{OpFunction(type, function_control, TypeFunction(type, U64, type))};
         const Id addr{OpFunctionParameter(U64)};
         const Id value{OpFunctionParameter(type)};
         define_body(&StorageDefinitions::U32, addr, storage_types.U32.element, 2,
@@ -1241,8 +1287,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
             });
         })) {
         const Id function_type{TypeFunction(U32[1], U64, U32[1], U32[1])};
-        atomic_cas_global_func_u32 =
-            OpFunction(U32[1], spv::FunctionControlMask::MaskNone, function_type);
+        atomic_cas_global_func_u32 = OpFunction(U32[1], function_control, function_type);
         const Id address{OpFunctionParameter(U64)};
         const Id comparator{OpFunctionParameter(U32[1])};
         const Id value{OpFunctionParameter(U32[1])};
@@ -1258,60 +1303,343 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
     }
 }
 
-void EmitContext::DefineRescalingInput(const Info& info) {
-    if (!info.uses_rescaling_uniform) {
-        return;
-    }
-    if (profile.unified_descriptor_binding) {
-        DefineRescalingInputPushConstant();
-    } else {
+void EmitContext::DefinePushConstants(const Info& info) {
+    const bool rescaling{info.uses_rescaling_uniform};
+    const bool render_area{info.uses_render_area && profile.unified_descriptor_binding};
+    if (rescaling && !profile.unified_descriptor_binding) {
         DefineRescalingInputUniformConstant();
     }
-}
+    const bool rescaling_block{rescaling && profile.unified_descriptor_binding};
+    const bool page_table{storage_by_address && profile.unified_descriptor_binding};
+    const bool bank_table{uniforms_by_address && profile.unified_descriptor_binding};
+    if (!rescaling_block && !render_area && !page_table && !bank_table) {
+        return;
+    }
+    // One block with every member this stage reads, at the offsets of PushConstantLayout.
+    boost::container::static_vector<Id, 6> members;
+    boost::container::static_vector<u32, 6> offsets;
+    boost::container::static_vector<const char*, 6> names;
+    const auto add_member{[&](Id type, u32 offset, const char* name) {
+        members.push_back(type);
+        offsets.push_back(offset);
+        names.push_back(name);
+        return static_cast<u32>(members.size() - 1);
+    }};
+    if (rescaling_block) {
+        rescaling_textures_type = TypeArray(U32[1], Const(4u));
+        Decorate(rescaling_textures_type, spv::Decoration::ArrayStride, 4u);
+        rescaling_textures_member_index = add_member(
+            rescaling_textures_type, RESCALING_LAYOUT_WORDS_OFFSET, "rescaling_textures");
 
-void EmitContext::DefineRescalingInputPushConstant() {
-    boost::container::static_vector<Id, 3> members{};
-    u32 member_index{0};
-
-    rescaling_textures_type = TypeArray(U32[1], Const(4u));
-    Decorate(rescaling_textures_type, spv::Decoration::ArrayStride, 4u);
-    members.push_back(rescaling_textures_type);
-    rescaling_textures_member_index = member_index++;
-
-    rescaling_images_type = TypeArray(U32[1], Const(NUM_IMAGE_SCALING_WORDS));
-    Decorate(rescaling_images_type, spv::Decoration::ArrayStride, 4u);
-    members.push_back(rescaling_images_type);
-    rescaling_images_member_index = member_index++;
-
-    if (stage != Stage::Compute) {
-        members.push_back(F32[1]);
-        rescaling_downfactor_member_index = member_index++;
+        rescaling_images_type = TypeArray(U32[1], Const(NUM_IMAGE_SCALING_WORDS));
+        Decorate(rescaling_images_type, spv::Decoration::ArrayStride, 4u);
+        rescaling_images_member_index =
+            add_member(rescaling_images_type, RESCALING_LAYOUT_IMAGES_OFFSET, "rescaling_images");
+        if (stage != Stage::Compute) {
+            rescaling_downfactor_member_index =
+                add_member(F32[1], RESCALING_LAYOUT_DOWN_FACTOR_OFFSET, "down_factor");
+        }
+    }
+    if (render_area) {
+        render_are_member_index = add_member(F32[4], RENDERAREA_LAYOUT_OFFSET, "render_area");
+    }
+    if (bank_table) {
+        bank_table_member_index = add_member(U64, BANK_TABLE_OFFSET, "bank_table");
+    }
+    if (page_table) {
+        page_table_member_index = add_member(U64, PAGE_TABLE_OFFSET, "page_table");
     }
     const Id push_constant_struct{TypeStruct(std::span(members.data(), members.size()))};
     Decorate(push_constant_struct, spv::Decoration::Block);
-    Name(push_constant_struct, "ResolutionInfo");
-
-    MemberDecorate(push_constant_struct, rescaling_textures_member_index, spv::Decoration::Offset,
-                   static_cast<u32>(offsetof(RescalingLayout, rescaling_textures)));
-    MemberName(push_constant_struct, rescaling_textures_member_index, "rescaling_textures");
-
-    MemberDecorate(push_constant_struct, rescaling_images_member_index, spv::Decoration::Offset,
-                   static_cast<u32>(offsetof(RescalingLayout, rescaling_images)));
-    MemberName(push_constant_struct, rescaling_images_member_index, "rescaling_images");
-
-    if (stage != Stage::Compute) {
-        MemberDecorate(push_constant_struct, rescaling_downfactor_member_index,
-                       spv::Decoration::Offset,
-                       static_cast<u32>(offsetof(RescalingLayout, down_factor)));
-        MemberName(push_constant_struct, rescaling_downfactor_member_index, "down_factor");
+    Name(push_constant_struct, "PushConstants");
+    for (u32 member = 0; member < members.size(); ++member) {
+        MemberDecorate(push_constant_struct, member, spv::Decoration::Offset, offsets[member]);
+        MemberName(push_constant_struct, member, names[member]);
     }
     const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};
-    rescaling_push_constants = AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant);
-    Name(rescaling_push_constants, "rescaling_push_constants");
-
-    if (profile.supported_spirv >= 0x00010400) {
-        interfaces.push_back(rescaling_push_constants);
+    const Id variable{AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant)};
+    Name(variable, "push_constants");
+    if (rescaling_block) {
+        rescaling_push_constants = variable;
     }
+    if (render_area) {
+        render_area_push_constant = variable;
+    }
+    if (page_table) {
+        page_table_push_constant = variable;
+    }
+    if (bank_table) {
+        bank_table_push_constant = variable;
+    }
+    if (profile.supported_spirv >= 0x00010400) {
+        interfaces.push_back(variable);
+    }
+}
+
+/// Global memory through the GPU page table: every access translates its own address, so
+/// accesses the storage buffer pass could not track reach guest memory exactly like tracked ones.
+void EmitContext::DefineGlobalMemoryFunctionsByAddress(const IR::Program& program) {
+    const auto define_load{[&](const StorageTypeDefinition& type_def, Id type, u32 size) {
+        const Id func_id{
+            OpFunction(type, spv::FunctionControlMask::MaskNone, TypeFunction(type, U64))};
+        const Id addr{OpFunctionParameter(U64)};
+        AddLabel();
+        OpReturnValue(LoadByAddress(type, PageTablePointer(type_def.element, addr), size));
+        OpFunctionEnd();
+        return func_id;
+    }};
+    const auto define_write{[&](const StorageTypeDefinition& type_def, Id type, u32 size) {
+        const Id func_id{OpFunction(void_id, spv::FunctionControlMask::MaskNone,
+                                    TypeFunction(void_id, U64, type))};
+        const Id addr{OpFunctionParameter(U64)};
+        const Id data{OpFunctionParameter(type)};
+        AddLabel();
+        StoreByAddress(PageTablePointer(type_def.element, addr), data, size);
+        OpReturn();
+        OpFunctionEnd();
+        return func_id;
+    }};
+    load_global_func_u32 = define_load(storage_types.U32, U32[1], sizeof(u32));
+    write_global_func_u32 = define_write(storage_types.U32, U32[1], sizeof(u32));
+    load_global_func_u32x2 = define_load(storage_types.U32x2, U32[2], sizeof(u32[2]));
+    write_global_func_u32x2 = define_write(storage_types.U32x2, U32[2], sizeof(u32[2]));
+    load_global_func_u32x4 = define_load(storage_types.U32x4, U32[4], sizeof(u32[4]));
+    write_global_func_u32x4 = define_write(storage_types.U32x4, U32[4], sizeof(u32[4]));
+
+    using enum GlobalAtomic;
+    std::array<bool, static_cast<size_t>(Count)> used{};
+    bool uses_compare_exchange{};
+    for (const IR::Block* const block : program.blocks) {
+        for (const IR::Inst& inst : block->Instructions()) {
+            if (const auto kind = GlobalAtomicKind(inst.GetOpcode())) {
+                used[static_cast<size_t>(*kind)] = true;
+            }
+            uses_compare_exchange |= inst.GetOpcode() == IR::Opcode::GlobalAtomicCompareExchange32;
+        }
+    }
+    const Id scope{Const(static_cast<u32>(spv::Scope::Device))};
+    const Id zero{u32_zero_value};
+    for (size_t index = 0; index < used.size(); ++index) {
+        if (!used[index]) {
+            continue;
+        }
+        const auto kind = static_cast<GlobalAtomic>(index);
+        const Id type{kind == AddF32 ? F32[1] : U32[1]};
+        const Id func_id{
+            OpFunction(type, spv::FunctionControlMask::MaskNone, TypeFunction(type, U64, type))};
+        const Id addr{OpFunctionParameter(U64)};
+        const Id value{OpFunctionParameter(type)};
+        AddLabel();
+        const auto atomic = [&](Id (Sirit::Module::*op)(Id, Id, Id, Id, Id)) {
+            const Id pointer{PageTablePointer(storage_types.U32.element, addr)};
+            return (this->*op)(U32[1], pointer, scope, zero, value);
+        };
+        // The CAS loops take a word array and an index: the array starts at the word.
+        const auto cas = [&](Id function, Id result_type) {
+            const Id word_array{PageTablePointer(storage_types.U32.array, addr)};
+            return OpFunctionCall(result_type, function, zero, value, word_array);
+        };
+        switch (kind) {
+        case IAdd:
+            OpReturnValue(atomic(&Sirit::Module::OpAtomicIAdd));
+            break;
+        case SMin:
+            OpReturnValue(atomic(&Sirit::Module::OpAtomicSMin));
+            break;
+        case UMin:
+            OpReturnValue(atomic(&Sirit::Module::OpAtomicUMin));
+            break;
+        case SMax:
+            OpReturnValue(atomic(&Sirit::Module::OpAtomicSMax));
+            break;
+        case UMax:
+            OpReturnValue(atomic(&Sirit::Module::OpAtomicUMax));
+            break;
+        case And:
+            OpReturnValue(atomic(&Sirit::Module::OpAtomicAnd));
+            break;
+        case Or:
+            OpReturnValue(atomic(&Sirit::Module::OpAtomicOr));
+            break;
+        case Xor:
+            OpReturnValue(atomic(&Sirit::Module::OpAtomicXor));
+            break;
+        case Exchange:
+            OpReturnValue(atomic(&Sirit::Module::OpAtomicExchange));
+            break;
+        case Inc:
+            OpReturnValue(cas(increment_cas_ssbo, U32[1]));
+            break;
+        case Dec:
+            OpReturnValue(cas(decrement_cas_ssbo, U32[1]));
+            break;
+        case AddF32:
+            OpReturnValue(cas(f32_add_cas, F32[1]));
+            break;
+        case Count:
+            OpReturnValue(ConstantNull(type));
+            break;
+        }
+        OpFunctionEnd();
+        global_atomic_funcs[index] = func_id;
+    }
+    if (uses_compare_exchange) {
+        const Id function_type{TypeFunction(U32[1], U64, U32[1], U32[1])};
+        atomic_cas_global_func_u32 =
+            OpFunction(U32[1], spv::FunctionControlMask::MaskNone, function_type);
+        const Id address{OpFunctionParameter(U64)};
+        const Id comparator{OpFunctionParameter(U32[1])};
+        const Id value{OpFunctionParameter(U32[1])};
+        AddLabel();
+        const Id pointer{PageTablePointer(storage_types.U32.element, address)};
+        OpReturnValue(
+            OpAtomicCompareExchange(U32[1], pointer, scope, zero, zero, value, comparator));
+        OpFunctionEnd();
+    }
+}
+
+void EmitContext::DefinePageTable(const Info& info) {
+    if (!storage_by_address && !uniforms_by_address) {
+        return;
+    }
+    if ((storage_by_address && !Sirit::ValidId(page_table_push_constant)) ||
+        (uniforms_by_address && !Sirit::ValidId(bank_table_push_constant))) {
+        throw NotImplementedException("Device addresses without push constants");
+    }
+    AddExtension("SPV_KHR_physical_storage_buffer");
+    AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
+    SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
+    psb_u32_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, U32[1]);
+    psb_u64_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, U64);
+    // 8 and 16-bit loads through PhysicalStorageBuffer pointers are storage buffer accesses.
+    if (info.uses_int8 && profile.support_int8 && profile.support_storage_buffer_8bit) {
+        AddExtension("SPV_KHR_8bit_storage");
+        AddCapability(spv::Capability::StorageBuffer8BitAccess);
+    }
+    if (info.uses_int16 && profile.support_int16 && profile.support_storage_buffer_16bit) {
+        AddExtension("SPV_KHR_16bit_storage");
+        AddCapability(spv::Capability::StorageBuffer16BitAccess);
+    }
+    if (!storage_by_address) {
+        return;
+    }
+
+    // va -> L1[va >> 21] is the block, its entry (va >> 12) & 511 the page's device address.
+    const Id function_type{TypeFunction(U64, U64)};
+    page_table_func = OpFunction(U64, spv::FunctionControlMask::MaskNone, function_type);
+    Name(page_table_func, "page_table_translate");
+    const Id va{OpFunctionParameter(U64)};
+    AddLabel();
+    const Id push_u64{TypePointer(spv::StorageClass::PushConstant, U64)};
+    const Id table{OpLoad(
+        U64, OpAccessChain(push_u64, page_table_push_constant, Const(page_table_member_index)))};
+    constexpr u64 l1_mask{(u64{1} << (PAGE_TABLE_ADDRESS_BITS - PAGE_TABLE_BLOCK_BITS)) - 1};
+    constexpr u64 entry_mask{(u64{1} << (PAGE_TABLE_BLOCK_BITS - PAGE_TABLE_PAGE_BITS)) - 1};
+    constexpr u64 page_mask{(u64{1} << PAGE_TABLE_PAGE_BITS) - 1};
+    const Id l1_index{OpBitwiseAnd(U64, OpShiftRightLogical(U64, va, Const(PAGE_TABLE_BLOCK_BITS)),
+                                   Constant(U64, l1_mask))};
+    const Id l1_address{OpIAdd(U64, table, OpShiftLeftLogical(U64, l1_index, Const(2U)))};
+    const Id block{OpLoad(U32[1], OpConvertUToPtr(psb_u32_pointer, l1_address),
+                          spv::MemoryAccessMask::Aligned, 4U)};
+    const Id entry{OpBitwiseAnd(U64, OpShiftRightLogical(U64, va, Const(PAGE_TABLE_PAGE_BITS)),
+                                Constant(U64, entry_mask))};
+    const Id block_offset{OpShiftLeftLogical(
+        U64, OpUConvert(U64, block), Const(PAGE_TABLE_BLOCK_BITS - PAGE_TABLE_PAGE_BITS + 3U))};
+    const Id l2_address{
+        OpIAdd(U64, OpIAdd(U64, table, Constant(U64, PAGE_TABLE_L1_BYTES)),
+               OpIAdd(U64, block_offset, OpShiftLeftLogical(U64, entry, Const(3U))))};
+    const Id page{OpLoad(U64, OpConvertUToPtr(psb_u64_pointer, l2_address),
+                         spv::MemoryAccessMask::Aligned, 8U)};
+    OpReturnValue(OpIAdd(U64, page, OpBitwiseAnd(U64, va, Constant(U64, page_mask))));
+    OpFunctionEnd();
+}
+
+Id EmitContext::PageTableAddress(Id va) {
+    return OpFunctionCall(U64, page_table_func, va);
+}
+
+Id EmitContext::PageTablePointer(Id pointer_type, Id va) {
+    return OpConvertUToPtr(pointer_type, PageTableAddress(va));
+}
+
+Id EmitContext::StorageBaseAddress(u32 binding) {
+    const auto& descriptors{program_info->storage_buffers_descriptors};
+    if (binding >= descriptors.size()) {
+        throw LogicError("Storage buffer binding {} out of {}", binding, descriptors.size());
+    }
+    const StorageBufferDescriptor& desc{descriptors[binding]};
+    const u64 align_mask{~(profile.min_ssbo_alignment - 1U)};
+    const Id words{
+        EmitGetCbufU32x2(*this, IR::Value{desc.cbuf_index}, IR::Value{desc.cbuf_offset})};
+    Id pointer{OpBitcast(U64, words)};
+    if (desc.indirect_offset != ~0U) {
+        // An entry of the table the constant buffer points to, read through the page table.
+        const Id entry{OpIAdd(U64, pointer, Constant(U64, u64{desc.indirect_offset}))};
+        const Id low{LoadByAddress(U32[1], PageTablePointer(psb_u32_pointer, entry), 4)};
+        const Id high_address{OpIAdd(U64, entry, Constant(U64, u64{4}))};
+        const Id high{LoadByAddress(U32[1], PageTablePointer(psb_u32_pointer, high_address), 4)};
+        pointer = OpBitcast(U64, OpCompositeConstruct(U32[2], low, high));
+    }
+    return OpBitwiseAnd(U64, pointer, Constant(U64, align_mask));
+}
+
+Id EmitContext::StorageAddress(u32 binding, Id offset, u32 bias) {
+    Id address{OpIAdd(U64, StorageBaseAddress(binding), OpUConvert(U64, offset))};
+    if (bias != 0) {
+        address = OpIAdd(U64, address, Constant(U64, u64{bias}));
+    }
+    return address;
+}
+
+Id EmitContext::BankLoad(Id result_type, u32 element_size, Id binding, Id byte_offset) {
+    const Id push_u64{TypePointer(spv::StorageClass::PushConstant, U64)};
+    const Id table{OpLoad(
+        U64, OpAccessChain(push_u64, bank_table_push_constant, Const(bank_table_member_index)))};
+    const Id index{
+        OpIAdd(U32[1], Const(BankTableStage(stage) * BANK_TABLE_BANKS_PER_STAGE), binding)};
+    const Id entry{
+        OpIAdd(U64, table,
+               OpIMul(U64, OpUConvert(U64, index), Constant(U64, u64{sizeof(BankTableEntry)})))};
+    const Id address{
+        OpLoad(U64, OpConvertUToPtr(psb_u64_pointer, entry), spv::MemoryAccessMask::Aligned, 8U)};
+    const Id size_address{OpIAdd(U64, entry, Constant(U64, u64{offsetof(BankTableEntry, size)}))};
+    const Id size{OpLoad(U32[1], OpConvertUToPtr(psb_u32_pointer, size_address),
+                         spv::MemoryAccessMask::Aligned, 4U)};
+    // Past the bank's end reads zero, as past a bound uniform buffer's range; the load itself
+    // stays within the bank (offset 0 then).
+    const Id end{OpIAdd(U32[1], byte_offset, Const(element_size))};
+    const Id inside{OpULessThanEqual(U1, end, size)};
+    const Id safe_offset{OpSelect(U32[1], inside, byte_offset, u32_zero_value)};
+    const Id pointer_type{TypePointer(spv::StorageClass::PhysicalStorageBuffer, result_type)};
+    const Id pointer{
+        OpConvertUToPtr(pointer_type, OpIAdd(U64, address, OpUConvert(U64, safe_offset)))};
+    const Id value{OpLoad(result_type, pointer, spv::MemoryAccessMask::Aligned, element_size)};
+    const u32 components{result_type.value == U32[2].value   ? 2U
+                         : result_type.value == U32[4].value ? 4U
+                                                             : 1U};
+    const std::array<Id, 4> conditions{inside, inside, inside, inside};
+    const Id condition{components == 1
+                           ? inside
+                           : OpCompositeConstruct(TypeVector(U1, static_cast<int>(components)),
+                                                  std::span(conditions.data(), components))};
+    return OpSelect(result_type, condition, value, ConstantNull(result_type));
+}
+
+Id EmitContext::LoadByAddress(Id type, Id pointer, u32 alignment) {
+    if (requires_coherent_global_memory) {
+        return OpLoad(type, pointer,
+                      spv::MemoryAccessMask::Aligned | spv::MemoryAccessMask::Volatile, alignment);
+    }
+    return OpLoad(type, pointer, spv::MemoryAccessMask::Aligned, alignment);
+}
+
+void EmitContext::StoreByAddress(Id pointer, Id value, u32 alignment) {
+    if (requires_coherent_global_memory) {
+        OpStore(pointer, value, spv::MemoryAccessMask::Aligned | spv::MemoryAccessMask::Volatile,
+                alignment);
+        return;
+    }
+    OpStore(pointer, value, spv::MemoryAccessMask::Aligned, alignment);
 }
 
 void EmitContext::DefineRescalingInputUniformConstant() {
@@ -1325,38 +1653,9 @@ void EmitContext::DefineRescalingInputUniformConstant() {
     }
 }
 
-void EmitContext::DefineRenderArea(const Info& info) {
-    if (!info.uses_render_area) {
-        return;
-    }
-
-    if (profile.unified_descriptor_binding) {
-        boost::container::static_vector<Id, 1> members{};
-        u32 member_index{0};
-
-        members.push_back(F32[4]);
-        render_are_member_index = member_index++;
-
-        const Id push_constant_struct{TypeStruct(std::span(members.data(), members.size()))};
-        Decorate(push_constant_struct, spv::Decoration::Block);
-        Name(push_constant_struct, "RenderAreaInfo");
-
-        MemberDecorate(push_constant_struct, render_are_member_index, spv::Decoration::Offset, 0);
-        MemberName(push_constant_struct, render_are_member_index, "render_area");
-
-        const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};
-        render_area_push_constant =
-            AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant);
-        Name(render_area_push_constant, "render_area_push_constants");
-
-        if (profile.supported_spirv >= 0x00010400) {
-            interfaces.push_back(render_area_push_constant);
-        }
-    }
-}
-
 void EmitContext::DefineConstantBuffers(const Info& info, u32& binding) {
-    if (info.constant_buffer_descriptors.empty()) {
+    if (info.constant_buffer_descriptors.empty() || uniforms_by_address) {
+        // Read through the bank table (GetCbuf): no descriptors, no bindings.
         return;
     }
     if (!profile.support_descriptor_aliasing) {
@@ -1402,7 +1701,7 @@ void EmitContext::DefineConstantBuffers(const Info& info, u32& binding) {
 }
 
 void EmitContext::DefineConstantBufferIndirectFunctions(const Info& info) {
-    if (!info.uses_cbuf_indirect) {
+    if (!info.uses_cbuf_indirect || uniforms_by_address) {
         return;
     }
     const auto make_accessor{[&](Id buffer_type, Id UniformDefinitions::*member_ptr) {
@@ -1467,7 +1766,7 @@ void EmitContext::DefineConstantBufferIndirectFunctions(const Info& info) {
 }
 
 void EmitContext::DefineStorageBuffers(const Info& info, u32& binding) {
-    if (info.storage_buffers_descriptors.empty()) {
+    if (info.storage_buffers_descriptors.empty() && !storage_by_address) {
         return;
     }
     AddExtension("SPV_KHR_storage_buffer_storage_class");
@@ -1475,6 +1774,10 @@ void EmitContext::DefineStorageBuffers(const Info& info, u32& binding) {
     IR::Type used_types{profile.support_descriptor_aliasing ? info.used_storage_buffer_types
                                                             : IR::Type::U32};
     used_types |= IR::Type::U32;
+    if (storage_by_address) {
+        // Global memory functions load and store these through the page table.
+        used_types |= IR::Type::U32x2 | IR::Type::U32x4;
+    }
     if (profile.support_int8 && profile.support_storage_buffer_8bit &&
         True(used_types & IR::Type::U8)) {
         DefineSsbos(*this, storage_types.U8, &StorageDefinitions::U8, info, binding, U8,
@@ -1509,8 +1812,10 @@ void EmitContext::DefineStorageBuffers(const Info& info, u32& binding) {
         DefineSsbos(*this, storage_types.U32x4, &StorageDefinitions::U32x4, info, binding, U32[4],
                     sizeof(u32[4]));
     }
-    for (const StorageBufferDescriptor& desc : info.storage_buffers_descriptors) {
-        binding += desc.count;
+    if (!storage_by_address) {
+        for (const StorageBufferDescriptor& desc : info.storage_buffers_descriptors) {
+            binding += desc.count;
+        }
     }
     const bool needs_function{
         info.uses_global_increment || info.uses_global_decrement || info.uses_atomic_f32_add ||
@@ -1572,7 +1877,7 @@ void EmitContext::DefineTextureBuffers(const Info& info, u32& binding) {
         }
         const Id id{AddGlobalVariable(type, spv::StorageClass::UniformConstant)};
         Decorate(id, spv::Decoration::Binding, binding);
-        Decorate(id, spv::Decoration::DescriptorSet, 0U);
+        Decorate(id, spv::Decoration::DescriptorSet, descriptor_set);
         Name(id, NameOf(stage, desc, "texbuf"));
         texture_buffers.push_back({
             .id = id,
@@ -1595,7 +1900,7 @@ void EmitContext::DefineImageBuffers(const Info& info, u32& binding) {
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, image_type)};
         const Id id{AddGlobalVariable(pointer_type, spv::StorageClass::UniformConstant)};
         Decorate(id, spv::Decoration::Binding, binding);
-        Decorate(id, spv::Decoration::DescriptorSet, 0U);
+        Decorate(id, spv::Decoration::DescriptorSet, descriptor_set);
         Name(id, NameOf(stage, desc, "imgbuf"));
         if (info.requires_coherent_image_memory) {
             Decorate(id, spv::Decoration::Coherent);
@@ -1623,7 +1928,7 @@ void EmitContext::DefineTextures(const Info& info, u32& binding, u32& scaling_in
         const Id desc_type{DescType(*this, sampled_type, pointer_type, desc.count)};
         const Id id{AddGlobalVariable(desc_type, spv::StorageClass::UniformConstant)};
         Decorate(id, spv::Decoration::Binding, binding);
-        Decorate(id, spv::Decoration::DescriptorSet, 0U);
+        Decorate(id, spv::Decoration::DescriptorSet, descriptor_set);
         Name(id, NameOf(stage, desc, "tex"));
         textures.push_back({
             .id = id,
@@ -1653,7 +1958,7 @@ void EmitContext::DefineImages(const Info& info, u32& binding, u32& scaling_inde
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, image_type)};
         const Id id{AddGlobalVariable(pointer_type, spv::StorageClass::UniformConstant)};
         Decorate(id, spv::Decoration::Binding, binding);
-        Decorate(id, spv::Decoration::DescriptorSet, 0U);
+        Decorate(id, spv::Decoration::DescriptorSet, descriptor_set);
         Name(id, NameOf(stage, desc, "img"));
         if (info.requires_coherent_image_memory) {
             Decorate(id, spv::Decoration::Coherent);

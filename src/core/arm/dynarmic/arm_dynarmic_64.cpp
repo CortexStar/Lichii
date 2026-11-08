@@ -4,17 +4,29 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
+#include <cstring>
+#include <string>
+#include <thread>
 #if defined(_M_X64) || defined(__x86_64__)
-#include <immintrin.h>
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
+#include <x86intrin.h>
 #endif
+#include "common/x64/monitor_wait.h"
+#endif
+#include "common/page_table.h"
 #include "common/settings.h"
 #include "core/arm/dynarmic/arm_dynarmic.h"
 #include "core/arm/dynarmic/arm_dynarmic_64.h"
 #include "core/arm/dynarmic/dynarmic_exclusive_monitor.h"
 #include "core/arm/dynarmic/window_trace.h"
 #include "core/core_timing.h"
+#include "core/guest_cpu_experiment.h"
 #include "core/hle/kernel/k_process.h"
 #include "dynarmic/interface/A64/config.h"
 
@@ -199,11 +211,13 @@ void DynarmicCallbacks64::ExceptionRaised(u64 pc, Dynarmic::A64::Exception excep
         }
     }
     switch (exception) {
-    case Dynarmic::A64::Exception::WaitForInterrupt:
     case Dynarmic::A64::Exception::WaitForEvent:
+    case Dynarmic::A64::Exception::Yield:
+        OnSpinHint(pc);
+        return;
+    case Dynarmic::A64::Exception::WaitForInterrupt:
     case Dynarmic::A64::Exception::SendEvent:
     case Dynarmic::A64::Exception::SendEventLocal:
-    case Dynarmic::A64::Exception::Yield:
         LOG_TRACE(Core_ARM, "ExceptionRaised(exception = {}, pc = {:08X}, code = {:08X}, cached = {:08X})", std::size_t(exception), pc, m_memory.Read32(pc), MemoryReadCode(pc).value_or(0));
         return;
     case Dynarmic::A64::Exception::NoExecuteFault:
@@ -218,6 +232,196 @@ void DynarmicCallbacks64::ExceptionRaised(u64 pc, Dynarmic::A64::Exception excep
             LOG_CRITICAL(Core_ARM, "ExceptionRaised(exception = {}, pc = {:08X}, code = {:08X})", static_cast<std::size_t>(exception), pc, m_memory.Read32(pc));
         }
     }
+}
+
+void DynarmicCallbacks64::OnSpinHint(u64 pc) {
+#if defined(_M_X64) || defined(__x86_64__)
+    static const bool spin_off = GuestCpuExperimentOff("spin");
+    if (spin_off) {
+        _mm_pause();
+        _mm_pause();
+        return;
+    }
+    switch (m_spin_episode.OnYield(__rdtsc(), m_spin_gap_tsc)) {
+    case SpinAction::YieldGuestCore:
+        m_parent.m_jit->HaltExecution(GuestYield);
+        return;
+    case SpinAction::YieldHostCpu:
+        std::this_thread::yield();
+        return;
+    case SpinAction::Wait:
+        if (WaitForPolledWord(pc)) {
+            return;
+        }
+        break;
+    case SpinAction::Pause:
+        break;
+    }
+    // Give the SMT sibling the core for a moment, as GetCNTPCT does.
+    _mm_pause();
+    _mm_pause();
+#elif defined(__aarch64__)
+    asm volatile("yield");
+#endif
+}
+
+bool DynarmicCallbacks64::WaitForPolledWord(u64 pc) {
+#if defined(_M_X64) || defined(__x86_64__)
+    if (m_spin_wait_tsc == 0) {
+        return false;
+    }
+    auto& site = m_spin_sites[(pc >> 2) % m_spin_sites.size()];
+    if (site.pc != pc) {
+        std::array<u32, 4> after{};
+        for (size_t i = 0; i < after.size(); ++i) {
+            after[i] = MemoryReadCode(pc + 4 * (i + 1)).value_or(0);
+        }
+        site = {pc, DecodeSpinWatch(after)};
+    }
+    if (!site.watch) {
+        return false;
+    }
+    const auto& jit = *m_parent.m_jit;
+    const u64 base = site.watch->base == 31 ? jit.GetSP() : jit.GetRegister(site.watch->base);
+    const u64 address = (base + u64(site.watch->offset)) & ~u64(site.watch->size - 1);
+    const u8* const word = m_memory.GetPointerSilent(address);
+    if (word == nullptr) {
+        return false;
+    }
+    // The loop reads the word right after the YIELD: sleep until another core writes its line,
+    // or m_spin_wait_tsc passes (a write between the guest's last read and this one is noticed
+    // at the latest then).
+    const u64 seen = site.watch->size == 8 ? *reinterpret_cast<const volatile u64*>(word)
+                                            : *reinterpret_cast<const volatile u32*>(word);
+    Common::X64::MonitorWait(word, seen, site.watch->size, m_spin_wait_tsc);
+    return true;
+#else
+    return false;
+#endif
+}
+
+std::optional<Dynarmic::A64::HostFunctionEntry> DynarmicCallbacks64::GetHostFunction(u64 vaddr) {
+    if (m_page_table == nullptr) {
+        return std::nullopt;
+    }
+    const GuestFunctionSite* const site = m_process->FindGuestFunction(vaddr);
+    if (site == nullptr) {
+        return std::nullopt;
+    }
+    for (size_t i = 0; i < site->head.size(); ++i) {
+        if (MemoryReadCode(vaddr + 4 * i) != site->head[i]) {
+            return std::nullopt; // patched code
+        }
+    }
+    Dynarmic::A64::HostFunction function{};
+    switch (site->function) {
+    case GuestFunction::Memmove:
+        function = &HostMemmove;
+        break;
+    case GuestFunction::Memset:
+        function = &HostMemset;
+        break;
+    case GuestFunction::MurmurHash3String:
+        function = &HostMurmurHash3String;
+        break;
+    case GuestFunction::Fmodf:
+        function = &HostFmodf;
+        break;
+    }
+    return Dynarmic::A64::HostFunctionEntry{function, this};
+}
+
+u8* DynarmicCallbacks64::HostSpan(u64 vaddr, u64 size) const {
+    const u64 last = vaddr + size - 1;
+    if (size == 0 || last < vaddr) {
+        return nullptr;
+    }
+    const u64 first_page = vaddr >> Memory::YUZU_PAGEBITS;
+    const u64 last_page = last >> Memory::YUZU_PAGEBITS;
+    if (last_page >= m_page_table->entries.size()) {
+        return nullptr;
+    }
+    // Pages are contiguous on the host when their entries hold the same absolute offset; a
+    // marked page reads as a null pointer.
+    const auto [pointer, type, block] = m_page_table->entries[first_page].PointerTypeBlock();
+    if (type != Common::PageType::Memory || pointer == 0) {
+        return nullptr;
+    }
+    for (u64 page = first_page + 1; page <= last_page; ++page) {
+        const auto [next_pointer, next_type, next_block] =
+            m_page_table->entries[page].PointerTypeBlock();
+        if (next_type != Common::PageType::Memory || next_pointer != pointer) {
+            return nullptr;
+        }
+    }
+    return reinterpret_cast<u8*>(pointer + vaddr);
+}
+
+// The host functions decline (the guest's own code then runs, through the JIT's memory paths)
+// when a buffer is not plain contiguous memory: rasterizer-cached, debug or unmapped pages.
+
+bool DynarmicCallbacks64::HostMemmove(void* user, const Dynarmic::A64::HostFunctionState& state) {
+    const auto& self = *static_cast<const DynarmicCallbacks64*>(user);
+    const u64 size = state.x[2];
+    if (size == 0) {
+        return true;
+    }
+    u8* const dst = self.HostSpan(state.x[0], size);
+    const u8* const src = self.HostSpan(state.x[1], size);
+    if (dst == nullptr || src == nullptr) {
+        return false;
+    }
+    // x0 (the destination) is the result and stays.
+    std::memmove(dst, src, size);
+    return true;
+}
+
+bool DynarmicCallbacks64::HostMemset(void* user, const Dynarmic::A64::HostFunctionState& state) {
+    const auto& self = *static_cast<const DynarmicCallbacks64*>(user);
+    const u64 size = state.x[2];
+    if (size == 0) {
+        return true;
+    }
+    u8* const dst = self.HostSpan(state.x[0], size);
+    if (dst == nullptr) {
+        return false;
+    }
+    std::memset(dst, static_cast<u8>(state.x[1]), size);
+    return true;
+}
+
+bool DynarmicCallbacks64::HostMurmurHash3String(void* user,
+                                                const Dynarmic::A64::HostFunctionState& state) {
+    const auto& self = *static_cast<const DynarmicCallbacks64*>(user);
+    MurmurHash3X86_32 hash{static_cast<u32>(state.x[1])};
+    u64 address = state.x[0];
+    while (true) {
+        // Up to the end of the page: the next page may not be mapped (the guest reads only
+        // up to the terminator).
+        const u64 page_left = Memory::YUZU_PAGESIZE - (address & Memory::YUZU_PAGEMASK);
+        const u8* const bytes = self.HostSpan(address, page_left);
+        if (bytes == nullptr) {
+            return false;
+        }
+        const auto* const end = static_cast<const u8*>(std::memchr(bytes, 0, page_left));
+        hash.Update({bytes, end != nullptr ? static_cast<size_t>(end - bytes) : page_left});
+        if (end != nullptr) {
+            break;
+        }
+        address += page_left;
+    }
+    state.x[0] = hash.Finish();
+    return true;
+}
+
+bool DynarmicCallbacks64::HostFmodf(void*, const Dynarmic::A64::HostFunctionState& state) {
+    const FmodfResult result = Fmodf(static_cast<u32>(state.v[0]), static_cast<u32>(state.v[2]),
+                                     state.fpcr);
+    // Writing s0 clears the rest of v0.
+    state.v[0] = result.value;
+    state.v[1] = 0;
+    *state.fpsr_exc |= result.fpsr;
+    return true;
 }
 
 void DynarmicCallbacks64::CallSVC(u32 svc) {
@@ -243,6 +447,16 @@ u64 DynarmicCallbacks64::GetTicksRemaining() {
     return std::max<s64>(m_parent.m_system.CoreTiming().downcount, 0);
 }
 
+namespace {
+bool CounterPollPauseEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_CNTPCT_PAUSE");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+} // namespace
+
 u64 DynarmicCallbacks64::GetCNTPCT() {
     const u64 ticks = m_parent.m_system.CoreTiming().GetClockTicks();
     // Guest code that waits by polling the counter (title 1's main thread reads it ~17 million
@@ -250,11 +464,7 @@ u64 DynarmicCallbacks64::GetCNTPCT() {
     // GPU thread is often on the other half of that SMT core. Two reads within ~1.7 us of each
     // other are such a loop: pause, which hands the core's resources to the sibling thread for a
     // moment. The guest sees the same counter. EDEN_NX2_CNTPCT_PAUSE=0 turns it off.
-    static const bool pause_spins = [] {
-        const char* value = std::getenv("EDEN_NX2_CNTPCT_PAUSE");
-        return value == nullptr || value[0] != '0';
-    }();
-    if (pause_spins && ticks - m_last_cntpct < m_spin_ticks) {
+    if (CounterPollPauseEnabled() && ticks - m_last_cntpct < m_spin_ticks) {
 #if defined(_M_X64) || defined(__x86_64__)
         _mm_pause();
         _mm_pause();
@@ -346,6 +556,17 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
     // 31.25 MHz for Switch 2 titles (Common::WallClock::SetGuestCNTFRQ, set at boot).
     config.cntfrq_el0 = static_cast<u32>(Common::g_wall_clock.GetGuestCNTFRQ());
     m_cb->m_spin_ticks = config.cntfrq_el0 / 600'000;
+#if defined(_M_X64) || defined(__x86_64__)
+    // Spin-wait hints (TSC ticks): an episode ends after 8 us without a YIELD; one wait for the
+    // polled line lasts at most 2 us, so interrupts and lost wake-ups are noticed by then.
+    if (Common::g_wall_clock.IsNative()) {
+        m_cb->m_spin_gap_tsc = Common::g_wall_clock.NsToTicks(std::chrono::microseconds{8});
+        if (Common::X64::HasMonitorWait()) {
+            m_cb->m_spin_wait_tsc = static_cast<u32>(
+                Common::g_wall_clock.NsToTicks(std::chrono::microseconds{2}));
+        }
+    }
+#endif
 
     // Unpredictable instructions
     config.define_unpredictable_behaviour = true;
@@ -364,6 +585,11 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
     // Allow memory fault handling to work
     if (m_system.DebuggerEnabled()) {
         config.check_halt_on_memory_access = true;
+    }
+
+    // Small hot guest functions as host code (GetHostFunction) when memory needs no checks.
+    if (page_table != nullptr && !m_cb->m_check_memory_access && !GuestCpuExperimentOff("hostfn")) {
+        m_cb->m_page_table = page_table;
     }
 
     // null_jit
@@ -456,6 +682,91 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
         config.fastmem_pointer = std::nullopt;
         config.fastmem_exclusive_access = false;
     }
+#if defined(ARCHITECTURE_x86_64)
+    // x86-64 host code generation options; Paranoid keeps dynarmic's defaults.
+    if (Settings::values.cpu_accuracy.GetValue() != Settings::CpuAccuracy::Paranoid) {
+        // x86-64 is TSO: LDAPR/LDAR/LDAXR need no locked RMW (STLR keeps XCHG), and DMB xxLD/xxST
+        // order nothing TSO does not already order. Ocarina of Time has ~68k LDAPRB sites (static
+        // init guards), each a LOCK XADD that bounced the guard's cache line between the cores.
+        config.tso_ordered_loads = true;
+        config.elide_ld_st_barriers = true;
+        // The JIT spilled ~9% of its instructions to stack slots in Ocarina of Time's hot code
+        // while callee-saved GPRs sat empty: evictions go to a free callee-saved GPR first, and an
+        // operand that is overwritten but still needed is copied to a free register instead.
+        config.spill_to_free_gpr = true;
+        config.scratch_copy_to_free_reg = true;
+        // W-register writes and zero-extends of values a 32-bit instruction produced skip the
+        // second `mov r32, r32`.
+        config.elide_redundant_zext = true;
+        // ldr/str [xN, #imm]: the immediate goes into the fastmem addressing mode instead of a
+        // separate LEA (and often a register copy).
+        config.fold_address_offsets = true;
+        // The per-block %rbp frame is three instructions per block that nothing reads.
+        config.omit_block_frame = true;
+        // Fast dispatch table of 2^16 entries, 4-way set associative: 1 MiB per core instead of
+        // the 16 MiB direct-mapped 2^20 table.
+        config.fast_dispatch_table_bits = 16;
+        config.fast_dispatch_set_associative = true;
+        // A 32-entry return stack buffer: returns from deeper call chains skip the dispatcher.
+        config.rsb_size = 32;
+        // Unlinked exits jump to one shared stub per target: 5/6-byte patch sites instead of
+        // 22/23 bytes plus an inline exit stub.
+        config.compact_block_exits = true;
+        // Fault/abort paths, atomic fallbacks and exit stubs go to a cold region at the end of
+        // the code cache, so hot blocks sit densely.
+        config.far_code = true;
+        // Branches, CSEL and CBZ/TBZ read the host flags left by the instruction before them
+        // instead of reloading NZCV from the guest state.
+        config.reuse_host_flags = !config.enable_cycle_counting;
+        // LSE atomics as host atomics (fastmem exclusives with the global monitor ignored only).
+        config.native_lse_atomics = config.fastmem_exclusive_access &&
+            config.HasOptimization(Dynarmic::OptimizationFlag::Unsafe_IgnoreGlobalMonitor);
+        // CheckMemoryAccess halts with these when it refuses an access.
+        config.memory_abort_halt_reasons = DataAbort | PrefetchAbort;
+        // Halt checks on links to lower PCs and on indirect branches instead of every linked
+        // branch (multicore only: dynarmic counts no cycles there).
+        config.halt_check_on_back_edges = !config.enable_cycle_counting;
+        // MRS CNTPCT_EL0 in the emitted code: RDTSC and the clock's fixed-point factor, without
+        // the callback and its fenced RDTSC (guest code reads the counter ~10^5-10^7 times a
+        // second). Only when the counter is the host clock unchanged.
+        if (config.wall_clock_cntpct && m_system.CoreTiming().GuestCounterIsHostClock() &&
+            !GuestCpuExperimentOff("cntpct")) {
+            config.cntpct_rdtsc_factor = Common::g_wall_clock.CNTPCTRdtscFactor();
+            if (CounterPollPauseEnabled()) {
+                // The same ~1.7 us as m_spin_ticks, in TSC ticks.
+                config.cntpct_last_tsc = &m_cb->m_last_cntpct;
+                config.cntpct_spin_tsc = static_cast<u32>(std::min<u64>(
+                    Common::g_wall_clock.NsToTicks(std::chrono::nanoseconds{1'000'000'000 / 600'000}),
+                    0x7FFF'FFFF));
+            }
+        }
+        // BL/BLR as host calls and RET as a host return checked against the guest return
+        // address: the CPU's return predictor predicts guest returns instead of one shared
+        // indirect jump through the return stack buffer (multicore only, no cycle counter).
+        config.host_call_return = !config.enable_cycle_counting;
+        // Every BR/BLR site jumps through its own cache of its last target, so each site has its
+        // own indirect jump for the branch predictor (virtual calls) instead of all sharing the
+        // fast dispatcher's; sites that keep changing target are patched to the dispatcher.
+        config.indirect_branch_cache = true;
+        // Code reads the per-core callbacks, TPIDR pointers and monitor slots from the JIT state,
+        // so one compiled block is valid on every core (for one code cache per process).
+        config.core_independent_code = true;
+        // EXPERIMENT (do not merge): EDEN_JIT_OFF=hcr,ibc turns host_call_return /
+        // indirect_branch_cache off for the integration A/B.
+        if (const char* off = std::getenv("EDEN_JIT_OFF")) {
+            const std::string list = std::string{","} + off + ",";
+            if (list.find(",hcr,") != std::string::npos) {
+                config.host_call_return = false;
+            }
+            if (list.find(",ibc,") != std::string::npos) {
+                config.indirect_branch_cache = false;
+            }
+            if (list.find(",cic,") != std::string::npos) {
+                config.core_independent_code = false;
+            }
+        }
+    }
+#endif
     m_jit.emplace(config);
 }
 

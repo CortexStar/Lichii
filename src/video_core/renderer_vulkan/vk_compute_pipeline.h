@@ -11,16 +11,19 @@
 #include <functional>
 #include <mutex>
 #include <span>
+#include <thread>
 
 #include <boost/container/small_vector.hpp>
 
 #include "common/common_types.h"
 #include "common/thread_worker.h"
 #include "shader_recompiler/shader_info.h"
+#include "video_core/renderer_vulkan/pipeline_build.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_descriptor_buffer.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
+#include "video_core/renderer_vulkan/vk_pipeline_binary.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -37,14 +40,15 @@ class Scheduler;
 
 class ComputePipeline {
 public:
-    explicit ComputePipeline(const Device& device, Scheduler& scheduler, vk::PipelineCache& pipeline_cache,
-                             DescriptorPool& descriptor_pool,
+    explicit ComputePipeline(const Device& device, Scheduler& scheduler,
+                             vk::PipelineCache& pipeline_cache, DescriptorPool& descriptor_pool,
                              GuestDescriptorQueue& guest_descriptor_queue,
                              DescriptorBufferRing& descriptor_buffer_ring,
                              Common::ThreadWorker* thread_worker,
                              PipelineStatistics* pipeline_statistics,
                              VideoCore::ShaderNotify* shader_notify, const Shader::Info& info,
-                             vk::ShaderModule spv_module, u64 shader_hash);
+                             vk::ShaderModule spv_module, u64 shader_hash,
+                             PipelineBinaryCache* binary_cache = nullptr);
 
     ComputePipeline& operator=(ComputePipeline&&) noexcept = delete;
     ComputePipeline(ComputePipeline&&) noexcept = delete;
@@ -77,6 +81,16 @@ public:
         return written_images;
     }
 
+    struct ImageAccess {
+        VkImage image;
+        bool written;
+    };
+
+    /// The images (not buffer views) the last configured dispatch samples, loads or stores.
+    [[nodiscard]] std::span<const ImageAccess> ImageAccesses() const noexcept {
+        return image_accesses;
+    }
+
     struct SampledImage {
         u32 tic;
         VideoCommon::ImageViewId id;
@@ -98,7 +112,7 @@ public:
 
 private:
     /// Builds the pipeline once, on whichever thread gets here first.
-    void RunBuild();
+    void RunBuild(bool low_priority_thread);
 
     const Device& device;
     vk::PipelineCache& pipeline_cache;
@@ -108,6 +122,7 @@ private:
     u64 shader_hash{};
     u32 num_descriptor_entries{};
     boost::container::small_vector<VideoCommon::ImageViewId, 8> written_images;
+    boost::container::small_vector<ImageAccess, 16> image_accesses;
     std::vector<SampledImage> sampled_images;
 
     VideoCommon::ComputeUniformBufferSizes uniform_buffer_sizes{};
@@ -117,6 +132,13 @@ private:
     bool uses_push_descriptor{false};
     bool uses_descriptor_buffer{false};
     DescriptorBufferLayout descriptor_buffer_layout;
+    std::vector<u32> binding_kinds; ///< Binding memo kind per texture/image view, in read order
+    // The previous dispatch's descriptor buffer allocation
+    std::vector<DescriptorUpdateEntry> last_descriptor_payload;
+    VkDeviceSize last_descriptor_buffer_offset{};
+    u32 last_descriptor_buffer_chunk{};
+    u64 last_descriptor_buffer_generation{};
+    bool has_last_descriptor_buffer{};
     DescriptorAllocator descriptor_allocator;
     vk::PipelineLayout pipeline_layout;
     vk::DescriptorUpdateTemplate descriptor_update_template;
@@ -125,9 +147,16 @@ private:
     std::function<void()> build_task;
     std::atomic_bool build_claimed{false};
     std::atomic_bool build_task_done{true};
+    BuilderPriority build_priority;
     std::condition_variable build_condvar;
     std::mutex build_mutex;
     std::atomic_bool is_built{false};
+
+    /// OptimizesInBackground: the optimized pipeline, bound instead of `pipeline` once built.
+    vk::Pipeline optimized_pipeline;
+    std::atomic<VkPipeline> optimized_handle{VK_NULL_HANDLE};
+    /// Last member: joined before anything the background build uses is destroyed.
+    std::jthread optimizer;
 };
 
 } // namespace Vulkan

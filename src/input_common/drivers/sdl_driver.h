@@ -8,8 +8,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 #include "common/container/unordered_map.h"
 
 #include <SDL3/SDL.h>
@@ -17,6 +19,9 @@
 #include "common/common_types.h"
 #include "common/threadsafe_queue.h"
 #include "input_common/input_engine.h"
+#ifdef _WIN32
+#include "input_common/drivers/gameinput_source.h"
+#endif
 
 union SDL_Event;
 
@@ -114,6 +119,35 @@ private:
 
     /// Returns true if the button is on the left joycon
     bool IsButtonOnLeftSide(Settings::NativeButton::Values button) const;
+
+#ifdef _WIN32
+    struct GameInputPad {
+        GameInputSource::Pad pad;
+        GameInputSource::Device device;
+        SDL_JoystickID sdl_id{};
+        std::shared_ptr<SDLJoystick> joystick;
+        GameInputMapping::Bindings bindings{};
+    };
+
+    /// Gives each GameInput gamepad that has no SDL identity yet the SDL joystick it is, closing
+    /// that joystick in SDL if SDL opened it first. Main thread.
+    void BindGameInputPads();
+
+    /// Releases the SDL identity of a GameInput gamepad that went away.
+    void UnbindGameInputPad(GameInputSource::Pad pad);
+
+    /// A GameInput reading: the joystick inputs SDL would report for it.
+    void OnGameInputState(GameInputSource::Pad pad, const GameInputMapping::GamepadState& state);
+
+    /// True when a GameInput gamepad reads this SDL joystick (SDL must not open it).
+    bool IsGameInputJoystick(SDL_JoystickID joystick_id);
+
+    std::unique_ptr<GameInputSource> gameinput;
+    std::mutex gameinput_mutex;
+    std::vector<GameInputPad> gameinput_pads;
+    std::vector<SDL_JoystickID> gameinput_released;
+    std::atomic<bool> gameinput_changed{};
+#endif
 
     /// Map of GUID of a list of corresponding virtual Joysticks
     ::Common::unordered_map<Common::UUID, std::vector<std::shared_ptr<SDLJoystick>>> joystick_map;

@@ -6,17 +6,38 @@
 
 add_executable(tests
     common/addon_config.cpp
+    video_core/amd_float16.cpp
+    video_core/oot_ultrawide.cpp
+    video_core/graphics_pipeline_library.cpp
+    video_core/cached_pipeline_policy.cpp
+    video_core/gpl_build_once.cpp
+    video_core/pipeline_binary_store.cpp
+    video_core/maxwell_half_fmz.cpp
     video_core/vulkan_overlay_filter.cpp
     video_core/buffer_cache_ports.cpp
+    video_core/upload_batch.cpp
+    video_core/upload_order.cpp
+    video_core/gpu_page_table.cpp
+    video_core/native_verify.cpp
     video_core/unswizzle_workers.cpp
+    video_core/block_linear_swizzle.cpp
     video_core/aftermath_dump.cpp
     video_core/frame_dump_schedule.cpp
+    video_core/draw_class_stats.cpp
+    video_core/draw_input_watch.cpp
+    video_core/heap_mappings.cpp
+    video_core/dynamic_state_delta.cpp
     video_core/host_mip_limits.cpp
     video_core/gpu_timestamp.cpp
+    video_core/unbacked_image_policy.cpp
+    video_core/host_logic_op.cpp
+    video_core/hdr_capture.cpp
     core/nx2_streamplay.cpp
     core/nx2_video_ready.cpp
     core/nx2_debug_server.cpp
     core/nx2_present_pacer.cpp
+    core/vi_conductor.cpp
+    common/display_hdr.cpp
     common/dkb_cpu_trace.cpp
     common/dkb_frame_trace.cpp
     audio_core/nx2_sysmix.cpp
@@ -33,9 +54,13 @@ add_executable(tests
     audio_core/microphone.cpp
     audio_core/hardware_audio_codec.cpp
     core/gpu_dirty_memory.cpp
+    core/load_timing.cpp
+    core/nso_image_size.cpp
     core/memory_acquire.cpp
     core/builtin_patches.cpp
+    core/oot_ultrawide.cpp
     core/builtin_font_glyphs.cpp
+    core/framebuffer_layout.cpp
     core/system_test_context.h
     video_core/ampere_branch_modifiers.cpp
     video_core/ampere_fast_fusion_logged.cpp
@@ -58,6 +83,12 @@ add_executable(tests
     video_core/maxwell_numeric.cpp
     video_core/maxwell_permute_lod.cpp
     video_core/submission_policy.cpp
+    video_core/present_cadence.cpp
+    video_core/present_mode_policy.cpp
+    video_core/render_pass_barrier_tracker.cpp
+    video_core/hazard_tracker.cpp
+    video_core/depth_write_policy.cpp
+    video_core/tessellation_stages.cpp
     video_core/native_pending_policy.cpp
     video_core/framebuffer_clear_layers.cpp
     video_core/framebuffer_limits.cpp
@@ -67,10 +98,14 @@ add_executable(tests
     video_core/ampere_async_copy.cpp
     video_core/ampere_trap_guards.cpp
     video_core/async_draw_policy.cpp
+    video_core/draw_debug_switches.cpp
+    video_core/perf_overlay.cpp
     video_core/async_shader_emission.cpp
     video_core/pipeline_build.cpp
     video_core/oot_network.cpp
     video_core/page_filter.cpp
+    video_core/pipeline_cache_policy.cpp
+    video_core/pipeline_eviction_policy.cpp
     video_core/pipeline_optimization.cpp
     video_core/spirv_atomic_retry.cpp
     video_core/spirv_storage_alignment.cpp
@@ -79,15 +114,21 @@ add_executable(tests
     video_core/multi_range_refresh.cpp
     video_core/command_fetch_order.cpp
     video_core/gpu_written_pages.cpp
+    video_core/async_report_wait.cpp
+    video_core/nx2_bufcache.cpp
+    video_core/nx2_write_handoff.cpp
     video_core/command_writer.cpp
     video_core/split_fence_wait.cpp
     video_core/command_snapshot_suspensions.cpp
     video_core/pending_maps.cpp
     video_core/maxwell_fast_method.cpp
+    hid_core/npad_input_publish.cpp
     hid_core/sensor_info.cpp
+    common/input_latency.cpp
     common/paged_scalar.cpp
     common/queue_lifetime.cpp
     common/queue_timed_wait.cpp
+    common/nx2_address_wait.cpp
     common/range_set_move.cpp
     common/range_set_subtract.cpp
     video_core/uniform_cache_history.cpp
@@ -109,6 +150,7 @@ add_executable(tests
     video_core/gpu_command_safety.cpp
     video_core/syncpoint_actions.cpp
     video_core/nx2_video_render.cpp
+    video_core/nx2_video_decode_policy.cpp
     video_core/ampere_matrix.cpp
     video_core/spirv_software_matrix.cpp
     video_core/spirv_builtin_capabilities.cpp
@@ -127,17 +169,20 @@ add_executable(tests
     common/host_memory_failure.cpp
     common/host_memory_test_access.h
     core/host_memory_failure.cpp
+    common/mapped_file.cpp
     common/page_table.cpp
     common/param_package.cpp
     common/range_map.cpp
     common/ring_buffer.cpp
     common/scratch_buffer.cpp
+    common/thread_priority.cpp
     common/slot_vector.cpp
     common/sparse_large_vector.cpp
     common/undefined_fix.cpp
     common/unique_function.cpp
     common/zstd_compression.cpp
     core/core_timing.cpp
+    core/spin_wait.cpp
     core/thread_startup_policy.cpp
     core/nup_writer.cpp
     core/nup_metadata.cpp
@@ -171,6 +216,9 @@ add_executable(tests
     video_core/usage_tracker.cpp
     video_core/shader_invalidation.cpp
     video_core/descriptor_table.cpp
+    video_core/sampler_class_key.cpp
+    video_core/pool_page_watch.cpp
+    video_core/pool_mirror.cpp
     video_core/descriptor_payload_growth.cpp
     video_core/global_address_tracking.cpp
     video_core/global_atomic_routing.cpp
@@ -182,6 +230,7 @@ add_executable(tests
     video_core/indirect_reset.cpp
     video_core/stale_pages.cpp
     input_common/calibration_configuration_job.cpp
+    input_common/gameinput_mapping.cpp
 )
 
 create_target_directory_groups(tests)
@@ -190,7 +239,8 @@ target_link_libraries(tests PRIVATE common core audio_core input_common video_co
 target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
 
 if (TARGET dynarmic::dynarmic)
-    target_sources(tests PRIVATE core/window_trace.cpp)
+    target_sources(tests PRIVATE core/window_trace.cpp core/dynarmic_atomic_fallback.cpp)
+    target_sources(tests PRIVATE core/guest_cpu.cpp core/window_trace.cpp)
     target_link_libraries(tests PRIVATE dynarmic::dynarmic)
 endif()
 

@@ -65,4 +65,43 @@ std::size_t DecompressDataZSTD(std::span<const u8> compressed, std::span<u8> out
     return ZSTD_isError(result) ? 0 : result;
 }
 
+std::optional<std::vector<u8>> TryDecompressDataZSTDWithDictionary(
+    std::span<const u8> compressed, std::span<const u8> dictionary, std::size_t max_size) {
+    const unsigned long long size = ZSTD_getFrameContentSize(compressed.data(), compressed.size());
+    if (size == ZSTD_CONTENTSIZE_ERROR || size == ZSTD_CONTENTSIZE_UNKNOWN || size > max_size) {
+        return std::nullopt;
+    }
+    ZSTD_DCtx* const context = ZSTD_createDCtx();
+    if (context == nullptr) {
+        return std::nullopt;
+    }
+    std::vector<u8> out(static_cast<std::size_t>(size));
+    const std::size_t result =
+        ZSTD_decompress_usingDict(context, out.data(), out.size(), compressed.data(),
+                                  compressed.size(), dictionary.data(), dictionary.size());
+    ZSTD_freeDCtx(context);
+    if (ZSTD_isError(result) || result != size) {
+        return std::nullopt;
+    }
+    return out;
+}
+
+std::vector<u8> CompressDataZSTDWithDictionary(std::span<const u8> source,
+                                               std::span<const u8> dictionary) {
+    ZSTD_CCtx* const context = ZSTD_createCCtx();
+    if (context == nullptr) {
+        return {};
+    }
+    std::vector<u8> out(ZSTD_compressBound(source.size()));
+    const std::size_t result =
+        ZSTD_compress_usingDict(context, out.data(), out.size(), source.data(), source.size(),
+                                dictionary.data(), dictionary.size(), ZSTD_CLEVEL_DEFAULT);
+    ZSTD_freeCCtx(context);
+    if (ZSTD_isError(result)) {
+        return {};
+    }
+    out.resize(result);
+    return out;
+}
+
 } // namespace Common::Compression

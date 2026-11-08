@@ -20,11 +20,17 @@ namespace Common {
 
 class Event {
 public:
+    Event() = default;
+    ~Event();
+    Event(const Event&) = delete;
+    Event& operator=(const Event&) = delete;
+
     void Set() {
         std::scoped_lock lk{mutex};
         if (!is_set) {
             is_set = true;
             condvar.notify_one();
+            WakeBlockedWaiter();
         }
     }
 
@@ -35,6 +41,12 @@ public:
     }
 
     bool WaitFor(const std::chrono::nanoseconds time);
+
+    /// Like WaitFor, but the thread sleeps in the OS instead of in a monitor wait: Set wakes it at
+    /// once, and the timeout can end up to an OS timer tick late (Windows: ~0.5 ms at the maximum
+    /// timer resolution). WaitFor's MWAITX/UMWAIT wait is precise but counts as CPU time for the
+    /// whole wait.
+    bool BlockFor(const std::chrono::nanoseconds time);
 
     template<class Clock, class Duration>
     bool WaitUntil(const std::chrono::time_point<Clock, Duration> time) {
@@ -57,9 +69,16 @@ public:
     }
 
 private:
+    /// Windows: wakes a thread in BlockFor (no-op elsewhere and when none waits there).
+    void WakeBlockedWaiter();
+
     alignas(64) std::atomic<bool> is_set{false};
     std::condition_variable condvar;
     std::mutex mutex;
+#ifdef _WIN32
+    std::atomic<u32> blocked_waiters{0}; ///< Threads in BlockFor
+    void* wake_handle{};                 ///< Auto-reset event for BlockFor, made on first use
+#endif
 };
 
 class Barrier {
@@ -106,11 +125,28 @@ enum class ThreadPlacement : u32 {
 };
 
 void SetCurrentThreadPriority(ThreadPriority new_priority);
+
+/// A thread whose priority another thread can change.
+struct ThreadPriorityTarget {
+    u64 native{};
+};
+
+[[nodiscard]] ThreadPriorityTarget CurrentThreadPriorityTarget();
+
+/// Sets the priority of another thread of this process. On Linux, raising it needs RLIMIT_NICE
+/// room or CAP_SYS_NICE, as for SetCurrentThreadPriority.
+void SetOtherThreadPriority(ThreadPriorityTarget target, ThreadPriority new_priority);
 void SetCurrentThreadName(const char* name);
 void SetCurrentThreadToPerformanceCores();
 void SetCurrentThreadToEfficiencyCores();
 void SetCurrentThreadToBackgroundWork();
 void SetCurrentThreadToAllCores();
+
+/// Windows: registers the calling thread with MMCSS's "Games" task (AvSetMmThreadCharacteristics)
+/// until it exits, so the Multimedia Class Scheduler raises it above the process's
+/// TIME_CRITICAL threads while it stays within the task's CPU budget. For short, deadline-bound
+/// threads (present, audio). No-op elsewhere.
+void SetCurrentThreadToGamesMmcss();
 
 enum class PinnedRole : u32 { GpuFront, GpuBack, GuestCore };
 

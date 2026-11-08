@@ -4,6 +4,11 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <utility>
+
+#include "common/display_hdr.h"
+#include "common/input_latency.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/frontend/emu_window.h"
@@ -24,6 +29,10 @@ namespace {
 
 constexpr size_t MAX_FRAMES_IN_FLIGHT = 7;
 constexpr u32 MAX_PRESENT_ATTEMPTS = 3;
+
+// Wakes from an OS timer wait end up to ~0.5 ms late on Windows (maximum timer resolution); the
+// last stretch before a present tick is waited for precisely.
+constexpr auto PreciseWaitGuard = std::chrono::microseconds{700};
 #ifdef HAS_LSFG
 static_assert(MAX_FRAMES_IN_FLIGHT <= LSFG_MAX_TARGETS);
 #endif
@@ -127,7 +136,6 @@ PresentManager::PresentManager(const vk::Instance& instance_,
     , scheduler{scheduler_}
     , swapchain{swapchain_}
     , surface{surface_}
-    , blit_supported{CanBlitToSwapchain(device.GetPhysical(), swapchain.GetImageViewFormat())}
     , storage_supported{CanStoreToFrame(device.GetPhysical(), swapchain.GetImageFormat())}
     , use_present_thread{Settings::values.async_presentation.GetValue()}
 {
@@ -141,9 +149,12 @@ PresentManager::PresentManager(const vk::Instance& instance_,
             VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
         .queueFamilyIndex = device.GetGraphicsFamily(),
     });
-    auto cmdbuffers = cmdpool.Allocate(image_count);
+    // One more than the swapchain needs: the present cadence keeps the last presented frame to
+    // present it again, and the renderer still gets as many as before.
+    const size_t frame_count = image_count + 1;
+    auto cmdbuffers = cmdpool.Allocate(frame_count);
 
-    frames.resize(image_count);
+    frames.resize(frame_count);
     for (u32 i = 0; i < frames.size(); i++) {
         Frame& frame = frames[i];
         frame.index = i;
@@ -167,7 +178,13 @@ PresentManager::PresentManager(const vk::Instance& instance_,
     }
 }
 
-PresentManager::~PresentManager() = default;
+PresentManager::~PresentManager() {
+    // The present thread uses members declared after it: stop it before they are destroyed.
+    if (present_thread.joinable()) {
+        present_thread.request_stop();
+        present_thread.join();
+    }
+}
 
 Frame* PresentManager::GetRenderFrame() {
 
@@ -182,6 +199,7 @@ Frame* PresentManager::GetRenderFrame() {
     // Wait for the presentation to be finished so all frame resources are free
     frame->present_done.Wait();
     frame->present_done.Reset();
+    frame->color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 
     return frame;
 }
@@ -208,12 +226,24 @@ bool PresentManager::NeedsStorage(const Frame* frame, bool required) const {
     return required && frame->storage_capable && !frame->storage_view;
 }
 
+VkFormat PresentManager::GetFrameImageFormat(VkFormat image_view_format) const {
+    if (image_view_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ||
+        image_view_format == VK_FORMAT_R16G16B16A16_SFLOAT) {
+        return image_view_format;
+    }
+    // Render SDR through a UNORM view, but preserve the surface's transfer encoding for blits.
+    return swapchain.GetSdrImageFormat();
+}
+
 void PresentManager::RecreateFrame(Frame* frame, u32 width, u32 height, VkFormat image_view_format,
                                    VkRenderPass rd, bool storage) {
     auto& dld = device.GetLogical();
 
     frame->width = width;
     frame->height = height;
+    frame->format = image_view_format;
+    frame->image_format = GetFrameImageFormat(image_view_format);
+    frame->storage_capable = CanStoreToFrame(device.GetPhysical(), frame->image_format);
 
     const bool with_storage = storage && frame->storage_capable;
     VkImageUsageFlags storage_usage = 0;
@@ -226,7 +256,7 @@ void PresentManager::RecreateFrame(Frame* frame, u32 width, u32 height, VkFormat
         .pNext = nullptr,
         .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT,
         .imageType = VK_IMAGE_TYPE_2D,
-        .format = swapchain.GetImageFormat(),
+        .format = frame->image_format,
         .extent =
             {
                 .width = width,
@@ -243,7 +273,7 @@ void PresentManager::RecreateFrame(Frame* frame, u32 width, u32 height, VkFormat
         .queueFamilyIndexCount = 0,
         .pQueueFamilyIndices = nullptr,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-    });
+    }, false, MemoryAllocator::RenderTargetPriority);
 
     frame->image_view = dld.CreateImageView({
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -277,7 +307,7 @@ void PresentManager::RecreateFrame(Frame* frame, u32 width, u32 height, VkFormat
             .flags = 0,
             .image = *frame->image,
             .viewType = VK_IMAGE_VIEW_TYPE_2D,
-            .format = swapchain.GetImageFormat(),
+            .format = frame->image_format,
             .components =
                 {
                     .r = VK_COMPONENT_SWIZZLE_IDENTITY,
@@ -331,7 +361,27 @@ void PresentManager::PresentThread(std::stop_token token) {
     Common::SetCurrentThreadName("VulkanPresent");
     Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
     Common::SetCurrentThreadToPerformanceCores();
+    // Each present is a short burst with a deadline; under background load a normal-class
+    // TIME_CRITICAL thread (GPU, GPUBack, guest cores) could otherwise delay it.
+    Common::SetCurrentThreadToGamesMmcss();
+    std::stop_callback wake_on_stop{token, [this] { cadence_wake.Set(); }};
     while (!token.stop_requested()) {
+        // EXPERIMENT (do not merge): EDEN_NX2_PRESENT_CADENCE=0 presents every frame at once.
+        static const bool cadence_off = [] {
+            const char* value = std::getenv("EDEN_NX2_PRESENT_CADENCE");
+            return value != nullptr && value[0] == '0';
+        }();
+        const u32 rate = cadence_off ? 0
+                                     : PresentCadenceRate(
+                                           swapchain.GetFrameCap(),
+                                           guest_present_rate.load(std::memory_order_relaxed));
+        if (rate != 0) {
+            PresentOnTick(token, rate);
+            continue;
+        }
+        // Without a variable refresh display every frame goes out as soon as it is queued.
+        ReleaseHeldFrame();
+        cadence.Reset();
         std::unique_lock lock{queue_mutex};
         // Wait for presentation frames
         frame_cv.wait(lock, token, [this] { return !present_queue.empty(); });
@@ -353,11 +403,144 @@ void PresentManager::PresentThread(std::stop_token token) {
             free_cv.notify_one();
         }
     }
+    ReleaseHeldFrame();
 }
 
-void PresentManager::RecreateSwapchain(Frame* frame) {
-    swapchain.Create(*surface, frame->width, frame->height); // Pass raw pointer
-    SetImageCount();
+void PresentManager::PresentOnTick(std::stop_token token, u32 rate) {
+    using Clock = PresentCadence::Clock;
+    auto& master_semaphore = scheduler.GetMasterSemaphore();
+    if (held_frame == nullptr) {
+        // Nothing to present again yet: the first frame goes out once the GPU has rendered it, and
+        // the ticks start from there.
+        Frame* frame;
+        {
+            std::unique_lock lock{queue_mutex};
+            frame_cv.wait(lock, token, [this] { return !present_queue.empty(); });
+            if (token.stop_requested()) {
+                return;
+            }
+            frame = present_queue.front();
+        }
+        master_semaphore.Wait(frame->ready_tick);
+        cadence.Reset();
+        void(cadence.Next(Clock::now(), rate));
+    } else {
+        const auto tick = cadence.Next(Clock::now(), rate);
+        if (const auto ahead = tick - Clock::now(); ahead > PreciseWaitGuard) {
+            void(cadence_wake.BlockFor(ahead - PreciseWaitGuard));
+        }
+        if (const auto ahead = tick - Clock::now(); ahead > Clock::duration::zero()) {
+            void(cadence_wake.WaitFor(ahead));
+        }
+        if (token.stop_requested()) {
+            return;
+        }
+        const s64 late_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - tick).count();
+        cadence_stats.max_late_us = (std::max)(cadence_stats.max_late_us, late_us);
+        cadence_stats.late_frames += late_us > 200 ? 1 : 0;
+    }
+
+    master_semaphore.Refresh();
+    Frame* frame = nullptr;
+    std::unique_lock lock{queue_mutex};
+    u32 ready = 0;
+    for (const Frame* queued : present_queue) {
+        if (!master_semaphore.IsFree(queued->ready_tick)) {
+            break;
+        }
+        ++ready;
+    }
+    cadence_stats.max_queued = (std::max)(cadence_stats.max_queued, ready);
+    if (ready != 0) {
+        frame = present_queue.front();
+        present_queue.pop_front();
+        frame_cv.notify_one();
+    }
+    // Swapchain lock before the queue lock is released, as in PresentThread (WaitPresent).
+    std::unique_lock swapchain_lock{swapchain_mutex};
+    lock.unlock();
+    if (frame != nullptr) {
+        CopyToSwapchain(frame);
+        ReleaseHeldFrame();
+        held_frame = frame;
+        ++cadence_stats.frames;
+    } else {
+        presenting_repeat = true;
+        CopyToSwapchain(held_frame);
+        presenting_repeat = false;
+        ++cadence_stats.repeats;
+    }
+    swapchain_lock.unlock();
+    ReportCadence(Clock::now(), rate);
+}
+
+void PresentManager::ReleaseHeldFrame() {
+    if (held_frame == nullptr) {
+        return;
+    }
+    std::scoped_lock fl{free_mutex};
+    free_queue.push_back(std::exchange(held_frame, nullptr));
+    free_cv.notify_one();
+}
+
+void PresentManager::ReportCadence(PresentCadence::Clock::time_point now, u32 rate) {
+    auto& stats = cadence_stats;
+    if (stats.since == PresentCadence::Clock::time_point{}) {
+        stats.since = now;
+        return;
+    }
+    if (now - stats.since < std::chrono::seconds{10}) {
+        return;
+    }
+    LOG_INFO(Render_Vulkan,
+             "Present cadence {} Hz (interval {} us): {} new frames, {} presented again, at most "
+             "{} ready at a tick, {} ticks woke over 200 us late (max {} us)",
+             rate, cadence.Interval().count() / 1000, stats.frames, stats.repeats, stats.max_queued,
+             stats.late_frames, stats.max_late_us);
+    stats = {.since = now};
+}
+
+void PresentManager::UpdateHdrMetadata() {
+    // The values the guest was told it renders for (nx2:vi2 QueryDisplayHdrStatus).
+    auto& monitor = Common::DisplayHdrMonitor::Instance();
+    monitor.Watch(render_window.GetWindowInfo().render_surface);
+    hdr_metadata_generation = monitor.Generation();
+    const auto output = Common::ResolveHdrOutput(monitor.Current(), Settings::HdrMode::On,
+                                                 Settings::values.hdr_peak_luminance.GetValue(),
+                                                 Settings::values.hdr_reference_white.GetValue());
+    swapchain.SetHdrMetadata(output.peak_luminance, output.reference_white);
+}
+
+// Returns false after discarding a deferred or incompatible frame; creation exceptions propagate.
+bool PresentManager::RecreateSwapchain(Frame* frame) {
+    if (swapchain.Create(*surface, frame->width, frame->height, frame->format,
+                         frame->color_space)) {
+        SetImageCount();
+        if (frame->color_space == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
+            UpdateHdrMetadata();
+        }
+        ConfigureTransfer(frame);
+        if (transfer_mode != TransferMode::Unsupported) {
+            return true;
+        }
+    }
+    DiscardFrame(frame);
+    return false;
+}
+
+void PresentManager::ConfigureTransfer(const Frame* frame) {
+    transfer_source_format = frame->image_format;
+    transfer_mode = TransferMode::Unsupported;
+    if (frame->image_format == GetFrameImageFormat(frame->format)) {
+        if (CanBlitToSwapchain(device.GetPhysical(), swapchain.GetImageFormat()) &&
+            (device.GetPhysical().GetFormatProperties(frame->image_format).optimalTilingFeatures &
+             VK_FORMAT_FEATURE_BLIT_SRC_BIT) != 0) {
+            transfer_mode = TransferMode::Blit;
+        } else if (frame->image_format == swapchain.GetImageFormat()) {
+            transfer_mode = TransferMode::Copy;
+        }
+    }
 }
 
 void PresentManager::SetImageCount() {
@@ -375,9 +558,30 @@ void PresentManager::SetImageCount() {
 #endif
     swapchain_image_count = swapchain.GetImageCount();
     swapchain_image_format = swapchain.GetImageFormat();
+    if (use_present_thread && slot_fences.size() != swapchain.GetImageCount()) {
+        // A recreated swapchain waited for the device first: no copy is pending.
+        slot_fences.resize(swapchain.GetImageCount());
+        for (auto& fence : slot_fences) {
+            fence = device.GetLogical().CreateFence({
+                .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+            });
+        }
+    }
+}
+
+void PresentManager::WaitForSlot() {
+    if (use_present_thread && swapchain.IsNativeSwapchain()) {
+        void(slot_fences[swapchain.GetFrameIndex()].Wait());
+    }
 }
 
 void PresentManager::DiscardFrame(Frame* frame) {
+    if (presenting_repeat) {
+        // Its render semaphore was waited for by its first present; nothing is pending.
+        return;
+    }
     static constexpr VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
     const VkSemaphore render_ready = *frame->render_ready;
     const VkSubmitInfo submit_info{
@@ -406,7 +610,9 @@ void PresentManager::CopyToSwapchain(Frame* frame) {
 #ifdef __ANDROID__
                 surface = CreateSurface(instance, render_window.GetWindowInfo());
 #endif
-                RecreateSwapchain(frame);
+                if (!RecreateSwapchain(frame)) {
+                    return;
+                }
             }
 
             // Draw to swapchain.
@@ -427,23 +633,49 @@ void PresentManager::CopyToSwapchain(Frame* frame) {
 
 void PresentManager::CopyToSwapchainImpl(Frame* frame) {
 
-    // If the size of the incoming frames has changed, recreate the swapchain
-    // to account for that.
+    // Recreate for size changes, SDR/HDR10/scRGB transitions, or a suboptimal swapchain.
     const bool is_suboptimal = swapchain.NeedsRecreation() || swapchain.IsOutDated();
     const bool size_changed =
         swapchain.GetWidth() != frame->width || swapchain.GetHeight() != frame->height;
-    if (is_suboptimal || size_changed) {
-        RecreateSwapchain(frame);
+    const bool format_changed = swapchain.GetRequestedFormat() != frame->format;
+    const bool color_space_changed = swapchain.GetRequestedColorSpace() != frame->color_space;
+    if (is_suboptimal || size_changed || format_changed || color_space_changed) {
+        if (!RecreateSwapchain(frame)) {
+            return;
+        }
+    } else if (frame->color_space == VK_COLOR_SPACE_HDR10_ST2084_EXT &&
+               Common::DisplayHdrMonitor::Instance().Generation() != hdr_metadata_generation) {
+        // A new calibration or peak while HDR stays on: the game tone maps to the new peak.
+        UpdateHdrMetadata();
+    }
+
+    // Queued SDR frames can retain an older underlying format after surface recreation.
+    if (transfer_source_format != frame->image_format) {
+        ConfigureTransfer(frame);
+    }
+    if (transfer_mode == TransferMode::Unsupported) {
+        DiscardFrame(frame);
+        return;
     }
     if (!swapchain.IsCreated()) {
         DiscardFrame(frame);
         return;
     }
 
+    // The acquire semaphore of this slot is free again once the copy that waited on it has run.
+    WaitForSlot();
     while (swapchain.AcquireNextImage(!use_present_thread)) {
-        RecreateSwapchain(frame);
+        if (!RecreateSwapchain(frame)) {
+            return;
+        }
+        WaitForSlot();
     }
+    const std::size_t slot = swapchain.GetFrameIndex();
 
+    if (presenting_repeat) {
+        // The previous present of this frame still owns its command buffer and fence.
+        frame->present_done.Wait();
+    }
     const vk::CommandBuffer cmdbuf{frame->cmdbuf};
     cmdbuf.Begin({
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -534,7 +766,7 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
     cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER, VK_PIPELINE_STAGE_TRANSFER_BIT, {},
                            {}, {}, pre_barriers);
 
-    if (blit_supported) {
+    if (transfer_mode == TransferMode::Blit) {
         cmdbuf.BlitImage(*frame->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                          MakeImageBlit(frame->width, frame->height, extent.width, extent.height),
@@ -553,6 +785,8 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
     const VkSemaphore present_semaphore = swapchain.CurrentPresentSemaphore();
     const VkSemaphore render_semaphore = swapchain.CurrentRenderSemaphore();
     const std::array wait_semaphores = {present_semaphore, *frame->render_ready};
+    // A frame presented again was rendered long ago, and its render semaphore is consumed.
+    const u32 wait_count = presenting_repeat ? 1U : 2U;
 
     static constexpr std::array<VkPipelineStageFlags, 2> wait_stage_masks{
         VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -562,7 +796,7 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
     const VkSubmitInfo submit_info{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .pNext = nullptr,
-        .waitSemaphoreCount = 2U,
+        .waitSemaphoreCount = wait_count,
         .pWaitSemaphores = wait_semaphores.data(),
         .pWaitDstStageMask = wait_stage_masks.data(),
         .commandBufferCount = 1,
@@ -573,6 +807,9 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
 
     // Submit the image copy/blit to the swapchain
     {
+        if (presenting_repeat) {
+            frame->present_done.Reset();
+        }
         std::scoped_lock submit_lock{scheduler.submit_mutex};
         switch (const VkResult result =
                     device.GetGraphicsQueue().Submit(submit_info, *frame->present_done)) {
@@ -585,9 +822,19 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
             vk::Check(result);
             break;
         }
+        if (use_present_thread && swapchain.IsNativeSwapchain()) {
+            // Signals once everything submitted to the queue so far, this copy included, has run.
+            const vk::Fence& slot_fence = slot_fences[slot];
+            slot_fence.Reset();
+            vk::Check(device.GetGraphicsQueue().Submit({}, *slot_fence));
+        }
     }
 
     // Present
+    if (!presenting_repeat) {
+        // Input latency counts a guest frame's first present only.
+        Common::InputLatency::RecordPresent(std::exchange(frame->input_ns, 0));
+    }
     swapchain.Present(render_semaphore);
 }
 

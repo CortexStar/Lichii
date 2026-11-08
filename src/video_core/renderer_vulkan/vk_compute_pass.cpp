@@ -20,10 +20,12 @@
 #include "common/div_ceil.h"
 #include "common/vector_math.h"
 #include "video_core/host_shaders/astc_decoder_comp_spv.h"
+#include "video_core/host_shaders/bc7_encoder_comp_spv.h"
 #include "video_core/host_shaders/bc_encoder_comp_spv.h"
 #include "video_core/host_shaders/queries_prefix_scan_sum_comp_spv.h"
 #include "video_core/host_shaders/queries_prefix_scan_sum_nosubgroups_comp_spv.h"
 #include "video_core/host_shaders/resolve_conditional_render_comp_spv.h"
+#include "video_core/host_shaders/resolve_query_availability_comp_spv.h"
 #include "video_core/host_shaders/vulkan_quad_indexed_comp_spv.h"
 #include "video_core/host_shaders/vulkan_uint8_comp_spv.h"
 #include "video_core/host_shaders/vulkan_vertex_repack_comp_spv.h"
@@ -236,6 +238,14 @@ struct BcEncoderPushConstants {
     u32 height;
     u32 bc3;
     u32 out_offset; // in 8-byte units
+};
+
+struct Bc7EncoderPushConstants {
+    u32 blocks_x;
+    u32 blocks_y;
+    u32 width;
+    u32 height;
+    u32 out_offset; // in 16-byte units
 };
 
 struct QueriesPrefixScanPushConstants {
@@ -536,6 +546,54 @@ void ConditionalRenderingResolvePass::Resolve(VkBuffer dst_buffer, VkBuffer src_
         cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                VK_PIPELINE_STAGE_CONDITIONAL_RENDERING_BIT_EXT, 0,
                                write_barrier);
+    });
+}
+
+QueryAvailabilityResolvePass::QueryAvailabilityResolvePass(
+    const Device& device_, Scheduler& scheduler_, DescriptorPool& descriptor_pool_,
+    ComputePassDescriptorQueue& compute_pass_descriptor_queue_)
+    : ComputePass(device_, scheduler_, descriptor_pool_, INPUT_OUTPUT_DESCRIPTOR_SET_BINDINGS,
+                  INPUT_OUTPUT_DESCRIPTOR_UPDATE_TEMPLATE, INPUT_OUTPUT_BANK_INFO,
+                  COMPUTE_PUSH_CONSTANT_RANGE<sizeof(u32)>, RESOLVE_QUERY_AVAILABILITY_COMP_SPV),
+      scheduler{scheduler_}, compute_pass_descriptor_queue{compute_pass_descriptor_queue_} {}
+
+void QueryAvailabilityResolvePass::Resolve(VkBuffer dst_buffer, VkDeviceSize dst_offset,
+                                           VkBuffer src_buffer, VkDeviceSize src_offset,
+                                           u32 count) {
+    if (count == 0) {
+        return;
+    }
+    compute_pass_descriptor_queue.Acquire(scheduler, 2);
+    compute_pass_descriptor_queue.AddBuffer(src_buffer, src_offset, VkDeviceSize{count} * 16);
+    compute_pass_descriptor_queue.AddBuffer(dst_buffer, dst_offset, VkDeviceSize{count} * 8);
+    const void* const descriptor_data{compute_pass_descriptor_queue.UpdateData()};
+
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([this, descriptor_data, count](vk::CommandBuffer cmdbuf) {
+        static constexpr VkMemoryBarrier read_barrier{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        };
+        static constexpr VkMemoryBarrier write_barrier{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT,
+        };
+        const VkDescriptorSet set = descriptor_allocator.Commit();
+        device.GetLogical().UpdateDescriptorSet(set, *descriptor_template, descriptor_data);
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                               0, read_barrier);
+        cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
+        cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, *layout, 0, set, {});
+        cmdbuf.PushConstants(*layout, VK_SHADER_STAGE_COMPUTE_BIT, count);
+        cmdbuf.Dispatch((count + 63) / 64, 1, 1);
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                               VK_PIPELINE_STAGE_TRANSFER_BIT |
+                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                               0, write_barrier);
     });
 }
 
@@ -878,6 +936,44 @@ void BcEncoderPass::Encode(VkImageView source, u32 width, u32 height, u32 layers
         cmdbuf.PushConstants(*layout, VK_SHADER_STAGE_COMPUTE_BIT, uniforms);
         cmdbuf.Dispatch(Common::DivCeil(uniforms.blocks_x, 8U), Common::DivCeil(uniforms.blocks_y, 8U),
                         layers);
+    });
+}
+
+Bc7EncoderPass::Bc7EncoderPass(const Device& device_, Scheduler& scheduler_,
+                               DescriptorPool& descriptor_pool_,
+                               ComputePassDescriptorQueue& compute_pass_descriptor_queue_)
+    : ComputePass(device_, scheduler_, descriptor_pool_, BC_ENCODER_DESCRIPTOR_SET_BINDINGS,
+                  BC_ENCODER_DESCRIPTOR_UPDATE_TEMPLATE, ASTC_BANK_INFO,
+                  COMPUTE_PUSH_CONSTANT_RANGE<sizeof(Bc7EncoderPushConstants)>,
+                  BC7_ENCODER_COMP_SPV),
+      scheduler{scheduler_}, compute_pass_descriptor_queue{compute_pass_descriptor_queue_} {}
+
+Bc7EncoderPass::~Bc7EncoderPass() = default;
+
+void Bc7EncoderPass::Encode(VkImageView source, u32 width, u32 height, u32 layers,
+                            VkBuffer buffer, VkDeviceSize buffer_offset, VkDeviceSize buffer_size,
+                            VkDeviceSize out_offset) {
+    scheduler.RequestOutsideRenderPassOperationContext();
+    compute_pass_descriptor_queue.Acquire(scheduler, 2);
+    compute_pass_descriptor_queue.AddImage(source);
+    compute_pass_descriptor_queue.AddBuffer(buffer, buffer_offset, buffer_size);
+    const void* const descriptor_data{compute_pass_descriptor_queue.UpdateData()};
+    const Bc7EncoderPushConstants uniforms{
+        .blocks_x = Common::DivCeil(width, 4U),
+        .blocks_y = Common::DivCeil(height, 4U),
+        .width = width,
+        .height = height,
+        .out_offset = static_cast<u32>(out_offset / 16),
+    };
+    const VkPipeline vk_pipeline = *pipeline;
+    scheduler.Record([this, vk_pipeline, uniforms, layers, descriptor_data](vk::CommandBuffer cmdbuf) {
+        const VkDescriptorSet set = descriptor_allocator.Commit();
+        device.GetLogical().UpdateDescriptorSet(set, *descriptor_template, descriptor_data);
+        cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, vk_pipeline);
+        cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, *layout, 0, set, {});
+        cmdbuf.PushConstants(*layout, VK_SHADER_STAGE_COMPUTE_BIT, uniforms);
+        // Four blocks of 16 invocations per workgroup, along a block row.
+        cmdbuf.Dispatch(Common::DivCeil(uniforms.blocks_x, 4U), uniforms.blocks_y, layers);
     });
 }
 

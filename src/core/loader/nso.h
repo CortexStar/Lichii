@@ -95,6 +95,9 @@ public:
         return IdentifyType(file);
     }
 
+    /// The module's size in the process: its segments, the argument area and .bss, page aligned.
+    static u32 ImageSize(const NSOHeader& header, bool pass_arguments);
+
     static std::optional<VAddr> LoadModule(Kernel::KProcess& process, Core::System& system,
                                            const FileSys::VfsFile& nso_file, VAddr load_base,
                                            bool should_pass_arguments, bool load_into_process,

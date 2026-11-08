@@ -256,6 +256,8 @@ void nvhost_as_gpu::Nx2Sparse(u64 gpu_address, u64 size, bool create) {
         return;
     }
     nx2_sparse_ranges[gpu_address] = {size, device_address};
+    // Its blocks get memory as they are written; until then they read zero (smmu.Free forgets it).
+    smmu.AddZeroReadRange(device_address, device_size);
     // On the GPU thread, as in Nx2Map.
     system.GPU().MapInOrder(
         gpu_address, size, [gmmu = gmmu.get(), gpu_address, device_address, size] {

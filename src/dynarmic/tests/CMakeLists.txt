@@ -14,11 +14,15 @@ add_executable(dynarmic_tests
     A32/test_svc.cpp
     A32/test_thumb_instructions.cpp
     A32/testenv.h
+    block_range_information.cpp
     decoder_tests.cpp
     # A64
     A64/a64.cpp
     A64/fibonacci.cpp
     A64/fp_min_max.cpp
+    A64/host_call_return.cpp
+    A64/indirect_branch_cache.cpp
+    A64/core_independent_code.cpp
     A64/misaligned_page_table.cpp
     A64/test_invalidation.cpp
     A64/real_world.cpp

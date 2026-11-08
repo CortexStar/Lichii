@@ -163,6 +163,22 @@ public:
     bool IsMemoryDirty(GPUVAddr gpu_addr, size_t size,
                        VideoCommon::CacheType which = VideoCommon::CacheType::All) const;
 
+    /// Whether [gpu_addr, gpu_addr + size) overlaps the Switch 2 syncpoint shim, whose words
+    /// Read<u32> answers from the syncpoint manager instead of memory.
+    [[nodiscard]] bool OverlapsSyncpointShim(GPUVAddr gpu_addr, size_t size) const {
+        const GPUVAddr shim = native_syncpoint_shim.load(std::memory_order_acquire);
+        return shim != 0 && gpu_addr < shim + NumShimSyncpoints * sizeof(u32) &&
+               gpu_addr + size > shim;
+    }
+
+    /// Switch 2, the split GPU thread's front (GpuSplit::NarrowDrains): whether a read of
+    /// [gpu_addr, gpu_addr + size) still needs the full drain: a page of it is unmapped, or GPU
+    /// work wrote it through the buffer cache (Nx2IsGpuWritten: newer words may be in the cache,
+    /// which only the back may ask or flush), or it reads the syncpoint shim (the back increments
+    /// syncpoints). Without any of these IsMemoryDirty(BufferCache) is false: the buffer cache
+    /// holds GPU-written data only on pages it marked.
+    [[nodiscard]] bool Nx2ReadNeedsDrain(GPUVAddr gpu_addr, std::size_t size) const;
+
     size_t MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const;
 
     [[nodiscard]] u64 MapSerial() const {

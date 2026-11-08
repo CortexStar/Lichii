@@ -30,6 +30,9 @@ Tools for Eden and other subprojects. When adding new scripts please use `#!/bin
 - `find-unused-strings.sh`: Find any unused strings in the Android app (XML -> Kotlin).
 - `cpp-lint.sh`: Homemade dumb C++ linter.
 - `fuzzsettings.cpp`: Fuzz settings files.
+- `nx2/banding.py`: Measures banding in the smooth gradients of screenshots (colours per 32x32 block, run length, luma step histogram).
+- `nx2/av1_hw_probe.c`: Decodes an AV1 IVF file like the nx2 video decoder (FFmpeg's av1 on Vulkan, D3D12VA, D3D11VA or CUDA, or libdav1d) with FFmpeg's debug log, to tell a driver or FFmpeg failure from Lichii's.
+- `windows/build-ffmpeg-mingw.sh`: Cross-builds the MinGW FFmpeg package (libdav1d, AV1 hardware decoding) from Linux with llvm-mingw.
 
 ## Android
 

@@ -151,6 +151,16 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
     X(vkCmdSetConservativeRasterizationModeEXT);
     X(vkCmdSetLineRasterizationModeEXT);
     X(vkCmdSetLineStippleEnableEXT);
+    X(vkCmdSetLineStippleEXT);
+    X(vkCmdSetViewportWithCountEXT);
+    X(vkCmdSetScissorWithCountEXT);
+    X(vkCmdSetPolygonModeEXT);
+    X(vkCmdSetRasterizationSamplesEXT);
+    X(vkCmdSetSampleMaskEXT);
+    X(vkCmdSetTessellationDomainOriginEXT);
+    X(vkCmdSetDepthClipEnableEXT);
+    X(vkCmdSetDepthClipNegativeOneToOneEXT);
+    X(vkCmdSetProvokingVertexModeEXT);
     X(vkCmdSetDepthBiasEnableEXT);
     X(vkCmdSetLogicOpEnableEXT);
     X(vkCmdSetDepthClampEnableEXT);
@@ -239,6 +249,7 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
     X(vkResetFences);
     X(vkResetQueryPool);
     X(vkSetDebugUtilsObjectNameEXT);
+    X(vkSetHdrMetadataEXT);
     X(vkSetDebugUtilsObjectTagEXT);
     X(vkUnmapMemory);
     X(vkUpdateDescriptorSetWithTemplate);
@@ -248,8 +259,21 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
     X(vkGetDescriptorSetLayoutBindingOffsetEXT);
     X(vkGetDescriptorEXT);
     X(vkCmdBindDescriptorBuffersEXT);
+    X(vkWriteResourceDescriptorsEXT);
+    X(vkWriteSamplerDescriptorsEXT);
+    X(vkCmdBindResourceHeapEXT);
+    X(vkCmdBindSamplerHeapEXT);
+    X(vkCmdPushDataEXT);
+    X(vkRegisterCustomBorderColorEXT);
+    X(vkUnregisterCustomBorderColorEXT);
     X(vkCmdSetDescriptorBufferOffsetsEXT);
+    X(vkCreatePipelineBinariesKHR);
+    X(vkDestroyPipelineBinaryKHR);
+    X(vkGetPipelineKeyKHR);
+    X(vkGetPipelineBinaryDataKHR);
+    X(vkReleaseCapturedPipelineDataKHR);
     X(vkWaitForFences);
+    X(vkWaitForPresent2KHR);
     X(vkWaitSemaphores);
 
     // Support for timeline semaphores is mandatory in Vulkan 1.2
@@ -321,6 +345,7 @@ bool Load(VkInstance instance, InstanceDispatch& dld) noexcept {
     X(vkGetPhysicalDeviceFormatProperties2);
     X(vkGetPhysicalDeviceProperties2);
     X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR);
+    X(vkGetPhysicalDeviceSurfaceCapabilities2KHR);
     X(vkGetPhysicalDeviceSurfaceFormatsKHR);
     X(vkGetPhysicalDeviceSurfacePresentModesKHR);
     X(vkGetPhysicalDeviceSurfaceSupportKHR);
@@ -1042,6 +1067,20 @@ VkSurfaceCapabilitiesKHR PhysicalDevice::GetSurfaceCapabilitiesKHR(VkSurfaceKHR 
     VkSurfaceCapabilitiesKHR capabilities;
     Check(dld->vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &capabilities));
     return capabilities;
+}
+
+bool PhysicalDevice::GetSurfaceCapabilities2KHR(VkSurfaceKHR surface,
+                                                VkSurfaceCapabilities2KHR& capabilities) const {
+    if (dld->vkGetPhysicalDeviceSurfaceCapabilities2KHR == nullptr) {
+        return false;
+    }
+    const VkPhysicalDeviceSurfaceInfo2KHR info{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR,
+        .pNext = nullptr,
+        .surface = surface,
+    };
+    Check(dld->vkGetPhysicalDeviceSurfaceCapabilities2KHR(physical_device, &info, &capabilities));
+    return true;
 }
 
 std::vector<VkSurfaceFormatKHR> PhysicalDevice::GetSurfaceFormatsKHR(VkSurfaceKHR surface) const {

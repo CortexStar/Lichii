@@ -16,6 +16,7 @@
 #include "core/file_sys/romfs_factory.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/service/filesystem/filesystem.h"
+#include "core/load_timing.h"
 #include "core/loader/loader.h"
 
 namespace FileSys {
@@ -24,9 +25,11 @@ RomFSFactory::RomFSFactory(Loader::AppLoader& app_loader, ContentProvider& provi
                            Service::FileSystem::FileSystemController& controller)
     : content_provider{provider}, filesystem_controller{controller} {
     // Load the RomFS from the app
+    const auto start = Core::LoadTiming::Clock::now();
     if (app_loader.ReadRomFS(file) != Loader::ResultStatus::Success) {
         LOG_WARNING(Service_FS, "Unable to read base RomFS");
     }
+    Core::LoadTiming::LogPhase("RomFS image", start);
 
     updatable = app_loader.IsRomFSUpdatable();
 }

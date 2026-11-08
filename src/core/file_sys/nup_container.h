@@ -128,6 +128,12 @@ public:
     /// Quick magic check without a full parse.
     static bool IsNupFile(const VirtualFile& file);
 
+    /// Parses the container of `file`, or hands over the one KeepParsed kept for the same host
+    /// file. System::Load reads the program's NPDM from the container before the loader opens it,
+    /// and each parse reads and hashes the whole TOC (Ocarina of Time: 36.8 MB, 372,587 files).
+    static std::unique_ptr<NupContainer> Open(VirtualFile file);
+    static void KeepParsed(std::unique_ptr<NupContainer> container);
+
     /// Recursively merges overlay into a copy of base; overlay paths win.
     static VirtualDir MergeShadowDirs(const VirtualDir& base, const VirtualDir& overlay);
 
@@ -159,6 +165,11 @@ public:
 
     VirtualDir GetExeFSDir(std::size_t package_index);
     VirtualDir GetRomFSDir(std::size_t package_index);
+    /// The base RomFS with the update's files over it, as MergeShadowDirs(GetRomFSDir(base),
+    /// GetRomFSDir(update)) gives it, built straight from the TOC: only the files that win are
+    /// opened and no per-package tree is built for directories both packages have.
+    VirtualDir GetMergedRomFSDir(std::optional<std::size_t> base_index,
+                                 std::optional<std::size_t> update_index);
     VirtualDir GetPackageDir(std::size_t package_index);
 
     /// Stream-hashes every member file against its stored SHA-256.
@@ -190,11 +201,13 @@ private:
     bool ValidateDirTree() const;
     void BuildDirTree(u32 dir_index, VectorVfsDirectory& out);
     VirtualDir BuildPackageDir(u32 dir_index);
+    VirtualDir MergeDirTrees(u32 base_dir, u32 overlay_dir);
     std::vector<u8> ReadExtentRaw(const FileNode& node) const;
 
     VirtualFile file;
     Loader::ResultStatus status{Loader::ResultStatus::ErrorNullFile};
 
+    std::array<u8, 0x80> superblock{}; ///< As read; Open compares it to find a kept container.
     u64 toc_offset{};
     u64 toc_size{};
     u64 blob_offset{};

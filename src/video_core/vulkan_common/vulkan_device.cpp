@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <array>
-#include <bitset>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -24,7 +23,6 @@
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/literals.h"
-#include <ranges>
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "video_core/vulkan_common/nsight_aftermath_tracker.h"
@@ -628,7 +626,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 
     sets_per_pool = 64;
     // AMD GCN4 and older are told apart by their lack of float16, read before float16 is turned
-    // off for newer AMD drivers below: checked after that, every AMD GPU looked like GCN4 and lost
+    // off for older AMD drivers below: checked after that, every AMD GPU looked like GCN4 and lost
     // VK_EXT_sampler_filter_minmax (an RDNA3 Radeon 780M logged it).
     const bool amd_gcn4_or_older = is_amd && !features.shader_float16_int8.shaderFloat16;
     if (is_amd_driver) {
@@ -642,10 +640,9 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
             has_broken_cube_compatibility = true;
         }
 
-        // AMD drivers (2026+) have broken float16 math on DKCR
-        if (features.shader_float16_int8.shaderFloat16) {
-            LOG_WARNING(Render_Vulkan,
-                        "AMD drivers (2026+) have broken float16 math");
+        if (features.shader_float16_int8.shaderFloat16 &&
+            IsAmdFloat16Broken(properties.properties.driverVersion)) {
+            LOG_WARNING(Render_Vulkan, "AMD drivers before 2.0.416 (26.10.2): float16 math off");
             features.shader_float16_int8.shaderFloat16 = false;
         }
     }
@@ -750,6 +747,12 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         RemoveExtensionFeature(extensions.descriptor_buffer, features.descriptor_buffer,
                                VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME);
     }
+    // So does VK_EXT_descriptor_heap: heaps are bound by device address range.
+    if (extensions.descriptor_heap && !features.buffer_device_address.bufferDeviceAddress) {
+        LOG_WARNING(Render_Vulkan, "Descriptor heap needs buffer device address, disabling.");
+        RemoveExtensionFeature(extensions.descriptor_heap, features.descriptor_heap,
+                               VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME);
+    }
 #ifdef EGLANTINE_STREAMLINE
     // NVIDIA's DLSS needs buffer device addresses: keep the feature enabled for
     // it, but leave Eglantine's own buffers as they are without descriptor buffers.
@@ -759,7 +762,8 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         extensions.buffer_device_address = false;
     } else
 #endif
-    if (!extensions.descriptor_buffer) {
+        if (!extensions.descriptor_buffer && !features.buffer_device_address.bufferDeviceAddress) {
+        // Kept whenever the device has it: the GPU page table reaches storage by device address.
         RemoveExtensionFeature(extensions.buffer_device_address, features.buffer_device_address,
                                VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
     }
@@ -804,6 +808,9 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     }
     if (extensions.buffer_device_address) {
         flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+    }
+    if (extensions.memory_priority) {
+        flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_PRIORITY_BIT;
     }
     // EDEN_NX2_VRAM_LIMIT_MIB: VMA fails allocations past the limit, like a smaller card.
     std::array<VkDeviceSize, VK_MAX_MEMORY_HEAPS> heap_size_limits;
@@ -874,7 +881,8 @@ VmaPool Device::GetSeparatePool(SeparatePool kind, u32 memory_type) const {
             .blockSize = SeparatePoolBlockSize,
             .minBlockCount = 0,
             .maxBlockCount = 0,
-            .priority = 0.f,
+            // Guest buffers are read by most draws; sparse pages are textures (VMA's default).
+            .priority = kind == SeparatePool::DeviceBuffers ? 0.75f : 0.5f,
             .minAllocationAlignment = 0,
             .pMemoryAllocateNext = nullptr,
         };
@@ -1221,6 +1229,19 @@ bool Device::GetSuitability(bool requires_swapchain) {
     FOR_EACH_VK_FEATURE_EXT(FEATURE_EXTENSION);
     FOR_EACH_VK_EXTENSION(EXTENSION);
 
+    // Graphics pipelines built during play are linked from per-stage libraries
+    // (vk_pipeline_library). Kept out of the extension tables: it is added only with its feature.
+    // EXPERIMENT, A/B only, never merges: EDEN_NX2_EXP_NO_GPL=1 builds every pipeline whole.
+    graphics_pipeline_library_requested = std::getenv("EDEN_NX2_EXP_NO_GPL") == nullptr;
+    if (graphics_pipeline_library_requested &&
+        supported_extensions.contains(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) &&
+        supported_extensions.contains(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME)) {
+        loaded_extensions.insert(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+        loaded_extensions.insert(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+    } else {
+        graphics_pipeline_library_requested = false;
+    }
+
     extensions.depth_stencil_resolve =
         extensions.depth_stencil_resolve &&
         (instance_version >= VK_API_VERSION_1_2 || extensions.create_renderpass2);
@@ -1274,6 +1295,11 @@ bool Device::GetSuitability(bool requires_swapchain) {
     }
 
     FOR_EACH_VK_RECOMMENDED_EXTENSION(LOG_EXTENSION);
+    // Loaded as VK_KHR_robustness2 where the driver has it, otherwise as the EXT.
+    if (!extensions.robustness_2) {
+        LOG_INFO(Render_Vulkan, "Device doesn't support extension {} or {}",
+                 VK_KHR_ROBUSTNESS_2_EXTENSION_NAME, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+    }
     FOR_EACH_VK_MANDATORY_EXTENSION(CHECK_EXTENSION);
 
     if (requires_swapchain) {
@@ -1339,6 +1365,12 @@ bool Device::GetSuitability(bool requires_swapchain) {
     if (has_device_fault_extension) {
         device_fault_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
         SetNext(next, device_fault_features);
+    }
+
+    if (graphics_pipeline_library_requested) {
+        graphics_pipeline_library_features.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT;
+        SetNext(next, graphics_pipeline_library_features);
     }
 
     // Perform the feature test.
@@ -1417,6 +1449,11 @@ bool Device::GetSuitability(bool requires_swapchain) {
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT;
         SetNext(next, properties.descriptor_buffer);
     }
+    if (extensions.descriptor_heap) {
+        properties.descriptor_heap.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_PROPERTIES_EXT;
+        SetNext(next, properties.descriptor_heap);
+    }
     if (extensions.subgroup_size_control || features.subgroup_size_control.subgroupSizeControl) {
         properties.subgroup_size_control.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES;
@@ -1432,6 +1469,11 @@ bool Device::GetSuitability(bool requires_swapchain) {
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_PROPERTIES_KHR;
         SetNext(next, properties.maintenance5);
     }
+    if (extensions.pipeline_binary) {
+        properties.pipeline_binary.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_BINARY_PROPERTIES_KHR;
+        SetNext(next, properties.pipeline_binary);
+    }
     if (extensions.custom_border_color) {
         properties.custom_border_color.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_PROPERTIES_EXT;
@@ -1446,6 +1488,12 @@ bool Device::GetSuitability(bool requires_swapchain) {
         properties.integer_dot_product.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES;
         SetNext(next, properties.integer_dot_product);
+    }
+
+    if (graphics_pipeline_library_requested) {
+        properties.graphics_pipeline_library.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT;
+        SetNext(next, properties.graphics_pipeline_library);
     }
 
     // Perform the property fetch.
@@ -1565,6 +1613,17 @@ void Device::RemoveUnsuitableExtensions() {
     extensions.descriptor_buffer = features.descriptor_buffer.descriptorBuffer;
     RemoveExtensionFeatureIfUnsuitable(extensions.descriptor_buffer, features.descriptor_buffer,
                                        VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME);
+
+    // VK_EXT_descriptor_heap
+    // EXPERIMENT (do not merge): off until heap pipelines use it; EDEN_NX2_DESCRIPTOR_HEAP=1
+    // enables it.
+    static const bool heap_wanted = [] {
+        const char* const value = std::getenv("EDEN_NX2_DESCRIPTOR_HEAP");
+        return value != nullptr && value[0] == '1';
+    }();
+    extensions.descriptor_heap = features.descriptor_heap.descriptorHeap && heap_wanted;
+    RemoveExtensionFeatureIfUnsuitable(extensions.descriptor_heap, features.descriptor_heap,
+                                       VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME);
 
     // VK_EXT_extended_dynamic_state
     extensions.extended_dynamic_state = features.extended_dynamic_state.extendedDynamicState;
@@ -1720,6 +1779,27 @@ void Device::RemoveUnsuitableExtensions() {
     RemoveExtensionFeatureIfUnsuitable(extensions.mesh_shader, features.mesh_shader,
                                        VK_EXT_MESH_SHADER_EXTENSION_NAME);
 
+    // VK_EXT_graphics_pipeline_library. Without fast linking every link is optimized
+    // (GraphicsLibraryLinksOptimized).
+    if (graphics_pipeline_library_requested) {
+        const bool usable = graphics_pipeline_library_features.graphicsPipelineLibrary;
+        if (!usable) {
+            loaded_extensions.erase(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+            loaded_extensions.erase(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+            graphics_pipeline_library_features.graphicsPipelineLibrary = VK_FALSE;
+        }
+        graphics_pipeline_library_enabled = usable;
+        if (usable) {
+            LOG_INFO(Render_Vulkan,
+                     "Nx2Perf gpl: graphics pipeline libraries on (fast linking {}, link time "
+                     "optimization info kept {}, independent interpolation decoration {})",
+                     properties.graphics_pipeline_library.graphicsPipelineLibraryFastLinking,
+                     KeepsGraphicsLibraryLinkInfo(),
+                     properties.graphics_pipeline_library
+                         .graphicsPipelineLibraryIndependentInterpolationDecoration);
+        }
+    }
+
     // VK_KHR_shader_quad_control
     // Quad control depends on maximal reconvergence; advertise neither unless
     // the dependency is enabled on the logical device too.
@@ -1821,10 +1901,46 @@ void Device::RemoveUnsuitableExtensions() {
     RemoveExtensionFeatureIfUnsuitable(extensions.maintenance4, features.maintenance4,
                                        VK_KHR_MAINTENANCE_4_EXTENSION_NAME);
 
+    // VK_EXT_memory_priority, VK_EXT_pageable_device_local_memory: under memory pressure the
+    // driver moves the lowest-priority allocations to system memory instead of failing new ones
+    // (Windows pages device memory either way; this tells it what to keep).
+    extensions.memory_priority = features.memory_priority.memoryPriority;
+    RemoveExtensionFeatureIfUnsuitable(extensions.memory_priority, features.memory_priority,
+                                       VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME);
+    extensions.pageable_device_local_memory =
+        features.pageable_device_local_memory.pageableDeviceLocalMemory &&
+        extensions.memory_priority;
+    RemoveExtensionFeatureIfUnsuitable(extensions.pageable_device_local_memory,
+                                       features.pageable_device_local_memory,
+                                       VK_EXT_PAGEABLE_DEVICE_LOCAL_MEMORY_EXTENSION_NAME);
+
+    // VK_KHR_present_id2, VK_KHR_present_wait2 (pacing on the display's present times)
+    // Both need VK_KHR_get_surface_capabilities2 on the instance.
+    extensions.present_id2 = features.present_id2.presentId2 &&
+                             dld.vkGetPhysicalDeviceSurfaceCapabilities2KHR != nullptr;
+    RemoveExtensionFeatureIfUnsuitable(extensions.present_id2, features.present_id2,
+                                       VK_KHR_PRESENT_ID_2_EXTENSION_NAME);
+    extensions.present_wait2 = features.present_wait2.presentWait2 && extensions.present_id2;
+    RemoveExtensionFeatureIfUnsuitable(extensions.present_wait2, features.present_wait2,
+                                       VK_KHR_PRESENT_WAIT_2_EXTENSION_NAME);
+
+    // VK_KHR_present_mode_fifo_latest_ready
+    extensions.present_mode_fifo_latest_ready =
+        features.present_mode_fifo_latest_ready.presentModeFifoLatestReady;
+    RemoveExtensionFeatureIfUnsuitable(extensions.present_mode_fifo_latest_ready,
+                                       features.present_mode_fifo_latest_ready,
+                                       VK_KHR_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME);
+
     // VK_KHR_maintenance5
     extensions.maintenance5 = features.maintenance5.maintenance5;
     RemoveExtensionFeatureIfUnsuitable(extensions.maintenance5, features.maintenance5,
                                        VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
+
+    // VK_KHR_pipeline_binary (its pipeline flags need VK_KHR_maintenance5)
+    extensions.pipeline_binary =
+        features.pipeline_binary.pipelineBinaries && extensions.maintenance5;
+    RemoveExtensionFeatureIfUnsuitable(extensions.pipeline_binary, features.pipeline_binary,
+                                       VK_KHR_PIPELINE_BINARY_EXTENSION_NAME);
 
     // VK_KHR_maintenance6
     extensions.maintenance6 = features.maintenance6.maintenance6;
@@ -1905,6 +2021,23 @@ void Device::ReleaseCustomBorderColorSamplers(size_t count) const {
 }
 
 u64 Device::GetDeviceMemoryUsage() const {
+    // The buffer and texture caches ask every frame; with the budget extension each answer is a
+    // driver and OS query (~0.1-0.5 ms on Windows): answers younger than 50 ms are reused.
+    constexpr s64 reuse_ns = 50'000'000;
+    const s64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
+    const s64 last = memory_usage_time.load(std::memory_order_acquire);
+    if (last != 0 && now - last < reuse_ns) {
+        return memory_usage_value.load(std::memory_order_relaxed);
+    }
+    const u64 usage = QueryDeviceMemoryUsage();
+    memory_usage_value.store(usage, std::memory_order_relaxed);
+    memory_usage_time.store(now, std::memory_order_release);
+    return usage;
+}
+
+u64 Device::QueryDeviceMemoryUsage() const {
     VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{};
     budget.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
     physical.GetMemoryProperties(&budget);

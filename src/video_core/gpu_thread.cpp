@@ -61,6 +61,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         // The pending-channel polls below sleep 50 us; the default timer slack adds up to 50 more.
         prctl(PR_SET_TIMERSLACK, 1UL, 0, 0, 0);
 #endif
+        VideoCommon::GpuSplit::MarkGpuThread();
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
         Common::SetCurrentThreadToPerformanceCores();
         if (Settings::values.pin_gpu_threads.GetValue()) {
@@ -75,6 +76,12 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         namespace Profile = VideoCommon::Nx2Profile;
         auto& split = VideoCommon::GpuSplit::Get();
         while (!stop_token.stop_requested()) {
+            if (commands_held.load(std::memory_order_acquire)) {
+                std::unique_lock lock{hold_mutex};
+                hold_cv.wait(lock, stop_token,
+                             [this] { return !commands_held.load(std::memory_order_relaxed); });
+                continue;
+            }
             Profile::Report();
             split.MaybeStart(system);
             if (scheduler.HasPendingChannels()) {
@@ -88,6 +95,11 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     last_progress = std::chrono::steady_clock::now();
                 }
                 if (!state.queue.TryPop(next)) {
+                    // What the resumed channels sent goes to the back before this thread yields or
+                    // sleeps (Commit publishes every 256 words).
+                    if (split.Active()) {
+                        split.PublishBeforeWait();
+                    }
                     if (!scheduler.HasPendingChannels()) {
                         continue;
                     }
@@ -148,6 +160,10 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 } else {
                     ASSERT(false);
                 }
+                if (!std::holds_alternative<SubmitListCommand>(next.data)) {
+                    // Syncs, maps, flushes and composites write guest memory anywhere.
+                    split.NoteUnboundedWrite(false, VideoCommon::UnboundedCause::GpuThreadCommand);
+                }
                 split.Defer([state_ptr = &state, fence = next.fence, block = next.block] {
                     SignalCommand(*state_ptr, fence, block);
                 });
@@ -177,6 +193,18 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
             last_progress = std::chrono::steady_clock::now();
         }
     });
+}
+
+void ThreadManager::HoldCommands() {
+    commands_held.store(true, std::memory_order_release);
+}
+
+void ThreadManager::ReleaseCommands() {
+    {
+        std::scoped_lock lock{hold_mutex};
+        commands_held.store(false, std::memory_order_release);
+    }
+    hold_cv.notify_all();
 }
 
 void ThreadManager::SubmitList(s32 channel, Tegra::CommandList&& entries, bool is_async) {

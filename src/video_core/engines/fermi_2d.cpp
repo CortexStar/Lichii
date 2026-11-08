@@ -24,6 +24,7 @@ namespace Tegra::Engines {
 using namespace Texture;
 
 Fermi2D::Fermi2D(MemoryManager& memory_manager_) : memory_manager{memory_manager_} {
+    engine_type = EngineTypes::Fermi2D;
     sw_blitter = std::make_unique<Blitter::SoftwareBlitEngine>(memory_manager);
     // Nvidia's OpenGL driver seems to assume these values
     regs.src.depth = 1;

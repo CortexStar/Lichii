@@ -85,6 +85,26 @@ public:
 
     void Sync(size_t start, size_t size) {
         const auto& dev = device.GetLogical();
+        // AMD's driver: read what is available without blocking; a result that has not landed
+        // counts as visible (1024 samples), as in the GPU-side resolve (SyncWrites).
+        if (device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY) {
+            std::array<std::pair<u64, u64>, BANK_SIZE> values{};
+            const VkResult query_result =
+                dev.GetQueryResults(*query_pool, static_cast<u32>(start), static_cast<u32>(size),
+                                    sizeof(values[0]) * size, values.data(), sizeof(values[0]),
+                                    VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+            if (query_result == VK_ERROR_DEVICE_LOST) {
+                device.ReportLoss();
+                throw vk::Exception(query_result);
+            }
+            if (query_result != VK_SUCCESS && query_result != VK_NOT_READY) {
+                throw vk::Exception(query_result);
+            }
+            for (size_t i = 0; i < size; ++i) {
+                host_results[start + i] = values[i].second != 0 ? values[i].first : 1024;
+            }
+            return;
+        }
         const VkResult query_result = dev.GetQueryResults(
             *query_pool, static_cast<u32>(start), static_cast<u32>(size), sizeof(u64) * size,
             &host_results[start], sizeof(u64), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
@@ -146,6 +166,10 @@ public:
         amend_value = 0;
         accumulation_value = 0;
         queries_prefix_scan_pass.emplace(device, scheduler, descriptor_pool, compute_pass_descriptor_queue);
+        if (device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY) {
+            availability_pass.emplace(device, scheduler, descriptor_pool,
+                                      compute_pass_descriptor_queue);
+        }
 
         const VkBufferCreateInfo buffer_ci = {
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -272,69 +296,166 @@ public:
         size_t resolve_buffer_index = ObtainBuffer<true>(num_slots_used);
         resolve_buffers.push_back(resolve_buffer_index);
         size_t base_offset = 0;
-        // AMD's drivers wait on each query of a WAIT_BIT copy separately (3.8 us per query, ~5 ms
-        // a frame in Ocarina). Queries complete in order on the queue, so waiting for the newest
-        // one is enough before copying the range without the wait.
-        const bool wait_on_last =
-            driver_id == VK_DRIVER_ID_AMD_PROPRIETARY || driver_id == VK_DRIVER_ID_AMD_OPEN_SOURCE;
 
-        ApplyBanksWideOp<true>(pending_sync, [&](SamplesQueryBank* bank, size_t start,
-                                                 size_t amount) {
-            size_t bank_id = bank->GetIndex();
-            auto& resolve_buffer = buffers[resolve_buffer_index];
-            VkQueryPool query_pool = bank->GetInnerPool();
+        // Copy only the slots of the queries being synced and zero the slots between them. The
+        // wide copy waits (WAIT_BIT) on every slot of the span; a slot in it no query ended
+        // stalls the GPU until the driver gives up (~8 ms each on AMD, 10 times a frame in
+        // Ocarina of Time's Kokiri Forest).
+        {
+            std::map<size_t, std::vector<std::pair<size_t, size_t>>> runs_by_bank;
+            for (auto q : pending_sync) {
+                ApplyBankOp(GetQuery(q), [&](SamplesQueryBank* bank, size_t start, size_t amount) {
+                    runs_by_bank[bank->GetIndex()].emplace_back(start, start + amount);
+                });
+            }
+            struct BankRuns {
+                VkQueryPool query_pool;
+                std::vector<std::pair<size_t, size_t>> merged;
+                size_t span_start;
+                size_t span_end;
+                size_t base_offset;
+            };
+            std::vector<BankRuns> banks;
+            for (auto& [bank_id, runs] : runs_by_bank) {
+                std::ranges::sort(runs);
+                std::vector<std::pair<size_t, size_t>> merged;
+                for (const auto& run : runs) {
+                    if (!merged.empty() && run.first <= merged.back().second) {
+                        merged.back().second = (std::max)(merged.back().second, run.second);
+                    } else {
+                        merged.push_back(run);
+                    }
+                }
+                const size_t span_start = merged.front().first;
+                const size_t span_end = merged.back().second;
+                banks.push_back({
+                    .query_pool = bank_pool.GetBank(bank_id).GetInnerPool(),
+                    .merged = std::move(merged),
+                    .span_start = span_start,
+                    .span_end = span_end,
+                    .base_offset = base_offset,
+                });
+                offsets[bank_id] = {span_start, base_offset};
+                base_offset += (span_end - span_start) * SamplesQueryBank::QUERY_SIZE;
+            }
+            const VkBuffer resolve_buffer = *buffers[resolve_buffer_index];
+            constexpr size_t query_size = SamplesQueryBank::QUERY_SIZE;
             scheduler.RequestOutsideRenderPassOperationContext();
-            scheduler.Record([start, amount, base_offset, query_pool, wait_on_last,
-                              buffer = *resolve_buffer](vk::CommandBuffer cmdbuf) {
-                const VkBufferMemoryBarrier copy_query_pool_barrier{
-                    .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-                    .pNext = nullptr,
-                    .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-                    .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
-                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .buffer = buffer,
-                    .offset = base_offset,
-                    .size = amount * SamplesQueryBank::QUERY_SIZE,
-                };
-
-                if (!wait_on_last || amount == 1) {
-                    cmdbuf.CopyQueryPoolResults(
-                        query_pool, static_cast<u32>(start), static_cast<u32>(amount), buffer,
-                        static_cast<u32>(base_offset), SamplesQueryBank::QUERY_SIZE,
-                        VK_QUERY_RESULT_WAIT_BIT | VK_QUERY_RESULT_64_BIT);
-                } else {
-                    const size_t last = amount - 1;
-                    const VkDeviceSize last_offset =
-                        base_offset + last * SamplesQueryBank::QUERY_SIZE;
-                    cmdbuf.CopyQueryPoolResults(query_pool, static_cast<u32>(start + last), 1,
-                                                buffer, last_offset, SamplesQueryBank::QUERY_SIZE,
-                                                VK_QUERY_RESULT_WAIT_BIT | VK_QUERY_RESULT_64_BIT);
-                    // Orders the unwaited copy after the waited one.
-                    const VkBufferMemoryBarrier waited_barrier{
-                        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            if (availability_pass) {
+                // AMD's driver: even after a barrier on all prior work, a result can land after
+                // the copy (with WAIT_BIT each copy waited ~9.6 ms). Copy without waiting, with
+                // each slot's availability, then resolve each slot on the GPU to its count when it
+                // had landed and to a "visible" 1024 samples otherwise: a late result reads as an
+                // occluded object drawn instead of hidden (the scene vanished) or a stall (9 -> 22
+                // FPS in Kokiri Forest). The availability word is what decides, not what the copy
+                // writes for an unavailable query, which the Vulkan spec leaves undefined
+                // (approach from Savulska's test on #573). Waiting on the newest query instead
+                // (#679) gave 54 FPS under the Deku tree on an RX 9070 XT, this 56-58.
+                // Every bank's span goes into one range, so one fill, one barrier and one resolve
+                // dispatch serve the whole sync: the fill marks every slot as a gap (all ones,
+                // which no copy writes), the copies overwrite the synced runs, and the resolve
+                // turns what is left marked into zero samples.
+                const u32 total_slots = static_cast<u32>(base_offset / query_size);
+                const VkDeviceSize availability_size = VkDeviceSize{total_slots} * 16;
+                const VkBuffer availability_buffer = AvailabilityBuffer(availability_size);
+                scheduler.Record([banks, availability_buffer,
+                                  availability_size](vk::CommandBuffer cmdbuf) {
+                    cmdbuf.FillBuffer(availability_buffer, 0, availability_size, 0xFFFFFFFFU);
+                    static constexpr VkMemoryBarrier FILL_BARRIER{
+                        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                         .pNext = nullptr,
                         .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
                         .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                    };
+                    cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, FILL_BARRIER);
+                    for (const BankRuns& bank : banks) {
+                        const VkDeviceSize bank_offset = bank.base_offset / query_size * 16;
+                        for (const auto& [start, end] : bank.merged) {
+                            cmdbuf.CopyQueryPoolResults(
+                                bank.query_pool, static_cast<u32>(start),
+                                static_cast<u32>(end - start), availability_buffer,
+                                bank_offset + (start - bank.span_start) * 16, 16,
+                                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+                        }
+                    }
+                });
+                // Orders the copies before it.
+                availability_pass->Resolve(resolve_buffer, 0, availability_buffer, 0, total_slots);
+            } else {
+                // AMD's drivers wait on each query of a WAIT_BIT copy separately (3.8 us per
+                // query, ~5 ms a frame in Ocarina). Queries complete in order on the queue, so
+                // waiting for the newest one is enough before copying the range without the wait.
+                const bool wait_on_last = driver_id == VK_DRIVER_ID_AMD_PROPRIETARY ||
+                                          driver_id == VK_DRIVER_ID_AMD_OPEN_SOURCE;
+                scheduler.Record([banks, buffer = resolve_buffer,
+                                  wait_on_last](vk::CommandBuffer cmdbuf) {
+                    for (const BankRuns& bank : banks) {
+                        const auto& merged = bank.merged;
+                        const size_t span_start = bank.span_start;
+                        const size_t bank_base = bank.base_offset;
+                        for (size_t i = 0; i + 1 < merged.size(); ++i) {
+                            const size_t gap_begin = merged[i].second;
+                            const size_t gap_end = merged[i + 1].first;
+                            cmdbuf.FillBuffer(buffer,
+                                              bank_base + (gap_begin - span_start) * query_size,
+                                              (gap_end - gap_begin) * query_size, 0);
+                        }
+                        for (const auto& [start, end] : merged) {
+                            if (!wait_on_last || end - start == 1) {
+                                cmdbuf.CopyQueryPoolResults(
+                                    bank.query_pool, static_cast<u32>(start),
+                                    static_cast<u32>(end - start), buffer,
+                                    bank_base + (start - span_start) * query_size, query_size,
+                                    VK_QUERY_RESULT_WAIT_BIT | VK_QUERY_RESULT_64_BIT);
+                                continue;
+                            }
+                            // The newest query of the run with the wait, then the others without.
+                            const size_t last = end - 1;
+                            const VkDeviceSize last_offset =
+                                bank_base + (last - span_start) * query_size;
+                            cmdbuf.CopyQueryPoolResults(
+                                bank.query_pool, static_cast<u32>(last), 1, buffer, last_offset,
+                                query_size, VK_QUERY_RESULT_WAIT_BIT | VK_QUERY_RESULT_64_BIT);
+                            // Orders the unwaited copy after the waited one.
+                            const VkBufferMemoryBarrier waited_barrier{
+                                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                                .pNext = nullptr,
+                                .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                                .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                .buffer = buffer,
+                                .offset = last_offset,
+                                .size = query_size,
+                            };
+                            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                                                   waited_barrier);
+                            cmdbuf.CopyQueryPoolResults(
+                                bank.query_pool, static_cast<u32>(start),
+                                static_cast<u32>(last - start), buffer,
+                                bank_base + (start - span_start) * query_size, query_size,
+                                VK_QUERY_RESULT_64_BIT);
+                        }
+                    }
+                    const VkBufferMemoryBarrier copy_query_pool_barrier{
+                        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                        .pNext = nullptr,
+                        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                        .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
                         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                         .buffer = buffer,
-                        .offset = last_offset,
-                        .size = SamplesQueryBank::QUERY_SIZE,
+                        .offset = 0,
+                        .size = VK_WHOLE_SIZE,
                     };
                     cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, waited_barrier);
-                    cmdbuf.CopyQueryPoolResults(
-                        query_pool, static_cast<u32>(start), static_cast<u32>(last), buffer,
-                        static_cast<u32>(base_offset), SamplesQueryBank::QUERY_SIZE,
-                        VK_QUERY_RESULT_64_BIT);
-                }
-                cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, copy_query_pool_barrier);
-            });
-            offsets[bank_id] = {start, base_offset};
-            base_offset += amount * SamplesQueryBank::QUERY_SIZE;
-        });
+                                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                                           copy_query_pool_barrier);
+                });
+            }
+        }
 
         // Convert queries
         bool has_multi_queries = false;
@@ -671,6 +792,31 @@ private:
     u64 bank_bound_resets{}; ///< Counts CloseCounter dropped once a query outgrew the bank bound.
     std::mutex flush_guard;
     std::optional<QueriesPrefixScanPass> queries_prefix_scan_pass;
+    /// AMD: results copied with availability (16 bytes a slot) before QueryAvailabilityResolvePass.
+    std::optional<QueryAvailabilityResolvePass> availability_pass;
+    std::vector<vk::Buffer> availability_buffers; ///< The last is current; older ones stay alive
+    VkDeviceSize availability_capacity{};
+
+    /// The current availability buffer, grown to at least `size` bytes.
+    VkBuffer AvailabilityBuffer(VkDeviceSize size) {
+        if (size > availability_capacity) {
+            availability_capacity = (std::max)(size, availability_capacity * 2);
+            const VkBufferCreateInfo buffer_ci{
+                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .size = availability_capacity,
+                .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                .queueFamilyIndexCount = 0,
+                .pQueueFamilyIndices = nullptr,
+            };
+            // Commands already recorded may still use the old one: it is kept, not destroyed.
+            availability_buffers.push_back(
+                memory_allocator.CreateBuffer(buffer_ci, MemoryUsage::DeviceLocal));
+        }
+        return *availability_buffers.back();
+    }
 };
 
 // Transform feedback queries
@@ -989,6 +1135,7 @@ private:
             return;
         }
         has_flushed_end_pending = true;
+        scheduler.NoteRenderPassTransformFeedback();
         // Refresh buffers state before beginning transform feedback so counters are up-to-date
         UpdateBuffers();
         if (!has_started || buffers_count == 0) {
@@ -1419,6 +1566,9 @@ struct QueryCacheRuntimeImpl {
     VkConditionalRenderingBeginInfoEXT hcr_setup;
     VkBuffer hcr_buffer;
     size_t hcr_offset;
+    /// The guest bytes hcr_setup reads when they are a guest buffer's, 0 when it reads the
+    /// resolve buffer. Each resume reads them again, in the submission it is recorded in.
+    DAddr hcr_guest_address{};
     bool hcr_is_set;
     bool is_hcr_running;
 
@@ -1449,6 +1599,7 @@ void QueryCacheRuntime::EndHostConditionalRendering() {
     impl->is_hcr_running = false;
     impl->hcr_buffer = VkBuffer{};
     impl->hcr_offset = 0;
+    impl->hcr_guest_address = 0;
 }
 
 void QueryCacheRuntime::PauseHostConditionalRendering() {
@@ -1467,6 +1618,11 @@ void QueryCacheRuntime::ResumeHostConditionalRendering() {
         return;
     }
     if (!impl->is_hcr_running) {
+        if (impl->hcr_guest_address != 0) {
+            // An upload of the predicate later in this submission must run after this read.
+            std::scoped_lock lk(impl->buffer_cache.mutex);
+            impl->buffer_cache.MarkUsed(impl->hcr_guest_address, 8);
+        }
         impl->scheduler.Record([hcr_setup = impl->hcr_setup](vk::CommandBuffer cmdbuf) {
             cmdbuf.BeginConditionalRenderingEXT(hcr_setup);
         });
@@ -1497,6 +1653,7 @@ void QueryCacheRuntime::HostConditionalRenderingCompareValueImpl(VideoCommon::Lo
     }
     impl->hcr_setup.buffer = impl->hcr_buffer;
     impl->hcr_setup.offset = impl->hcr_offset;
+    impl->hcr_guest_address = object.address;
     impl->hcr_setup.flags = is_equal ? VK_CONDITIONAL_RENDERING_INVERTED_BIT_EXT : 0;
     impl->hcr_is_set = true;
     impl->is_hcr_running = false;
@@ -1526,6 +1683,7 @@ void QueryCacheRuntime::HostConditionalRenderingCompareBCImpl(DAddr address, boo
     impl->conditional_resolve_pass->Resolve(*impl->hcr_resolve_buffer, to_resolve,
                                             to_resolve_offset, compare_to_zero);
     impl->hcr_setup.buffer = *impl->hcr_resolve_buffer;
+    impl->hcr_guest_address = 0;
     impl->hcr_setup.offset = 0;
     impl->hcr_setup.flags = is_equal ? 0 : VK_CONDITIONAL_RENDERING_INVERTED_BIT_EXT;
     impl->hcr_is_set = true;

@@ -626,32 +626,62 @@ void SetCurrentThreadAffinity(const std::vector<u32>& cpus) {
 
 namespace Common {
 
+namespace {
+#ifdef _WIN32
+int WindowsPriority(ThreadPriority priority) {
+    switch (priority) {
+    case ThreadPriority::Low:
+        return THREAD_PRIORITY_BELOW_NORMAL;
+    case ThreadPriority::Normal:
+        return THREAD_PRIORITY_NORMAL;
+    case ThreadPriority::High:
+        return THREAD_PRIORITY_ABOVE_NORMAL;
+    case ThreadPriority::VeryHigh:
+        return THREAD_PRIORITY_HIGHEST;
+    case ThreadPriority::Critical:
+        return THREAD_PRIORITY_TIME_CRITICAL;
+    default:
+        return THREAD_PRIORITY_NORMAL;
+    }
+}
+#elif defined(__HAIKU__)
+// TODO: We have priorities for 3D rendering applications - may help lavapipe?
+int HaikuPriority(ThreadPriority priority) {
+    switch (priority) {
+    case ThreadPriority::Low:
+        return B_LOW_PRIORITY;
+    case ThreadPriority::Normal:
+        return B_NORMAL_PRIORITY;
+    case ThreadPriority::High:
+        return B_DISPLAY_PRIORITY;
+    case ThreadPriority::VeryHigh:
+        return B_URGENT_DISPLAY_PRIORITY;
+    case ThreadPriority::Critical:
+        return B_URGENT_PRIORITY;
+    default:
+        return B_NORMAL_PRIORITY;
+    }
+}
+#elif !defined(__linux__)
+void SetPthreadPriority(pthread_t thread, ThreadPriority priority) {
+    const s32 max_prio = sched_get_priority_max(SCHED_OTHER);
+    const s32 min_prio = sched_get_priority_min(SCHED_OTHER);
+    if (max_prio > min_prio) {
+        const u32 level = (std::min)(static_cast<u32>(priority), 4U);
+        sched_param params{};
+        params.sched_priority =
+            min_prio + static_cast<s32>(static_cast<u32>(max_prio - min_prio) * level) / 4;
+        pthread_setschedparam(thread, SCHED_OTHER, &params);
+    }
+}
+#endif
+} // Anonymous namespace
+
 void SetCurrentThreadPriority(ThreadPriority new_priority) {
 #ifdef _WIN32
-    int windows_priority = [&]() {
-        switch (new_priority) {
-        case ThreadPriority::Low: return THREAD_PRIORITY_BELOW_NORMAL;
-        case ThreadPriority::Normal: return THREAD_PRIORITY_NORMAL;
-        case ThreadPriority::High: return THREAD_PRIORITY_ABOVE_NORMAL;
-        case ThreadPriority::VeryHigh: return THREAD_PRIORITY_HIGHEST;
-        case ThreadPriority::Critical: return THREAD_PRIORITY_TIME_CRITICAL;
-        default: return THREAD_PRIORITY_NORMAL;
-        }
-    }();
-    SetThreadPriority(GetCurrentThread(), windows_priority);
+    ::SetThreadPriority(GetCurrentThread(), WindowsPriority(new_priority));
 #elif defined(__HAIKU__)
-    // TODO: We have priorities for 3D rendering applications - may help lavapipe?
-    int priority = [&]() {
-        switch (new_priority) {
-        case ThreadPriority::Low: return B_LOW_PRIORITY;
-        case ThreadPriority::Normal: return B_NORMAL_PRIORITY;
-        case ThreadPriority::High: return B_DISPLAY_PRIORITY;
-        case ThreadPriority::VeryHigh: return B_URGENT_DISPLAY_PRIORITY;
-        case ThreadPriority::Critical: return B_URGENT_PRIORITY;
-        default: return B_NORMAL_PRIORITY;
-        }
-    }();
-    set_thread_priority(find_thread(NULL), priority);
+    set_thread_priority(find_thread(NULL), HaikuPriority(new_priority));
 #elif defined(__ANDROID__)
     const int nice_value = NiceValueForPriority(new_priority);
     const pid_t tid = gettid();
@@ -668,15 +698,53 @@ void SetCurrentThreadPriority(ThreadPriority new_priority) {
                   GetLastErrorMsg());
     }
 #else
-    const s32 max_prio = sched_get_priority_max(SCHED_OTHER);
-    const s32 min_prio = sched_get_priority_min(SCHED_OTHER);
-    if (max_prio > min_prio) {
-        const u32 level = (std::min)(static_cast<u32>(new_priority), 4U);
-        sched_param params{};
-        params.sched_priority =
-            min_prio + static_cast<s32>(static_cast<u32>(max_prio - min_prio) * level) / 4;
-        pthread_setschedparam(pthread_self(), SCHED_OTHER, &params);
+    SetPthreadPriority(pthread_self(), new_priority);
+#endif
+}
+
+ThreadPriorityTarget CurrentThreadPriorityTarget() {
+    ThreadPriorityTarget target{};
+#ifdef _WIN32
+    target.native = GetCurrentThreadId();
+#elif defined(__HAIKU__)
+    target.native = static_cast<u64>(find_thread(NULL));
+#elif defined(__linux__)
+    target.native = static_cast<u64>(gettid());
+#else
+    const pthread_t self = pthread_self();
+    static_assert(sizeof(self) <= sizeof(target.native));
+    std::memcpy(&target.native, &self, sizeof(self));
+#endif
+    return target;
+}
+
+void SetOtherThreadPriority(ThreadPriorityTarget target, ThreadPriority new_priority) {
+#ifdef _WIN32
+    const HANDLE thread =
+        OpenThread(THREAD_SET_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(target.native));
+    if (thread == nullptr) {
+        LOG_DEBUG(Common, "Could not open thread {}: {}", target.native, GetLastErrorMsg());
+        return;
     }
+    ::SetThreadPriority(thread, WindowsPriority(new_priority));
+    CloseHandle(thread);
+#elif defined(__HAIKU__)
+    set_thread_priority(static_cast<thread_id>(target.native), HaikuPriority(new_priority));
+#elif defined(__linux__)
+    const int nice_value = NiceValueForPriority(new_priority);
+    const pid_t tid = static_cast<pid_t>(target.native);
+    if (setpriority(PRIO_PROCESS, static_cast<id_t>(tid), nice_value) != 0) {
+        LOG_DEBUG(Common, "Could not set the nice value of thread {} to {}: {}", tid, nice_value,
+                  GetLastErrorMsg());
+        return;
+    }
+#ifdef __ANDROID__
+    RememberCurrentThreadNice(tid, nice_value);
+#endif
+#else
+    pthread_t thread;
+    std::memcpy(&thread, &target.native, sizeof(thread));
+    SetPthreadPriority(thread, new_priority);
 #endif
 }
 
@@ -812,6 +880,47 @@ void SetCurrentThreadToBackgroundWork() {
 #endif
 }
 
+void SetCurrentThreadToGamesMmcss() {
+#ifdef _WIN32
+    // avrt.dll is loaded at run time: no import library needed, as for the CPU-set calls.
+    using SetCharacteristics = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
+    using RevertCharacteristics = BOOL(WINAPI*)(HANDLE);
+    struct Avrt {
+        SetCharacteristics set{};
+        RevertCharacteristics revert{};
+    };
+    static const Avrt avrt = [] {
+        Avrt result;
+        if (const HMODULE module = LoadLibraryW(L"avrt.dll"); module != nullptr) {
+            result.set = reinterpret_cast<SetCharacteristics>(
+                reinterpret_cast<void*>(GetProcAddress(module, "AvSetMmThreadCharacteristicsW")));
+            result.revert = reinterpret_cast<RevertCharacteristics>(
+                reinterpret_cast<void*>(GetProcAddress(module, "AvRevertMmThreadCharacteristics")));
+        }
+        return result;
+    }();
+    // Leaves the task when the thread exits.
+    struct Registration {
+        HANDLE handle{};
+        ~Registration() {
+            if (handle != nullptr && avrt.revert != nullptr) {
+                avrt.revert(handle);
+            }
+        }
+    };
+    thread_local Registration registration;
+    if (registration.handle != nullptr || avrt.set == nullptr) {
+        return;
+    }
+    DWORD task_index = 0;
+    registration.handle = avrt.set(L"Games", &task_index);
+    if (registration.handle == nullptr) {
+        LOG_WARNING(Common, "AvSetMmThreadCharacteristicsW(Games) failed: {}",
+                    Common::GetLastErrorMsg());
+    }
+#endif
+}
+
 void SetCurrentThreadToAllCores() {
 #if defined(__ANDROID__)
     ADPF::RemoveCurrentThread();
@@ -878,6 +987,82 @@ void PollThreadPolicies() {
     RefreshThreadPolicies();
 #endif
 }
+
+#ifdef _WIN32
+namespace {
+// One high-resolution timer per waiting thread, so concurrent BlockFor deadlines don't overwrite
+// each other. Falls back to a normal waitable timer before Windows 10 1803.
+HANDLE ThreadWaitTimer() {
+    struct Timer {
+        HANDLE handle = [] {
+            HANDLE timer = CreateWaitableTimerExW(
+                nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+            return timer != nullptr ? timer
+                                    : CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+        }();
+        ~Timer() {
+            if (handle != nullptr) {
+                CloseHandle(handle);
+            }
+        }
+    };
+    thread_local Timer timer;
+    return timer.handle;
+}
+} // Anonymous namespace
+
+Event::~Event() {
+    if (wake_handle != nullptr) {
+        CloseHandle(wake_handle);
+    }
+}
+
+void Event::WakeBlockedWaiter() {
+    // Pairs with BlockFor: it counts itself in before it checks is_set, and Set stores is_set
+    // before it reads the count, so one of the two sees the other.
+    if (blocked_waiters.load() != 0) {
+        SetEvent(wake_handle);
+    }
+}
+
+bool Event::BlockFor(const std::chrono::nanoseconds time) {
+    const HANDLE timer = ThreadWaitTimer();
+    if (time > std::chrono::nanoseconds::zero() && timer != nullptr) {
+        {
+            std::scoped_lock lk{mutex};
+            if (wake_handle == nullptr) {
+                wake_handle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            }
+        }
+        if (wake_handle != nullptr) {
+            blocked_waiters.fetch_add(1);
+            if (!is_set.load()) {
+                // Relative due time in 100 ns units, rounded up.
+                LARGE_INTEGER due{};
+                due.QuadPart = -static_cast<LONGLONG>((time.count() + 99) / 100);
+                if (SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) {
+                    const HANDLE handles[2]{static_cast<HANDLE>(wake_handle), timer};
+                    WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+                }
+            }
+            blocked_waiters.fetch_sub(1);
+            // A wake meant for an earlier Set can end the wait early: the caller sees no signal
+            // and waits again.
+            bool expected = true;
+            return is_set.compare_exchange_strong(expected, false);
+        }
+    }
+    return WaitFor(time);
+}
+#else
+Event::~Event() = default;
+
+void Event::WakeBlockedWaiter() {}
+
+bool Event::BlockFor(const std::chrono::nanoseconds time) {
+    return WaitFor(time);
+}
+#endif
 
 #ifdef ARCHITECTURE_x86_64
 // On Linux and UNIX systems, a futex would nominally be used to cover the costs

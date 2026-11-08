@@ -29,9 +29,59 @@ struct RescalingLayout {
 struct RenderAreaLayout {
     std::array<f32, 4> render_area;
 };
-constexpr u32 RESCALING_LAYOUT_WORDS_OFFSET = offsetof(RescalingLayout, rescaling_textures);
-constexpr u32 RESCALING_LAYOUT_DOWN_FACTOR_OFFSET = offsetof(RescalingLayout, down_factor);
-constexpr u32 RENDERAREA_LAYOUT_OFFSET = offsetof(RenderAreaLayout, render_area);
+/// Every push constant a pipeline's stages read, in one range. A stage reads its members from
+/// one block (an entry point may use one push constant block), so the members never overlap: a
+/// vertex shader's render area used to sit at offset 0, over the fragment shader's rescaling words.
+/// The first words hold the device addresses of the tables shaders reach guest state through
+/// (the same offsets as the push data of descriptor heap pipelines).
+struct PushConstantLayout {
+    u64 texture_table; ///< texture index table (descriptor heap pipelines)
+    u64 bank_table;    ///< constant buffer bank addresses of the draw
+    u64 page_table;    ///< VideoCommon::GpuPageTable of the channel's address space
+    u64 reserved;
+    RescalingLayout rescaling;
+    RenderAreaLayout render_area;
+};
+constexpr u32 TEXTURE_TABLE_OFFSET = offsetof(PushConstantLayout, texture_table);
+constexpr u32 BANK_TABLE_OFFSET = offsetof(PushConstantLayout, bank_table);
+constexpr u32 PAGE_TABLE_OFFSET = offsetof(PushConstantLayout, page_table);
+constexpr u32 RESCALING_LAYOUT_WORDS_OFFSET =
+    offsetof(PushConstantLayout, rescaling) + offsetof(RescalingLayout, rescaling_textures);
+constexpr u32 RESCALING_LAYOUT_IMAGES_OFFSET =
+    offsetof(PushConstantLayout, rescaling) + offsetof(RescalingLayout, rescaling_images);
+constexpr u32 RESCALING_LAYOUT_DOWN_FACTOR_OFFSET =
+    offsetof(PushConstantLayout, rescaling) + offsetof(RescalingLayout, down_factor);
+constexpr u32 RENDERAREA_LAYOUT_OFFSET =
+    offsetof(PushConstantLayout, render_area) + offsetof(RenderAreaLayout, render_area);
+constexpr u32 PUSH_CONSTANT_LAYOUT_SIZE = sizeof(PushConstantLayout);
+
+/// Constant buffers by device address (Info::uniforms_by_address): the draw's bank table holds one
+/// entry per (stage, constant buffer), at (BankTableStage(stage) * BANK_TABLE_BANKS_PER_STAGE +
+/// index) * sizeof(BankTableEntry). Reads at or past `size` return zero, as past a bound range.
+struct BankTableEntry {
+    u64 address; ///< device address of the bank's first byte (a zero page when unbound)
+    u32 size;
+    u32 reserved;
+};
+static_assert(sizeof(BankTableEntry) == 16);
+constexpr u32 BANK_TABLE_BANKS_PER_STAGE = 18;
+/// Graphics stages index the table by their pipeline slot; a dispatch has its own table.
+[[nodiscard]] constexpr u32 BankTableStage(Stage stage) {
+    return stage == Stage::Compute ? 0U : static_cast<u32>(stage);
+}
+
+/// The GPU page table as shaders read it (VideoCommon::GpuPageTable): L1 holds a u32 block index
+/// per 2^PAGE_TABLE_BLOCK_BITS bytes of guest address space, the L2 blocks after it hold a u64
+/// host device address per 2^PAGE_TABLE_PAGE_BITS bytes.
+constexpr u32 PAGE_TABLE_ADDRESS_BITS = 40;
+constexpr u32 PAGE_TABLE_PAGE_BITS = 12;
+constexpr u32 PAGE_TABLE_BLOCK_BITS = 21;
+constexpr u64 PAGE_TABLE_L1_BYTES =
+    (u64{1} << (PAGE_TABLE_ADDRESS_BITS - PAGE_TABLE_BLOCK_BITS)) * sizeof(u32);
+static_assert(RESCALING_LAYOUT_WORDS_OFFSET == 32 && RESCALING_LAYOUT_IMAGES_OFFSET == 48 &&
+                  RESCALING_LAYOUT_DOWN_FACTOR_OFFSET == 56 && RENDERAREA_LAYOUT_OFFSET == 64 &&
+                  PUSH_CONSTANT_LAYOUT_SIZE == 80,
+              "push constant offsets are shared with the descriptor heap push data layout");
 
 [[nodiscard]] std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_info, IR::Program& program, Bindings& bindings);
 [[nodiscard]] inline std::vector<u32> EmitSPIRV(const Profile& profile, IR::Program& program) {

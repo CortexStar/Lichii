@@ -44,6 +44,17 @@ FramebufferLayout DefaultFrameLayout(u32 width, u32 height) noexcept {
     };
 }
 
+float UltrawideAspectRatio(float window_aspect_ratio) noexcept {
+    // 21:9 panels are 64:27 (2560x1080, 5120x2160) or 43:18 (3440x1440).
+    constexpr float widest = 18.0f / 43.0f;
+    constexpr float narrowest = 9.0f / 21.0f;
+    constexpr float tolerance = 1e-4f;
+    if (window_aspect_ratio >= widest - tolerance && window_aspect_ratio <= narrowest + tolerance) {
+        return window_aspect_ratio;
+    }
+    return narrowest;
+}
+
 /// @brief Convenience method to determine emulation aspect ratio
 /// @param aspect Represents the index of aspect ratio stored in Settings::values.aspect_ratio
 /// @param window_aspect_ratio Current window aspect ratio
@@ -55,7 +66,7 @@ float EmulationAspectRatio(Settings::AspectRatio aspect, float window_aspect_rat
     case Settings::AspectRatio::R4_3:
         return 3.0f / 4.0f;
     case Settings::AspectRatio::R21_9:
-        return 9.0f / 21.0f;
+        return UltrawideAspectRatio(window_aspect_ratio);
     case Settings::AspectRatio::R16_10:
         return 10.0f / 16.0f;
     case Settings::AspectRatio::Stretch:

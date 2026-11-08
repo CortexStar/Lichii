@@ -41,6 +41,10 @@ struct ShaderInfo {
     size_t size_bytes{};
     /// Lowered code of a native program, reused when its pipelines are built.
     std::shared_ptr<const LoweredNativeCode> lowered_native;
+    /// Generic inputs a native vertex program reads (its header's input map), two bits per
+    /// attribute as in FixedPipelineState::attribute_types. None for task and mesh programs, all
+    /// set for any other program.
+    u64 vertex_attribute_mask{~u64{0}};
 };
 
 class ShaderCache : public VideoCommon::ChannelSetupCaches<VideoCommon::ChannelInfo> {
@@ -64,6 +68,12 @@ class ShaderCache : public VideoCommon::ChannelSetupCaches<VideoCommon::ChannelI
 public:
     /// Device pages this cache ever registered objects on (InnerInvalidation skips the rest).
     VideoCommon::PageFilter page_filter;
+
+    /// Whether shaders were marked for removal and not removed yet (InvalidateRegions removes
+    /// them).
+    [[nodiscard]] bool HasPendingRemovals() const noexcept {
+        return removal_pending.load(std::memory_order_acquire);
+    }
 
     /// @brief Removes shaders inside a given region
     /// @note Checks for ranges
@@ -178,6 +188,7 @@ private:
     ::Common::unordered_map<u64, std::vector<Entry*>> invalidation_cache;
     std::vector<std::unique_ptr<ShaderInfo>> storage;
     std::vector<Entry*> marked_for_removal;
+    std::atomic<bool> removal_pending{};
 
     /// Native programs the lowering rejected, by address, so each draw or dispatch rethrows the
     /// first error instead of lowering again; dropped when guest memory there is written.

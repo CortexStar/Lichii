@@ -34,4 +34,19 @@ inline bool ApplyMarioKartWorldPreset(Values& settings, u64 program_id, bool acc
     return true;
 }
 
+/// Switch 2 titles run docked unless their per-game configuration sets the console mode or the
+/// first player uses the handheld controller: a desktop is a TV setup, and handheld mode gives
+/// these titles a smaller resolution window, shorter LOD distances and worse texture filtering.
+/// Set as a per-game value, so RestoreGlobalState brings back the configured mode afterwards.
+inline bool ApplySwitch2ConsoleMode(Values& settings, bool switch2_program) {
+    auto& mode = settings.use_docked_mode;
+    if (!switch2_program || !mode.UsingGlobal() || mode.GetValue() == ConsoleMode::Docked ||
+        settings.players.GetValue()[0].controller_type == ControllerType::Handheld) {
+        return false;
+    }
+    mode.SetGlobal(false);
+    mode.SetValue(ConsoleMode::Docked);
+    return true;
+}
+
 } // namespace Settings

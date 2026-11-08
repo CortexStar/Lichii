@@ -71,8 +71,8 @@ returns, and the game's simulation step are different measurements.
 
 ## Vblank catch-up and guest time
 
-`StartVsyncTimer` uses a separate CoreTiming looping event, normally at 60 Hz.
-`EDEN_NX2_VSYNC_HZ` can override that experimental event rate. Guest present intervals
+`StartVsyncTimer` uses a separate CoreTiming looping event at the frame rate limit
+(Switch 2) setting, 60 Hz by default. Guest present intervals
 do not change its rate. The display-refresh query still reports 60 Hz.
 
 `CoreTiming::Advance` reschedules a looping event from its scheduled time, not its

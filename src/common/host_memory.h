@@ -96,6 +96,9 @@ public:
 private:
     void Swap(HostMemory& other) noexcept;
 
+    /// Windows reserves the backing and commits it in granules on first hand-out or mapping.
+    void CommitBacking(size_t physical_offset, size_t length);
+
     friend class HostMemoryTestAccess;
     struct AllocationTestControl {
         size_t backing_size;
@@ -122,6 +125,7 @@ private:
     static constexpr size_t GranuleShift = 16; ///< 64 KiB of backing per state byte
     static constexpr u8 GranuleUsed = 1 << 0;   ///< Handed out at least once
     static constexpr u8 GranuleDirty = 1 << 1;  ///< May hold non-zero data
+    static constexpr u8 GranuleCommitted = 1 << 2; ///< Charged to the commit limit (Windows)
     std::unique_ptr<std::atomic<u8>[]> granules;
     size_t num_granules{};
     // Windows requires it for kernels whom lack proper support for some functions!

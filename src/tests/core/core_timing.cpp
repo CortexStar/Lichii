@@ -7,10 +7,12 @@
 #include <bitset>
 #include <chrono>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
 
+#include "common/settings.h"
 #include "core/core.h"
 #include "core/core_timing.h"
 
@@ -143,4 +145,91 @@ TEST_CASE("CoreTiming[BasicOrderNoPausing]", "[core]") {
     printf("HostTimer No Pausing Scheduling Time: %.3f %.6f\n", micro, mili);
     printf("HostTimer No Pausing Timer Time: %.3f %.6f\n", timer_time / 1000.f,
            timer_time / 1000000.f);
+}
+
+TEST_CASE("CoreTiming[ClockTicksCpuClock]", "[core]") {
+    Settings::values.sync_core_speed.SetValue(false);
+    Settings::values.use_custom_cpu_ticks.SetValue(false);
+
+    Core::Timing::CoreTiming core_timing;
+    core_timing.SetMulticore(false);
+    core_timing.AddTicks(1'000'000);
+
+    const auto ticks_with = [&](Settings::CpuClock clock, bool switch2) {
+        Settings::values.cpu_clock.SetValue(clock);
+        Settings::SetCurrentProgramIsSwitch2(switch2);
+        return core_timing.GetClockTicks();
+    };
+
+    const u64 normal = ticks_with(Settings::CpuClock::Normal, false);
+    REQUIRE(ticks_with(Settings::CpuClock::Boost, false) == normal * 1734 / 1020);
+    REQUIRE(ticks_with(Settings::CpuClock::Overclock, false) == normal * 2040 / 1020);
+
+    const u64 normal_switch2 = ticks_with(Settings::CpuClock::Normal, true);
+    REQUIRE(ticks_with(Settings::CpuClock::Boost, true) == normal_switch2);
+    REQUIRE(ticks_with(Settings::CpuClock::Overclock, true) == normal_switch2);
+
+    Settings::values.cpu_clock.SetValue(Settings::CpuClock::Normal);
+    Settings::SetCurrentProgramIsSwitch2(false);
+}
+
+TEST_CASE("CoreTiming[DroppedEventType]", "[core]") {
+    // An event whose type is destroyed while it is queued is dropped when it falls due; it used
+    // to stay at the top of the queue and keep Advance looping forever.
+    Core::Timing::CoreTiming core_timing;
+    core_timing.SetMulticore(false);
+    bool later_ran = false;
+    auto gone = Core::Timing::CreateEvent(
+        "gone", [](s64, std::chrono::nanoseconds) { return std::nullopt; });
+    const auto later = Core::Timing::CreateEvent("later", [&](s64, std::chrono::nanoseconds) {
+        later_ran = true;
+        return std::nullopt;
+    });
+    core_timing.ScheduleEvent(std::chrono::nanoseconds{0}, gone);
+    core_timing.ScheduleEvent(std::chrono::nanoseconds{1}, later);
+    gone.reset();
+    core_timing.AddTicks(1'000'000);
+    REQUIRE_FALSE(core_timing.Advance().has_value());
+    REQUIRE(later_ran);
+}
+
+TEST_CASE("CoreTiming[WakeOnlyWhenNeeded]", "[core]") {
+    // ScheduleEvent wakes the timer thread only if it would otherwise look at the queue too late:
+    // a precise event needs it up os_wake_guard before, a relaxed one by its due time.
+    Core::Timing::CoreTiming core_timing;
+    core_timing.SetMulticore(false);
+    core_timing.os_wake_guard = 100;
+    core_timing.planned_wake = 1'000;
+    CHECK(core_timing.NeedsWake(1'050, false));
+    CHECK_FALSE(core_timing.NeedsWake(1'100, false));
+    CHECK_FALSE(core_timing.NeedsWake(5'000, false));
+    CHECK_FALSE(core_timing.NeedsWake(1'050, true));
+    CHECK(core_timing.NeedsWake(999, true));
+
+    // Advance plans the next look: nothing queued means never, so any new event wakes it.
+    REQUIRE_FALSE(core_timing.Advance().has_value());
+    CHECK(core_timing.planned_wake == (std::numeric_limits<s64>::max)());
+    CHECK(core_timing.NeedsWake(1'000'000'000'000, false));
+    // With an event queued, it looks again by the time it has to wait for it.
+    const auto later = Core::Timing::CreateEvent(
+        "later", [](s64, std::chrono::nanoseconds) { return std::nullopt; });
+    core_timing.ScheduleEvent(std::chrono::milliseconds{10}, later);
+    const auto next = core_timing.Advance();
+    REQUIRE(next.has_value());
+    CHECK(core_timing.planned_wake == core_timing.next_wait.until);
+    CHECK(core_timing.next_wait.until <= *next);
+    CHECK_FALSE(core_timing.NeedsWake(*next + 1'000'000'000, false));
+    core_timing.UnscheduleEvent(later);
+}
+
+TEST_CASE("CoreTiming::GuestCounterIsHostClock", "[core]") {
+    using Core::Timing::CoreTiming;
+    // Multicore, native clock, no core-speed sync, a Switch 2 title: the JIT reads the TSC.
+    STATIC_CHECK(CoreTiming::GuestCounterIsHostClock(true, true, false, true));
+    // Single core counts emulated ticks; a non-native clock is not the TSC.
+    STATIC_CHECK_FALSE(CoreTiming::GuestCounterIsHostClock(false, true, false, true));
+    STATIC_CHECK_FALSE(CoreTiming::GuestCounterIsHostClock(true, false, false, true));
+    // Core-speed sync divides by the speed limit; Switch 1 titles scale by the CPU clock.
+    STATIC_CHECK_FALSE(CoreTiming::GuestCounterIsHostClock(true, true, true, true));
+    STATIC_CHECK_FALSE(CoreTiming::GuestCounterIsHostClock(true, true, false, false));
 }

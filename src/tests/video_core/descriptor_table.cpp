@@ -459,3 +459,176 @@ TEST_CASE("Descriptor ID lookup CPU benchmark", "[.][descriptor_lookup_bench]") 
         }
     }
 }
+
+namespace {
+/// Guest memory of a descriptor pool whose writes are reported per page, as the texture cache's
+/// write watch reports them for armed pages.
+struct WatchedMemory {
+    std::vector<u64> words = std::vector<u64>(2048);
+
+    const u8* GetPointer(GPUVAddr) const {
+        return nullptr;
+    }
+
+    void ReadBlockUnsafe(GPUVAddr address, void* output, size_t size) const {
+        std::memcpy(output, reinterpret_cast<const u8*>(words.data()) + (address - 0x1000), size);
+    }
+};
+} // namespace
+
+TEST_CASE("Resident descriptors always equal guest memory under watched writes",
+          "[descriptor_table]") {
+    using Table = VideoCommon::DescriptorTable<u64, Common::SlotId>;
+    WatchedMemory memory;
+    Table table;
+    // Entries 0..1023 over pages 0..2: the base is not page aligned.
+    constexpr GPUVAddr base = 0x1000 + 0x100;
+    REQUIRE(table.Synchronize(base, 1023));
+    REQUIRE(table.pages.size() == 3);
+    std::mt19937 random{0x7e57};
+    u64 frame{};
+    u64 resident_hits{};
+    for (unsigned i = 0; i < 400000; ++i) {
+        const u32 index = random() % 1024;
+        const u32 op = random() % 1024;
+        if (op < 17) {
+            // A write: armed pages report it, unarmed ones are not watched. One in 17 goes
+            // anywhere, the others to the last page.
+            const u32 target = op == 16 && random() % 64 == 0 ? index : 1000 + index % 24;
+            memory.words[(base - 0x1000) / 8 + target] = random() % 4;
+            const u32 page = table.PageOf(target);
+            if (table.pages[page].armed) {
+                table.NoteDisarmed(page, frame, true);
+            }
+        } else if (op < 33) {
+            ++frame;
+            table.ClearAllResident();
+        } else if (op == 33) {
+            table.Forget(index);
+        } else if (op == 34) {
+            table.Invalidate();
+        } else if (table.IsResident(index)) {
+            ++resident_hits;
+            REQUIRE(table.descriptors[index] == memory.words[(base - 0x1000) / 8 + index]);
+            REQUIRE(table.bound_ids[index] ==
+                    Common::SlotId{static_cast<u32>(table.descriptors[index]) + 1});
+        } else {
+            const u32 page = table.PageOf(index);
+            REQUIRE(table.InOnePage(index));
+            // Armed before the read, as the texture cache does.
+            const bool armed = table.pages[page].armed || table.MayArm(page, frame);
+            if (armed && !table.pages[page].armed) {
+                table.NoteArmed(page, page + 100, frame);
+            }
+            const auto [descriptor, changed] = table.Read(memory, index);
+            if (changed) {
+                table.bound_ids[index] = Common::SlotId{static_cast<u32>(descriptor) + 1};
+            }
+            REQUIRE(table.bound_ids[index] == Common::SlotId{static_cast<u32>(descriptor) + 1});
+            if (armed) {
+                table.SetResident(index);
+            }
+        }
+    }
+    CHECK(resident_hits > 10000);
+}
+
+TEST_CASE("Descriptor pool pages back off after writes", "[descriptor_table]") {
+    using Table = VideoCommon::DescriptorTable<u64>;
+    Table table;
+    REQUIRE(table.Synchronize(0x2000, 1023));
+    REQUIRE(table.pages.size() == 2);
+    REQUIRE(table.PageOf(511) == 0);
+    REQUIRE(table.PageOf(512) == 1);
+    REQUIRE(table.PageAddress(1) == 0x3000);
+
+    table.NoteArmed(0, 7, 10);
+    REQUIRE(table.ArmedPages() == 1);
+    REQUIRE_FALSE(table.MayArm(0, 10));
+    table.SetResident(3);
+    table.SetResident(600);
+    table.NoteDisarmed(0, 10, true);
+    CHECK_FALSE(table.IsResident(3));
+    CHECK(table.IsResident(600));
+    CHECK(table.ArmedPages() == 0);
+    // First strike: one frame.
+    CHECK_FALSE(table.MayArm(0, 10));
+    CHECK(table.MayArm(0, 11));
+    // Written right after each arm: 3, 7, 15, 31, 63 frames, then capped.
+    u64 frame = 11;
+    for (const u64 wait : {3U, 7U, 15U, 31U, 63U, 63U}) {
+        table.NoteArmed(0, 7, frame);
+        table.NoteDisarmed(0, frame, true);
+        CHECK_FALSE(table.MayArm(0, frame + wait - 1));
+        CHECK(table.MayArm(0, frame + wait));
+        frame += wait;
+    }
+    // Quiet for QUIET_FRAMES: starts over at one frame.
+    table.NoteArmed(0, 7, frame);
+    table.NoteDisarmed(0, frame + Table::QUIET_FRAMES, true);
+    CHECK(table.MayArm(0, frame + Table::QUIET_FRAMES + 1));
+    // A disarm without a write (rebinding) leaves the back-off alone.
+    table.NoteArmed(1, 8, frame);
+    table.NoteDisarmed(1, frame, false);
+    CHECK(table.MayArm(1, frame));
+    CHECK(table.ArmedPages() == 0);
+}
+
+TEST_CASE("Descriptor entries crossing a page are never in one page", "[descriptor_table]") {
+    VideoCommon::DescriptorTable<std::array<u64, 4>> table;
+    REQUIRE(table.Synchronize(0x1000 + 0x10, 255));
+    CHECK(table.InOnePage(0));
+    CHECK_FALSE(table.InOnePage(127)); // bytes 0xFF0..0x100F
+    CHECK(table.InOnePage(128));
+    CHECK(table.PageOf(128) == 1);
+    CHECK(table.pages.size() == 3);
+    table.SetResident(127);
+    table.Forget(127);
+    CHECK_FALSE(table.IsResident(127));
+}
+
+TEST_CASE("Descriptor heap mirror sees every bound id change once", "[descriptor_table]") {
+    using Id = Common::SlotId;
+    VideoCommon::DescriptorTable<u64, Id> table;
+    REQUIRE(table.Synchronize(0x1000, 255));
+    REQUIRE(table.TakeMirrorReset());
+    REQUIRE_FALSE(table.TakeMirrorReset());
+    std::vector<Id> heap(256, Id{0});
+    const auto drain = [&] {
+        table.TakeMirrorUpdates([&](u32 index, Id id) {
+            REQUIRE(heap[index] != id);
+            heap[index] = id;
+        });
+    };
+    WatchedMemory memory;
+    std::mt19937 random{0x3141};
+    for (unsigned i = 0; i < 100000; ++i) {
+        const u32 index = random() % 256;
+        switch (random() % 6) {
+        case 0:
+            table.Forget(index);
+            break;
+        case 1:
+            drain();
+            for (u32 entry = 0; entry < 256; ++entry) {
+                if (((table.read_descriptors[entry / 64] >> (entry % 64)) & 1) != 0) {
+                    REQUIRE(heap[entry] == table.bound_ids[entry]);
+                }
+            }
+            break;
+        case 2:
+            memory.words[index] = random() % 3;
+            break;
+        default:
+            if (table.Read(memory, index).second) {
+                const u64 descriptor = table.descriptors[index];
+                table.Bind(index, Id{static_cast<u32>(descriptor)});
+            }
+        }
+        REQUIRE(table.MirrorMismatches() == 0);
+    }
+    // Rebinding the pool starts the mirror over.
+    REQUIRE(table.Synchronize(0x1000, 127));
+    REQUIRE(table.TakeMirrorReset());
+    table.TakeMirrorUpdates([](u32, Id) { FAIL("no updates after a reset"); });
+}

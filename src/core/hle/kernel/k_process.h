@@ -8,8 +8,12 @@
 
 #include <atomic>
 #include <map>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 #include "core/arm/arm_interface.h"
+#include "core/arm/guest_functions.h"
 #include "core/file_sys/program_metadata.h"
 #include "core/hle/kernel/code_set.h"
 #include "core/hle/kernel/k_address_arbiter.h"
@@ -121,6 +125,7 @@ private:
 
     std::atomic<s64> m_cpu_time{};
     std::atomic_bool m_mkw_dynamic_fps_patch_applied{};
+    std::vector<std::pair<u64, const Core::GuestFunctionSite*>> m_guest_functions;
     std::atomic<s64> m_num_process_switches{};
     std::atomic<s64> m_num_thread_switches{};
     std::atomic<s64> m_num_fpu_switches{};
@@ -191,6 +196,11 @@ public:
     void SetMkwDynamicFpsPatchApplied(bool applied) {
         m_mkw_dynamic_fps_patch_applied.store(applied, std::memory_order_relaxed);
     }
+
+    /// Records the guest functions (Core::GuestFunctionSites) of a module loaded at `base`, for
+    /// the JIT to run as host code. Called while loading, before guest code runs.
+    void AddGuestFunctions(std::string_view build_id, u64 base);
+    const Core::GuestFunctionSite* FindGuestFunction(u64 address) const;
 
     u64 GetProcessId() const {
         return m_process_id;

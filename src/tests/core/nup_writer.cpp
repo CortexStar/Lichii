@@ -332,6 +332,72 @@ TEST_CASE("NUP packs base, updates and add-ons and reads back through NupContain
     REQUIRE_FALSE(by_name.contains(".listing"));
 }
 
+TEST_CASE("NUP merges the update RomFS over the base straight from the TOC", "[nup]") {
+    TempDir t;
+    const auto root = t.path / "Game";
+    MakeDump(root);
+    Put(root / "updates/65536/romfs/copy/shared.bin", "update copy");
+    Put(root / "updates/65536/romfs/copy/extra.bin", "extra");
+    const auto archive = t.path / "Game.nup";
+    FileSys::Nup::PackOptions options{.raw_threshold = 16 * 1024};
+    REQUIRE(FileSys::Nup::PackDump(root, archive, options, {}, nullptr, nullptr) ==
+            FileSys::Nup::PackResult::Success);
+
+    FileSys::RealVfsFilesystem real;
+    NupContainer nup{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    const auto merged = nup.GetMergedRomFSDir(0, 1);
+    const auto reference = NupContainer::MergeShadowDirs(nup.GetRomFSDir(0), nup.GetRomFSDir(1));
+    REQUIRE(merged->GetName() == reference->GetName());
+    const auto tree = PackedTree(merged);
+    REQUIRE(tree == PackedTree(reference));
+    REQUIRE(tree.at("copy/shared.bin") == "update copy");
+    REQUIRE(tree.at("copy/extra.bin") == "extra");
+    REQUIRE(tree.at("big.bin") == std::string(64 * 1024, 'b'));
+    REQUIRE(tree.at("Zeta/a") == "a");
+    REQUIRE(tree.contains("System/Resource/ResourceSizeTable.Product.100.rsizetable"));
+    REQUIRE(tree.contains("System/Resource/ResourceSizeTable.Product.110.rsizetable"));
+
+    // Without a base or an update it is that package's own tree.
+    REQUIRE(PackedTree(nup.GetMergedRomFSDir(0, std::nullopt)) == PackedTree(nup.GetRomFSDir(0)));
+    REQUIRE(PackedTree(nup.GetMergedRomFSDir(std::nullopt, 1)) == PackedTree(nup.GetRomFSDir(1)));
+    // Package 2 has no RomFS.
+    REQUIRE(PackedTree(nup.GetMergedRomFSDir(0, 2)) == PackedTree(nup.GetRomFSDir(0)));
+    REQUIRE(nup.GetMergedRomFSDir(std::nullopt, std::nullopt) == nullptr);
+}
+
+TEST_CASE("NUP hands a kept container to the next Open of the same file only", "[nup]") {
+    TempDir t;
+    const auto root = t.path / "Game";
+    MakeDump(root);
+    const auto archive = t.path / "Game.nup";
+    const auto other = t.path / "Other.nup";
+    FileSys::Nup::PackOptions options{.raw_threshold = 16 * 1024};
+    REQUIRE(FileSys::Nup::PackDump(root, archive, options) == FileSys::Nup::PackResult::Success);
+    Put(root / "Base/RomFS/other.bin", "other");
+    REQUIRE(FileSys::Nup::PackDump(root, other, options) == FileSys::Nup::PackResult::Success);
+
+    FileSys::RealVfsFilesystem real;
+    const auto open = [&](const fs::path& path) {
+        return real.OpenFile(path.string(), FileSys::OpenMode::Read);
+    };
+    auto first = NupContainer::Open(open(archive));
+    REQUIRE(first->GetStatus() == Loader::ResultStatus::Success);
+    const NupContainer* const kept = first.get();
+    NupContainer::KeepParsed(std::move(first));
+
+    // Another container is parsed, and the kept one stays for its own file.
+    const auto unrelated = NupContainer::Open(open(other));
+    REQUIRE(unrelated.get() != kept);
+    REQUIRE(unrelated->GetStatus() == Loader::ResultStatus::Success);
+
+    const auto taken = NupContainer::Open(open(archive));
+    REQUIRE(taken.get() == kept);
+    const auto again = NupContainer::Open(open(archive));
+    REQUIRE(again.get() != kept);
+    REQUIRE(again->GetStatus() == Loader::ResultStatus::Success);
+}
+
 TEST_CASE("NUP reads zstd members above the memory cache through a temporary file", "[nup]") {
     TempDir t;
     const auto root = t.path / "Game";

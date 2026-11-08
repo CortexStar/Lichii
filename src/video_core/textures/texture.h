@@ -295,6 +295,12 @@ struct TICEntry {
     constexpr bool IsBuffer() const {
         return header_version == TICHeaderVersion::OneDBuffer;
     }
+
+    /// Format 0 describes no texture: NVIDIA's texture header classes define no
+    /// COMPONENTS_SIZES value 0 (R32_G32_B32_A32 is 1).
+    constexpr bool HasNoFormat() const {
+        return format.Value() == TextureFormat{};
+    }
 };
 static_assert(sizeof(TICEntry) == 0x20, "TICEntry has wrong size");
 

@@ -114,6 +114,10 @@ public:
     inline bool IsVoid() const noexcept {
         return GetType() == IR::Type::Void;
     }
+    /// The producing instruction of a non-immediate argument.
+    inline IR::Inst* GetInst() const noexcept {
+        return value.GetInst();
+    }
 
     bool FitsInImmediateU32() const noexcept;
     bool FitsInImmediateS32() const noexcept;
@@ -144,7 +148,10 @@ class RegAlloc final {
 public:
     using ArgumentInfo = std::array<Argument, IR::max_arg_count>;
     RegAlloc() noexcept = default;
-    RegAlloc(std::bitset<32> gpr_order, std::bitset<32> xmm_order) noexcept;
+    std::optional<s32> SpillJitOffset() const noexcept { return spill_jit_offset; }
+    /// spill_jit_offset: the spill slots are at [ABI_JIT_PTR + offset] instead of on the stack.
+    RegAlloc(std::bitset<32> gpr_order, std::bitset<32> xmm_order, bool spill_to_gpr = false, bool scratch_copy = false,
+             std::optional<s32> spill_jit_offset = std::nullopt) noexcept;
 
     ArgumentInfo GetArgumentInfo(const IR::Inst* inst) noexcept;
     void RegisterPseudoOperation(const IR::Inst* inst) noexcept;
@@ -257,6 +264,9 @@ private:
     std::bitset<32> gpr_order;
     std::bitset<32> xmm_order;
     size_t reserved_stack_space = 0;
+    bool spill_to_gpr = false;
+    bool scratch_copy = false;
+    std::optional<s32> spill_jit_offset;
 };
 
 }  // namespace Dynarmic::Backend::X64
