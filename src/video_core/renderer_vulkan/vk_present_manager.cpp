@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <utility>
 
 #include "common/display_hdr.h"
@@ -379,8 +380,15 @@ void PresentManager::PresentThread(std::stop_token token) {
     Common::SetCurrentThreadToGamesMmcss();
     std::stop_callback wake_on_stop{token, [this] { cadence_wake.Set(); }};
     while (!token.stop_requested()) {
-        const u32 rate = PresentCadenceRate(swapchain.GetFrameCap(),
-                                            guest_present_rate.load(std::memory_order_relaxed));
+        // EXPERIMENT (do not merge): EDEN_NX2_PRESENT_CADENCE=0 presents every frame at once.
+        static const bool cadence_off = [] {
+            const char* value = std::getenv("EDEN_NX2_PRESENT_CADENCE");
+            return value != nullptr && value[0] == '0';
+        }();
+        const u32 rate = cadence_off ? 0
+                                     : PresentCadenceRate(
+                                           swapchain.GetFrameCap(),
+                                           guest_present_rate.load(std::memory_order_relaxed));
         if (rate != 0) {
             PresentOnTick(token, rate);
             continue;
