@@ -205,6 +205,36 @@ void OotMotionVertex(EmitContext& ctx) {
     ctx.AddLabel(merge_label);
 }
 
+// The vertex's clip position from the stage buffer's position lines, which the mesh epilogue
+// copies to gl_Position. A mesh shader must not read its outputs
+// (VUID-StandaloneSpirv-MeshEXT-07107; AMD's compiler crashed on that). A component the program
+// does not write reads as 0 (w as 1).
+Id OotMeshPosition(EmitContext& ctx, Id vertex) {
+    const Id u32_type{ctx.U32[1]};
+    const auto& lines{ctx.mesh_info.vertex_lines};
+    const u32 num_lines{static_cast<u32>(lines.size())};
+    const Id group{ctx.OpShiftRightLogical(u32_type, vertex, ctx.Const(5U))};
+    const Id lane{ctx.OpBitwiseAnd(u32_type, vertex, ctx.Const(31U))};
+    const Id first{
+        ctx.OpIAdd(u32_type, ctx.OpIMul(u32_type, group, ctx.Const(num_lines * 32)), lane)};
+    std::array<Id, 4> components;
+    for (u32 element = 0; element < 4; ++element) {
+        const u32 attribute{static_cast<u32>(IR::Attribute::PositionX) + element};
+        const auto line{std::ranges::find(lines, attribute)};
+        if (line == lines.end()) {
+            components[element] = ctx.Const(element == 3 ? 1.0f : 0.0f);
+            continue;
+        }
+        const u32 offset{static_cast<u32>(line - lines.begin()) * 32};
+        components[element] = ctx.OpBitcast(
+            ctx.F32[1], ctx.OpLoad(u32_type, ctx.OpAccessChain(
+                                                 ctx.mesh_shared_u32, ctx.mesh_attributes,
+                                                 ctx.OpIAdd(u32_type, first, ctx.Const(offset)))));
+    }
+    return ctx.OpCompositeConstruct(ctx.F32[4], components[0], components[1], components[2],
+                                    components[3]);
+}
+
 } // Anonymous namespace
 
 // Mesh stage: as OotMotionVertex for one vertex of the workgroup. Each vertex has two history
@@ -216,8 +246,7 @@ void OotMotionVertex(EmitContext& ctx) {
 void EmitOotMotionMeshVertex(EmitContext& ctx, Id vertex) {
     const Id u32_type{ctx.U32[1]};
     const Id vec4_output{ctx.TypePointer(spv::StorageClass::Output, ctx.F32[4])};
-    const Id position{
-        ctx.OpLoad(ctx.F32[4], ctx.OpAccessChain(vec4_output, ctx.output_position, vertex))};
+    const Id position{OotMeshPosition(ctx, vertex)};
     const Id current_pointer{ctx.OpAccessChain(vec4_output, ctx.oot_motion.current, vertex)};
     const Id previous_pointer{ctx.OpAccessChain(vec4_output, ctx.oot_motion.previous, vertex)};
     ctx.OpStore(current_pointer, position);
@@ -446,8 +475,7 @@ void EmitOotMotionMeshSnapshot(EmitContext& ctx) {
 void EmitOotMotionMeshShadowVertex(EmitContext& ctx, Id vertex) {
     const Id u32_type{ctx.U32[1]};
     const Id vec4_output{ctx.TypePointer(spv::StorageClass::Output, ctx.F32[4])};
-    const Id position{
-        ctx.OpLoad(ctx.F32[4], ctx.OpAccessChain(vec4_output, ctx.output_position, vertex))};
+    const Id position{OotMeshPosition(ctx, vertex)};
     ctx.OpStore(ctx.OpAccessChain(vec4_output, ctx.oot_motion.current, vertex), position);
     const Id first{ctx.OpShiftLeftLogical(u32_type, vertex, ctx.Const(2U))};
     std::array<Id, 4> components;
