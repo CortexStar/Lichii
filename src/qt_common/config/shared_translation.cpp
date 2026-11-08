@@ -205,8 +205,8 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Specifies how videos should be decoded.\nIt can either use the CPU or the GPU for "
               "decoding, or perform no decoding at all (black screen on videos).\n"
               "In most cases, GPU decoding provides the best performance."));
-    INSERT(Settings, experimental_pr777_optimizations,
-           tr("Experimental rendering optimizations (#777)"),
+    INSERT(Settings, experimental_texture_binding_optimizations,
+           tr("Experimental texture binding optimizations"),
            tr("Enables sampled texture descriptor reuse and batched texture-handle reads in Vulkan.\n"
               "May improve CPU-limited scenes. Change this option before starting the game."));
     INSERT(Settings, accelerate_astc, tr("ASTC Decoding Method:"),

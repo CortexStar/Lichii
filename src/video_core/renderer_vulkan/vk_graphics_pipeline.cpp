@@ -578,7 +578,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         for (const auto& desc : info.texture_descriptors) {
             VideoCommon::BatchedHandles::Cursor batch{
                 *gpu_memory, desc, cbufs,
-                Settings::values.experimental_pr777_optimizations.GetValue()};
+                Settings::values.experimental_texture_binding_optimizations.GetValue()};
             for (u32 index = 0; index < desc.count; ++index) {
                 const bool storage_pointer = VideoCommon::HandleIsStoragePointer(info, desc, index);
                 const auto raw = storage_pointer ? std::optional<u32>{} : batch.Read(index);
@@ -758,7 +758,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             Profile::Scope scope{Profile::Zone::PushDescriptors};
             PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
                                  rescaling, samplers_it, views_it,
-                                 Settings::values.experimental_pr777_optimizations.GetValue() &&
+                                 Settings::values.experimental_texture_binding_optimizations.GetValue() &&
                                          !VideoCommon::StableSampled::FailedValidation().load(
                                              std::memory_order_relaxed) &&
                                          num_textures >= 256 && !mesh_emulation &&
