@@ -1430,7 +1430,6 @@ private:
         VkPhysicalDeviceShaderFloat8FeaturesEXT float8{};
         VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR derivatives{};
         VkPhysicalDeviceShaderIntegerDotProductFeatures integer_dot{};
-        VkPhysicalDeviceDynamicRenderingFeatures dynamic_rendering{};
     };
     /// AMD's FSR runtime: its device features and the frame generation swapchain's queues.
     void SetupAmdFfx(std::vector<VkDeviceQueueCreateInfo>& queue_cis,

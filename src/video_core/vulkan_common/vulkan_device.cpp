@@ -2081,8 +2081,6 @@ void Device::SetupAmdFfx(std::vector<VkDeviceQueueCreateInfo>& queue_cis,
         supported_extensions.contains(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
     const bool has_dot = vk13 || supported_extensions.contains(
                                      VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME);
-    const bool has_dynamic_rendering =
-        vk13 || supported_extensions.contains(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
     if (has_float8) {
         add(amd.float8, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT);
     }
@@ -2091,9 +2089,6 @@ void Device::SetupAmdFfx(std::vector<VkDeviceQueueCreateInfo>& queue_cis,
     }
     if (has_dot) {
         add(amd.integer_dot, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES);
-    }
-    if (has_dynamic_rendering) {
-        add(amd.dynamic_rendering, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES);
     }
     physical.GetFeatures2(query);
     std::string enabled;
@@ -2119,11 +2114,10 @@ void Device::SetupAmdFfx(std::vector<VkDeviceQueueCreateInfo>& queue_cis,
         chain(amd.integer_dot);
         note("shader_integer_dot_product");
     }
-    if (has_dynamic_rendering && amd.dynamic_rendering.dynamicRendering) {
-        if (!vk13) {
-            loaded_extensions.insert(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
-        }
-        chain(amd.dynamic_rendering);
+    // Dynamic rendering is in the device's own feature chain (FOR_EACH_VK_FEATURE_1_3, its
+    // extension loaded below Vulkan 1.3): a second VkPhysicalDeviceDynamicRenderingFeatures
+    // here would repeat its sType in vkCreateDevice's chain (VUID-VkDeviceCreateInfo-sType-unique).
+    if (features.dynamic_rendering.dynamicRendering) {
         note("dynamic_rendering");
     }
     LOG_INFO(Render_Vulkan, "AMD FSR: device features for AMD's runtime: {}",
