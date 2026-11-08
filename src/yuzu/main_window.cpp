@@ -5552,14 +5552,13 @@ void MainWindow::LoadTranslation() {
     if (loaded) {
         qApp->installTranslator(&translator);
     } else if (!language.empty() && language != "en") {
-        // A language this build has no translation for: show English, which the language list
-        // then selects. English works without its file (en.qm only holds plurals, and builds
-        // without translations lack it), so it gets no warning. <System> stays selected when the
-        // system's language has no translation, so the UI follows the system again once it
-        // changes to a translated one.
-        LOG_WARNING(Frontend, "No UI translation for \"{}\" in this build, using English",
+        // A language this build has no translation for shows English, but the setting is kept
+        // (the language list marks it as missing), so a build that has the translation shows it
+        // again. Likewise <System> stays when the system's language has no translation. English
+        // works without its file (en.qm only holds plurals, and builds without translations lack
+        // it), so it gets no warning.
+        LOG_WARNING(Frontend, "No UI translation for \"{}\" in this build, showing English",
                     language);
-        UISettings::values.language = std::string("en");
     }
 }
 
