@@ -47,6 +47,7 @@
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/texture_cache/pending_download.h"
+#include "video_core/texture_cache/pool_mirror.h"
 #include "video_core/texture_cache/pool_page_watch.h"
 #include "video_core/texture_cache/render_targets.h"
 #include "video_core/texture_cache/stale_pages.h"
@@ -143,6 +144,20 @@ struct AsyncDecodeContext {
     bool cancelled{}; ///< The image was deleted meanwhile: drop the result (GPU thread only).
 };
 
+/// What the descriptor heap mirroring one channel's graphics or compute pools holds.
+struct PoolMirrorState {
+    PoolMirror::Layout layout;
+    PoolMirror::HeapPageVersions image_pages;
+    PoolMirror::HeapPageVersions sampler_pages;
+    PoolMirror::HeapPageVersions meta_pages;
+    std::vector<u32> meta; ///< Per TIC
+    /// Per (class * 2 + depth use): the sampler each TSC slot holds.
+    std::vector<std::vector<SamplerId>> samplers;
+    /// Sampler slots draws asked for since the last drain: (class, depth use, TSC).
+    std::vector<std::array<u32, 3>> wanted_samplers;
+    u64 version{};
+};
+
 using TextureCacheGPUMap = ::Common::unordered_map<u64, std::vector<ImageId>, Common::IdentityHash<u64>>;
 
 class TextureCacheChannelInfo : public ChannelInfo {
@@ -162,6 +177,9 @@ public:
     // rehashes, and never removes the new entry: its id is still 0) and never inserts.
     ::Common::unordered_map<TICEntry, ImageViewId> image_views;
     ::Common::unordered_map<TSCEntry, SamplerId> samplers;
+
+    PoolMirrorState graphics_mirror;
+    PoolMirrorState compute_mirror;
 
     TextureCacheGPUMap* gpu_page_table = nullptr;
     TextureCacheGPUMap* sparse_page_table = nullptr;
@@ -544,6 +562,78 @@ public:
         return pool_generation;
     }
 
+    using MirrorUpdate = PoolMirror::Update<ImageViewId, SamplerId>;
+
+    /// A texture handle a draw reads, resolved as the pool-mirroring heap holds it.
+    struct ResolvedHandle {
+        u32 tic; ///< After the Switch 2 header-offset rule (TextureHeaderIndex)
+        u32 tsc;
+        u32 meta; ///< PoolMirror::Meta word of the TIC
+        /// Logical image slot of type 0; type t is at + t * Layout::tic_stride. ~0 when the TIC
+        /// is past the pool.
+        u32 image_slot;
+        /// Logical sampler slot for a plain and a depth-compare use. ~0 when the entry has no
+        /// view or the TSC is past the pool.
+        std::array<u32, 2> sampler_slots;
+    };
+
+    /**
+     * Resolves the texture handles a draw reads for the heap mirroring the current channel's
+     * pools: makes their entries resident (images are only made for entries draws reference)
+     * and asks for the sampler slots their classes need. Writes one ResolvedHandle per handle.
+     * @return True when the heap has updates to take before the draw.
+     */
+    bool ResolveForDraw(std::span<const u32> raw_handles, bool via_header_index, bool compute,
+                        std::span<ResolvedHandle> out);
+
+    /**
+     * Hands the heap's pending changes to func(const MirrorUpdate&), in order.
+     * @param draw_seq Sequence number of the last draw the backend recorded (page versions).
+     */
+    template <typename Func>
+    void TakeMirrorUpdates(bool compute, u64 draw_seq, Func&& func);
+
+    /// Moves whenever TakeMirrorUpdates hands over anything for the channel's heap.
+    [[nodiscard]] u64 MirrorVersion(bool compute) const noexcept {
+        return (compute ? channel_state->compute_mirror : channel_state->graphics_mirror).version;
+    }
+
+    /// Physical page holding a logical heap page now (PoolMirror::HeapPageVersions::Map).
+    [[nodiscard]] u32 MirrorPhysicalPage(bool compute, PoolMirror::Heap heap,
+                                         u32 logical_page) const noexcept {
+        const PoolMirrorState& mirror =
+            compute ? channel_state->compute_mirror : channel_state->graphics_mirror;
+        switch (heap) {
+        case PoolMirror::Heap::Image:
+            return mirror.image_pages.Map(logical_page);
+        case PoolMirror::Heap::Sampler:
+            return mirror.sampler_pages.Map(logical_page);
+        default:
+            return mirror.meta_pages.Map(logical_page);
+        }
+    }
+
+    [[nodiscard]] const PoolMirror::Layout& MirrorLayout(bool compute) const noexcept {
+        return (compute ? channel_state->compute_mirror : channel_state->graphics_mirror).layout;
+    }
+
+    [[nodiscard]] std::span<const u32> MirrorPageTable(bool compute,
+                                                       PoolMirror::Heap heap) const noexcept {
+        const PoolMirrorState& mirror =
+            compute ? channel_state->compute_mirror : channel_state->graphics_mirror;
+        switch (heap) {
+        case PoolMirror::Heap::Image:
+            return mirror.image_pages.Table();
+        case PoolMirror::Heap::Sampler:
+            return mirror.sampler_pages.Table();
+        default:
+            return mirror.meta_pages.Table();
+        }
+    }
+
+    /// The meta word of a view as the heap holds it (class, rescaled, depth-compare rules).
+    [[nodiscard]] u32 MirrorMeta(ImageViewId view_id);
+
     Common::SpinRecursiveMutex mutex;
 
 private:
@@ -629,6 +719,8 @@ private:
 
     /// The image's views are gone: the entries bound to them resolve again on their next read.
     void ForgetPoolRefs(ImageId image_id);
+
+    PoolMirror::SamplerClasses sampler_classes;
 
     /// A TIC entry bound to a view of an image (image_pool_refs).
     struct PoolRef {
