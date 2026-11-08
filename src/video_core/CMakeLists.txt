@@ -38,6 +38,8 @@ add_library(video_core STATIC
     delayed_destruction_ring.h
     dirty_flags.cpp
     dirty_flags.h
+    draw_class_stats.cpp
+    draw_class_stats.h
     dma_pusher.cpp
     dma_pusher.h
     engines/sw_blitter/blitter.cpp
