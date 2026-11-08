@@ -80,7 +80,12 @@ void Park([[maybe_unused]] const std::atomic<u64>& word, [[maybe_unused]] u64 se
 
 bool CanPark() {
 #if defined(__x86_64__) || defined(_M_X64)
-    return Common::g_cpu_caps.monitorx || Common::g_cpu_caps.waitpkg;
+    // EXPERIMENT (do not merge): EDEN_NX2_EXP_NO_PARK=1 keeps the PAUSE loops.
+    static const bool no_park = [] {
+        const char* const value = std::getenv("EDEN_NX2_EXP_NO_PARK");
+        return value != nullptr && value[0] == '1';
+    }();
+    return !no_park && (Common::g_cpu_caps.monitorx || Common::g_cpu_caps.waitpkg);
 #else
     return false;
 #endif

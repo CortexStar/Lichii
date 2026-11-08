@@ -3084,8 +3084,15 @@ auto BufferCache<P>::Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool 
             // Pages the CPU writes the lists of (GPU-written once, long before) stay synced, and
             // a list on none of the words GPU work wrote since the page was flushed is in guest
             // memory too: it waits for no copy.
+            // EXPERIMENT (do not merge): EDEN_NX2_EXP_LIST_WHOLE_PAGE=1 reads every list on a
+            // GPU-written page from its copy, as before.
+            static const bool whole_page = [] {
+                const char* const value = std::getenv("EDEN_NX2_EXP_LIST_WHOLE_PAGE");
+                return value != nullptr && value[0] == '1';
+            }();
             if (entry.synced_writes == entry.writes ||
-                (entry.flushed && !Nx2HasListWords(entry, offset, offset + out.size()))) {
+                (!whole_page && entry.flushed &&
+                 !Nx2HasListWords(entry, offset, offset + out.size()))) {
                 return Nx2ListRead::Synced;
             }
             if (!current(entry)) {
@@ -3129,7 +3136,12 @@ void BufferCache<P>::Nx2ReadListWords(const Nx2ListPage& entry, DAddr device_add
         for (u64 word = offset / 4; word < (end + 3) / 4 && all_gpu; ++word) {
             all_gpu = entry.gpu_words.test(static_cast<size_t>(word));
         }
-        if (all_gpu || !entry.flushed) {
+        // EXPERIMENT (do not merge): EDEN_NX2_EXP_LIST_WHOLE_PAGE=1.
+        static const bool whole_page = [] {
+            const char* const value = std::getenv("EDEN_NX2_EXP_LIST_WHOLE_PAGE");
+            return value != nullptr && value[0] == '1';
+        }();
+        if (all_gpu || !entry.flushed || whole_page) {
             std::memcpy(out.data(), copy + offset, out.size());
             return;
         }
