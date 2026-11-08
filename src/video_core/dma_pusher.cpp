@@ -625,8 +625,12 @@ DmaPusher::BackWrites DmaPusher::FrontBackWrites(Engines::EngineInterface& engin
         writes.cause = VideoCommon::UnboundedCause::Maxwell3DBack;
         break;
     case Engines::EngineTypes::KeplerCompute: {
-        // Dispatches write wherever their shaders store.
         auto& compute = static_cast<Engines::KeplerCompute&>(engine);
+        if (compute.FrontRunsMacros()) {
+            // It notes its own, per launch and write (KeplerCompute::FrontNoteWrites).
+            break;
+        }
+        // Dispatches write wherever their shaders store.
         writes.unbounded = compute.MayWriteMemory(method);
         writes.writer = writes.unbounded;
         writes.cause = method >= MacroRegistersStart ? VideoCommon::UnboundedCause::ComputeMacro

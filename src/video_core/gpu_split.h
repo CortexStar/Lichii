@@ -443,6 +443,15 @@ public:
             unbounded_writer_position = write_position;
         }
     }
+    /// A compute dispatch was just sent. The front end runs MME DMA reads in method order
+    /// without waiting for earlier grids (barriers come as WFIs, which count as unbounded), so
+    /// dispatches only hold semaphore acquires and the command list reads waiting for writers.
+    void NoteDispatch() {
+        if (front_macros) {
+            acquire_position = write_position;
+            unbounded_writer_position = write_position;
+        }
+    }
     /// Unbounded writes that write no guest memory themselves on the back: barriers, and
     /// dispatches, whose shader stores go to the host GPU's copies.
     [[nodiscard]] static constexpr bool BarrierOnly(UnboundedCause cause) {
