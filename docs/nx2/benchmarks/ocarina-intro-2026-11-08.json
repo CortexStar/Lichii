@@ -1,0 +1,244 @@
+{
+  "date": "2026-11-08",
+  "game": "The Legend of Zelda: Ocarina of Time",
+  "route": "Select New Game, watch the unskipped intro until player control in Links house",
+  "hardware": {
+    "cpu": "AMD Ryzen 7 9800X3D",
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    "driver": "615.78.08",
+    "os": "Linux 7.3.1-1-cachyos"
+  },
+  "build": {
+    "revision": "6e83fcede3f2a7e54c049c1a2277d8f4c0a7cabf",
+    "type": "Release, non-PGO",
+    "sha256": "bc68b23e00c3fe05d76eec6613c02054483cdbe716b08838e44c29e89b16691c",
+    "same_executable_for_all_arms": true
+  },
+  "seed": {
+    "build": "6e83fcede3",
+    "sha256": {
+      "lichii": "bc68b23e00c3fe05d76eec6613c02054483cdbe716b08838e44c29e89b16691c",
+      "vulkan.fork-v54.bin": "c9f9ea169c2c2f3e673800c4b49b0d0c6c348083945c75fd10bb51785b590690",
+      "vulkan_used.fork-v54.bin": "1a6f6da2c982a3ecabd7e2f40e8bb56d23b179b8cba8215c68c24e7f1f462cfe",
+      "warm-compute.bin": "a254598d97502ac5c43515b90b60f2368d6a4ca721bbd00e4321a8b91e4e9d2d",
+      "warm-graphics.bin": "94384a3c77ebcaea54e75b83f6bed3e37258a71ae304e7d604654d456811e301",
+      "warm-compute.count": "ed93b717f8cc10fc0e927cf5924a305744637b0809e9338d6dbb53c5cc792805",
+      "warm-graphics.count": "e078717cac0d964f4188ffbd994252dcbd6929152ab3f063830df4e5967425e5",
+      "warm-mesh.bin": "b71198ad15a16559b80750eafc2ca99df261c2ca4617f7d5d4509aea6f93c460",
+      "warm-mesh.count": "7cd3628ccebc4dddeaf36b7d9d4458a988dae203d8852619052515e4e29aae2c"
+    },
+    "seed": "Frozen historical runtime cache; 6539 records, 938 mesh templates. No pilot data reused.",
+    "saves": "Fresh title save in every arm; all NAND seed file hashes identical.",
+    "driver_cache": "Empty and separate in every measured arm.",
+    "measurement_tools_sha256": {
+      "measure_stutters.py": "dcf5cdb1b3a8eb91bbcf2e8f7df22e52873945f9e1bf2fffb7b43202ea113633",
+      "debug_mcp.py": "3a386c748db6d57c44b4051a8cdd0b6ccabd0ad855fc1aa1dbd193009534dc2f"
+    }
+  },
+  "method": {
+    "repetitions_per_configuration": 1,
+    "order": [
+      "before",
+      "no-mesh",
+      "after"
+    ],
+    "saves": "No title save at start; identical initial NAND file hashes checked across all three profiles.",
+    "runtime_cache_seed_pipelines": 6539,
+    "runtime_cache_seed_mesh_templates": 938,
+    "driver_cache_seed": "Empty, separate NVIDIA cache directory in each arm; no measured or pilot cache reused.",
+    "recipes": "Regenerated with the current builder using only the frozen historical runtime seed and game archives; identical in both optimized arms.",
+    "draw_policy": "Wait; no skipped draws",
+    "warmup": "Always at boot; 8 compute/graphics workers, one mesh worker; completed before timing.",
+    "title_prefix": "Plus for 6 presents starting at present 2439, then 3305 neutral presents; one title screenshot before the timed New Game press.",
+    "sequence": {
+      "steps": [
+        {
+          "buttons": [
+            "A"
+          ],
+          "frames": 6
+        },
+        {
+          "frames": 35994
+        }
+      ],
+      "timeout_s": 300
+    },
+    "chunk_presents": 120,
+    "start": "First present of the A press selecting New Game.",
+    "stop": "First observed creation of slot_00/progress.sav; checked after each 120-present chunk; final endpoint screenshot and subsequent timing read included.",
+    "endpoint_validation": "All three endpoint images show three hearts and Move/Change View prompts with Link standing in his house. A short left-stick movement after each timed run visibly turns Link.",
+    "measurement": "Continuous guest-present intervals, including gaps between client requests; not display scanout or GPU execution time.",
+    "integrity": "Every sample rejects truncated or incomplete timestamp windows; complete interval count matches the endpoint cursor difference.",
+    "limitations": [
+      "Single pass per configuration, fixed order; no confidence interval or variance estimate.",
+      "New game with a historical runtime-cache seed, not a completely cold first-ever launch.",
+      "Baseline changes the full GPL/no-inline/preload/archive package in the same patched executable; it is not an unmodified release binary.",
+      "Only the mesh checkbox differs between the two optimized configurations.",
+      "Guest-present stalls include loading, emulation and other work; they do not establish shader compilation as the cause.",
+      "Checkpoint polling is bounded by 120 presents, not a fixed wall time; final capture overhead is retained.",
+      "Title request/screenshot gaps add neutral presents; title prehistory is not guaranteed pixel-identical.",
+      "60 Hz excess time is descriptive and can include intentional cutscene cadence.",
+      "Cold preparation is separate from intro timings and does not predict warm-cache startup.",
+      "Only the listed NVIDIA/Linux configuration was tested."
+    ]
+  },
+  "configurations": {
+    "before": {
+      "gpl": false,
+      "calls_not_inlined": false,
+      "preload_all": false,
+      "archive_warmup": false,
+      "use_mesh_shader_warmup": false,
+      "mesh_recipe_file_present": false,
+      "mesh_candidates": 0,
+      "cold_archive_warmup_log_summary": {
+        "compute": null,
+        "graphics": null,
+        "mesh": null
+      },
+      "cold_archive_warmup_seconds": {
+        "compute": 0,
+        "graphics": 0,
+        "mesh": 0
+      }
+    },
+    "no-mesh": {
+      "gpl": true,
+      "calls_not_inlined": true,
+      "preload_all": true,
+      "archive_warmup": true,
+      "use_mesh_shader_warmup": false,
+      "mesh_recipe_file_present": true,
+      "mesh_candidates": 512,
+      "cold_archive_warmup_log_summary": {
+        "compute": "Nx2Perf compute_warm: finished, 3434 built, 0 failed, 0 not reached, 23 s",
+        "graphics": "Nx2Perf graphics_warm: finished, 36200 built, 602 failed, 201 s",
+        "mesh": null
+      },
+      "cold_archive_warmup_seconds": {
+        "compute": 23.0,
+        "graphics": 201.0,
+        "mesh": 0
+      }
+    },
+    "after": {
+      "gpl": true,
+      "calls_not_inlined": true,
+      "preload_all": true,
+      "archive_warmup": true,
+      "use_mesh_shader_warmup": true,
+      "mesh_recipe_file_present": true,
+      "mesh_candidates": 512,
+      "cold_archive_warmup_log_summary": {
+        "compute": "Nx2Perf compute_warm: finished, 3434 built, 0 failed, 0 not reached, 22 s",
+        "graphics": "Nx2Perf graphics_warm: finished, 36200 built, 602 failed, 202 s",
+        "mesh": "Nx2Perf mesh_warm: finished, 512 built, 0 rejected, 0 driver failed, candidate_build_ms=84838.8, 85.4 s, complete=true cache_ready=true cancelled=false"
+      },
+      "cold_archive_warmup_seconds": {
+        "compute": 22.0,
+        "graphics": 202.0,
+        "mesh": 85.4
+      }
+    }
+  },
+  "results": [
+    {
+      "configuration": "before",
+      "frames": 22028,
+      "duration_ms": 371816.788198,
+      "mean_ms": 16.879280379426184,
+      "fps": 59.24423183460356,
+      "p50_ms": 16.666028,
+      "p90_ms": 16.9045117,
+      "p99_ms": 19.722480639999997,
+      "min_ms": 2.587313,
+      "max_ms": 929.776235,
+      "stutters": 74,
+      "truncated": false,
+      "before_present": 5750,
+      "after_present": 27779,
+      "p99_9_ms": 70.56719729300077,
+      "over_ms": {
+        "33.333333": 74,
+        "50": 36,
+        "100": 14,
+        "250": 2,
+        "500": 1
+      },
+      "over_100ms_per_minute": 2.259177171829807,
+      "excess_over_60hz_ms": 8138.5055196666535,
+      "requested_input_presents_executed": 21840,
+      "endpoint_capture_included": true,
+      "checkpoint_reached": true,
+      "hud_and_movement_verified": true,
+      "all_chunk_bounds_valid": true,
+      "private_raw_result_sha256": "28906ca4afe81fb1027b18c318ab1bbe9ddf0105828274ab93a4770326f5fd35"
+    },
+    {
+      "configuration": "no-mesh",
+      "frames": 20697,
+      "duration_ms": 372427.337246,
+      "mean_ms": 17.99426666888921,
+      "fps": 55.573256660074286,
+      "p50_ms": 16.685986,
+      "p90_ms": 21.765303000000003,
+      "p99_ms": 34.50071160000002,
+      "min_ms": 6.183853,
+      "max_ms": 701.563495,
+      "stutters": 303,
+      "truncated": false,
+      "before_present": 5768,
+      "after_present": 26466,
+      "p99_9_ms": 65.96137464800384,
+      "over_ms": {
+        "33.333333": 308,
+        "50": 31,
+        "100": 12,
+        "250": 2,
+        "500": 1
+      },
+      "over_100ms_per_minute": 1.933263023397279,
+      "excess_over_60hz_ms": 31075.846690999984,
+      "requested_input_presents_executed": 20520,
+      "endpoint_capture_included": true,
+      "checkpoint_reached": true,
+      "hud_and_movement_verified": true,
+      "all_chunk_bounds_valid": true,
+      "private_raw_result_sha256": "3ff7086aea5f06ad7476e04100dbef7d0ceb25a4af730fa7fa2c427be25d50c4"
+    },
+    {
+      "configuration": "after",
+      "frames": 21060,
+      "duration_ms": 371229.669661,
+      "mean_ms": 17.62723977497626,
+      "fps": 56.730379388133485,
+      "p50_ms": 16.680211,
+      "p90_ms": 20.031069000000002,
+      "p99_ms": 31.9103215,
+      "min_ms": 4.460826,
+      "max_ms": 499.859935,
+      "stutters": 110,
+      "truncated": false,
+      "before_present": 5761,
+      "after_present": 26822,
+      "p99_9_ms": 61.076678763019885,
+      "over_ms": {
+        "33.333333": 110,
+        "50": 24,
+        "100": 12,
+        "250": 2,
+        "500": 0
+      },
+      "over_100ms_per_minute": 1.9395001500216578,
+      "excess_over_60hz_ms": 24973.73885333332,
+      "requested_input_presents_executed": 20880,
+      "endpoint_capture_included": true,
+      "checkpoint_reached": true,
+      "hud_and_movement_verified": true,
+      "all_chunk_bounds_valid": true,
+      "private_raw_result_sha256": "758bf357b5418472535a95a29842fc04858d1e44ac0c81033a983cc9e6e62b50"
+    }
+  ],
+  "interpretation": "The intro results are mixed: full warm-up reduced the worst interval from 929.8 to 499.9 ms (46.2%), and >100 ms intervals from 14 to 12, but p99 worsened from 19.7 to 31.9 ms and mean guest-present rate fell from 59.24 to 56.73 FPS. Compared with mesh disabled, enabling mesh reduced the worst interval from 701.6 to 499.9 ms and p99 from 34.5 to 31.9 ms, with the same 12 intervals >100 ms. These single passes suggest a worst-stall benefit, not an across-the-board performance improvement or a statistically established mesh benefit. Both optimized configurations showed worse middle-intro pacing than baseline; the cause is not established by these measurements."
+}

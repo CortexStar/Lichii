@@ -276,8 +276,8 @@ class Emulator:
         self.sock = None
         self.buffer = b""
 
-    def call(self, method, params, timeout):
-        for attempt in (0, 1):
+    def call(self, method, params, timeout, retry_disconnect=True):
+        for attempt in range(2 if retry_disconnect else 1):
             try:
                 if self.sock is None:
                     self.sock = socket.create_connection((self.host, self.port), timeout=5)
@@ -304,7 +304,7 @@ class Emulator:
             except OSError as error:
                 # A stale connection from an earlier boot: reconnect once.
                 self.close()
-                if attempt == 1:
+                if not retry_disconnect or attempt == 1:
                     raise EmulatorError(str(error)) from error
         if "error" in response:
             raise EmulatorError(response["error"])

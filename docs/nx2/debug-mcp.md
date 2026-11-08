@@ -176,10 +176,24 @@ report boot preparation separately from gameplay and distinguish guest presents 
 `tools/nx2/measure_stutters.py sequence.json result.json --server 127.0.0.1:6545`
 automates replay and collection, including counts above fixed 50/100/250/500 ms thresholds.
 The sequence file is an `input_sequence` params object. It does not reset saves or caches.
-An [Ocarina cold-driver comparison](benchmarks/ocarina-prewarm-2026-11-08.json) records the
-settings, input sequences and aggregate results for three configurations. It is one pass per
-configuration; the full package improved camera stalls, but that route did not demonstrate
-an additional camera benefit from mesh predictions alone.
+Long sequences (up to 36,000 requested presents) are split into bounded requests; the recorder
+overlaps one timestamp to retain intervals across request boundaries and computes percentiles
+from the complete series. Request gaps can add neutral frames. Held inputs longer than a chunk
+are rejected rather than silently released and pressed again.
+Adjacent active steps can still be separated by a neutral request gap; use neutral waits at
+chunk boundaries, or a single request when uninterrupted holds across steps are required.
+`--chunk-frames 120 --stop-file <new-save-file> --endpoint-image endpoint.png` can stop at a
+previously absent checkpoint file and capture one endpoint image. File creation alone does not
+prove player control: verify the HUD and then test movement outside the measurement. The final
+capture/request cost remains in the measured series. A wall-time limit and exact interval-count
+checks reject incomplete runs; input requests are never automatically replayed after a disconnect.
+The primary [Ocarina intro benchmark](benchmarks/ocarina-intro-2026-11-08.json) runs from
+New Game through the unskipped intro to verified player control. It records three configurations
+with fresh saves, a shared historical runtime-cache seed, and separate empty NVIDIA caches.
+The [timing chart](benchmarks/ocarina-intro-2026-11-08.png) shows the complete interval series;
+compare both long stalls and overall pacing. These are single passes, not variance estimates.
+The earlier [camera-sweep comparison](benchmarks/ocarina-prewarm-2026-11-08.json) remains as
+historical evidence on an older build and a shorter route.
 
 **`screenshot`** `{height?, save?, timeout_s?}`. It requests a 16:9 layout from
 `Layout::DefaultFrameLayout`, and the renderer blits the presented framebuffers into it. The
