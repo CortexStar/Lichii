@@ -756,7 +756,8 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         extensions.buffer_device_address = false;
     } else
 #endif
-    if (!extensions.descriptor_buffer) {
+        if (!extensions.descriptor_buffer && !features.buffer_device_address.bufferDeviceAddress) {
+        // Kept whenever the device has it: the GPU page table reaches storage by device address.
         RemoveExtensionFeature(extensions.buffer_device_address, features.buffer_device_address,
                                VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
     }

@@ -630,6 +630,17 @@ FN_MAX_LIMIT_LIST
     }
 
     /// Returns true if the device supports buffer device address.
+    /// Shaders can reach storage and global memory through the GPU page table
+    /// (VideoCommon::GpuPageTable): buffer device addresses, 64-bit integers and atomics, and
+    /// 8/16-bit storage access (without them the backend emulates small stores with storage
+    /// buffer loops that need bound buffers).
+    bool SupportsGpuPageTable() const {
+        return IsBufferDeviceAddressSupported() && IsShaderInt64Supported() &&
+               IsExtShaderAtomicInt64Supported() && IsDescriptorAliasingSupported() &&
+               IsInt8Supported() && IsStorageBuffer8BitAccessSupported() &&
+               IsShaderInt16Supported() && IsStorageBuffer16BitAccessSupported();
+    }
+
     bool IsBufferDeviceAddressSupported() const {
         return extensions.buffer_device_address;
     }

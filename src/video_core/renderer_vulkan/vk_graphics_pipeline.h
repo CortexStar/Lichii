@@ -395,6 +395,8 @@ private:
     bool fragment_has_color0_output{};
     u32 color_output_mask{};
     bool writes_storage{};
+    bool uses_page_table{};   ///< a stage reaches storage through the GPU page table
+    u64 page_table_address{}; ///< the page table of the draw being configured
 
     /// Graphics pipeline libraries: one descriptor set per stage (set index =
     /// stage index), the shader libraries, and this pipeline's own vertex input and fragment

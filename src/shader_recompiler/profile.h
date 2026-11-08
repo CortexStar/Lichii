@@ -47,6 +47,10 @@ struct Profile {
     bool support_typeless_image_loads{};
     bool support_demote_to_helper_invocation{};
     bool support_int64_atomics{};
+    /// Storage buffers and global memory are reached by device address through the GPU page table
+    /// (VideoCommon::GpuPageTable) instead of descriptors. Programs flagged
+    /// Info::storage_by_address use it.
+    bool gpu_page_table{};
     bool support_shared_int64_atomics{};
     bool support_derivative_control{};
     bool support_geometry_shader_passthrough{};

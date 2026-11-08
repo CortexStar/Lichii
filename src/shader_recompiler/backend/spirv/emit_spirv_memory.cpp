@@ -36,6 +36,11 @@ Id StoragePointer(EmitContext& ctx, const IR::Value& binding, const IR::Value& o
     if (!binding.IsImmediate()) {
         throw NotImplementedException("Dynamic storage buffer indexing");
     }
+    if (ctx.storage_by_address) {
+        const u32 bias{index_offset * static_cast<u32>(element_size)};
+        return ctx.PageTablePointer(type_def.element,
+                                    ctx.StorageAddress(binding.U32(), ctx.Def(offset), bias));
+    }
     const Id ssbo{ctx.ssbos[binding.U32()].*member_ptr};
     const Id index{StorageIndex(ctx, offset, element_size, index_offset)};
     return ctx.OpAccessChain(type_def.element, ssbo, ctx.u32_zero_value, index);
@@ -46,6 +51,9 @@ Id LoadStorage(EmitContext& ctx, const IR::Value& binding, const IR::Value& offs
                Id StorageDefinitions::*member_ptr, u32 index_offset = 0) {
     const Id pointer{
         StoragePointer(ctx, binding, offset, type_def, element_size, member_ptr, index_offset)};
+    if (ctx.storage_by_address) {
+        return ctx.LoadByAddress(result_type, pointer, static_cast<u32>(element_size));
+    }
     return ctx.OpLoad(result_type, pointer);
 }
 
@@ -60,6 +68,10 @@ void WriteStorage(EmitContext& ctx, const IR::Value& binding, const IR::Value& o
                   Id StorageDefinitions::*member_ptr, u32 index_offset = 0) {
     const Id pointer{
         StoragePointer(ctx, binding, offset, type_def, element_size, member_ptr, index_offset)};
+    if (ctx.storage_by_address) {
+        ctx.StoreByAddress(pointer, value, static_cast<u32>(element_size));
+        return;
+    }
     ctx.OpStore(pointer, value);
 }
 

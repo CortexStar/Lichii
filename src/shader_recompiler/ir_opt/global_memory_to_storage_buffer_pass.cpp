@@ -2186,6 +2186,10 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
 
 size_t StorageBufferLimit(const HostTranslateInfo& host_info) {
     size_t limit{Info::MAX_SSBOS};
+    if (host_info.gpu_page_table) {
+        // Nothing is bound: the descriptors only name ranges to keep resident.
+        return limit;
+    }
     for (const u32 device_limit : {host_info.max_per_stage_descriptor_storage_buffers,
                                    host_info.max_descriptor_set_storage_buffers}) {
         if (device_limit != 0) {

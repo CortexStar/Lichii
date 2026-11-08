@@ -28,7 +28,6 @@
 #include <boost/container/small_vector.hpp>
 
 #include "common/common_types.h"
-#include "common/spin_recursive_mutex.h"
 #include "common/div_ceil.h"
 #include "common/literals.h"
 #include "common/lru_cache.h"
@@ -36,6 +35,7 @@
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/slot_vector.h"
+#include "common/spin_recursive_mutex.h"
 #include "shader_recompiler/shader_info.h"
 #include "video_core/buffer_cache/buffer_base.h"
 #include "video_core/buffer_cache/nx2_bufcache.h"
@@ -45,9 +45,9 @@
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/delayed_destruction_ring.h"
 #include "video_core/dirty_flags.h"
-#include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/gpu_page_table.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_download_trace.h"
@@ -328,6 +328,23 @@ public:
     void SetComputeUniformBufferState(u32 mask, const ComputeUniformBufferSizes* sizes);
 
     void UnbindGraphicsStorageBuffers(size_t stage);
+
+    /// GPU page table: whether graphics stage `stage` reaches its storage buffers and global
+    /// memory by device address (Shader::Info::storage_by_address). Its storage bindings are then
+    /// made resident in the page table instead of bound.
+    void SetStorageByAddress(size_t stage, bool by_address) {
+        graphics_storage_by_address[stage] = by_address;
+    }
+
+    /// GPU page table: the same for the compute program of the next dispatch.
+    void SetComputeStorageByAddress(bool by_address) {
+        compute_storage_by_address = by_address;
+    }
+
+    /// The device address of the current address space's page table, with the entries made
+    /// resident so far uploaded in command order (call it after binding, before recording).
+    /// 0 without page table support.
+    [[nodiscard]] u64 PageTableAddress();
 
     bool BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
                                    bool is_written, u32 indirect_offset = ~0U);
@@ -1087,6 +1104,45 @@ private:
     std::vector<MultiRangeSegment> compute_segments;
     /// Bumped whenever a buffer is created, deleted or joined: resolved bindings may be stale.
     u64 binding_epoch = 1;
+
+    /// GPU page table, one per GPU address space (MemoryManager::GetID).
+    static constexpr u32 PAGE_TABLE_BLOCKS = 8192; ///< 2 MiB of mapped address space each
+    struct ResidentRun {
+        GPUVAddr gpu_addr{};
+        DAddr device_addr{};
+        u32 size{};
+        BufferId buffer_id;
+    };
+    /// One storage binding made resident: the host buffers its guest range maps to, kept on the
+    /// terms of StorageBindingMemo (no buffer came or went, no mapping changed).
+    struct Residency {
+        GPUVAddr gpu_addr{};
+        u32 size{};
+        u64 epoch{}; ///< binding_epoch when stored; 0 never matches
+        u64 map_serial{};
+        size_t as_id{};
+        const void* channel{};
+        boost::container::small_vector<ResidentRun, 2> runs;
+        bool mapped{}; ///< the runs are in the page table
+    };
+    [[nodiscard]] GpuPageTable* CurrentPageTable();
+    /// Finds (or creates) the buffers holding `binding`'s guest range, unless `residency` still
+    /// holds them. Update phase: a buffer this creates may delete others (has_deleted_buffers).
+    void ResolveResidency(Residency& residency, const Binding& binding);
+    /// Maps the resolved runs in the page table, synchronizes them and marks what the program
+    /// can write (at most `write_mark_limit` bytes). Bind phase.
+    void MakeResident(Residency& residency, bool is_written, u64 write_mark_limit);
+    /// EDEN_NX2_NATIVE_VERIFY=storage: the table translates the binding's first and last byte to
+    /// where its buffer holds them.
+    void VerifyResidency(const Residency& residency);
+    /// A buffer goes away: page table entries into it go back to the null page.
+    void UnmapFromPageTables(BufferId buffer_id);
+    std::unordered_map<size_t, std::unique_ptr<GpuPageTable>> page_tables;
+    std::unordered_set<u32> page_table_buffers; ///< BufferId indices with entries in a table
+    std::array<bool, NUM_STAGES> graphics_storage_by_address{};
+    bool compute_storage_by_address{};
+    std::array<std::array<Residency, NUM_STORAGE_BUFFERS>, NUM_STAGES + 1> residencies{};
+    bool page_table_full_logged{};
     std::array<StorageResolveCache, NUM_STAGES> graphics_storage_resolve{};
     StorageResolveCache compute_storage_resolve{};
 

@@ -14,6 +14,7 @@
 #include "video_core/buffer_cache/memory_tracker_base.h"
 #include "video_core/buffer_cache/upload_order.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/gpu_page_table.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
 #include "video_core/renderer_vulkan/vk_multi_range_buffer.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
@@ -298,6 +299,17 @@ public:
         return max_dynamic_storage_buffers;
     }
 
+    /// GPU page table (VideoCommon::GpuPageTable): whether shaders can reach storage by device
+    /// address (buffer device address, 64-bit integers and atomics).
+    [[nodiscard]] bool SupportsGpuPageTable() const noexcept;
+
+    /// The device address of a zeroed page every unmapped page table entry points at.
+    [[nodiscard]] u64 NullPageAddress();
+
+    /// Brings the device copy of page table `id` up to `table`, with copies recorded in command
+    /// order (a draw recorded before never reads a new entry). Returns its device address.
+    u64 SyncPageTable(size_t id, VideoCommon::GpuPageTable& table);
+
 private:
     /// EDEN_NX2_UPLOAD_REORDER_CHECK: work recorded now uses these bytes.
     void NoteCheckUse(VkBuffer handle, u64 offset, u64 size, UploadReorderCheck::Source source) {
@@ -343,6 +355,16 @@ private:
     VkDeviceSize multi_range_total{};
 
     StreamUniformRef last_stream_uniform{};
+
+    struct PageTableBuffer {
+        vk::Buffer buffer;
+        u64 address{};
+        u64 size{};
+    };
+    std::vector<PageTableBuffer> page_tables;
+    std::vector<VideoCommon::GpuPageTable::Update> page_table_updates;
+    vk::Buffer null_page;
+    u64 null_page_address{};
 
     u32 uniform_buffer_alignment{1}; ///< Asked once per bound uniform buffer: kept here
     u32 storage_buffer_alignment{1};

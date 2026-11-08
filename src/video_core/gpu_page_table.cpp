@@ -3,9 +3,16 @@
 
 #include <algorithm>
 
+#include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "video_core/gpu_page_table.h"
 
 namespace VideoCommon {
+
+// Shaders translate with the same layout (Shader::Backend::SPIRV::EmitContext::PageTableAddress).
+static_assert(GpuPageTable::ADDRESS_BITS == Shader::Backend::SPIRV::PAGE_TABLE_ADDRESS_BITS);
+static_assert(GpuPageTable::PAGE_BITS == Shader::Backend::SPIRV::PAGE_TABLE_PAGE_BITS);
+static_assert(GpuPageTable::BLOCK_BITS == Shader::Backend::SPIRV::PAGE_TABLE_BLOCK_BITS);
+static_assert(GpuPageTable::L1_BYTES == Shader::Backend::SPIRV::PAGE_TABLE_L1_BYTES);
 
 GpuPageTable::GpuPageTable(u32 max_blocks_)
     : image{new u8[L1_BYTES + u64{(std::max)(max_blocks_, 1U)} * BLOCK_BYTES]{}},
