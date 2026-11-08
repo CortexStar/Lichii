@@ -84,6 +84,10 @@ public:
         return 0;
     }
 
+    /// The rate the guest's presents are paced at (PaceToVblank), 0 when they are not paced: the
+    /// present cadence follows it. Safe to call from any thread.
+    virtual void SetGuestPresentRate([[maybe_unused]] u32 hz) {}
+
     [[nodiscard]] const RendererDeviceInfo& GetDeviceInfo() const {
         return device_info;
     }

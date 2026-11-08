@@ -287,7 +287,7 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
             generated->input_ns = 0;
             blit_swapchain.PrepareFrame(device, generated, render_window.GetFramebufferLayout());
             frame_gen.GenerateInto(device, generated, generation);
-            scheduler.Flush(*generated->render_ready);
+            generated->ready_tick = scheduler.Flush(*generated->render_ready);
             present_manager.Present(generated);
         }
     }
@@ -296,7 +296,7 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     if (trace) {
         scheduler.MarkFrameEnd(++trace_frame);
     }
-    scheduler.Flush(*frame->render_ready);
+    frame->ready_tick = scheduler.Flush(*frame->render_ready);
 
     const auto presenting = trace ? std::chrono::steady_clock::now()
                                   : std::chrono::steady_clock::time_point{};

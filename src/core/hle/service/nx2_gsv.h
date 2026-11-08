@@ -2026,7 +2026,9 @@ private:
             Settings::values.use_speed_limit.GetValue() ? Settings::SpeedLimit() : 0;
         const auto vblank_interval =
             PresentWordInterval(swap_interval, refresh_rate, Nx2VsyncRateHz(), speed_limit);
+        auto& renderer = system.GPU().Renderer();
         if (vblank_interval.count() == 0 && fps_limit == 0) {
+            renderer.SetGuestPresentRate(0);
             return;
         }
         if (timing != std::exchange(m_swap_word, timing)) {
@@ -2035,6 +2037,9 @@ private:
                      m_presents, swap_interval, refresh_rate, fps_limit, timing);
         }
         const auto interval = PacedInterval(vblank_interval, fps_limit);
+        // The host presents on a steady cadence at this rate (VRR); rounded, 59.94 is 60.
+        renderer.SetGuestPresentRate(
+            static_cast<u32>((1'000'000'000LL + interval.count() / 2) / interval.count()));
         if (trace) {
             m_frame_trace.target_ms = std::chrono::duration<double, std::milli>(interval).count();
         }
