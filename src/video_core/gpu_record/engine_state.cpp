@@ -45,7 +45,11 @@ bool ReadRaw(ByteReader& r, T& value, const char* name, std::string& error) {
         return false;
     }
     r.Raw(&value, sizeof(T));
-    return r.Ok();
+    if (!r.Ok()) {
+        error = fmt::format("{}: the recording ends inside its {} bytes", name, sizeof(T));
+        return false;
+    }
+    return true;
 }
 
 void WriteMacroEngine(ByteWriter& w, const Tegra::MacroEngine& engine) {
