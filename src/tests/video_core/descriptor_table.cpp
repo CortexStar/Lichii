@@ -586,3 +586,49 @@ TEST_CASE("Descriptor entries crossing a page are never in one page", "[descript
     table.Forget(127);
     CHECK_FALSE(table.IsResident(127));
 }
+
+TEST_CASE("Descriptor heap mirror sees every bound id change once", "[descriptor_table]") {
+    using Id = Common::SlotId;
+    VideoCommon::DescriptorTable<u64, Id> table;
+    REQUIRE(table.Synchronize(0x1000, 255));
+    REQUIRE(table.TakeMirrorReset());
+    REQUIRE_FALSE(table.TakeMirrorReset());
+    std::vector<Id> heap(256, Id{0});
+    const auto drain = [&] {
+        table.TakeMirrorUpdates([&](u32 index, Id id) {
+            REQUIRE(heap[index] != id);
+            heap[index] = id;
+        });
+    };
+    WatchedMemory memory;
+    std::mt19937 random{0x3141};
+    for (unsigned i = 0; i < 100000; ++i) {
+        const u32 index = random() % 256;
+        switch (random() % 6) {
+        case 0:
+            table.Forget(index);
+            break;
+        case 1:
+            drain();
+            for (u32 entry = 0; entry < 256; ++entry) {
+                if (((table.read_descriptors[entry / 64] >> (entry % 64)) & 1) != 0) {
+                    REQUIRE(heap[entry] == table.bound_ids[entry]);
+                }
+            }
+            break;
+        case 2:
+            memory.words[index] = random() % 3;
+            break;
+        default:
+            if (table.Read(memory, index).second) {
+                const u64 descriptor = table.descriptors[index];
+                table.Bind(index, Id{static_cast<u32>(descriptor)});
+            }
+        }
+        REQUIRE(table.MirrorMismatches() == 0);
+    }
+    // Rebinding the pool starts the mirror over.
+    REQUIRE(table.Synchronize(0x1000, 127));
+    REQUIRE(table.TakeMirrorReset());
+    table.TakeMirrorUpdates([](u32, Id) { FAIL("no updates after a reset"); });
+}
