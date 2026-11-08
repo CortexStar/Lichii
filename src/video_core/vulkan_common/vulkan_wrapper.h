@@ -370,6 +370,11 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkCmdBindDescriptorBuffersEXT vkCmdBindDescriptorBuffersEXT{};
     PFN_vkCmdSetDescriptorBufferOffsetsEXT vkCmdSetDescriptorBufferOffsetsEXT{};
     PFN_vkUpdateDescriptorSets vkUpdateDescriptorSets{};
+    PFN_vkCreatePipelineBinariesKHR vkCreatePipelineBinariesKHR{};
+    PFN_vkDestroyPipelineBinaryKHR vkDestroyPipelineBinaryKHR{};
+    PFN_vkGetPipelineKeyKHR vkGetPipelineKeyKHR{};
+    PFN_vkGetPipelineBinaryDataKHR vkGetPipelineBinaryDataKHR{};
+    PFN_vkReleaseCapturedPipelineDataKHR vkReleaseCapturedPipelineDataKHR{};
     PFN_vkWaitForFences vkWaitForFences{};
     PFN_vkWaitForPresent2KHR vkWaitForPresent2KHR{};
     PFN_vkWaitSemaphores vkWaitSemaphores{};

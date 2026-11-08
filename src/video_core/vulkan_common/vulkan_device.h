@@ -82,6 +82,7 @@ VK_DEFINE_HANDLE(VmaPool)
     FEATURE(KHR, CooperativeMatrix, COOPERATIVE_MATRIX, cooperative_matrix)                        \
     FEATURE(KHR, Maintenance5, MAINTENANCE_5, maintenance5)                                        \
     FEATURE(KHR, Maintenance6, MAINTENANCE_6, maintenance6)                                        \
+    FEATURE(KHR, PipelineBinary, PIPELINE_BINARY, pipeline_binary)                                 \
     FEATURE(KHR, PresentId2, PRESENT_ID_2, present_id2)                                            \
     FEATURE(KHR, PresentModeFifoLatestReady, PRESENT_MODE_FIFO_LATEST_READY,                       \
             present_mode_fifo_latest_ready)                                                        \
@@ -89,11 +90,10 @@ VK_DEFINE_HANDLE(VmaPool)
     FEATURE(KHR, PipelineExecutableProperties, PIPELINE_EXECUTABLE_PROPERTIES,                     \
             pipeline_executable_properties)                                                        \
     FEATURE(KHR, ShaderQuadControl, SHADER_QUAD_CONTROL, shader_quad_control)                      \
-    FEATURE(KHR, ShaderMaximalReconvergence, SHADER_MAXIMAL_RECONVERGENCE,                        \
-            shader_maximal_reconvergence)                                                        \
+    FEATURE(KHR, ShaderMaximalReconvergence, SHADER_MAXIMAL_RECONVERGENCE,                         \
+            shader_maximal_reconvergence)                                                          \
     FEATURE(KHR, WorkgroupMemoryExplicitLayout, WORKGROUP_MEMORY_EXPLICIT_LAYOUT,                  \
             workgroup_memory_explicit_layout)
-
 
 // Define miscellaneous extensions which may be used by the implementation here.
 #define FOR_EACH_VK_EXTENSION(EXTENSION)                                                           \
@@ -1213,6 +1213,13 @@ FN_MAX_LIMIT_LIST
         return extensions.maintenance4;
     }
 
+    /// Lichii keeps the driver's binaries of the pipelines it builds (VK_KHR_pipeline_binary):
+    /// the device has pipeline binaries and doesn't prefer its internal cache.
+    bool IsKhrPipelineBinarySupported() const {
+        return extensions.pipeline_binary &&
+               !properties.pipeline_binary.pipelineBinaryPrefersInternalCache;
+    }
+
     /// Returns true if the device supports VK_KHR_maintenance5.
     bool IsKhrMaintenance5Supported() const {
         return extensions.maintenance5;
@@ -1392,6 +1399,7 @@ private:
         VkPhysicalDeviceSubgroupSizeControlProperties subgroup_size_control{};
         VkPhysicalDeviceTransformFeedbackPropertiesEXT transform_feedback{};
         VkPhysicalDeviceMaintenance5PropertiesKHR maintenance5{};
+        VkPhysicalDevicePipelineBinaryPropertiesKHR pipeline_binary{};
         VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT graphics_pipeline_library{};
         VkPhysicalDeviceDepthStencilResolveProperties depth_stencil_resolve{};
         VkPhysicalDeviceCustomBorderColorPropertiesEXT custom_border_color{};

@@ -250,6 +250,11 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
     X(vkGetDescriptorEXT);
     X(vkCmdBindDescriptorBuffersEXT);
     X(vkCmdSetDescriptorBufferOffsetsEXT);
+    X(vkCreatePipelineBinariesKHR);
+    X(vkDestroyPipelineBinaryKHR);
+    X(vkGetPipelineKeyKHR);
+    X(vkGetPipelineBinaryDataKHR);
+    X(vkReleaseCapturedPipelineDataKHR);
     X(vkWaitForFences);
     X(vkWaitForPresent2KHR);
     X(vkWaitSemaphores);

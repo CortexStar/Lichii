@@ -323,12 +323,14 @@ GraphicsPipeline::GraphicsPipeline(
     RenderPassCache& render_pass_cache, const GraphicsPipelineCacheKey& key_,
     std::array<vk::ShaderModule, NUM_STAGES> stages,
     const std::array<const Shader::Info*, NUM_STAGES>& infos, EmitStagesFunc emit_stages,
-    std::optional<MeshEmulationSetup> mesh_emulation_, LibraryParams library_params)
+    std::optional<MeshEmulationSetup> mesh_emulation_, LibraryParams library_params,
+    PipelineBinaryCache* binary_cache_)
     : key{key_}, device{device_}, texture_cache{texture_cache_}, buffer_cache{buffer_cache_},
       pipeline_cache(pipeline_cache_), scheduler{scheduler_},
       guest_descriptor_queue{guest_descriptor_queue_},
       descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)},
-      library_cache{library_params.library_cache}, spirv_hashes{library_params.spirv_hashes},
+      library_cache{library_params.library_cache}, binary_cache{binary_cache_},
+      spirv_hashes{library_params.spirv_hashes},
       worker_only_build{worker_thread && static_cast<bool>(emit_stages)},
       mesh_emulation{std::move(mesh_emulation_)} {
     if (shader_notify) {
@@ -1766,33 +1768,34 @@ vk::Pipeline GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     const bool unoptimized = (flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT) != 0;
     const auto trace_begin = std::chrono::steady_clock::now();
     TracePipelineBuild("BEGIN", "graphics", key.Hash(), key.unique_hashes, unoptimized);
-    vk::Pipeline created = device.GetLogical().CreateGraphicsPipeline(
-        {
-            .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = flags,
-            .stageCount = static_cast<u32>(shader_stages.size()),
-            .pStages = shader_stages.data(),
-            .pVertexInputState = mesh_emulation ? &emulation_vertex_input
-                                 : is_mesh      ? nullptr
-                                                : &states.vertex_input_ci,
-            .pInputAssemblyState = mesh_emulation ? &emulation_input_assembly
-                                   : is_mesh      ? nullptr
-                                                  : &states.input_assembly_ci,
-            .pTessellationState = is_mesh ? nullptr : &states.tessellation_ci,
-            .pViewportState = &states.viewport_ci,
-            .pRasterizationState = &states.rasterization_ci,
-            .pMultisampleState = &states.multisample_ci,
-            .pDepthStencilState = &states.depth_stencil_ci,
-            .pColorBlendState = &states.color_blend_ci,
-            .pDynamicState = &states.dynamic_state_ci,
-            .layout = *pipeline_layout,
-            .renderPass = render_pass,
-            .subpass = 0,
-            .basePipelineHandle = nullptr,
-            .basePipelineIndex = 0,
-        },
-        *pipeline_cache);
+    const VkGraphicsPipelineCreateInfo pipeline_ci{
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = flags,
+        .stageCount = static_cast<u32>(shader_stages.size()),
+        .pStages = shader_stages.data(),
+        .pVertexInputState = mesh_emulation ? &emulation_vertex_input
+                             : is_mesh      ? nullptr
+                                            : &states.vertex_input_ci,
+        .pInputAssemblyState = mesh_emulation ? &emulation_input_assembly
+                               : is_mesh      ? nullptr
+                                              : &states.input_assembly_ci,
+        .pTessellationState = is_mesh ? nullptr : &states.tessellation_ci,
+        .pViewportState = &states.viewport_ci,
+        .pRasterizationState = &states.rasterization_ci,
+        .pMultisampleState = &states.multisample_ci,
+        .pDepthStencilState = &states.depth_stencil_ci,
+        .pColorBlendState = &states.color_blend_ci,
+        .pDynamicState = &states.dynamic_state_ci,
+        .layout = *pipeline_layout,
+        .renderPass = render_pass,
+        .subpass = 0,
+        .basePipelineHandle = nullptr,
+        .basePipelineIndex = 0,
+    };
+    vk::Pipeline created =
+        binary_cache ? binary_cache->CreateGraphicsPipeline(pipeline_ci, *pipeline_cache)
+                     : device.GetLogical().CreateGraphicsPipeline(pipeline_ci, *pipeline_cache);
     TracePipelineBuild("END", "graphics", key.Hash(), key.unique_hashes, unoptimized,
                        std::chrono::duration<double, std::milli>(
                            std::chrono::steady_clock::now() - trace_begin)

@@ -221,6 +221,10 @@ private:
     /// pipelines, so it outlives them.
     GraphicsPipelineLibraryCache graphics_libraries;
 
+    /// Driver binaries of the pipelines built, kept by Lichii (VK_KHR_pipeline_binary). Declared
+    /// before the workers that use it.
+    PipelineBinaryCache binary_cache;
+
     /// Destroys graphics pipelines unused for a while, once the GPU is done with them.
     void EvictUnusedPipelines();
     u64 frame_count{};

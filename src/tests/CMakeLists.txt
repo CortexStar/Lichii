@@ -8,6 +8,7 @@ add_executable(tests
     common/addon_config.cpp
     video_core/amd_float16.cpp
     video_core/graphics_pipeline_library.cpp
+    video_core/pipeline_binary_store.cpp
     video_core/maxwell_half_fmz.cpp
     video_core/vulkan_overlay_filter.cpp
     video_core/buffer_cache_ports.cpp

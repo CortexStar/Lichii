@@ -27,6 +27,7 @@
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_descriptor_buffer.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
+#include "video_core/renderer_vulkan/vk_pipeline_binary.h"
 #include "video_core/renderer_vulkan/vk_pipeline_library.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
@@ -131,7 +132,7 @@ public:
         std::array<vk::ShaderModule, NUM_STAGES> stages,
         const std::array<const Shader::Info*, NUM_STAGES>& infos, EmitStagesFunc emit_stages = {},
         std::optional<MeshEmulationSetup> mesh_emulation = std::nullopt,
-        LibraryParams library_params = {});
+        LibraryParams library_params = {}, PipelineBinaryCache* binary_cache = nullptr);
 
     static std::chrono::nanoseconds TakeHoldTime() noexcept;
 
@@ -364,6 +365,8 @@ private:
     /// stage index), the shader libraries, and this pipeline's own vertex input and fragment
     /// output libraries.
     GraphicsPipelineLibraryCache* const library_cache;
+    /// Creates the monolithic pipeline from stored driver binaries when it has them.
+    PipelineBinaryCache* const binary_cache;
     std::array<u128, NUM_STAGES> spirv_hashes{};
     std::array<vk::DescriptorSetLayout, NUM_STAGES> stage_set_layouts;
     std::array<std::string, NUM_STAGES> stage_set_signatures;

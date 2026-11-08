@@ -171,6 +171,7 @@ add_library(video_core STATIC
     renderer_vulkan/framebuffer_limits.h
     renderer_vulkan/maxwell_to_vk.cpp
     renderer_vulkan/maxwell_to_vk.h
+    renderer_vulkan/pipeline_binary_store.h
     renderer_vulkan/pipeline_build.h
     renderer_vulkan/pipeline_build_trace.h
     renderer_vulkan/pipeline_eviction_policy.h
@@ -210,6 +211,8 @@ add_library(video_core STATIC
     renderer_vulkan/vk_frame_dump.h
     renderer_vulkan/vk_graphics_pipeline.cpp
     renderer_vulkan/vk_graphics_pipeline.h
+    renderer_vulkan/vk_pipeline_binary.cpp
+    renderer_vulkan/vk_pipeline_binary.h
     renderer_vulkan/vk_pipeline_library.cpp
     renderer_vulkan/vk_pipeline_library.h
     renderer_vulkan/vk_multi_range_buffer.cpp
