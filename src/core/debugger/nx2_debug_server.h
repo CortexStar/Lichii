@@ -16,8 +16,10 @@
 #include "common/common_types.h"
 
 /// Transport of the debug server (docs/nx2/debug-mcp.md): newline-delimited JSON requests over a
-/// loopback TCP socket, served on one thread. It knows nothing about the emulator; the tools are
-/// the handlers it is given (nx2_debug_tools.cpp).
+/// loopback TCP socket. Each client's requests are answered in order; the handlers of different
+/// clients may run at the same time, so a handler that waits (input) does not hold up the others.
+/// It knows nothing about the emulator; the tools are the handlers it is given
+/// (nx2_debug_tools.cpp).
 namespace Core::Nx2Debug {
 
 struct Endpoint {

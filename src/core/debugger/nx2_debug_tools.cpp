@@ -13,6 +13,7 @@
 #include <fstream>
 #include <future>
 #include <iterator>
+#include <mutex>
 #include <numeric>
 #include <thread>
 
@@ -80,6 +81,10 @@ struct ToolState {
     u64 samples{};
     u64 gpu_reads{};
     std::atomic<bool> stopping{};
+    /// The server runs different clients' requests at once: the tools take turns on this state,
+    /// and input calls (which wait for frames and touch only the controller) on their own.
+    std::mutex tools_mutex;
+    std::mutex input_mutex;
 };
 
 namespace {
@@ -684,10 +689,14 @@ json InputSequence(ToolState& state, const json& params, const ClientGone& clien
 
 Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
     const auto handler = [&state](json (*tool)(ToolState&, const json&)) -> Handler {
-        return [state, tool](const json& params, const ClientGone&) { return tool(*state, params); };
+        return [state, tool](const json& params, const ClientGone&) {
+            std::scoped_lock lock{state->tools_mutex};
+            return tool(*state, params);
+        };
     };
     const auto waiting = [&state](json (*tool)(ToolState&, const json&, const ClientGone&)) -> Handler {
         return [state, tool](const json& params, const ClientGone& client_gone) {
+            std::scoped_lock lock{state->input_mutex};
             return tool(*state, params, client_gone);
         };
     };

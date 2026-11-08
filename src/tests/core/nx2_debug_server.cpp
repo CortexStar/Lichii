@@ -157,6 +157,41 @@ TEST_CASE("Debug server requests map to handlers", "[core][nx2_debug_server]") {
     REQUIRE(bad_params.contains("error"));
 }
 
+TEST_CASE("Debug server answers a client while another client's request waits",
+          "[core][nx2_debug_server]") {
+    std::atomic<bool> release{};
+    Handlers handlers = EchoHandlers();
+    handlers.emplace("wait", [&release](const json&, const ClientGone&) {
+        for (int i = 0; i < 500 && !release.load(); ++i) {
+            std::this_thread::sleep_for(10ms);
+        }
+        return json{{"released", release.load()}};
+    });
+    Core::Nx2Debug::Server server{{"127.0.0.1", 0}, std::move(handlers)};
+    boost::asio::io_context io;
+    const boost::asio::ip::tcp::endpoint endpoint{boost::asio::ip::make_address("127.0.0.1"),
+                                                  server.Port()};
+    boost::asio::ip::tcp::socket waiting{io};
+    boost::asio::ip::tcp::socket other{io};
+    waiting.connect(endpoint);
+    other.connect(endpoint);
+    const auto request = [](boost::asio::ip::tcp::socket& socket, std::string_view line) {
+        boost::asio::write(socket, boost::asio::buffer(std::string{line} + "\n"));
+    };
+    const auto response = [](boost::asio::ip::tcp::socket& socket) {
+        std::string buffer;
+        boost::asio::read_until(socket, boost::asio::dynamic_buffer(buffer), '\n');
+        return json::parse(buffer.substr(0, buffer.find('\n')));
+    };
+    request(waiting, R"({"id":1,"method":"wait"})");
+    std::this_thread::sleep_for(50ms);
+    request(other, R"({"id":2,"method":"echo","params":{"b":2}})");
+    // Answered while "wait" still holds its worker: before the release.
+    REQUIRE(response(other) == json{{"id", 2}, {"result", {{"b", 2}}}});
+    release = true;
+    REQUIRE(response(waiting) == json{{"id", 1}, {"result", {{"released", true}}}});
+}
+
 TEST_CASE("Debug server shader hashes need all 16 hex digits", "[core][nx2_debug_server]") {
     REQUIRE(Core::Nx2Debug::ParseShaderHash("00000000621c4755") == 0x621c4755);
     REQUIRE(Core::Nx2Debug::ParseShaderHash("3DDFB1D7621C4755") == 0x3ddfb1d7621c4755);

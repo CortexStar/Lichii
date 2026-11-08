@@ -19,10 +19,14 @@ using boost::asio::ip::tcp;
 /// Longest request line; a client sending more is disconnected.
 constexpr size_t MAX_REQUEST = size_t{1} << 20;
 
+/// Clients whose requests are handled at the same time.
+constexpr size_t WORKERS = 4;
+
 class Session : public std::enable_shared_from_this<Session> {
 public:
-    explicit Session(tcp::socket socket_, const Handlers& handlers_)
-        : socket{std::move(socket_)}, handlers{handlers_} {}
+    explicit Session(tcp::socket socket_, const Handlers& handlers_,
+                     boost::asio::thread_pool& workers_)
+        : socket{std::move(socket_)}, handlers{handlers_}, workers{workers_} {}
 
     void Read() {
         boost::asio::async_read_until(
@@ -31,25 +35,33 @@ public:
                 if (error) {
                     return;
                 }
-                std::string_view line{self->input.data(), length - 1};
+                std::string line = self->input.substr(0, length - 1);
                 if (!line.empty() && line.back() == '\r') {
-                    line.remove_suffix(1);
+                    line.pop_back();
                 }
-                self->output = line.empty() ? std::string{}
-                                            : HandleRequest(self->handlers, line,
-                                                            [&self] { return self->ClientGone(); });
                 self->input.erase(0, length);
-                if (self->output.empty()) {
+                if (line.empty()) {
                     self->Read();
                     return;
                 }
-                self->output += '\n';
-                self->Write();
+                // The handler runs on a worker: a tool that waits (input holds for its frames)
+                // must not stop the server from answering other clients meanwhile. This session
+                // reads its next request only after answering, so its requests stay in order.
+                boost::asio::post(self->workers, [self, line = std::move(line)] {
+                    std::string response =
+                        HandleRequest(self->handlers, line, [&self] { return self->ClientGone(); });
+                    boost::asio::post(self->socket.get_executor(),
+                                      [self, response = std::move(response)]() mutable {
+                                          self->output = std::move(response) + '\n';
+                                          self->Write();
+                                      });
+                });
             });
     }
 
 private:
-    /// A non-blocking peek: end of stream or a reset means the client left.
+    /// A non-blocking peek: end of stream or a reset means the client left. Called from the
+    /// worker while no read or write of this session is pending.
     bool ClientGone() {
         boost::system::error_code error;
         socket.non_blocking(true, error);
@@ -71,6 +83,7 @@ private:
 
     tcp::socket socket;
     const Handlers& handlers;
+    boost::asio::thread_pool& workers;
     std::string input;
     std::string output;
 };
@@ -172,6 +185,8 @@ struct Server::Impl {
         if (thread.joinable()) {
             thread.join();
         }
+        // Running handlers end on their own (the tools' stopping flag, client checks).
+        workers.join();
     }
 
     void Accept() {
@@ -179,7 +194,7 @@ struct Server::Impl {
             if (error) {
                 return;
             }
-            std::make_shared<Session>(std::move(socket), handlers)->Read();
+            std::make_shared<Session>(std::move(socket), handlers, workers)->Read();
             Accept();
         });
     }
@@ -187,6 +202,8 @@ struct Server::Impl {
     Handlers handlers;
     boost::asio::io_context io;
     tcp::acceptor acceptor;
+    /// Handlers run here, one request per client at a time (WORKERS clients at once).
+    boost::asio::thread_pool workers{WORKERS};
     std::thread thread;
 };
 
