@@ -11,6 +11,7 @@
 #include "common/assert.h"
 #include "common/bit_field.h"
 #include "common/common_types.h"
+#include "common/input_latency.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "core/core_timing.h"
@@ -145,6 +146,9 @@ void NPad::FreeAppletResourceId(u64 aruid) {
 }
 
 void NPad::ControllerUpdate(Kernel::KernelCore& kernel, Core::HID::ControllerTriggerType type, std::size_t controller_idx) {
+    if (type == Core::HID::ControllerTriggerType::Button) {
+        Common::InputLatency::Changed();
+    }
     if (NpadInputPublish::Publishes(type)) {
         std::scoped_lock lock{input_changed_mutex};
         if (input_changed) {

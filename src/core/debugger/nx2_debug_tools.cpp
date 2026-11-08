@@ -18,6 +18,7 @@
 
 #include "common/fs/path_util.h"
 #include "common/scope_exit.h"
+#include "common/input_latency.h"
 #include "common/logging.h"
 #include "common/nx2_sampler.h"
 #include "common/scm_rev.h"
@@ -189,6 +190,7 @@ json Status(ToolState& state, const json& params) {
     const u64 after = g_nx2_present_count.load(std::memory_order_relaxed);
     const double seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+    const auto input = Common::InputLatency::Recent();
     return {
         {"title", state.title},
         {"program_id", fmt::format("{:016X}", state.program_id)},
@@ -205,6 +207,12 @@ json Status(ToolState& state, const json& params) {
         {"dump_dir", state.dump_directory.generic_string()},
         {"log_filter", state.log_filter},
         {"rejected", HexList(VideoCore::Nx2Debug::RejectedHashes())},
+        // Button change to the host present of the first frame that sampled it.
+        {"input_to_present", {{"samples", input.samples},
+                              {"mean_ms", input.mean_ms},
+                              {"p50_ms", input.p50_ms},
+                              {"p99_ms", input.p99_ms},
+                              {"max_ms", input.max_ms}}},
     };
 }
 

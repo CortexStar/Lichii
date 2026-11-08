@@ -42,6 +42,8 @@ struct Frame {
     vk::Semaphore render_ready;
     vk::Fence present_done;
     bool storage_capable{};
+    /// The button change the guest frame shown sampled (Common::InputLatency), 0 for none.
+    u64 input_ns{};
 };
 
 class PresentManager {

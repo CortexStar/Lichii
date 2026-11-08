@@ -85,6 +85,8 @@ add_library(
     host_memory.cpp
     host_memory.h
     input.h
+    input_latency.cpp
+    input_latency.h
     intrusive_red_black_tree.h
     literals.h
     logging.cpp
