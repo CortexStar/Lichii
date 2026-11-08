@@ -273,6 +273,16 @@ void RecordDispatchBarrier(vk::CommandBuffer cmdbuf, VkPipelineStageFlags src) {
                            0, READ_BARRIER);
 }
 
+/// EXPERIMENT (do not merge): EDEN_NX2_EXP_DISPATCH_BARRIERS=all records the barrier before every
+/// guest dispatch from all stages, as before hazard tracking (the decisions are still counted).
+bool AllDispatchBarriers() {
+    static const bool all = [] {
+        const char* value = std::getenv("EDEN_NX2_EXP_DISPATCH_BARRIERS");
+        return value != nullptr && std::string_view{value} == "all";
+    }();
+    return all;
+}
+
 bool IsPrimitiveRestartSupported(const Device& device, VkPrimitiveTopology topology) {
     return ((topology != VK_PRIMITIVE_TOPOLOGY_PATCH_LIST &&
              device.IsTopologyListPrimitiveRestartSupported()) ||
@@ -2156,6 +2166,9 @@ void RasterizerVulkan::DispatchCompute() {
             VideoCommon::Nx2Profile::Add(counters[static_cast<size_t>(decision)], 1);
         }
         scheduler.NoteComputeWrites();
+        if (AllDispatchBarriers()) {
+            return VkPipelineStageFlags{vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER};
+        }
         if (decision == Decision::NoBarrier) {
             return std::nullopt;
         }
