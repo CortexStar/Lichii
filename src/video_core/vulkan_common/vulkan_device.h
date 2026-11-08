@@ -232,6 +232,17 @@ enum class NvidiaArchitecture {
     Arch_AmpereOrNewer,
 };
 
+/**
+ * Whether float16 arithmetic stays off on this AMD proprietary (or AMDVLK) driver. Eden turned it
+ * off on every AMD driver for float16 errors in Donkey Kong Country Returns HD on early-2026
+ * drivers (eden-emu PR 3661, which records no driver version or repro). Driver 2.0.416 (26.10.2)
+ * computes float16 add, mul, fma, NMin/NMax clamps, compares, isnan and f16<->f32 conversions of
+ * every half value bit-exact to IEEE 754 in the packed, bitcast-unpacked form the recompiler emits.
+ */
+[[nodiscard]] constexpr bool IsAmdFloat16Broken(u32 driver_version) {
+    return driver_version < VK_MAKE_API_VERSION(0, 2, 0, 416);
+}
+
 /// Handles data specific to a physical device.
 class Device {
 public:

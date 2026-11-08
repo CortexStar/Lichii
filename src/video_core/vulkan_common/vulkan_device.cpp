@@ -628,7 +628,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 
     sets_per_pool = 64;
     // AMD GCN4 and older are told apart by their lack of float16, read before float16 is turned
-    // off for newer AMD drivers below: checked after that, every AMD GPU looked like GCN4 and lost
+    // off for older AMD drivers below: checked after that, every AMD GPU looked like GCN4 and lost
     // VK_EXT_sampler_filter_minmax (an RDNA3 Radeon 780M logged it).
     const bool amd_gcn4_or_older = is_amd && !features.shader_float16_int8.shaderFloat16;
     if (is_amd_driver) {
@@ -642,10 +642,9 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
             has_broken_cube_compatibility = true;
         }
 
-        // AMD drivers (2026+) have broken float16 math on DKCR
-        if (features.shader_float16_int8.shaderFloat16) {
-            LOG_WARNING(Render_Vulkan,
-                        "AMD drivers (2026+) have broken float16 math");
+        if (features.shader_float16_int8.shaderFloat16 &&
+            IsAmdFloat16Broken(properties.properties.driverVersion)) {
+            LOG_WARNING(Render_Vulkan, "AMD drivers before 2.0.416 (26.10.2): float16 math off");
             features.shader_float16_int8.shaderFloat16 = false;
         }
     }
