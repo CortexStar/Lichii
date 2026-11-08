@@ -32,6 +32,7 @@
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "common/logging.h"
+#include "common/thread.h"
 #include "common/settings.h"
 #include "shader_recompiler/exception.h"
 
@@ -327,9 +328,46 @@ ComputePipeline::ComputePipeline(
         if (pipeline_statistics) {
             pipeline_statistics->Collect(device, *pipeline);
         }
-        // Nothing reads the module once the pipeline exists; the driver keeps its SPIR-V while it
-        // lives.
-        spv_module.reset();
+        if ((flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT) != 0 &&
+            OptimizesInBackground(device.GetDriverID(), shader_hash)) {
+            // The unoptimized pipeline runs until the optimized one is built; the module stays
+            // for that build.
+            optimizer = std::jthread([this, compute_ci, subgroup_size_ci] {
+                Common::SetCurrentThreadName("VkPipelineOptimize");
+                Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+                VkComputePipelineCreateInfo optimized_ci = compute_ci;
+                optimized_ci.flags &= ~VkPipelineCreateFlags{VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT};
+                if (optimized_ci.stage.pNext != nullptr) {
+                    optimized_ci.stage.pNext = &subgroup_size_ci;
+                }
+                const std::array<u64, 1> traced{shader_hash};
+                const auto begin = std::chrono::steady_clock::now();
+                TracePipelineBuild("BEGIN", "compute", shader_hash, traced, false);
+                try {
+                    optimized_pipeline =
+                        device.GetLogical().CreateComputePipeline(optimized_ci, *pipeline_cache);
+                } catch (const vk::Exception& exception) {
+                    LOG_ERROR(Render_Vulkan, "Optimized build of compute shader {:016X} failed: {}",
+                              shader_hash, exception.what());
+                    spv_module.reset();
+                    return;
+                }
+                const double ms = std::chrono::duration<double, std::milli>(
+                                      std::chrono::steady_clock::now() - begin)
+                                      .count();
+                TracePipelineBuild("END", "compute", shader_hash, traced, false, ms);
+                spv_module.reset();
+                optimized_handle.store(*optimized_pipeline, std::memory_order_release);
+                LOG_INFO(Render_Vulkan,
+                         "Compute shader {:016X}: optimized pipeline built in {:.0f} ms, replaces "
+                         "the unoptimized one",
+                         shader_hash, ms);
+            });
+        } else {
+            // Nothing reads the module once the pipeline exists; the driver keeps its SPIR-V while
+            // it lives.
+            spv_module.reset();
+        }
         std::scoped_lock lock{build_mutex};
         is_built = true;
         build_condvar.notify_one();
@@ -729,7 +767,9 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         if (!pipeline) {
             return;
         }
-        cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
+        const VkPipeline optimized = optimized_handle.load(std::memory_order_acquire);
+        cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE,
+                            optimized != VK_NULL_HANDLE ? optimized : *pipeline);
         if (!descriptor_set_layout) {
             return;
         }
