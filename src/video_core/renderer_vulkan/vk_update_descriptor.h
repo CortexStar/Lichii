@@ -7,6 +7,7 @@
 #pragma once
 
 #include <memory>
+#include <span>
 #include <variant>
 #include <vector>
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -70,6 +71,11 @@ public:
             .imageView = image_view,
             .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
         };
+    }
+
+    void AddSampledImages(std::span<const VkDescriptorImageInfo> images) {
+        for (const auto& image : images)
+            *(payload_cursor++) = image;
     }
 
     void AddImage(VkImageView image_view) {

@@ -9,6 +9,7 @@
 #include <cstring>
 #include <iostream>
 #include <span>
+#include "video_core/render_trace.h"
 
 #include <boost/container/small_vector.hpp>
 #include <boost/container/static_vector.hpp>
@@ -745,7 +746,14 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         {
             Profile::Scope scope{Profile::Zone::PushDescriptors};
             PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
-                                 rescaling, samplers_it, views_it);
+                                 rescaling, samplers_it, views_it,
+                                 VideoCommon::StableSampled::Enabled() &&
+                                         !VideoCommon::StableSampled::FailedValidation().load(
+                                             std::memory_order_relaxed) &&
+                                         num_textures >= 256 && !mesh_emulation &&
+                                         !VideoCommon::RenderTrace::Enabled()
+                                     ? &stable_sampled_chunks[stage]
+                                     : nullptr);
         }
         const auto& info{stage_infos[stage]};
         if (info.uses_render_area) {
