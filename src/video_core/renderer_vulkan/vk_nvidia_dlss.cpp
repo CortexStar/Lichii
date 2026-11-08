@@ -81,13 +81,15 @@ void NvidiaDlssUpscaler::CreateOutput(VkExtent2D upscale_size) {
     });
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([image = *output_image](vk::CommandBuffer cmdbuf) {
+        // NGX can initialize a new output with a transfer clear before its compute dispatches.
         cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                                VkImageMemoryBarrier{
                                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
                                    .pNext = nullptr,
                                    .srcAccessMask = 0,
-                                   .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                                   .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT |
+                                                    VK_ACCESS_TRANSFER_WRITE_BIT,
                                    .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
                                    .newLayout = VK_IMAGE_LAYOUT_GENERAL,
                                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,

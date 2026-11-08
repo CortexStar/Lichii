@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cstdlib>
+#include <mutex>
 #include <string_view>
 #include <fmt/format.h>
 #include "common/logging.h"
@@ -94,6 +95,7 @@ NvidiaDlssUpscaler::NvidiaDlssUpscaler(const Device &device_, Scheduler &schedul
 
 NvidiaDlssUpscaler::~NvidiaDlssUpscaler() {
     // Renderer shutdown has already stopped recording; do not submit to released game channels.
+    std::scoped_lock queue_lock{scheduler.submit_mutex};
     void(device.GetLogical().WaitIdle());
     neural_rendering.reset();
     const auto &api = Ngx::GetApi();
@@ -123,6 +125,7 @@ bool NvidiaDlssUpscaler::Upscale(const Inputs &in) {
     if (extent_changed) {
         if (neural_rendering) {
             scheduler.Finish();
+            std::scoped_lock queue_lock{scheduler.submit_mutex};
             neural_rendering.reset();
         }
         CreateOutput(in.upscale_size);
@@ -291,6 +294,9 @@ void NvidiaDlssUpscaler::PrepareNeuralRendering(const Inputs& in) {
     // The backend uploads model constants during construction. Finish before touching its queue
     // or replacing descriptors referenced by work already recorded on the scheduler worker.
     scheduler.Finish();
+    // The presentation thread also uses these queues. Keep construction, rebind failure cleanup
+    // and their device-idle waits under the same lock, after Finish has released the worker.
+    std::scoped_lock queue_lock{scheduler.submit_mutex};
     try {
         if (neural_rendering) {
             if (neural_rendering->HadTimeout()) {

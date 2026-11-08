@@ -3,12 +3,15 @@
 
 // Optional hardware test, deliberately excluded from ctest. Does not boot the emulator.
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <unistd.h>
 #include "common/fs/path_util.h"
 #include "common/logging.h"
@@ -76,6 +79,20 @@ void RenderCases(const Device& device, u32 scale, bool expect_neural) {
     MemoryAllocator allocator{device};
     StateTracker tracker;
     Scheduler scheduler{device, tracker};
+    // Simulate presentation submissions during backend setup, resizing and teardown. Declaring
+    // this before the upscaler keeps it running through upscaler destruction; use Vulkan validation
+    // to detect queue calls that are not protected by the scheduler's submission lock.
+    std::jthread present_thread{[&](std::stop_token stop) {
+        while (!stop.stop_requested()) {
+            {
+                std::scoped_lock queue_lock{scheduler.submit_mutex};
+                Require(device.GetGraphicsQueue().Submit(
+                            VkSubmitInfo{.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO}) == VK_SUCCESS,
+                        "Concurrent queue submission failed");
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+    }};
     NvidiaDlssUpscaler upscaler{device, scheduler, allocator};
     const VkExtent2D input_extent{320 * scale, 180 * scale};
     auto color = MakeInput(device, allocator, VK_FORMAT_R16G16B16A16_SFLOAT,

@@ -30,6 +30,7 @@ private:
     QPushButton* import_button{};
     QPushButton* neural_import_button{};
     QLabel* neural_status_label{};
+    bool driver_present{};
     bool neural_model_checked{};
     bool neural_model_valid{};
     bool neural_importing{};

@@ -72,7 +72,8 @@ def main():
                 out.write('};\n')
             else:
                 contents = asset.read_text()
-                assert ')NR_PTX"' not in contents
+                if ')NR_PTX"' in contents:
+                    raise ValueError(f'{asset.name} contains the raw-string delimiter')
                 out.write(f'const char asset{i}[] = R"NR_PTX({contents})NR_PTX";\n')
         out.write('struct Asset { std::string_view name; const void* data; size_t size; };\nconst Asset assets[] = {\n')
         for i, asset in enumerate(assets):

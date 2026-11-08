@@ -65,6 +65,7 @@ bool Save(const QString &path, const QByteArray &data) {
 } // namespace
 
 NvidiaDlssPanel::NvidiaDlssPanel(QWidget *parent) : QWidget(parent) {
+    driver_present = Common::DynamicLibrary{"libnvidia-ngx.so.1"}.IsOpen();
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(20, 0, 0, 0);
     auto *status_row = new QHBoxLayout;
@@ -125,9 +126,8 @@ void NvidiaDlssPanel::showEvent(QShowEvent *event) {
 void NvidiaDlssPanel::Refresh() {
     const auto model = Ngx::FindModel();
     const auto state = Ngx::GetStatus();
-    Common::DynamicLibrary driver{"libnvidia-ngx.so.1"};
     QString text;
-    if (!driver.IsOpen()) {
+    if (!driver_present) {
         text =
             Tr("The NVIDIA driver's NGX component is missing. Install a supported NVIDIA driver.");
     } else if (model.empty()) {

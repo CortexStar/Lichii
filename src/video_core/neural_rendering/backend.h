@@ -24,7 +24,8 @@ struct Frame {
 };
 
 // Private native inference backend. Construction submits uploads and warms the graph: the caller
-// must finish the renderer queue first. Images/views must outlive the backend and remain GENERAL.
+// must finish the renderer queue first and externally synchronize device queues throughout
+// construction and destruction. Images/views must outlive the backend and remain GENERAL.
 // The model directory must have passed IsInstalled(). No Vulkan loader symbols escape this target.
 class Backend {
 public:

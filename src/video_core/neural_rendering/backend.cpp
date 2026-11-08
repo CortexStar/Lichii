@@ -295,7 +295,8 @@ Backend::Backend(VkInstance instance, VkPhysicalDevice physical, VkDevice device
     impl->color_view = color_view;
     impl->motion_view = motion_view;
     impl->context = std::make_unique<vk::Context>(instance, physical, device, queue_family);
-    impl->model = std::make_unique<nr::Model>(*impl->context, model.string(), true);
+    // The caller already verified the installation with IsInstalled() (see backend.h).
+    impl->model = std::make_unique<nr::Model>(*impl->context, model.string(), false);
     impl->Initialize();
 }
 
