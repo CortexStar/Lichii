@@ -561,6 +561,12 @@ void RasterizerOpenGL::WaitForPendingDownloads(DAddr addr, u64 size) {
                 return;
             }
         }
+        // OpenGL has no fencing thread: fences the host GPU passed are only released (and their
+        // downloads land) when the GPU thread checks them. Ask it to, between draws (TickWork);
+        // SignalOrdering releases the signaled fences without waiting for the others.
+        if (attempt % 16 == 0) {
+            (void)gpu.RunOnGpuThread([this] { fence_manager.SignalOrdering(); });
+        }
         buffer_cache.WaitForLandedDownloads(seen, std::chrono::milliseconds{1});
     }
 }
