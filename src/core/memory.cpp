@@ -37,6 +37,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/memory.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_record/recorder.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/rasterizer_download_area.h"
@@ -74,6 +75,12 @@ struct Memory::Impl {
 #else
         host_buffer = std::addressof(system.DeviceMemory().buffer);
 #endif
+    }
+
+    void SetCurrentPageTable(Common::PageTable& page_table) {
+        current_page_table = &page_table;
+        // No fastmem: nothing maps the host buffer for this table.
+        current_page_table->fastmem_arena = nullptr;
     }
 
     void MapMemoryRegion(Common::PageTable& page_table, Common::ProcessAddress base, u64 size,
@@ -960,6 +967,10 @@ struct Memory::Impl {
             ReportForeignPointer(v_address, p);
             return;
         }
+        // A GPU recording notes every guest write to a GPU-visible page (gpu_record/recorder.h).
+        if (VideoCommon::GpuRecord::TrackingWrites()) [[unlikely]] {
+            VideoCommon::GpuRecord::Recorder::Get().OnCpuWrite(p, size);
+        }
         if (shared) [[unlikely]] {
             sys_core_guard.lock();
         }
@@ -1123,6 +1134,10 @@ void Memory::Reset() {
 
 void Memory::SetCurrentPageTable(Kernel::KProcess& process) {
     impl->SetCurrentPageTable(process);
+}
+
+void Memory::SetCurrentPageTable(Common::PageTable& page_table) {
+    impl->SetCurrentPageTable(page_table);
 }
 
 void Memory::MapMemoryRegion(Common::PageTable& page_table, Common::ProcessAddress base, u64 size,

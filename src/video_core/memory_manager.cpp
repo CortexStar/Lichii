@@ -20,6 +20,7 @@
 #include "video_core/nx2_perf.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/invalidation_accumulator.h"
+#include "video_core/gpu_record/recorder.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
@@ -238,13 +239,91 @@ void MemoryManager::BindRasterizer(VideoCore::RasterizerInterface* rasterizer_) 
     rasterizer = rasterizer_;
 }
 
+MemoryManager::Params MemoryManager::GetParams() const {
+    return Params{
+        .address_space_bits = address_space_bits,
+        .split_address = split_address,
+        .big_page_bits = big_page_bits,
+        .page_bits = page_bits,
+        .native_tiling = native_tiling,
+        .syncpoint_shim = native_syncpoint_shim.load(std::memory_order_acquire),
+    };
+}
+
+void MemoryManager::ForEachMapping(
+    const std::function<void(GPUVAddr, DAddr, u64, PTEKind, bool, bool)>& func) const {
+    struct Run {
+        GPUVAddr gpu{};
+        DAddr dev{};
+        u64 size{};
+        PTEKind kind{};
+        bool reserved{};
+    };
+    const auto walk = [&](const std::vector<u64>& table, u64 bits, bool big) {
+        const u64 unit = u64{1} << bits;
+        Run run{};
+        const auto emit = [&] {
+            if (run.size != 0) {
+                func(run.gpu, run.dev, run.size, run.kind, big, run.reserved);
+                run.size = 0;
+            }
+        };
+        for (size_t word = 0; word < table.size(); ++word) {
+            if (table[word] == 0) {
+                emit();
+                continue;
+            }
+            for (size_t sub = 0; sub < 32; ++sub) {
+                const auto type = static_cast<EntryType>((table[word] >> (2 * sub)) & 3);
+                const u64 index = word * 32 + sub;
+                const GPUVAddr gpu = index << bits;
+                if (type != EntryType::Mapped && type != EntryType::Reserved) {
+                    emit();
+                    continue;
+                }
+                const bool reserved = type == EntryType::Reserved;
+                DAddr dev = 0;
+                if (!reserved) {
+                    const u32 value = big ? big_page_table_dev[index] : page_table[index];
+                    dev = DAddr{value} << cpu_page_bits;
+                }
+                PTEKind kind;
+                {
+                    std::unique_lock<std::mutex> lock(guard);
+                    kind = kind_map.GetValueAt(gpu);
+                }
+                if (run.size != 0 && run.gpu + run.size == gpu && run.reserved == reserved &&
+                    run.kind == kind && (reserved || run.dev + run.size == dev)) {
+                    run.size += unit;
+                    continue;
+                }
+                emit();
+                run = Run{gpu, dev, unit, kind, reserved};
+            }
+        }
+        emit();
+    };
+    walk(entries, page_bits, false);
+    walk(big_entries, big_page_bits, true);
+}
+
 GPUVAddr MemoryManager::Map(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size, PTEKind kind, bool is_big_pages) {
+    if (VideoCommon::GpuRecord::Recording()) [[unlikely]] {
+        VideoCommon::GpuRecord::Recorder::Get().OnGmmuOp(
+            *this, {VideoCommon::GpuRecord::GmmuOpKind::Map, is_big_pages, static_cast<u8>(kind),
+                    0, gpu_addr, dev_addr, size});
+    }
     if (is_big_pages)
         return BigPageTableOp(gpu_addr, dev_addr, size, kind, EntryType::Mapped);
     return PageTableOp(gpu_addr, dev_addr, size, kind, EntryType::Mapped);
 }
 
 GPUVAddr MemoryManager::MapSparse(GPUVAddr gpu_addr, std::size_t size, bool is_big_pages) {
+    if (VideoCommon::GpuRecord::Recording()) [[unlikely]] {
+        VideoCommon::GpuRecord::Recorder::Get().OnGmmuOp(
+            *this, {VideoCommon::GpuRecord::GmmuOpKind::MapSparse, is_big_pages, 0, 0, gpu_addr,
+                    0, size});
+    }
     if (is_big_pages)
         return BigPageTableOp(gpu_addr, 0, size, PTEKind::INVALID, EntryType::Reserved);
     return PageTableOp(gpu_addr, 0, size, PTEKind::INVALID, EntryType::Reserved);
@@ -253,6 +332,10 @@ GPUVAddr MemoryManager::MapSparse(GPUVAddr gpu_addr, std::size_t size, bool is_b
 void MemoryManager::Unmap(GPUVAddr gpu_addr, std::size_t size) {
     if (size == 0) {
         return;
+    }
+    if (VideoCommon::GpuRecord::Recording()) [[unlikely]] {
+        VideoCommon::GpuRecord::Recorder::Get().OnGmmuOp(
+            *this, {VideoCommon::GpuRecord::GmmuOpKind::Unmap, false, 0, 0, gpu_addr, 0, size});
     }
     GetSubmappedRangeImpl<false>(gpu_addr, size, page_stash);
 

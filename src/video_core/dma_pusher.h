@@ -24,6 +24,7 @@
 #include "video_core/engines/engine_interface.h"
 #include "video_core/engines/puller.h"
 #include "video_core/gpu_split.h"
+#include "video_core/gpu_record/state_access.h"
 
 namespace Core {
 class System;
@@ -151,6 +152,8 @@ inline u64 HashPushbufferWords(std::span<const u32> words) {
 /// details on this implementation.
 class DmaPusher final {
 public:
+    friend struct ::VideoCommon::GpuRecord::StateAccess;
+
     /// Counts suspensions on a semaphore acquire and the resumes after them, so it is odd while
     /// the channel is suspended (see CommandList::snapshot_suspensions).
     std::atomic<u64> suspensions{0};

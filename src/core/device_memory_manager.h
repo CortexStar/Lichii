@@ -149,6 +149,25 @@ public:
     /// Traps the next guest CPU read of these pages, to learn which GPU writes the CPU reads.
     void ArmReadTraps(DAddr addr, size_t size);
 
+    /// Calls func(device_page, raw_physical_page) for each mapped device page, in ascending
+    /// order (the GPU recorder's snapshot of the mappings; gpu_record/recorder.h).
+    template <typename Func>
+    void ForEachMappedPage(Func&& func) const {
+        constexpr size_t num_pages = device_as_size >> page_bits;
+        for (size_t page = 0; page < num_pages; ++page) {
+            const u32 physical = tracked_entries[page].compressed_physical_ptr;
+            if (physical != 0) {
+                func(page, physical - 1U);
+            }
+        }
+    }
+
+    /// The ranges AddZeroReadRange declared, start -> size.
+    [[nodiscard]] std::map<DAddr, size_t> ZeroReadRanges() const {
+        std::scoped_lock lk(zero_read_guard);
+        return zero_read_ranges;
+    }
+
     /// Changes whenever Map or Unmap changed a translation.
     [[nodiscard]] u64 MappingGeneration() const {
         return translation_generation.load(std::memory_order_acquire);

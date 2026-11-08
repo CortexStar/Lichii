@@ -28,6 +28,7 @@
 #include "core/device_memory.h"
 #include "core/device_memory_manager.h"
 #include "core/memory.h"
+#include "video_core/gpu_record/recorder.h"
 #include "video_core/nx2_perf.h"
 
 namespace Core {
@@ -309,6 +310,12 @@ void DeviceMemoryManager<Traits>::Map(DAddr address, VAddr virtual_address, size
     Core::Memory::Memory* process_memory = registered_processes[asid.id];
     size_t start_page_d = address >> Memory::YUZU_PAGEBITS;
     size_t num_pages = Common::AlignUp(size, Memory::YUZU_PAGESIZE) >> Memory::YUZU_PAGEBITS;
+    // Declared before the lock: runs once it is released.
+    SCOPE_EXIT {
+        if (VideoCommon::GpuRecord::Recording()) [[unlikely]] {
+            VideoCommon::GpuRecord::Recorder::Get().OnSmmuMap(address, size);
+        }
+    };
     std::scoped_lock lk(mapping_guard);
 
     tracked_entries.CommitRegion(start_page_d, start_page_d + num_pages);
@@ -349,6 +356,9 @@ template <typename Traits>
 void DeviceMemoryManager<Traits>::Unmap(DAddr address, size_t size) {
     size_t start_page_d = address >> Memory::YUZU_PAGEBITS;
     size_t num_pages = Common::AlignUp(size, Memory::YUZU_PAGESIZE) >> Memory::YUZU_PAGEBITS;
+    if (VideoCommon::GpuRecord::Recording()) [[unlikely]] {
+        VideoCommon::GpuRecord::Recorder::Get().OnSmmuUnmap(address, size);
+    }
     device_inter->InvalidateRegion(address, size);
     std::scoped_lock lk(mapping_guard);
 

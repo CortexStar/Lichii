@@ -84,6 +84,10 @@ public:
      */
     void SetCurrentPageTable(Kernel::KProcess& process);
 
+    /// Uses `page_table` without a process and without fastmem: a GPU replay's stand-in for the
+    /// guest process, whose device mappings resolve through it (gpu_record/replayer.h).
+    void SetCurrentPageTable(Common::PageTable& page_table);
+
     /**
      * Maps an allocated buffer onto a region of the emulated process address space.
      *

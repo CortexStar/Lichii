@@ -59,6 +59,7 @@
 #include "network/network.h"
 #include "sdl_config.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_record/replayer.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
@@ -347,6 +348,56 @@ constexpr int kRestartExitCode = 75;
 static std::atomic_bool restart_requested{false};
 // Loads the disk pipeline cache while the guest boots (Vulkan).
 static std::jthread disk_cache_loader;
+// --gpu-replay: plays a GPU recording on its own thread; SDL_AppIterate ends the app after it.
+static std::jthread gpu_replay_thread;
+static std::atomic_bool gpu_replay_done{false};
+static std::atomic_bool gpu_replay_ok{false};
+
+/// `--gpu-replay FILE [OUT_DIR] [loops=N] [sync=observed|none] [screenshots=0] [disk_cache=0]
+/// [config=INI]`.
+struct GpuReplayArgs {
+    VideoCommon::GpuRecord::ReplayOptions options;
+    std::optional<std::string> config;
+};
+
+static std::optional<GpuReplayArgs> ParseGpuReplay(int argc, char** argv) {
+    if (argc < 2 || std::string_view{argv[1]} != "--gpu-replay") {
+        return std::nullopt;
+    }
+    GpuReplayArgs parsed;
+    auto& options = parsed.options;
+    if (argc < 3) {
+        fmt::print(stderr, "usage: --gpu-replay <recording> [out dir] [loops=N] "
+                           "[sync=observed|none] [screenshots=0] [disk_cache=0] [config=INI]\n");
+        return parsed; // empty path: refused by the caller
+    }
+    options.path = Common::FS::ToU8String(argv[2]);
+    options.out_dir = options.path;
+    options.out_dir.replace_extension(".replay");
+    for (int i = 3; i < argc; ++i) {
+        const std::string_view arg{argv[i]};
+        const size_t equals = arg.find('=');
+        if (equals == std::string_view::npos) {
+            options.out_dir = Common::FS::ToU8String(arg);
+            continue;
+        }
+        const std::string_view key = arg.substr(0, equals);
+        const std::string value{arg.substr(equals + 1)};
+        if (key == "loops") {
+            options.loops = static_cast<u32>(std::strtoul(value.c_str(), nullptr, 10));
+        } else if (key == "sync") {
+            options.sync = value == "none" ? VideoCommon::GpuRecord::ReplaySync::NoWait
+                                           : VideoCommon::GpuRecord::ReplaySync::Observed;
+        } else if (key == "screenshots") {
+            options.screenshots = value != "0";
+        } else if (key == "disk_cache") {
+            options.disk_cache = value != "0";
+        } else if (key == "config") {
+            parsed.config = value;
+        }
+    }
+    return parsed;
+}
 
 // ExecuteProgram state for the restarted process: what the Qt frontend keeps in-process when it
 // reboots a game. Only read when the launcher sets EDEN_CLI_RESTART_HANDOFF, so a leftover file
@@ -696,7 +747,15 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
 #else
     wchar_t **argv_w = nullptr;
 #endif
-    Core::LaunchParams lp = Core::ParseLaunchParams(state->system, argc, argv, argv_w);
+    const auto gpu_replay = ParseGpuReplay(argc, argv);
+    if (gpu_replay && gpu_replay->options.path.empty()) {
+        return SDL_APP_FAILURE;
+    }
+    // A replay takes no game: the launch parameters see the program name alone.
+    Core::LaunchParams lp = Core::ParseLaunchParams(state->system, gpu_replay ? 1 : argc, argv, argv_w);
+    if (gpu_replay && gpu_replay->config) {
+        lp.config_path = gpu_replay->config;
+    }
 #ifdef _WIN32
     LocalFree(argv_w);
 #endif
@@ -722,7 +781,7 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
         return EditNup(lp) ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
     }
 
-    if (lp.filepath.empty()) {
+    if (lp.filepath.empty() && !gpu_replay) {
         LOG_CRITICAL(Frontend, "Failed to load ROM: No ROM specified");
         return SDL_APP_FAILURE;
     }
@@ -767,6 +826,20 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     state->system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
     state->system.GetFileSystemController().CreateFactories(*state->system.GetFilesystem());
     state->system.GetUserChannel().clear();
+
+    if (gpu_replay) {
+        // No guest: the recording feeds the GPU (video_core/gpu_record/replayer.h).
+        gpu_replay_thread = std::jthread([state, options = gpu_replay->options] {
+            Common::SetCurrentThreadName("GpuReplay");
+            const auto report =
+                VideoCommon::GpuRecord::RunReplay(state->system, *state->emu_window, options);
+            fmt::print("{}", VideoCommon::GpuRecord::ReportJson(report));
+            std::fflush(stdout);
+            gpu_replay_ok = report.ok;
+            gpu_replay_done = true;
+        });
+        return SDL_APP_CONTINUE;
+    }
 
     Service::AM::FrontendAppletParameters load_parameters{
         .applet_id = Service::AM::AppletId::Application,
@@ -992,6 +1065,9 @@ extern "C" SDL_AppResult SDL_AppIterate(void *appstate) {
     if (restart_requested) {
         return SDL_APP_SUCCESS;
     }
+    if (gpu_replay_done) {
+        return gpu_replay_ok ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
+    }
     return state->emu_window && state->emu_window->IsOpen() ? SDL_APP_CONTINUE : SDL_APP_SUCCESS;
 }
 extern "C" SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
@@ -1006,6 +1082,9 @@ extern "C" void SDL_AppQuit(void *appstate, SDL_AppResult result) {
         return;
     }
     state->system.DetachDebugger();
+    if (gpu_replay_thread.joinable()) {
+        gpu_replay_thread.join();
+    }
     if (disk_cache_loader.joinable()) {
         disk_cache_loader.request_stop();
         disk_cache_loader.join();

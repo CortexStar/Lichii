@@ -32,6 +32,7 @@
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2_reactive.h"
 #include "video_core/rasterizer_interface.h"
+#include "video_core/gpu_record/recorder.h"
 
 namespace VideoCommon {
 
@@ -178,8 +179,15 @@ public:
             LOG_ERROR(HW_GPU, "Signal of syncpoint {} past the table, ignored", value);
             return;
         }
-        syncpoint_manager.IncrementGuest(value);
-        std::function<void()> func([this, value] { syncpoint_manager.IncrementHost(value); });
+        // The GPU's own increments: a GPU recording doesn't note them (gpu_record/recorder.h).
+        {
+            const VideoCommon::GpuRecord::GpuIncrementScope gpu_increment;
+            syncpoint_manager.IncrementGuest(value);
+        }
+        std::function<void()> func([this, value] {
+            const VideoCommon::GpuRecord::GpuIncrementScope gpu_increment;
+            syncpoint_manager.IncrementHost(value);
+        });
         SignalFence(std::move(func));
     }
 

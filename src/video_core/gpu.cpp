@@ -36,6 +36,7 @@
 #include "video_core/host_vsync.h"
 #include "video_core/gpu.h"
 #include "video_core/pending_maps.h"
+#include "video_core/gpu_record/recorder.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/gpu_timestamp.h"
 #include "video_core/host1x/host1x.h"
@@ -89,6 +90,25 @@ struct GPU::Impl {
         to_init.Init(system, program_id);
         to_init.BindRasterizer(renderer->ReadRasterizer());
         renderer->ReadRasterizer()->InitializeChannel(to_init);
+        if (VideoCommon::GpuRecord::Recording()) [[unlikely]] {
+            VideoCommon::GpuRecord::Recorder::Get().OnInitChannel(to_init);
+        }
+    }
+
+    void ForEachChannel(const std::function<void(Control::ChannelState&)>& func) {
+        for (const auto& [id, channel] : channels) {
+            func(*channel);
+        }
+    }
+
+    /// Before the renderer shows composite `request` (RequestComposite's numbering).
+    void NoteCompositeExecuted(u64 request) {
+        if (VideoCommon::GpuRecord::Recording()) [[unlikely]] {
+            VideoCommon::GpuRecord::Recorder::Get().OnCompositeExecuted(request);
+        }
+        if (composite_observer) [[unlikely]] {
+            composite_observer(request);
+        }
     }
 
     void InitAddressSpace(Tegra::MemoryManager& memory_manager) {
@@ -259,14 +279,23 @@ struct GPU::Impl {
 
     /// Push GPU command entries to be processed
     void PushGPUEntries(s32 channel, Tegra::CommandList&& entries) {
+        if (VideoCommon::GpuRecord::Recording()) [[unlikely]] {
+            VideoCommon::GpuRecord::Recorder::Get().OnSubmit(channel, entries);
+        }
         gpu_thread.SubmitList(channel, std::move(entries), is_async);
     }
 
     void RunInOrder(std::function<void()>&& func) {
+        if (VideoCommon::GpuRecord::Recording()) [[unlikely]] {
+            func = VideoCommon::GpuRecord::Recorder::Get().WrapOrdered(std::move(func), false);
+        }
         gpu_thread.Run(std::move(func), is_async);
     }
 
     void MapInOrder(GPUVAddr gpu_addr, u64 size, std::function<void()>&& func) {
+        if (VideoCommon::GpuRecord::Recording()) [[unlikely]] {
+            func = VideoCommon::GpuRecord::Recorder::Get().WrapOrdered(std::move(func), true);
+        }
         const u64 id = pending_maps.Add(gpu_addr, size);
         gpu_thread.Run(
             [this, id, func = std::move(func)] {
@@ -406,6 +435,10 @@ struct GPU::Impl {
     }
 
     void RequestComposite(std::vector<Tegra::FramebufferConfig>&& layers, std::vector<Service::Nvidia::NvFence>&& fences) {
+        const u64 request = ++composite_requests;
+        if (VideoCommon::GpuRecord::Recording()) [[unlikely]] {
+            VideoCommon::GpuRecord::Recorder::Get().OnComposite(layers, fences, request);
+        }
         const size_t num_fences{fences.size()};
         size_t current_request_counter{};
         if (num_fences != 0) {
@@ -420,14 +453,16 @@ struct GPU::Impl {
             }
         }
         pending_composite_fence = RequestSyncOperation(
-            [this, current_request_counter, num_fences, composite_layers = std::move(layers),
-             composite_fences = std::move(fences)] {
+            [this, request, current_request_counter, num_fences,
+             composite_layers = std::move(layers), composite_fences = std::move(fences)] {
                 if (num_fences == 0) {
+                    NoteCompositeExecuted(request);
                     renderer->Composite(composite_layers);
                     return;
                 }
                 auto& syncpoint_manager = system.Host1x().GetSyncpointManager();
-                const auto executer = [this, current_request_counter, composite_layers]() {
+                const auto executer = [this, request, current_request_counter,
+                                       composite_layers]() {
                     {
                         std::unique_lock<std::mutex> lk(request_swap_mutex);
                         if (--request_swap_counters[current_request_counter] != 0) {
@@ -435,6 +470,7 @@ struct GPU::Impl {
                         }
                         free_swap_counters.push_back(current_request_counter);
                     }
+                    NoteCompositeExecuted(request);
                     renderer->Composite(composite_layers);
                 };
                 for (size_t i = 0; i < num_fences; i++) {
@@ -519,6 +555,10 @@ struct GPU::Impl {
     std::deque<size_t> request_swap_counters;
     std::mutex request_swap_mutex;
     u64 pending_composite_fence{};
+    /// RequestComposite calls so far (the number each composite gets).
+    u64 composite_requests{};
+    /// Called before each composite is shown (GPU replays time and capture frames with it).
+    std::function<void(u64)> composite_observer;
 };
 
 GPU::GPU(Core::System& system, bool is_async, bool use_nvdec)
@@ -541,6 +581,14 @@ void GPU::BindChannel(s32 channel_id) {
 
 void GPU::ReleaseChannel(Control::ChannelState& to_release) {
     impl->ReleaseChannel(to_release);
+}
+
+void GPU::ForEachChannel(const std::function<void(Control::ChannelState&)>& func) {
+    impl->ForEachChannel(func);
+}
+
+void GPU::SetCompositeObserver(std::function<void(u64)> observer) {
+    impl->composite_observer = std::move(observer);
 }
 
 void GPU::InitAddressSpace(Tegra::MemoryManager& memory_manager) {
@@ -660,6 +708,9 @@ void GPU::RequestComposite(std::vector<Tegra::FramebufferConfig>&& layers,
 }
 
 void GPU::GuestFrameBoundary() {
+    if (VideoCommon::GpuRecord::Recording() || VideoCommon::GpuRecord::Armed()) [[unlikely]] {
+        VideoCommon::GpuRecord::Recorder::Get().OnFrameBoundary();
+    }
     // While the display starts the game's frames (HostVsync), they are numbered there.
     const auto last = VideoCore::HostVsync::LastStart();
     if (!last || std::chrono::steady_clock::now() - *last > std::chrono::milliseconds{100}) {

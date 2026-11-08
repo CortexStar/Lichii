@@ -190,6 +190,30 @@ bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id, std::siz
            metadata.IsSwitch2();
 }
 
+/// Per-program resolution scale (Ocarina of Time's DLSS/AMD outputs); Load and GPU replays.
+void ApplyProgramResolution(u64 program_id) {
+    // Ocarina of Time with NVIDIA DLSS outputs 4K: the game's 2560x1440 at 1.5x (only the
+    // output side when DLSS upscales from 1440p, see video_core/oot_dlss.h). Per-game value,
+    // so the saved configuration is untouched; EDEN_RES_SETUP still wins.
+    // The AMD modes keep the chosen scale: Native AA anti-aliases at it (1x: the game's
+    // size, so it fits any display), upscaling needs one above 1x (the ratio, 1.5x = Quality).
+    const bool amd_upscale = VideoCommon::OotDlss::UsesAmd() &&
+                             VideoCommon::OotDlss::Output() ==
+                                 Settings::OotDlssOutput::Quality4k &&
+                             Settings::values.resolution_setup.GetValue() <=
+                                 Settings::ResolutionSetup::Res1X;
+    if (program_id == VideoCommon::OotDlss::ProgramId &&
+        VideoCommon::OotDlss::Requested() && std::getenv("EDEN_RES_SETUP") == nullptr &&
+        (!VideoCommon::OotDlss::UsesAmd() || amd_upscale)) {
+        LOG_INFO(Core, "Ocarina of Time DLSS: 4K output ({}), resolution scale 1.5x",
+                 VideoCommon::OotDlss::Output() == Settings::OotDlssOutput::Dlaa4k
+                     ? "DLAA"
+                     : "Quality from 2560x1440");
+        Settings::values.resolution_setup.SetGlobal(false);
+        Settings::values.resolution_setup.SetValue(Settings::ResolutionSetup::Res3_2X);
+    }
+}
+
 } // namespace
 
 struct System::Impl {
@@ -482,26 +506,7 @@ struct System::Impl {
         // Expose program id to dump sites and other global readers.
         Settings::SetCurrentProgramID(params.program_id);
 
-        // Ocarina of Time with NVIDIA DLSS outputs 4K: the game's 2560x1440 at 1.5x (only the
-        // output side when DLSS upscales from 1440p, see video_core/oot_dlss.h). Per-game value,
-        // so the saved configuration is untouched; EDEN_RES_SETUP still wins.
-        // The AMD modes keep the chosen scale: Native AA anti-aliases at it (1x: the game's
-        // size, so it fits any display), upscaling needs one above 1x (the ratio, 1.5x = Quality).
-        const bool amd_upscale = VideoCommon::OotDlss::UsesAmd() &&
-                                 VideoCommon::OotDlss::Output() ==
-                                     Settings::OotDlssOutput::Quality4k &&
-                                 Settings::values.resolution_setup.GetValue() <=
-                                     Settings::ResolutionSetup::Res1X;
-        if (params.program_id == VideoCommon::OotDlss::ProgramId &&
-            VideoCommon::OotDlss::Requested() && std::getenv("EDEN_RES_SETUP") == nullptr &&
-            (!VideoCommon::OotDlss::UsesAmd() || amd_upscale)) {
-            LOG_INFO(Core, "Ocarina of Time DLSS: 4K output ({}), resolution scale 1.5x",
-                     VideoCommon::OotDlss::Output() == Settings::OotDlssOutput::Dlaa4k
-                         ? "DLAA"
-                         : "Quality from 2560x1440");
-            Settings::values.resolution_setup.SetGlobal(false);
-            Settings::values.resolution_setup.SetValue(Settings::ResolutionSetup::Res3_2X);
-        }
+        ApplyProgramResolution(params.program_id);
 
         // Track launch time for frontend launches
         LaunchTimestampCache::SaveLaunchTimestamp(params.program_id);
@@ -564,6 +569,41 @@ struct System::Impl {
         debug_service = Nx2Debug::MaybeStartService(system, name, params.program_id);
         Nx2Sampler::StartFromEnvironment();
         LoadTiming::LogPhase("CPU cores and applet start", phase_start);
+        return SystemResultStatus::Success;
+    }
+
+    /// The parts of Load a GPU replay needs: guest memory, Host1x and the GPU for a program,
+    /// without its process, services or CPU cores (gpu_record/replayer.h).
+    SystemResultStatus InitializeGpuReplay(System& system, Frontend::EmuWindow& emu_window,
+                                           u64 replay_program_id, bool switch2) {
+        Settings::SetCurrentProgramIsSwitch2(switch2);
+        if (switch2 &&
+            Settings::values.memory_layout_mode.GetValue() != Settings::MemoryLayout::Memory_12Gb) {
+            Settings::values.memory_layout_mode.SetGlobal(false);
+            Settings::values.memory_layout_mode.SetValue(Settings::MemoryLayout::Memory_12Gb);
+        }
+        static_cast<void>(Settings::ApplySwitch2ConsoleMode(Settings::values, switch2));
+        Common::g_wall_clock.SetGuestCNTFRQ(switch2 ? Common::WallClock::Switch2CNTFRQ
+                                                    : Common::WallClock::CNTFRQ);
+        const auto kernel_result = InitializeKernel(system);
+        if (kernel_result != SystemResultStatus::Success) {
+            return kernel_result;
+        }
+        program_id = replay_program_id;
+        Settings::SetCurrentProgramID(replay_program_id);
+        ApplyProgramResolution(replay_program_id);
+        host1x_core.emplace(system);
+        VideoCore::CreateGPU(gpu_core, emu_window, system);
+        if (!gpu_core) {
+            return SystemResultStatus::ErrorVideoCore;
+        }
+        is_powered_on = true;
+        exit_locked = false;
+        exit_requested = false;
+        perf_stats.emplace(replay_program_id);
+        GetAndResetPerfStats();
+        perf_stats->BeginSystemFrame();
+        GameSettings::LoadOverrides(replay_program_id, gpu_core->Renderer());
         return SystemResultStatus::Success;
     }
 
@@ -774,6 +814,11 @@ bool System::GetNVDECActive() {
 
 void System::InitializeDebugger() {
     impl->InitializeDebugger(*this, Settings::values.gdbstub_port.GetValue());
+}
+
+SystemResultStatus System::InitializeGpuReplay(Frontend::EmuWindow& emu_window, u64 program_id,
+                                               bool switch2) {
+    return impl->InitializeGpuReplay(*this, emu_window, program_id, switch2);
 }
 
 SystemResultStatus System::Load(Frontend::EmuWindow& emu_window, const std::string& filepath,

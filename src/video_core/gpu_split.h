@@ -145,6 +145,10 @@ public:
     [[nodiscard]] static bool OnBackThread() {
         return on_back_thread;
     }
+    /// Whether the calling thread is the GPU thread (the front) or the split's back.
+    [[nodiscard]] static bool OnGpuThreads() {
+        return on_gpu_thread || on_back_thread;
+    }
     /// Marks the calling thread as the GPU thread (the front, or the only one without the split).
     static void MarkGpuThread() {
         on_gpu_thread = true;

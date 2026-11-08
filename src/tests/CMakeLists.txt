@@ -33,6 +33,7 @@ add_executable(tests
     video_core/provoking_vertex.cpp
     video_core/host_mip_limits.cpp
     video_core/gpu_timestamp.cpp
+    video_core/gpu_record.cpp
     video_core/unbacked_image_policy.cpp
     video_core/host_logic_op.cpp
     video_core/hdr_capture.cpp

@@ -13,6 +13,8 @@
 #include <utility>
 #include <vector>
 
+#include "video_core/gpu_record/state_access.h"
+
 namespace Tegra {
 
 // Semaphore reduction ops (ADD, MIN, MAX, INC, DEC, AND, OR, XOR) shared by QMD releases and the
@@ -36,6 +38,8 @@ inline std::uint32_t ReduceSemaphore(std::uint32_t op, bool is_signed, std::uint
 // Native QMD 3.0 dependency scheduling; nonempty grids require a dispatch backend.
 class NativeQmdScheduler {
 public:
+    friend struct ::VideoCommon::GpuRecord::StateAccess;
+
     using Word = std::uint32_t;
     using Address = std::uint64_t;
     using Descriptor = std::array<Word, 64>;

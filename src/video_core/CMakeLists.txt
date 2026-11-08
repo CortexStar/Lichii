@@ -114,6 +114,15 @@ add_library(video_core STATIC
     gpu_timestamp.h
     gpu_page_table.cpp
     gpu_page_table.h
+    gpu_record/engine_state.cpp
+    gpu_record/engine_state.h
+    gpu_record/record_format.cpp
+    gpu_record/record_format.h
+    gpu_record/recorder.cpp
+    gpu_record/recorder.h
+    gpu_record/replayer.cpp
+    gpu_record/replayer.h
+    gpu_record/state_access.h
     gpu_split.cpp
     gpu_split.h
     gpu_thread.cpp

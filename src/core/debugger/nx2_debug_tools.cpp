@@ -34,6 +34,7 @@
 #include "hid_core/hid_core.h"
 #include "hid_core/resources/npad/npad.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_record/recorder.h"
 #include "video_core/guest_frame_timing.h"
 #include "video_core/nx2_debug_control.h"
 #include "video_core/renderer_base.h"
@@ -408,6 +409,47 @@ json Screenshot(ToolState& state, const json& params) {
     return result;
 }
 
+/// gpu_record {frames, path?, screenshot_every, width, height}: records the next `frames` guest
+/// frames of GPU input (video_core/gpu_record/recorder.h); {"status": true} reports progress.
+json GpuRecordTool(ToolState& state, const json& params) {
+    namespace GpuRecord = VideoCommon::GpuRecord;
+    auto& recorder = GpuRecord::Recorder::Get();
+    if (!params.value("status", false)) {
+        GpuRecord::RecordOptions options;
+        options.frames = Param<u32>(params, "frames", 60, 1, 3600);
+        options.screenshot_every = Param<u32>(params, "screenshot_every", 1, 0, 3600);
+        options.screenshot_height = Param<u32>(params, "height", 720, 144, 2160);
+        options.screenshot_width =
+            Param<u32>(params, "width", options.screenshot_height * 16 / 9, 144, 5120);
+        if (params.contains("path")) {
+            options.path = Common::FS::ToU8String(params.at("path").get<std::string>());
+        } else {
+            std::filesystem::create_directories(state.dump_directory);
+            static u32 recordings = 0;
+            options.path = state.dump_directory /
+                           fmt::format("gpu-{}-{:02}.lxgpurec", state.session, ++recordings);
+        }
+        std::string error;
+        if (!recorder.Arm(state.system, options, error)) {
+            throw std::runtime_error{error};
+        }
+    }
+    const auto status = recorder.GetStatus();
+    return {
+        {"state", status.state},
+        {"path", status.path},
+        {"error", status.error},
+        {"frames", status.frames},
+        {"submits", status.submits},
+        {"composites", status.composites},
+        {"snapshot_pages", status.snapshot_pages},
+        {"written_pages", status.dirty_pages},
+        {"bytes", status.bytes},
+        {"start_ms", status.start_ms},
+        {"write_ms", status.write_ms},
+    };
+}
+
 json LogTail(ToolState&, const json& params) {
     const u64 after = params.value("after", u64{0});
     const size_t limit = Param<size_t>(params, "limit", 200, 1, 5000);
@@ -776,6 +818,7 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
         {"frame_times", handler(FrameTimes)},
         {"present_status", handler(PresentStatus)},
         {"screenshot", handler(Screenshot)},
+        {"gpu_record", handler(GpuRecordTool)},
         {"log_tail", handler(LogTail)},
         {"log_filter", handler(LogFilter)},
         {"capture_frame", handler(CaptureFrame)},

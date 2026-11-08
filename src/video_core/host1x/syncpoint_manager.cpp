@@ -6,6 +6,7 @@
 
 #include "common/logging.h"
 #include "video_core/host1x/syncpoint_manager.h"
+#include "video_core/gpu_record/recorder.h"
 
 namespace Tegra {
 
@@ -62,6 +63,10 @@ void SyncpointManager::IncrementGuest(u32 syncpoint_id) {
         LOG_ERROR(HW_GPU, "Ignoring increment of invalid syncpoint {:#x}", syncpoint_id);
         return;
     }
+    if (VideoCommon::GpuRecord::Recording() && !VideoCommon::GpuRecord::Recorder::gpu_increment)
+        [[unlikely]] {
+        VideoCommon::GpuRecord::Recorder::Get().OnSyncpointIncrement(syncpoint_id, true, false);
+    }
     Increment(syncpoint_id, syncpoints_guest[syncpoint_id], wait_guest_cv,
               guest_action_storage[syncpoint_id], true);
 }
@@ -69,6 +74,10 @@ void SyncpointManager::IncrementGuest(u32 syncpoint_id) {
 void SyncpointManager::IncrementHost(u32 syncpoint_id) {
     if (syncpoint_id >= NUM_MAX_SYNCPOINTS) {
         return;
+    }
+    if (VideoCommon::GpuRecord::Recording() && !VideoCommon::GpuRecord::Recorder::gpu_increment)
+        [[unlikely]] {
+        VideoCommon::GpuRecord::Recorder::Get().OnSyncpointIncrement(syncpoint_id, false, true);
     }
     Increment(syncpoint_id, syncpoints_host[syncpoint_id], wait_host_cv,
               host_action_storage[syncpoint_id], false);

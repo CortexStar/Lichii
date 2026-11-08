@@ -15,6 +15,7 @@
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 #include "video_core/engines/engine_interface.h"
+#include "video_core/gpu_record/state_access.h"
 
 namespace Core {
 class System;
@@ -46,6 +47,8 @@ namespace Tegra::Engines {
 
 class Puller final {
 public:
+    friend struct ::VideoCommon::GpuRecord::StateAccess;
+
     struct MethodCall {
         u32 method{};
         u32 argument{};

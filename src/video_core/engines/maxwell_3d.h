@@ -30,6 +30,7 @@
 #include "video_core/nx2_perf.h"
 #include "video_core/textures/texture.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/gpu_record/state_access.h"
 
 namespace Core {
 class System;
@@ -67,6 +68,8 @@ namespace Tegra::Engines {
 
 class Maxwell3D final : public EngineInterface {
 public:
+    friend struct ::VideoCommon::GpuRecord::StateAccess;
+
     explicit Maxwell3D(MemoryManager& memory_manager);
     ~Maxwell3D();
 

@@ -13,6 +13,7 @@
 #include "common/common_types.h"
 #include "video_core/engines/engine_interface.h"
 #include "video_core/engines/engine_upload.h"
+#include "video_core/gpu_record/state_access.h"
 
 namespace Core {
 class System;
@@ -39,6 +40,8 @@ namespace Tegra::Engines {
 
 class KeplerMemory final : public EngineInterface {
 public:
+    friend struct ::VideoCommon::GpuRecord::StateAccess;
+
     explicit KeplerMemory(MemoryManager& memory_manager);
     ~KeplerMemory() override;
 

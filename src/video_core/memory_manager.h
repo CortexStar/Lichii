@@ -7,6 +7,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -148,6 +149,22 @@ public:
      */
     boost::container::small_vector<std::pair<GPUVAddr, std::size_t>, 32> GetSubmappedRange(
         GPUVAddr gpu_addr, std::size_t size) const;
+
+    /// What the address space was made with (GPU recordings recreate it).
+    struct Params {
+        u64 address_space_bits;
+        GPUVAddr split_address;
+        u64 big_page_bits;
+        u64 page_bits;
+        bool native_tiling;
+        GPUVAddr syncpoint_shim;
+    };
+    [[nodiscard]] Params GetParams() const;
+
+    /// Calls func(gpu_addr, dev_addr, size, kind, big_pages, reserved) for each run of mapped
+    /// (reserved: sparse) pages, small pages first: a big page maps over small ones.
+    void ForEachMapping(
+        const std::function<void(GPUVAddr, DAddr, u64, PTEKind, bool, bool)>& func) const;
 
     GPUVAddr Map(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size,
                  PTEKind kind = PTEKind::INVALID, bool is_big_pages = true);

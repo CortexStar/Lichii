@@ -24,6 +24,7 @@
 #include "video_core/macro.h"
 #include "video_core/native_qmd.h"
 #include "video_core/textures/texture.h"
+#include "video_core/gpu_record/state_access.h"
 
 namespace Core {
 class System;
@@ -65,6 +66,8 @@ extern std::atomic<u32> g_nx2_trace_draws_after_upscale;
 
 class KeplerCompute final : public EngineInterface {
 public:
+    friend struct ::VideoCommon::GpuRecord::StateAccess;
+
     explicit KeplerCompute(MemoryManager& memory_manager);
     ~KeplerCompute();
 

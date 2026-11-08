@@ -219,6 +219,12 @@ public:
      * @param program_index Specifies the index within the container of the program to launch.
      * @returns SystemResultStatus code, indicating if the operation succeeded.
      */
+    /// Sets up guest memory, Host1x and the GPU for `program_id` without loading it: no
+    /// process, services or CPU cores. A GPU replay feeds the GPU instead
+    /// (video_core/gpu_record/replayer.h).
+    [[nodiscard]] SystemResultStatus InitializeGpuReplay(Frontend::EmuWindow& emu_window,
+                                                         u64 program_id, bool switch2);
+
     [[nodiscard]] SystemResultStatus Load(Frontend::EmuWindow& emu_window,
                                           const std::string& filepath,
                                           Service::AM::FrontendAppletParameters& params);

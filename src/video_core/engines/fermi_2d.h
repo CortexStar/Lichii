@@ -14,6 +14,7 @@
 #include "common/common_types.h"
 #include "video_core/engines/engine_interface.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_record/state_access.h"
 
 namespace Tegra {
 class MemoryManager;
@@ -40,6 +41,8 @@ class SoftwareBlitEngine;
 
 class Fermi2D final : public EngineInterface {
 public:
+    friend struct ::VideoCommon::GpuRecord::StateAccess;
+
     explicit Fermi2D(MemoryManager& memory_manager_);
     ~Fermi2D() override;
 

@@ -169,6 +169,13 @@ public:
 
     void InitAddressSpace(Tegra::MemoryManager& memory_manager);
 
+    /// Calls func for every channel (the GPU recorder; with the GPU thread idle).
+    void ForEachChannel(const std::function<void(Control::ChannelState&)>& func);
+
+    /// `observer(request)` runs on the GPU thread before each composite is shown; `request`
+    /// numbers the RequestComposite calls from 1. Set once before GPU work starts (GPU replay).
+    void SetCompositeObserver(std::function<void(u64)> observer);
+
     /// Request a host GPU memory flush from the CPU.
     [[nodiscard]] u64 RequestFlush(DAddr addr, std::size_t size);
 

@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <span>
 #include <condition_variable>
 #include <functional>
 #include <list>
@@ -61,6 +62,14 @@ public:
     ActionHandle AddGuestIncrementObserver(IncrementObserver&& observer);
 
     void RemoveGuestIncrementObserver(const ActionHandle& handle);
+
+    /// Sets every syncpoint's guest and host value (a GPU replay's start), before GPU work.
+    void RestoreValues(std::span<const u32> guest, std::span<const u32> host) {
+        for (size_t i = 0; i < NUM_MAX_SYNCPOINTS && i < guest.size() && i < host.size(); ++i) {
+            syncpoints_guest[i].store(guest[i], std::memory_order_release);
+            syncpoints_host[i].store(host[i], std::memory_order_release);
+        }
+    }
 
     void IncrementGuest(u32 syncpoint_id);
 
