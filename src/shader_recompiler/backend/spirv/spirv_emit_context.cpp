@@ -503,8 +503,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineWriteStorageCasLoopFunction(program.info);
     DefineGlobalMemoryFunctions(program);
     DefineMeshEmulationOutput();
-    DefineRescalingInput(program.info);
-    DefineRenderArea(program.info);
+    DefinePushConstants(program.info);
 }
 
 EmitContext::~EmitContext() = default;
@@ -1267,59 +1266,62 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
     }
 }
 
-void EmitContext::DefineRescalingInput(const Info& info) {
-    if (!info.uses_rescaling_uniform) {
-        return;
-    }
-    if (profile.unified_descriptor_binding) {
-        DefineRescalingInputPushConstant();
-    } else {
+void EmitContext::DefinePushConstants(const Info& info) {
+    const bool rescaling{info.uses_rescaling_uniform};
+    const bool render_area{info.uses_render_area && profile.unified_descriptor_binding};
+    if (rescaling && !profile.unified_descriptor_binding) {
         DefineRescalingInputUniformConstant();
     }
-}
+    const bool rescaling_block{rescaling && profile.unified_descriptor_binding};
+    if (!rescaling_block && !render_area) {
+        return;
+    }
+    // One block with every member this stage reads, at the offsets of PushConstantLayout.
+    boost::container::static_vector<Id, 4> members;
+    boost::container::static_vector<u32, 4> offsets;
+    boost::container::static_vector<const char*, 4> names;
+    const auto add_member{[&](Id type, u32 offset, const char* name) {
+        members.push_back(type);
+        offsets.push_back(offset);
+        names.push_back(name);
+        return static_cast<u32>(members.size() - 1);
+    }};
+    if (rescaling_block) {
+        rescaling_textures_type = TypeArray(U32[1], Const(4u));
+        Decorate(rescaling_textures_type, spv::Decoration::ArrayStride, 4u);
+        rescaling_textures_member_index = add_member(
+            rescaling_textures_type, RESCALING_LAYOUT_WORDS_OFFSET, "rescaling_textures");
 
-void EmitContext::DefineRescalingInputPushConstant() {
-    boost::container::static_vector<Id, 3> members{};
-    u32 member_index{0};
-
-    rescaling_textures_type = TypeArray(U32[1], Const(4u));
-    Decorate(rescaling_textures_type, spv::Decoration::ArrayStride, 4u);
-    members.push_back(rescaling_textures_type);
-    rescaling_textures_member_index = member_index++;
-
-    rescaling_images_type = TypeArray(U32[1], Const(NUM_IMAGE_SCALING_WORDS));
-    Decorate(rescaling_images_type, spv::Decoration::ArrayStride, 4u);
-    members.push_back(rescaling_images_type);
-    rescaling_images_member_index = member_index++;
-
-    if (stage != Stage::Compute) {
-        members.push_back(F32[1]);
-        rescaling_downfactor_member_index = member_index++;
+        rescaling_images_type = TypeArray(U32[1], Const(NUM_IMAGE_SCALING_WORDS));
+        Decorate(rescaling_images_type, spv::Decoration::ArrayStride, 4u);
+        rescaling_images_member_index =
+            add_member(rescaling_images_type, RESCALING_LAYOUT_IMAGES_OFFSET, "rescaling_images");
+        if (stage != Stage::Compute) {
+            rescaling_downfactor_member_index =
+                add_member(F32[1], RESCALING_LAYOUT_DOWN_FACTOR_OFFSET, "down_factor");
+        }
+    }
+    if (render_area) {
+        render_are_member_index = add_member(F32[4], RENDERAREA_LAYOUT_OFFSET, "render_area");
     }
     const Id push_constant_struct{TypeStruct(std::span(members.data(), members.size()))};
     Decorate(push_constant_struct, spv::Decoration::Block);
-    Name(push_constant_struct, "ResolutionInfo");
-
-    MemberDecorate(push_constant_struct, rescaling_textures_member_index, spv::Decoration::Offset,
-                   static_cast<u32>(offsetof(RescalingLayout, rescaling_textures)));
-    MemberName(push_constant_struct, rescaling_textures_member_index, "rescaling_textures");
-
-    MemberDecorate(push_constant_struct, rescaling_images_member_index, spv::Decoration::Offset,
-                   static_cast<u32>(offsetof(RescalingLayout, rescaling_images)));
-    MemberName(push_constant_struct, rescaling_images_member_index, "rescaling_images");
-
-    if (stage != Stage::Compute) {
-        MemberDecorate(push_constant_struct, rescaling_downfactor_member_index,
-                       spv::Decoration::Offset,
-                       static_cast<u32>(offsetof(RescalingLayout, down_factor)));
-        MemberName(push_constant_struct, rescaling_downfactor_member_index, "down_factor");
+    Name(push_constant_struct, "PushConstants");
+    for (u32 member = 0; member < members.size(); ++member) {
+        MemberDecorate(push_constant_struct, member, spv::Decoration::Offset, offsets[member]);
+        MemberName(push_constant_struct, member, names[member]);
     }
     const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};
-    rescaling_push_constants = AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant);
-    Name(rescaling_push_constants, "rescaling_push_constants");
-
+    const Id variable{AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant)};
+    Name(variable, "push_constants");
+    if (rescaling_block) {
+        rescaling_push_constants = variable;
+    }
+    if (render_area) {
+        render_area_push_constant = variable;
+    }
     if (profile.supported_spirv >= 0x00010400) {
-        interfaces.push_back(rescaling_push_constants);
+        interfaces.push_back(variable);
     }
 }
 
@@ -1331,36 +1333,6 @@ void EmitContext::DefineRescalingInputUniformConstant() {
 
     if (profile.supported_spirv >= 0x00010400) {
         interfaces.push_back(rescaling_uniform_constant);
-    }
-}
-
-void EmitContext::DefineRenderArea(const Info& info) {
-    if (!info.uses_render_area) {
-        return;
-    }
-
-    if (profile.unified_descriptor_binding) {
-        boost::container::static_vector<Id, 1> members{};
-        u32 member_index{0};
-
-        members.push_back(F32[4]);
-        render_are_member_index = member_index++;
-
-        const Id push_constant_struct{TypeStruct(std::span(members.data(), members.size()))};
-        Decorate(push_constant_struct, spv::Decoration::Block);
-        Name(push_constant_struct, "RenderAreaInfo");
-
-        MemberDecorate(push_constant_struct, render_are_member_index, spv::Decoration::Offset, 0);
-        MemberName(push_constant_struct, render_are_member_index, "render_area");
-
-        const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};
-        render_area_push_constant =
-            AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant);
-        Name(render_area_push_constant, "render_area_push_constants");
-
-        if (profile.supported_spirv >= 0x00010400) {
-            interfaces.push_back(render_area_push_constant);
-        }
     }
 }
 
