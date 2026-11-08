@@ -309,6 +309,15 @@ void Scheduler::DispatchWork(bool lazy) {
     }
 }
 
+bool Scheduler::RenderPassMatches(const Framebuffer* framebuffer) const {
+    const VkExtent2D render_area = framebuffer->RenderArea();
+    // The identity RequestRenderpass continues a pass by (#699): a deferred clear's variant of the
+    // render pass is the same pass for later draws.
+    return state.renderpass != VK_NULL_HANDLE && framebuffer->Handle() == state.framebuffer &&
+           render_area.width == state.render_area.width &&
+           render_area.height == state.render_area.height;
+}
+
 void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass renderpass,
                                     const VkClearValue* clear_values, u32 clear_value_count,
                                     bool tracked) {

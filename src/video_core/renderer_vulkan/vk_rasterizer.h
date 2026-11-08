@@ -367,6 +367,8 @@ private:
         std::array<f32, 280 * 12> bones{};
     } oot_actor, oot_previous_actor;
 #endif
+    u64 nx2_dispatch_serial = 0;     ///< Compute dispatches recorded (WaitForIdle)
+    u64 nx2_wfi_dispatch_serial = 0; ///< nx2_dispatch_serial at the last real wait for idle
     u64 render_trace_frame = 0;
     u32 render_trace_draws = 0;
     /// Any of VideoCommon::DrawDebugSwitches is set: run the per-draw debug hooks.

@@ -1670,13 +1670,19 @@ void RasterizerVulkan::Clear(u32 layer_count) {
         clear_rect.rect.offset.x == 0 && clear_rect.rect.offset.y == 0 &&
         clear_rect.rect.extent.width >= render_area.width &&
         clear_rect.rect.extent.height >= render_area.height;
-    const bool can_defer_clear = ENABLE_DEFERRED_CLEAR && (!regs.clear_control.use_scissor || clear_covers_render_area) &&
-                                 clear_layers.covers_all_layers &&
-                                 !scheduler.IsRenderPassActive() &&
-                                 (!use_color || color_full_channels) && ds_deferrable;
+    // A pass open on another framebuffer ends here either way: the clear can still become the
+    // load op of this framebuffer's next pass (no load, no clear inside it).
+    const bool other_pass_open =
+        scheduler.IsRenderPassActive() && !scheduler.RenderPassMatches(framebuffer);
+    const bool can_defer_clear =
+        ENABLE_DEFERRED_CLEAR && (!regs.clear_control.use_scissor || clear_covers_render_area) &&
+        clear_layers.covers_all_layers && (!scheduler.IsRenderPassActive() || other_pass_open) &&
+        (!use_color || color_full_channels) && ds_deferrable;
     if (!can_defer_clear) {
         // A clear only writes the attachments.
         scheduler.RequestDrawRenderpass(framebuffer);
+    } else if (other_pass_open) {
+        scheduler.RequestOutsideRenderPassOperationContext();
     }
 
     query_cache.NotifySegment(true);
@@ -1769,6 +1775,7 @@ void RasterizerVulkan::Clear(u32 layer_count) {
 
 void RasterizerVulkan::DispatchCompute() {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Compute};
+    ++nx2_dispatch_serial;
     FlushWork();
     gpu_memory->FlushCaching();
     if (frame_dump.Capturing()) {
@@ -2331,6 +2338,19 @@ void RasterizerVulkan::WaitForIdle() {
         fence_manager.SignalOrdering();
         return;
     }
+    // A wait for idle between draws of one render pass ended it (~1,200 a second in Ocarina).
+    // Since the pass began only its draws ran; their attachment writes are covered by the
+    // deferred fragment barrier (the next draw sampling a target ends the pass) and by the
+    // barrier at the pass end. Storage or transform feedback writes, or a dispatch since the
+    // last real wait (dispatches have no barrier after them), still wait here.
+    if (scheduler.IsRenderPassActive() && !scheduler.RenderPassHasStores() &&
+        nx2_dispatch_serial == nx2_wfi_dispatch_serial &&
+        maxwell3d->regs.transform_feedback_enabled == 0) {
+        scheduler.DeferFragmentBarrier();
+        fence_manager.SignalOrdering();
+        return;
+    }
+    nx2_wfi_dispatch_serial = nx2_dispatch_serial;
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([flags](vk::CommandBuffer cmdbuf) {
         // Later work waits for the earlier work and sees its writes.
@@ -3112,7 +3132,8 @@ void RasterizerVulkan::FlushWork() {
         }();
         legacy_budget = forced_draws != 0 ? forced_draws : (device.IsMoltenVK() ? 128U : 4096U);
     }
-    switch (SubmissionPolicy::Advance(draw_counter, native, android, budget, legacy_budget)) {
+    switch (SubmissionPolicy::Advance(draw_counter, native, android, budget, legacy_budget,
+                                      scheduler.IsRenderPassActive())) {
     case SubmissionPolicy::Action::None:
         break;
     case SubmissionPolicy::Action::Dispatch:
