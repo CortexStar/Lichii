@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -18,7 +19,7 @@ namespace {
 using namespace VideoCommon::ShaderWarm;
 
 template <typename T>
-void Put(std::vector<u8>& bytes, size_t offset, T value) {
+void Put(std::span<u8> bytes, size_t offset, T value) {
     REQUIRE(offset + sizeof(T) <= bytes.size());
     std::memcpy(bytes.data() + offset, &value, sizeof(value));
 }
@@ -250,8 +251,13 @@ TEST_CASE("Mesh predictions deduplicate, respect caps and exclude known pipeline
     REQUIRE(unrelated.Write(out, {}) == 0);
 }
 
-TEST_CASE("Mesh warm variants preserve allocation-tail constant specialization", "[mesh_warm]") {
-    const auto donor = Donor();
+TEST_CASE("Mesh warm variants preserve separate constant-table specialization", "[mesh_warm]") {
+    auto donor = Donor();
+    auto& captured_mesh = donor.stages[1].environment;
+    const size_t captured_constants = 76 + Get<u64>(captured_mesh, 0);
+    captured_mesh.insert(captured_mesh.begin() + captured_constants, 12, 0);
+    Put<u64>(captured_mesh, 24, 1);
+    Put<u64>(captured_mesh, captured_constants, u64{1} << 32);
     CacheFile cache{*MakeMeshWarmCandidate(donor.stages, donor)};
     const auto task = Native(7, 1), fragment = Native(4, 3);
     auto mesh_a = Native(8, 2);
@@ -265,7 +271,7 @@ TEST_CASE("Mesh warm variants preserve allocation-tail constant specialization",
     REQUIRE(lowered_a.code == lowered_b.code);
     REQUIRE(StageHash(lowered_a.code) == donor.stages[1].code_hash);
     auto stages = donor.stages;
-    stages[1] = {8, StageHash(lowered_a.code), GraphicsEnv(8, lowered_a, mesh_a)};
+    stages[1] = {8, StageHash(lowered_a.code), GraphicsEnv(8, lowered_a, mesh_a, std::span{mesh_a}.subspan(144, 4))};
     const auto candidate = MakeMeshWarmCandidate(stages, donor);
     REQUIRE(candidate);
     CacheFile predicted{*candidate};
@@ -279,11 +285,11 @@ TEST_CASE("Mesh warm variants preserve allocation-tail constant specialization",
 
     MeshWarmRecipes recipes{{cache.path}, 8};
     const std::array<ShaderRecord, 3> variation{{{ProgramStage::Task, task, {}},
-                                                 {ProgramStage::Mesh, mesh_a, {}},
+                                                 {ProgramStage::Mesh, mesh_a, {}, std::span{mesh_a}.subspan(144, 4)},
                                                  {ProgramStage::Fragment, fragment, {}}}};
     recipes.AddVariation(variation);
     auto second = variation;
-    second[1].code = mesh_b;
+    second[1].constants = std::span{mesh_b}.subspan(144, 4);
     recipes.AddVariation(second);
     recipes.AddVariation(variation);
     REQUIRE(recipes.VariationCount() == 2);
@@ -344,4 +350,123 @@ TEST_CASE("Mesh warm prompts respect empty files and the per-game opt-in", "[mes
         marker << "done";
     }
     REQUIRE_FALSE(WarmPending(Title));
+}
+
+TEST_CASE("Warm records serialize the explicit constant table", "[mesh_warm]") {
+    const auto native = Native(4, 7);
+    LoweredCode lowered;
+    REQUIRE_FALSE(LowerProgram(native, true, lowered));
+    std::vector<u8> constants(8);
+    Put<u32>(constants, 0, 576);
+    Put<u32>(constants, 4, 656);
+    const auto env = GraphicsEnv(4, lowered, native, constants);
+    REQUIRE(Get<u64>(env, 24) == 2);
+    const size_t offset = 76 + lowered.code.size();
+    REQUIRE(Get<u64>(env, offset) == (u64{1} << 32));
+    REQUIRE(Get<u32>(env, offset + 8) == 576);
+    REQUIRE(Get<u64>(env, offset + 12) == ((u64{1} << 32) | 4));
+    REQUIRE(Get<u32>(env, offset + 20) == 656);
+    REQUIRE(Get<u64>(GraphicsEnv(4, lowered, native), 24) == 0);
+    ComputeKey key{};
+    const auto compute = ComputeEntry(lowered, {{1, 1, 1}, 0, 0}, constants, key);
+    REQUIRE(Get<u64>(compute, 4 + 24) == 2);
+    REQUIRE(Get<u32>(compute, 4 + offset + 8) == 576);
+}
+
+TEST_CASE("Archive variations carry their own constant tables", "[mesh_warm]") {
+    auto data = Bnsh();
+    for (size_t i = 0; i < 6; ++i) {
+        const size_t control = 0x400 + i * 0x60;
+        Put<u32>(data, control + 60, 4);
+        Put<u32>(data, control + 64, 64);
+    }
+    // A bad table only loses its constants, not the rest of the archive.
+    Put<u32>(data, 0x400 + 64, 0xfffffff0);
+    size_t records{}, groups{}, tables{};
+    WalkArchive(data, "constants.bnsh", nullptr, [&](const ShaderRecord& record) {
+        ++records;
+        if (!record.constants.empty()) {
+            REQUIRE(record.constants.size() == 4);
+            REQUIRE(Get<u32>(record.constants, 0) == Get<u32>(record.code, 64));
+            ++tables;
+        }
+    }, [](const std::string&) { FAIL("Unexpected archive error"); },
+    [&](std::span<const ShaderRecord> variation) {
+        ++groups;
+        REQUIRE(variation.size() == 3);
+        const auto with_constants = std::ranges::count_if(variation, [](const auto& record) {
+            return record.constants.size() == 4;
+        });
+        REQUIRE(with_constants == (groups == 1 ? 2 : 3));
+    });
+    REQUIRE(records == 6);
+    REQUIRE(tables == 5);
+    REQUIRE(groups == 2);
+}
+
+TEST_CASE("BAHS constants come from the separate allocation", "[mesh_warm]") {
+    constexpr size_t table = 0x170, record = table + 8, control = record + 32, pool = 0x300;
+    for (const u32 table_size : {0U, 4U, 3U, 8U}) {
+        std::vector<u8> data(pool + 148);
+        std::memcpy(data.data(), "BAHS", 4);
+        Put<u32>(data, 4, 11);
+        Put<u32>(data, 8, static_cast<u32>(data.size()));
+        Put<u32>(data, 12, 5);
+        Put<u32>(data, 20, 32);
+        Put<u32>(data, 24, 148);
+        Put<u32>(data, 28, pool);
+        Put<u32>(data, table, 8 + 32 + 104);
+        Put<u32>(data, table + 4, 1);
+        Put<u32>(data, record, 32 + 104);
+        Put<u32>(data, record + 4, 1); // Fragment
+        Put<u32>(data, record + 12, 16 + 104);
+        Put<u32>(data, record + 24, 104);
+        Put<s32>(data, record + 28, 16);
+        constexpr std::array<u8, 8> magic{0x34, 0x12, 0x76, 0x98, 0xc9, 0, 0, 0};
+        std::memcpy(data.data() + control, magic.data(), magic.size());
+        Put<u32>(data, control + 56, 144);
+        Put<u32>(data, control + 60, table_size);
+        Put<u32>(data, control + 64, 144);
+        Put<u32>(data, control + 68, 148);
+        Put<u32>(data, control + 84, 1U << 16);
+        const auto code = Native(4, 0xdeadbeef);
+        std::memcpy(data.data() + pool, code.data(), code.size());
+        Put<u32>(data, pool + 144, 0x12345678);
+        size_t records{};
+        WalkArchive(data, "constants.sharcb", nullptr, [&](const ShaderRecord& shader) {
+            ++records;
+            REQUIRE(shader.code.size() == 144);
+            if (table_size == 4) {
+                REQUIRE(shader.constants.size() == 4);
+                REQUIRE(Get<u32>(shader.constants, 0) == 0x12345678);
+            } else {
+                REQUIRE(shader.constants.empty());
+            }
+        }, [](const std::string& error) { FAIL(error); });
+        REQUIRE(records == 1);
+    }
+}
+
+TEST_CASE("Warm render targets are selected independently of shader hashes", "[mesh_warm]") {
+    std::vector<u8> records;
+    for (u32 i = 0; i < 4; ++i) {
+        auto donor = Donor();
+        donor.stages.back() = Prepared(4, 100 + i);
+        Put<u64>(donor.key, 5 * 8, donor.stages.back().code_hash);
+        if (i != 0) {
+            Put<u32>(donor.key, 48, 1U << 28);
+            Put<u32>(donor.key, 52, (1U << 5) | (10U << 6));
+            donor.key[56] = 0xe0;
+            Put<u64>(donor.key, AttributeTypesOffset, i);
+        }
+        const auto record = MakeMeshWarmCandidate(donor.stages, donor);
+        REQUIRE(record);
+        records.insert(records.end(), record->begin(), record->end());
+    }
+    CacheFile file{records};
+    const auto stats = ReadRuntimeStats({file.path});
+    REQUIRE(stats.templates[1]);
+    REQUIRE((*stats.templates[1])[56] == 0xe0);
+    REQUIRE((Get<u32>(*stats.templates[1], 52) & (0x3fU << 5)) == ((1U << 5) | (10U << 6)));
+    REQUIRE(Get<u64>(*stats.templates[1], 5 * 8) == 0);
 }

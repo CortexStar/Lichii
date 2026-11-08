@@ -269,7 +269,7 @@ std::optional<std::vector<u8>> MakeMeshWarmCandidate(
 
 struct MeshWarmRecipes::Impl {
     std::vector<MeshWarmTemplate> donors;
-    std::map<std::pair<u32, u128>, std::shared_ptr<MeshWarmStage>> programs;
+    std::map<std::pair<u32, std::array<u128, 2>>, std::shared_ptr<MeshWarmStage>> programs;
     std::set<std::array<u128, 3>> seen_variations;
     std::vector<std::vector<std::shared_ptr<MeshWarmStage>>> variations;
     size_t bytes{};
@@ -308,9 +308,8 @@ void MeshWarmRecipes::AddVariation(std::span<const ShaderRecord> variation) {
     for (size_t i = slots[0] ? 0 : 1; i < slots.size(); ++i) {
         const auto& record = *slots[i];
         const u32 stage = i == 0 ? 7 : i == 1 ? 8 : 4;
-        const auto id = std::pair{stage, Common::CityHash128(
-                                          reinterpret_cast<const char*>(record.code.data()),
-                                          record.code.size())};
+        const auto id = std::pair{stage, std::array{RecordIdentity(record.code),
+                                                       RecordIdentity(record.constants)}};
         auto [it, inserted] = impl->programs.try_emplace(id);
         if (inserted) {
             LoweredCode lowered;
@@ -318,7 +317,7 @@ void MeshWarmRecipes::AddVariation(std::span<const ShaderRecord> variation) {
                 ++impl->skipped;
                 return;
             }
-            auto env = GraphicsEnv(stage, lowered, record.code);
+            auto env = GraphicsEnv(stage, lowered, record.code, record.constants);
             if (env.size() > MaxPreparedBytes - impl->bytes) {
                 ++impl->skipped;
                 return;

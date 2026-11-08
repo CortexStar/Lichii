@@ -163,6 +163,7 @@ struct GraphicsProgram {
     std::vector<u32> archives;
     bool built{};
     u64 hash{};
+    u128 environment{};
 };
 
 struct Job {
@@ -171,6 +172,7 @@ struct Job {
     u32 stage{};
     size_t graphics_index{};
     std::vector<u8> program;
+    std::vector<u8> constants;
     ComputeControl control{};
 };
 
@@ -275,9 +277,10 @@ private:
             }
             if (job.graphics) {
                 result.hash = StageHash(lowered.code);
-                result.bytes = GraphicsEnv(job.stage, lowered, job.program);
+                result.bytes = GraphicsEnv(job.stage, lowered, job.program, job.constants);
             } else {
-                result.bytes = ComputeEntry(lowered, job.control, result.compute_key);
+                result.bytes =
+                    ComputeEntry(lowered, job.control, job.constants, result.compute_key);
             }
             result.ok = true;
         } catch (const std::exception& e) {
@@ -550,9 +553,9 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
     std::unordered_set<PairHash, PairHasher> compute_identities;
     std::unordered_map<u128, size_t, U128Hasher> graphics_index; // code -> program
     std::vector<GraphicsProgram> graphics;
-    std::unordered_set<std::string> compute_keys;
-    std::unordered_set<u64> fragment_hashes;
-    std::unordered_set<u64> vertex_hashes;
+    std::unordered_set<u128, U128Hasher> compute_keys;
+    std::unordered_set<u128, U128Hasher> fragment_hashes;
+    std::unordered_set<u128, U128Hasher> vertex_hashes;
     struct WrittenVertex {
         size_t program;
         u64 key_offset;
@@ -583,8 +586,7 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
             return;
         }
         if (!is_graphics) {
-            const std::string key(reinterpret_cast<const char*>(r.compute_key.data()),
-                                  r.compute_key.size());
+            const u128 key = Hash128(r.bytes);
             if (compute_keys.insert(key).second) {
                 compute_out.write(reinterpret_cast<const char*>(r.bytes.data()),
                                   static_cast<std::streamsize>(r.bytes.size()));
@@ -595,8 +597,9 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
         GraphicsProgram& program = graphics[index];
         program.built = true;
         program.hash = r.hash;
+        program.environment = Hash128(r.bytes);
         if (program.stage == 4) {
-            if (!fragment_hashes.insert(r.hash).second) {
+            if (!fragment_hashes.insert(program.environment).second) {
                 return; // same key as an earlier entry
             }
             const auto key = GraphicsEntryKey(4, fragment_template, r.hash, 0);
@@ -608,7 +611,7 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
             ++result.fragment_programs;
             return;
         }
-        if (!vertex_hashes.insert(r.hash).second) {
+        if (!vertex_hashes.insert(program.environment).second) {
             // Same stage hash: same key only if the attribute guess matches, known at the end.
             held_vertices.push_back({index, std::move(r.bytes)});
             return;
@@ -643,7 +646,9 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
             if (record.stage != ProgramStage::Compute && !is_graphics) {
                 return;
             }
-            const u128 code = Hash128(record.code);
+            const std::array program_parts{Hash128(record.code), Hash128(record.constants)};
+            const u128 code = Common::CityHash128(
+                reinterpret_cast<const char*>(program_parts.data()), sizeof(program_parts));
             const u128 control = Hash128(record.control);
             Job job;
             if (is_graphics) {
@@ -675,6 +680,7 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
             }
             job.seq = seq++;
             job.program.assign(record.code.begin(), record.code.end());
+            job.constants.assign(record.constants.begin(), record.constants.end());
             job_kinds.emplace_back(job.graphics, job.graphics_index);
             converter->Push(std::move(job));
             while (converter->Pending() > MaxPendingJobs && !stop.stop_requested()) {
@@ -787,18 +793,18 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
     };
 
     report(StageWriting, 0, written_vertices.size() + held_vertices.size());
-    std::set<std::pair<u64, u64>> vertex_keys; // (stage hash, attribute types)
+    std::set<std::pair<u128, u64>> vertex_keys; // (environment, attribute types)
     std::vector<std::pair<u64, u64>> patches;  // key offset, attribute types
     for (const auto& written : written_vertices) {
         const auto& program = graphics[written.program];
         const u64 types = attribute_types(program);
-        vertex_keys.emplace(program.hash, types);
+        vertex_keys.emplace(program.environment, types);
         patches.emplace_back(written.key_offset + AttributeTypesOffset, types);
     }
     for (auto& held : held_vertices) {
         const auto& program = graphics[held.program];
         const u64 types = attribute_types(program);
-        if (!vertex_keys.emplace(program.hash, types).second) {
+        if (!vertex_keys.emplace(program.environment, types).second) {
             continue;
         }
         const auto key = GraphicsEntryKey(0, vertex_template, program.hash, types);
