@@ -90,6 +90,57 @@ bool IsH264Stream(std::span<const u8> data) {
     return false;
 }
 
+namespace {
+constexpr u64 FnvBasis = 1469598103934665603ULL;
+constexpr u64 FnvPrime = 1099511628211ULL;
+
+u64 HashRows(u64 hash, const u8* data, u64 stride, u32 width, u32 height) {
+    for (u32 y = 0; y < height; ++y) {
+        const u8* row = data + y * stride;
+        for (u32 x = 0; x < width; ++x) {
+            hash = (hash ^ row[x]) * FnvPrime;
+        }
+    }
+    return hash;
+}
+} // namespace
+
+u64 Nx2PictureHash(const Nx2Picture& picture) {
+    const AVFrame* f = picture.frame->GetFrame();
+    const u32 width = static_cast<u32>(f->width);
+    const u32 height = static_cast<u32>(f->height);
+    const u32 chroma_width = (width + 1) / 2;
+    const u32 chroma_height = (height + 1) / 2;
+    u64 hash = HashRows(FnvBasis, f->data[0], static_cast<u64>(f->linesize[0]), width, height);
+    switch (f->format) {
+    case AV_PIX_FMT_NV12:
+        return HashRows(hash, f->data[1], static_cast<u64>(f->linesize[1]), chroma_width * 2,
+                        chroma_height);
+    case AV_PIX_FMT_YUV420P:
+    case AV_PIX_FMT_YUVJ420P:
+        for (u32 y = 0; y < chroma_height; ++y) {
+            const u8* u = f->data[1] + y * f->linesize[1];
+            const u8* v = f->data[2] + y * f->linesize[2];
+            for (u32 x = 0; x < chroma_width; ++x) {
+                hash = (hash ^ u[x]) * FnvPrime;
+                hash = (hash ^ v[x]) * FnvPrime;
+            }
+        }
+        return hash;
+    default:
+        return 0;
+    }
+}
+
+u64 Nx2Nv12Hash(std::span<const u8> image, u32 width, u32 height, u64 pitch, u64 chroma_offset) {
+    const u32 chroma_height = (height + 1) / 2;
+    if (image.size() < chroma_offset + pitch * chroma_height || pitch < width) {
+        return 0;
+    }
+    const u64 hash = HashRows(FnvBasis, image.data(), pitch, width, height);
+    return HashRows(hash, image.data() + chroma_offset, pitch, (width + 1) / 2 * 2, chroma_height);
+}
+
 struct Nx2VideoDecoder::Impl {
     std::string name;
     NvdecCommon::VideoCodec codec{};
