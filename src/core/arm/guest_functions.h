@@ -16,6 +16,7 @@ enum class GuestFunction : u8 {
     Memmove,           ///< memmove(x0, x1, x2); also memcpy implementations that allow overlap
     Memset,            ///< memset(x0, w1, x2)
     MurmurHash3String, ///< w0 = MurmurHash3_x86_32(x0, strlen(x0), w1)
+    Fmodf,             ///< s0 = fmodf(s0, s1), musl's integer algorithm
 };
 
 /// A guest function's entry point in one module build, identified by the module's build id (the
@@ -73,5 +74,15 @@ private:
     u32 m_tail{};
     u32 m_length{};
 };
+
+/// musl's fmodf on single-precision bit patterns, as the AArch64 build executes it: the result
+/// bits and the FPSR cumulative exception bits it raises (IOC = 1, IDC = 0x80) under `fpcr`
+/// (DN = bit 25, FZ = bit 24). Its FP instructions only run for y = 0, y NaN or x infinite/NaN
+/// ((x*y)/(x*y)) and for a zero or unchanged result (0*x), so the rest is exact integer code.
+struct FmodfResult {
+    u32 value;
+    u32 fpsr;
+};
+FmodfResult Fmodf(u32 x, u32 y, u32 fpcr);
 
 } // namespace Core

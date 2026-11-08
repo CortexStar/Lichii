@@ -74,6 +74,7 @@ public:
     static bool HostMemmove(void* user, const Dynarmic::A64::HostFunctionState& state);
     static bool HostMemset(void* user, const Dynarmic::A64::HostFunctionState& state);
     static bool HostMurmurHash3String(void* user, const Dynarmic::A64::HostFunctionState& state);
+    static bool HostFmodf(void* user, const Dynarmic::A64::HostFunctionState& state);
 
     Dynarmic::CodePage cached_code_page;
     u64 last_code_addr = u64(-1);
