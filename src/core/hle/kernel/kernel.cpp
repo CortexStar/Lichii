@@ -270,13 +270,17 @@ struct KernelCore::Impl {
     }
 
     void InitializePreemption(KernelCore& kernel) {
-        preemption_event = Core::Timing::CreateEvent("PreemptionCallback", [this, &kernel](s64 time, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
-            {
-                KScopedSchedulerLock lock(kernel);
-                global_scheduler_context->PreemptThreads(kernel);
-            }
-            return std::nullopt;
-        });
+        // Round-robin preemption every 10 ms: an OS timer tick late changes nothing.
+        preemption_event = Core::Timing::CreateRelaxedEvent(
+            "PreemptionCallback",
+            [this, &kernel](s64 time,
+                            std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
+                {
+                    KScopedSchedulerLock lock(kernel);
+                    global_scheduler_context->PreemptThreads(kernel);
+                }
+                return std::nullopt;
+            });
 
         const auto time_interval = std::chrono::nanoseconds{std::chrono::milliseconds(10)};
         system.CoreTiming().ScheduleLoopingEvent(time_interval, time_interval, preemption_event);

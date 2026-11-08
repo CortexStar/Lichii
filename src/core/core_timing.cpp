@@ -5,11 +5,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <tuple>
 #include "common/cpu_features.h"
-#include "common/cpu_features.h"
+#include "common/event_wait.h"
 
 #ifdef _WIN32
 #include "common/windows/timer_resolution.h"
@@ -42,12 +43,31 @@ std::shared_ptr<EventType> CreateEvent(std::string name, TimedCallback&& callbac
     return std::make_shared<EventType>(std::move(callback), std::move(name));
 }
 
+std::shared_ptr<EventType> CreateRelaxedEvent(std::string name, TimedCallback&& callback) {
+    return std::make_shared<EventType>(std::move(callback), std::move(name), true);
+}
+
+namespace {
+// How late an OS wait of the timer thread can end: one timer tick (0.5 ms at the maximum
+// resolution) plus the time to dispatch the woken thread. Measured on Windows 11 with a 0.5 ms
+// tick: a high-resolution waitable timer fires on the next tick, 13-50 us after it.
+s64 OsWakeGuardNs() {
+#ifdef _WIN32
+    return Common::Windows::GetCurrentTimerResolution().count() + 100'000;
+#else
+    // Elsewhere the timed wait is a condition variable wait either way.
+    return 0;
+#endif
+}
+} // Anonymous namespace
+
 struct CoreTiming::Event {
     s64 time;
     u64 fifo_order;
     std::weak_ptr<EventType> type;
     s64 reschedule_time;
     heap_t::handle_type handle{};
+    bool relaxed{};
 
     // Sort by time, unless the times are the same, in which case sort by
     // the order added to the queue
@@ -83,10 +103,14 @@ void CoreTiming::Initialize(std::function<void()>&& on_thread_init_) {
                 while (!paused && !stop_token.stop_requested()) {
                     paused_set = false;
                     if (auto const next_time = Advance(); next_time) {
-                        // There are more events left in the queue, wait until the next event.
-                        auto const wait_time = *next_time - GetGlobalTimeNs().count();
-                        if (wait_time > 0) {
-                            event.WaitFor(std::chrono::nanoseconds(wait_time));
+                        // There are more events left in the queue. Sleep in the OS while no
+                        // event needs a precise wake-up, then wait precisely for the next one:
+                        // a monitor wait counts as CPU time for as long as it lasts.
+                        auto const now = GetGlobalTimeNs().count();
+                        if (next_os_wake > now) {
+                            event.BlockFor(std::chrono::nanoseconds(next_os_wake - now));
+                        } else if (*next_time > now) {
+                            event.WaitFor(std::chrono::nanoseconds(*next_time - now));
                         }
                     } else {
                         // Queue is empty, wait until another event is scheduled and signals us to
@@ -153,7 +177,8 @@ void CoreTiming::ScheduleEvent(std::chrono::nanoseconds ns_into_future,
         std::scoped_lock scope{basic_lock};
         const auto next_time{absolute_time ? ns_into_future : GetGlobalTimeNs() + ns_into_future};
 
-        auto h{event_queue.emplace(Event{next_time.count(), event_fifo_id++, event_type, 0})};
+        auto h{event_queue.emplace(Event{next_time.count(), event_fifo_id++, event_type, 0,
+                                         heap_t::handle_type{}, event_type->relaxed})};
         (*h).handle = h;
     }
 
@@ -168,8 +193,9 @@ void CoreTiming::ScheduleLoopingEvent(std::chrono::nanoseconds start_time,
         std::scoped_lock scope{basic_lock};
         const auto next_time{absolute_time ? start_time : GetGlobalTimeNs() + start_time};
 
-        auto h{event_queue.emplace(
-            Event{next_time.count(), event_fifo_id++, event_type, resched_time.count()})};
+        auto h{event_queue.emplace(Event{next_time.count(), event_fifo_id++, event_type,
+                                         resched_time.count(), heap_t::handle_type{},
+                                         event_type->relaxed})};
         (*h).handle = h;
     }
 
@@ -288,7 +314,7 @@ std::optional<s64> CoreTiming::Advance() {
                 }
 
                 event_queue.update(evt.handle, Event{next_time, event_fifo_id++, evt.type,
-                                                     next_schedule_time, evt.handle});
+                                                     next_schedule_time, evt.handle, evt.relaxed});
             }
         }
 
@@ -296,6 +322,12 @@ std::optional<s64> CoreTiming::Advance() {
     }
 
     if (!event_queue.empty()) {
+        const s64 guard = OsWakeGuardNs();
+        s64 os_wake = std::numeric_limits<s64>::max();
+        for (const Event& queued : event_queue) {
+            os_wake = (std::min)(os_wake, Common::OsWakeTime(queued.time, queued.relaxed, guard));
+        }
+        next_os_wake = os_wake;
         return event_queue.top().time;
     } else {
         return std::nullopt;

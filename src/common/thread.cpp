@@ -947,6 +947,82 @@ void PollThreadPolicies() {
 #endif
 }
 
+#ifdef _WIN32
+namespace {
+// One high-resolution timer per waiting thread, so concurrent BlockFor deadlines don't overwrite
+// each other. Falls back to a normal waitable timer before Windows 10 1803.
+HANDLE ThreadWaitTimer() {
+    struct Timer {
+        HANDLE handle = [] {
+            HANDLE timer = CreateWaitableTimerExW(
+                nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+            return timer != nullptr ? timer
+                                    : CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+        }();
+        ~Timer() {
+            if (handle != nullptr) {
+                CloseHandle(handle);
+            }
+        }
+    };
+    thread_local Timer timer;
+    return timer.handle;
+}
+} // Anonymous namespace
+
+Event::~Event() {
+    if (wake_handle != nullptr) {
+        CloseHandle(wake_handle);
+    }
+}
+
+void Event::WakeBlockedWaiter() {
+    // Pairs with BlockFor: it counts itself in before it checks is_set, and Set stores is_set
+    // before it reads the count, so one of the two sees the other.
+    if (blocked_waiters.load() != 0) {
+        SetEvent(wake_handle);
+    }
+}
+
+bool Event::BlockFor(const std::chrono::nanoseconds time) {
+    const HANDLE timer = ThreadWaitTimer();
+    if (time > std::chrono::nanoseconds::zero() && timer != nullptr) {
+        {
+            std::scoped_lock lk{mutex};
+            if (wake_handle == nullptr) {
+                wake_handle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            }
+        }
+        if (wake_handle != nullptr) {
+            blocked_waiters.fetch_add(1);
+            if (!is_set.load()) {
+                // Relative due time in 100 ns units, rounded up.
+                LARGE_INTEGER due{};
+                due.QuadPart = -static_cast<LONGLONG>((time.count() + 99) / 100);
+                if (SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) {
+                    const HANDLE handles[2]{static_cast<HANDLE>(wake_handle), timer};
+                    WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+                }
+            }
+            blocked_waiters.fetch_sub(1);
+            // A wake meant for an earlier Set can end the wait early: the caller sees no signal
+            // and waits again.
+            bool expected = true;
+            return is_set.compare_exchange_strong(expected, false);
+        }
+    }
+    return WaitFor(time);
+}
+#else
+Event::~Event() = default;
+
+void Event::WakeBlockedWaiter() {}
+
+bool Event::BlockFor(const std::chrono::nanoseconds time) {
+    return WaitFor(time);
+}
+#endif
+
 #ifdef ARCHITECTURE_x86_64
 // On Linux and UNIX systems, a futex would nominally be used to cover the costs
 // the idea is that it's intuitivelly cheaper to use a direct instruction as opposed to a full futex call

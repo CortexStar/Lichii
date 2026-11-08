@@ -3763,9 +3763,12 @@ private:
             memory.Write32(m_syncpt_ro + 0x1c, SyncptRoBitsOffset);
             UpdateSyncptValues();
             if (!m_syncpt_poll) {
-                m_syncpt_poll = Core::Timing::CreateEvent(
+                // A poll, not a deadline: relaxed, so the timer thread sleeps in the OS for it
+                // instead of spending its 500 us intervals in a monitor wait.
+                m_syncpt_poll = Core::Timing::CreateRelaxedEvent(
                     "nx2:gsv:SyncptPoll",
-                    [this](s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
+                    [this](s64,
+                           std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
                         PollSyncpts();
                         return std::nullopt;
                     });

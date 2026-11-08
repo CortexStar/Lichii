@@ -32,4 +32,11 @@ constexpr u32 MwaitxTimeoutCycles(std::chrono::nanoseconds remaining, u64 ticks_
     return static_cast<u32>((ns * ticks_per_second + NsPerSecond - 1) / NsPerSecond);
 }
 
+/// When the timer thread may sleep in the OS until, for an event due at `due`. An OS wait ends up
+/// to `guard` late. A relaxed event tolerates that and is slept for until its due time; any other
+/// is slept for until `guard` before it, and the rest is waited for precisely.
+constexpr s64 OsWakeTime(s64 due, bool relaxed, s64 guard) {
+    return relaxed ? due : due - guard;
+}
+
 } // namespace Common

@@ -171,3 +171,32 @@ TEST_CASE("Event signalling across timed and untimed waits remains consumable", 
     CHECK(completed.load());
     CHECK_FALSE(event.WaitFor(0ns));
 }
+
+TEST_CASE("OsWakeTime sleeps until a relaxed event and short of a precise one", "[common][event]") {
+    constexpr s64 guard = 600'000;
+    STATIC_REQUIRE(Common::OsWakeTime(10'000'000, true, guard) == 10'000'000);
+    STATIC_REQUIRE(Common::OsWakeTime(10'000'000, false, guard) == 10'000'000 - guard);
+    // Without a guard (condition-variable waits) both are slept for until they are due.
+    STATIC_REQUIRE(Common::OsWakeTime(10'000'000, false, 0) == 10'000'000);
+}
+
+TEST_CASE("BlockFor returns on Set and on its timeout", "[common][event]") {
+    Common::Event event;
+    REQUIRE_FALSE(event.BlockFor(std::chrono::milliseconds{2}));
+    event.Set();
+    REQUIRE(event.BlockFor(std::chrono::seconds{2}));
+    REQUIRE_FALSE(event.IsSet());
+
+    std::jthread setter([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        event.Set();
+    });
+    const auto begin = std::chrono::steady_clock::now();
+    bool woken = false;
+    // An early wake meant for an earlier Set returns false: wait again, as the timer thread does.
+    while (!woken && std::chrono::steady_clock::now() - begin < std::chrono::seconds{2}) {
+        woken = event.BlockFor(std::chrono::seconds{2});
+    }
+    REQUIRE(woken);
+    REQUIRE(std::chrono::steady_clock::now() - begin < std::chrono::seconds{2});
+}

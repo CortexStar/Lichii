@@ -29,8 +29,9 @@ using TimedCallback = std::function<std::optional<std::chrono::nanoseconds>(
 
 /// Contains the characteristics of a particular event.
 struct EventType {
-    explicit EventType(TimedCallback&& callback_, std::string&& name_)
-        : callback{std::move(callback_)}, name{std::move(name_)}, sequence_number{0} {}
+    explicit EventType(TimedCallback&& callback_, std::string&& name_, bool relaxed_ = false)
+        : callback{std::move(callback_)}, name{std::move(name_)}, sequence_number{0},
+          relaxed{relaxed_} {}
 
     /// The event's callback function.
     TimedCallback callback;
@@ -39,6 +40,9 @@ struct EventType {
     /// A monotonic sequence number, incremented when this event is
     /// changed externally.
     size_t sequence_number;
+    /// The event may run up to an OS timer tick late (a poll, not a deadline): the timer thread
+    /// sleeps in the OS until it instead of waiting for it in a monitor wait.
+    const bool relaxed;
 };
 
 enum class UnscheduleEventType {
@@ -151,8 +155,10 @@ public:
     heap_t event_queue;
     s64 global_timer = 0;
 #ifdef _WIN32
-    s64 timer_resolution_ns;
+    s64 timer_resolution_ns{};
 #endif
+    /// Set by Advance: until when the timer thread can sleep in the OS (see Common::OsWakeTime).
+    s64 next_os_wake{};
     u64 event_fifo_id = 0;
     std::atomic<s64> pause_end_time{};
     /// Cycle timing
@@ -179,5 +185,8 @@ public:
 /// @returns An EventType instance representing the created event.
 ///
 std::shared_ptr<EventType> CreateEvent(std::string name, TimedCallback&& callback);
+
+/// Creates a relaxed event (EventType::relaxed): one that may run up to an OS timer tick late.
+std::shared_ptr<EventType> CreateRelaxedEvent(std::string name, TimedCallback&& callback);
 
 } // namespace Core::Timing
