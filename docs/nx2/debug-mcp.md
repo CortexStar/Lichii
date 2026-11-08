@@ -166,6 +166,17 @@ to 0.1 ms. With fewer than two presents, statistics are zero and the interval li
 Only available samples from the 4096-timestamp ring are used; overflow sets `truncated: true`.
 For example: `{"method":"frame_times","params":{"seconds":5,"refresh_hz":60}}`.
 
+For a scripted comparison, first read `status.presents`, run `input_sequence`, then call
+`frame_times` with `since_present` set to that count and `include_intervals: true`. This reads
+the retained window immediately, so sampling does not block input on the single-request server.
+The response includes `before_present` and `after_present`; all retained intervals are returned
+at full precision when requested. Keep the sequence below 4096 presents and reject truncated
+samples. Use identical save snapshots, inputs, build/settings and starting caches for comparisons;
+report boot preparation separately from gameplay and distinguish guest presents from display timing.
+`tools/nx2/measure_stutters.py sequence.json result.json --server 127.0.0.1:6545`
+automates replay and collection, including counts above fixed 50/100/250/500 ms thresholds.
+The sequence file is an `input_sequence` params object. It does not reset saves or caches.
+
 **`screenshot`** `{height?, save?, timeout_s?}`. It requests a 16:9 layout from
 `Layout::DefaultFrameLayout`, and the renderer blits the presented framebuffers into it. The
 BGRA result is turned into RGB and encoded as PNG with stb, which `common` already compiles. The

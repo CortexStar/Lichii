@@ -44,12 +44,16 @@ TOOLS = [
         "name": "frame_times",
         "description": "Guest-present frame intervals over seconds (default 5, max 60): mean, "
                        "fps, percentiles, VSync interval shares (refresh_hz defaults to 60), "
-                       "stutters and the last 120 intervals. Reports ring overflow as truncated.",
+                       "stutters and the last 120 intervals. Use since_present to read a past "
+                       "input sequence without waiting; include_intervals returns all retained "
+                       "intervals at full precision. Reports ring overflow as truncated.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 60, "default": 5},
                 "refresh_hz": {"type": "number", "exclusiveMinimum": 0, "default": 60},
+                "since_present": {"type": "integer", "minimum": 0},
+                "include_intervals": {"type": "boolean", "default": False},
             },
         },
     },
