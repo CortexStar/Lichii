@@ -804,6 +804,9 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     if (extensions.buffer_device_address) {
         flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     }
+    if (extensions.memory_priority) {
+        flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_PRIORITY_BIT;
+    }
     // EDEN_NX2_VRAM_LIMIT_MIB: VMA fails allocations past the limit, like a smaller card.
     std::array<VkDeviceSize, VK_MAX_MEMORY_HEAPS> heap_size_limits;
     heap_size_limits.fill(VK_WHOLE_SIZE);
@@ -873,7 +876,8 @@ VmaPool Device::GetSeparatePool(SeparatePool kind, u32 memory_type) const {
             .blockSize = SeparatePoolBlockSize,
             .minBlockCount = 0,
             .maxBlockCount = 0,
-            .priority = 0.f,
+            // Guest buffers are read by most draws; sparse pages are textures (VMA's default).
+            .priority = kind == SeparatePool::DeviceBuffers ? 0.75f : 0.5f,
             .minAllocationAlignment = 0,
             .pMemoryAllocateNext = nullptr,
         };
@@ -1824,6 +1828,19 @@ void Device::RemoveUnsuitableExtensions() {
     extensions.maintenance4 = features.maintenance4.maintenance4;
     RemoveExtensionFeatureIfUnsuitable(extensions.maintenance4, features.maintenance4,
                                        VK_KHR_MAINTENANCE_4_EXTENSION_NAME);
+
+    // VK_EXT_memory_priority, VK_EXT_pageable_device_local_memory: under memory pressure the
+    // driver moves the lowest-priority allocations to system memory instead of failing new ones
+    // (Windows pages device memory either way; this tells it what to keep).
+    extensions.memory_priority = features.memory_priority.memoryPriority;
+    RemoveExtensionFeatureIfUnsuitable(extensions.memory_priority, features.memory_priority,
+                                       VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME);
+    extensions.pageable_device_local_memory =
+        features.pageable_device_local_memory.pageableDeviceLocalMemory &&
+        extensions.memory_priority;
+    RemoveExtensionFeatureIfUnsuitable(extensions.pageable_device_local_memory,
+                                       features.pageable_device_local_memory,
+                                       VK_EXT_PAGEABLE_DEVICE_LOCAL_MEMORY_EXTENSION_NAME);
 
     // VK_KHR_present_id2, VK_KHR_present_wait2 (pacing on the display's present times)
     // Both need VK_KHR_get_surface_capabilities2 on the instance.

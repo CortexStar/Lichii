@@ -156,6 +156,7 @@ ImageInfo::ImageInfo(const TICEntry& config) noexcept {
 
 ImageInfo::ImageInfo(const Maxwell3D::Regs::RenderTargetConfig& ct,
                      Tegra::Texture::MsaaMode msaa_mode) noexcept {
+    render_target = true;
     forced_flushed =
         ct.tile_mode.is_pitch_linear && !Settings::values.use_reactive_flushing.GetValue();
     dma_downloaded = forced_flushed;
@@ -197,6 +198,7 @@ ImageInfo::ImageInfo(const Maxwell3D::Regs::RenderTargetConfig& ct,
 
 ImageInfo::ImageInfo(const Maxwell3D::Regs::Zeta& zt, const Maxwell3D::Regs::ZetaSize& zt_size,
                      Tegra::Texture::MsaaMode msaa_mode) noexcept {
+    render_target = true;
     forced_flushed =
         zt.tile_mode.is_pitch_linear && !Settings::values.use_reactive_flushing.GetValue();
     dma_downloaded = forced_flushed;

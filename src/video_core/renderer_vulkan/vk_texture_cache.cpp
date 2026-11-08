@@ -562,7 +562,10 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
             return image;
         }
     }
-    return may_fail ? allocator.TryCreateImage(image_ci) : allocator.CreateImage(image_ci);
+    const float priority = info.render_target ? MemoryAllocator::RenderTargetPriority
+                                              : MemoryAllocator::ImagePriority;
+    return may_fail ? allocator.TryCreateImage(image_ci, false, priority)
+                    : allocator.CreateImage(image_ci, false, priority);
 }
 
 [[nodiscard]] vk::ImageView MakeStorageView(const vk::Device& device, u32 level, VkImage image,

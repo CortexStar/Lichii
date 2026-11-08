@@ -74,6 +74,27 @@ namespace {
         return {};
     }
 
+    // VK_EXT_memory_priority: what the driver keeps resident first when device memory runs short.
+    // Stream buffers are rewritten every frame, guest buffers are read by most draws; staging
+    // lives in host memory and goes first.
+    [[nodiscard]] float MemoryUsagePriority(MemoryUsage usage) {
+        switch (usage) {
+            case MemoryUsage::Stream:
+                return 1.0f;
+            case MemoryUsage::DeviceLocal:
+                return 0.75f;
+            case MemoryUsage::Upload:
+            case MemoryUsage::Download:
+                return 0.0f;
+        }
+        return 0.5f;
+    }
+
+    [[nodiscard]] VmaAllocationCreateInfo WithoutBudgetLimit(VmaAllocationCreateInfo ci) {
+        ci.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+        return ci;
+    }
+
     [[nodiscard]] VmaMemoryUsage MemoryUsageVma(MemoryUsage usage) {
         switch (usage) {
             case MemoryUsage::DeviceLocal:
@@ -206,16 +227,18 @@ MemoryAllocator::MemoryAllocator(const Device &device_)
 
 MemoryAllocator::~MemoryAllocator() = default;
 
-vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicated) const
+vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicated,
+                                       float priority) const
 {
     vk::Image image;
-    vk::Check(AllocateImage(ci, dedicated, image));
+    vk::Check(AllocateImage(ci, dedicated, priority, image));
     return image;
 }
 
-vk::Image MemoryAllocator::TryCreateImage(const VkImageCreateInfo &ci, bool dedicated) const {
+vk::Image MemoryAllocator::TryCreateImage(const VkImageCreateInfo &ci, bool dedicated,
+                                          float priority) const {
     vk::Image image;
-    const VkResult result = AllocateImage(ci, dedicated, image);
+    const VkResult result = AllocateImage(ci, dedicated, priority, image);
     if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY && result != VK_ERROR_OUT_OF_HOST_MEMORY) {
         vk::Check(result);
     }
@@ -223,7 +246,7 @@ vk::Image MemoryAllocator::TryCreateImage(const VkImageCreateInfo &ci, bool dedi
 }
 
 VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedicated,
-                                        vk::Image &image) const {
+                                        float priority, vk::Image &image) const {
     const VmaAllocationCreateInfo alloc_ci = {
             // Best fit: images freed by the thousand leave holes in the blocks, which new ones
             // should fill before VMA takes another block.
@@ -237,7 +260,9 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
             .memoryTypeBits = 0,
             .pool = VK_NULL_HANDLE,
             .pUserData = nullptr,
-            .priority = 0.f,
+            // Applies to dedicated memory (images over half a block, or asked for); the shared
+            // blocks keep VMA's default of 0.5.
+            .priority = priority,
     };
 
     VkImage handle{};
@@ -355,7 +380,7 @@ VmaAllocation MemoryAllocator::AllocateSparseMemory(const VkMemoryRequirements &
         .memoryTypeBits = requirements.memoryTypeBits,
         .pool = VK_NULL_HANDLE,
         .pUserData = nullptr,
-        .priority = 0.f,
+        .priority = 0.5f,
     };
     VmaAllocation allocation{};
     VmaAllocationInfo info{};
@@ -437,7 +462,7 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
         .memoryTypeBits = usage == MemoryUsage::Stream ? 0u : valid_memory_types,
         .pool = VK_NULL_HANDLE,
         .pUserData = nullptr,
-        .priority = 0.f,
+        .priority = MemoryUsagePriority(usage),
     };
 
     VkBuffer handle{};
@@ -446,7 +471,15 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
     VkMemoryPropertyFlags property_flags{};
 
     if (!CreateBufferInSeparatePool(ci, usage, alloc_ci, handle, allocation, alloc_info)) {
-        vk::Check(vmaCreateBuffer(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info));
+        VkResult result = vmaCreateBuffer(allocator, &ci, &alloc_ci, &handle, &allocation,
+                                          &alloc_info);
+        if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+            // Over the budget: past it the driver pages the lowest-priority memory out
+            // (VK_EXT_pageable_device_local_memory) instead of the buffer failing.
+            const VmaAllocationCreateInfo relaxed = WithoutBudgetLimit(alloc_ci);
+            result = vmaCreateBuffer(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
+        }
+        vk::Check(result);
     }
     vmaGetAllocationMemoryProperties(allocator, allocation, &property_flags);
 
@@ -495,7 +528,7 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
         .memoryTypeBits = memory_type_bits,
         .pool = VK_NULL_HANDLE,
         .pUserData = nullptr,
-        .priority = 0.f,
+        .priority = MemoryUsagePriority(usage),
     };
 
     VkBuffer handle{};
@@ -503,8 +536,14 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
     VmaAllocation allocation{};
     VkMemoryPropertyFlags property_flags{};
 
-    vk::Check(vmaCreateBufferWithAlignment(allocator, &ci, &alloc_ci, min_alignment, &handle,
-                                           &allocation, &alloc_info));
+    VkResult result = vmaCreateBufferWithAlignment(allocator, &ci, &alloc_ci, min_alignment,
+                                                   &handle, &allocation, &alloc_info);
+    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+        const VmaAllocationCreateInfo relaxed = WithoutBudgetLimit(alloc_ci);
+        result = vmaCreateBufferWithAlignment(allocator, &ci, &relaxed, min_alignment, &handle,
+                                              &allocation, &alloc_info);
+    }
+    vk::Check(result);
     vmaGetAllocationMemoryProperties(allocator, allocation, &property_flags);
 
     u8 *data = reinterpret_cast<u8 *>(alloc_info.pMappedData);
@@ -532,6 +571,7 @@ MemoryCommit MemoryAllocator::Commit(const VkMemoryRequirements &reqs, MemoryUsa
     ci.memoryTypeBits = reqs.memoryTypeBits & valid_memory_types;
     ci.requiredFlags = 0;
     ci.preferredFlags = MemoryUsagePreferredVmaFlags(usage);
+    ci.priority = MemoryUsagePriority(usage);
 
     VmaAllocation a{};
     VmaAllocationInfo info{};
@@ -567,7 +607,7 @@ MemoryCommit MemoryAllocator::Commit(const vk::Buffer &buffer, MemoryUsage usage
     ci.preferredFlags = MemoryUsagePreferredVmaFlags(usage);
     ci.pool = VK_NULL_HANDLE;
     ci.pUserData = nullptr;
-    ci.priority = 0.0f;
+    ci.priority = MemoryUsagePriority(usage);
 
     const VkBuffer raw = *buffer;
 

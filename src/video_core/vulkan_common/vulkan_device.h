@@ -69,7 +69,10 @@ VK_DEFINE_HANDLE(VmaPool)
     FEATURE(EXT, 4444Formats, 4444_FORMATS, format_a4b4g4r4)                                       \
     FEATURE(EXT, IndexTypeUint8, INDEX_TYPE_UINT8, index_type_uint8)                               \
     FEATURE(EXT, LineRasterization, LINE_RASTERIZATION, line_rasterization)                        \
+    FEATURE(EXT, MemoryPriority, MEMORY_PRIORITY, memory_priority)                                 \
     FEATURE(EXT, MeshShader, MESH_SHADER, mesh_shader)                                             \
+    FEATURE(EXT, PageableDeviceLocalMemory, PAGEABLE_DEVICE_LOCAL_MEMORY,                          \
+            pageable_device_local_memory)                                                          \
     FEATURE(EXT, PrimitiveTopologyListRestart, PRIMITIVE_TOPOLOGY_LIST_RESTART,                    \
             primitive_topology_list_restart)                                                       \
     FEATURE(EXT, ProvokingVertex, PROVOKING_VERTEX, provoking_vertex)                              \
