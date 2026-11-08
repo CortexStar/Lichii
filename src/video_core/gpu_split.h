@@ -162,6 +162,11 @@ public:
 
     /// Makes what was sent visible to the back.
     void Publish();
+    /// Before the front yields or sleeps: the back gets what the front decoded so far instead of
+    /// idling until the next 256 words.
+    void PublishBeforeWait() {
+        Publish();
+    }
     /// Waits until the back executed everything sent so far.
     void Drain(DrainSite site = DrainSite::Other);
 
@@ -313,7 +318,9 @@ private:
     u64* ReserveSlow(size_t words);
     void Commit(size_t words) {
         write_position += words;
-        if (write_position - published_local >= publish_every) {
+        // A back that ran out of work gets each entry at once.
+        if (write_position - published_local >= publish_every ||
+            back_idle.load(std::memory_order_relaxed)) {
             Publish();
         }
     }
@@ -383,6 +390,8 @@ private:
     alignas(128) std::atomic<u64> consumed{};
     /// A position the front waits for (WaitFor): the back stores `consumed` once past it.
     alignas(128) std::atomic<u64> wait_target{~u64{0}};
+    /// The back found the ring empty (it spins, then sleeps): Commit publishes at once.
+    alignas(128) std::atomic<bool> back_idle{};
     alignas(128) std::atomic<bool> back_waiting{};
     std::atomic<u32> wake{};
     /// The front sleeps in Backoff (#161: instead of yielding).

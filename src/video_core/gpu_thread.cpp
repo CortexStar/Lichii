@@ -94,6 +94,11 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     last_progress = std::chrono::steady_clock::now();
                 }
                 if (!state.queue.TryPop(next)) {
+                    // What the resumed channels sent goes to the back before this thread yields or
+                    // sleeps (Commit publishes every 256 words).
+                    if (split.Active()) {
+                        split.PublishBeforeWait();
+                    }
                     if (!scheduler.HasPendingChannels()) {
                         continue;
                     }
