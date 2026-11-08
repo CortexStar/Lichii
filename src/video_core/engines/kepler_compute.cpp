@@ -2557,8 +2557,6 @@ void KeplerCompute::BackWrites(Core::System& system, const u64* writes, u32 coun
                 upload_state.HoldWrites(holding);
             }
         }
-        // Timed per method as GpuSplit::Execute times Method entries (EDEN_NX2_GPU_PROFILE).
-        VideoCommon::Nx2Profile::MethodScope method_scope{static_cast<u32>(engine_type), method};
         ConsumeSink(system);
         CallMethod(system, method, argument, (write & GpuSplit::WriteIsLast) != 0);
     }
