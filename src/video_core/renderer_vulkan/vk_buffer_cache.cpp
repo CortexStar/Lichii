@@ -627,6 +627,60 @@ void BufferCacheRuntime::PostCopyBarrier() {
     });
 }
 
+bool BufferCacheRuntime::SupportsGpuPageTable() const noexcept {
+    return device.SupportsGpuPageTable();
+}
+
+u64 BufferCacheRuntime::NullPageAddress() {
+    if (!null_page) {
+        // Read as zeroes. 64 KiB: a 4 KiB page plus room for accesses that run past its end.
+        constexpr u64 size = u64{64} * 1024;
+        null_page = CreateBuffer(device, memory_allocator, size, 0);
+        null_page_address = device.GetLogical().GetBufferDeviceAddress(*null_page);
+        ClearBuffer(*null_page, 0, size, 0);
+    }
+    return null_page_address;
+}
+
+u64 BufferCacheRuntime::SyncPageTable(size_t id, VideoCommon::GpuPageTable& table) {
+    if (page_tables.size() <= id) {
+        page_tables.resize(id + 1);
+    }
+    PageTableBuffer& device_table = page_tables[id];
+    if (!device_table.buffer || device_table.size != table.TotalBytes()) {
+        device_table.size = table.TotalBytes();
+        device_table.buffer = CreateBuffer(device, memory_allocator, device_table.size, 0);
+        device_table.address = device.GetLogical().GetBufferDeviceAddress(*device_table.buffer);
+        // A new buffer holds nothing: the model resends its whole image.
+        table.MarkAllDirty();
+    }
+    if (!table.HasUpdates()) {
+        return device_table.address;
+    }
+    table.TakeUpdates(page_table_updates);
+    u64 total = 0;
+    for (const auto& update : page_table_updates) {
+        total += update.size;
+    }
+    const StagingBufferRef staging = UploadStagingBuffer(total);
+    boost::container::small_vector<VideoCommon::BufferCopy, 8> copies;
+    u64 staging_offset = 0;
+    const std::span<const u8> image = table.Image();
+    for (const auto& update : page_table_updates) {
+        std::memcpy(staging.mapped_span.data() + staging_offset, image.data() + update.offset,
+                    update.size);
+        copies.push_back(VideoCommon::BufferCopy{
+            .src_offset = staging.offset + staging_offset,
+            .dst_offset = update.offset,
+            .size = update.size,
+        });
+        staging_offset += update.size;
+    }
+    // With barriers: draws recorded before keep reading the old entries, later ones the new.
+    CopyBuffer(*device_table.buffer, staging.buffer, copies, true);
+    return device_table.address;
+}
+
 void BufferCacheRuntime::ClearBuffer(VkBuffer dest_buffer, u32 offset, size_t size, u32 value) {
     if (dest_buffer == VK_NULL_HANDLE) {
         return;

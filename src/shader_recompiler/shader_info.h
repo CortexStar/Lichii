@@ -365,6 +365,9 @@ struct Info {
     bool uses_atomic_s32_max{};
     bool uses_int64_bit_atomics{};
     bool uses_global_memory{};
+    /// Storage buffers and global memory are reached through the GPU page table: the storage
+    /// buffer descriptors are not bound, they name the ranges the draw must have resident.
+    bool storage_by_address{};
     bool requires_coherent_global_memory{};
     bool requires_coherent_image_memory{};
     /// Set by the SPIR-V backend when HMMA runs on cooperative matrices, which need full subgroups
@@ -413,6 +416,15 @@ u32 NumDescriptors(const Descriptors& descriptors) {
     return num;
 }
 
+/// The storage buffer descriptors bound as buffers: none when the program reaches storage
+/// through the GPU page table (Info::storage_by_address).
+[[nodiscard]] inline std::span<const StorageBufferDescriptor> BoundStorageBuffers(
+    const Info& info) {
+    if (info.storage_by_address) {
+        return {};
+    }
+    return info.storage_buffers_descriptors;
+}
 
 /// Operations of a handle program, a stack machine over 32-bit words. Operands follow the
 /// operation code in the program; values are popped right operand first.

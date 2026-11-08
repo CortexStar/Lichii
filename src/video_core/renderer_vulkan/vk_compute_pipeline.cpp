@@ -41,6 +41,7 @@
 namespace Vulkan {
 
 using Shader::ImageBufferDescriptor;
+using Shader::Backend::SPIRV::PAGE_TABLE_OFFSET;
 using Shader::Backend::SPIRV::RESCALING_LAYOUT_WORDS_OFFSET;
 using Tegra::Texture::TexturePair;
 
@@ -437,6 +438,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
 
     buffer_cache.SetComputeUniformBufferState(info.constant_buffer_mask, &uniform_buffer_sizes);
     buffer_cache.UnbindComputeStorageBuffers();
+    buffer_cache.SetComputeStorageByAddress(info.storage_by_address);
     size_t ssbo_index{};
     for (const auto& desc : info.storage_buffers_descriptors) {
         ASSERT(desc.count == 1);
@@ -719,6 +721,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         buffer_cache.runtime.PostCopyBarrier();
         buffer_cache.any_buffer_uploaded = false;
     }
+    const u64 page_table{info.storage_by_address ? buffer_cache.PageTableAddress() : 0};
 
     RescalingPushConstant rescaling;
     const VideoCommon::SamplerId* samplers_it{samplers.data()};
@@ -843,8 +846,8 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
 
     const bool is_rescaling = !info.texture_descriptors.empty() || !info.image_descriptors.empty();
     auto bind = [this, descriptor_data, is_rescaling, descriptor_buffer_offset,
-                      descriptor_buffer_chunk, bind_descriptor_buffer,
-                      rescaling_data = rescaling.Data()](vk::CommandBuffer cmdbuf) {
+                 descriptor_buffer_chunk, bind_descriptor_buffer, page_table,
+                 rescaling_data = rescaling.Data()](vk::CommandBuffer cmdbuf) {
         if (bind_descriptor_buffer) {
             const VkDescriptorBufferBindingInfoEXT binding_info{
                 descriptor_buffer_ring.BindingInfo(descriptor_buffer_chunk)};
@@ -856,6 +859,10 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         const VkPipeline optimized = optimized_handle.load(std::memory_order_acquire);
         cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE,
                             optimized != VK_NULL_HANDLE ? optimized : *pipeline);
+        if (page_table != 0) {
+            cmdbuf.PushConstants(*pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, PAGE_TABLE_OFFSET,
+                                 sizeof(page_table), &page_table);
+        }
         if (!descriptor_set_layout) {
             return;
         }

@@ -46,6 +46,10 @@ struct Buffer : VideoCommon::BufferBase {
     u64 LastUsageTick() const {
         return tick;
     }
+    /// A made-up device address: the GPU page table tests check where entries point.
+    u64 DeviceAddress() const {
+        return 0x7000'0000'0000ULL + CpuAddr();
+    }
 
     std::vector<u8> bytes;
     u32 usage_marks{};
@@ -157,6 +161,20 @@ struct Runtime {
         Finish();
     }
     void BindUniformBuffer(Buffer&, u32, u32) {}
+    bool SupportsGpuPageTable() const {
+        return true;
+    }
+    u64 NullPageAddress() const {
+        return NULL_PAGE;
+    }
+    u64 SyncPageTable(size_t, VideoCommon::GpuPageTable& table) {
+        table.TakeUpdates(page_table_updates);
+        ++page_table_syncs;
+        return 0x5000'0000;
+    }
+    static constexpr u64 NULL_PAGE = 0x6000'0000;
+    std::vector<VideoCommon::GpuPageTable::Update> page_table_updates;
+    u32 page_table_syncs{};
     std::span<u8> BindMappedUniformBuffer(size_t, u32, u32 size) {
         stream.resize(size);
         return stream;
@@ -279,6 +297,27 @@ struct BufferCacheTestAccess {
     }
     static u32 CpuMarks(Cache& cache) {
         return cache.memory_tracker.cpu_marks;
+    }
+    /// One draw's storage binding through the GPU page table: the update, then the bind.
+    static const GpuPageTable& Resident(Cache& cache, BufferCacheChannelInfo& channel,
+                                        const Binding& binding, bool written) {
+        cache.channel_state = &channel;
+        cache.maxwell3d = &channel.maxwell3d;
+        cache.gpu_memory = &channel.gpu_memory;
+        auto& residency = cache.residencies[0][0];
+        cache.ResolveResidency(residency, binding);
+        cache.MakeResident(residency, written, ~u64{0});
+        REQUIRE(cache.PageTableAddress() == 0x5000'0000);
+        return *cache.CurrentPageTable();
+    }
+    static size_t Runs(Cache& cache) {
+        return cache.residencies[0][0].runs.size();
+    }
+    static void Delete(Cache& cache, BufferId id) {
+        cache.DeleteBuffer(id);
+    }
+    static BufferId Find(Cache& cache, DAddr address, u32 size) {
+        return cache.FindBuffer(address, size, false);
     }
 };
 
@@ -872,4 +911,42 @@ TEST_CASE("Downloads keep CPU writes collected and not yet applied", "[buffer_po
     REQUIRE(f.bytes[0x20ff7] == 0x34);
     REQUIRE(std::all_of(f.bytes + 0x20ff8, f.bytes + 0x21008, [](u8 b) { return b == 0xee; }));
     REQUIRE(f.bytes[0x21008] == 0x34);
+}
+
+TEST_CASE("Storage through the GPU page table maps each device run to its buffer",
+          "[buffer_ports]") {
+    Fixture f;
+    // Two 64 KiB GPU pages backed by device memory that is not contiguous.
+    constexpr GPUVAddr base = 0x200000;
+    f.memory->Map(base, 0x20000, 0x10000, Tegra::PTEKind::PITCH, true);
+    f.memory->Map(base + 0x10000, 0x40000, 0x10000, Tegra::PTEKind::PITCH, true);
+    Tegra::Control::ChannelState state{0};
+    state.memory_manager = &*f.memory;
+    state.payload.emplace(f.system, *f.memory, state);
+    VideoCommon::BufferCacheChannelInfo channel{state};
+    const VideoCommon::Binding binding{
+        .device_addr = 0x20000, .gpu_addr = base + 0x800, .size = 0x18000, .buffer_id = {}};
+    const auto& table = Access::Resident(*f.cache, channel, binding, true);
+    REQUIRE(Access::Runs(*f.cache) == 2);
+    constexpr u64 host = 0x7000'0000'0000ULL;
+    // Each byte translates to where the buffer holding its device address keeps it.
+    REQUIRE(table.Translate(base + 0x800) == host + 0x20800);
+    REQUIRE(table.Translate(base + 0xffff) == host + 0x2ffff);
+    REQUIRE(table.Translate(base + 0x10000) == host + 0x40000);
+    REQUIRE(table.Translate(base + 0x187ff) == host + 0x487ff);
+    // Pages outside the binding stay at the null page.
+    REQUIRE(table.Translate(base + 0x19000) == Runtime::NULL_PAGE);
+    // The same binding again changes no entry.
+    const u32 syncs = f.runtime.page_table_syncs;
+    Access::Resident(*f.cache, channel, binding, true);
+    REQUIRE(f.runtime.page_table_syncs == syncs + 1);
+    REQUIRE(f.runtime.page_table_updates.empty());
+    // A buffer that goes away takes its entries with it.
+    const VideoCommon::BufferId second = Access::Find(*f.cache, 0x40000, 0x8800);
+    Access::Delete(*f.cache, second);
+    REQUIRE(table.Translate(base + 0x10000) == Runtime::NULL_PAGE);
+    REQUIRE(table.Translate(base + 0x800) == host + 0x20800);
+    // The next draw makes it resident again in a new buffer.
+    Access::Resident(*f.cache, channel, binding, false);
+    REQUIRE(table.Translate(base + 0x10010) == host + 0x40010);
 }

@@ -24,6 +24,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/native_verify.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
 #include "video_core/nx2_perf.h"
@@ -190,6 +191,13 @@ void BufferCache<P>::TickFrame() {
 
 template <class P>
 void BufferCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t size) {
+    {
+        // Unmaps arrive from the guest's threads; the GPU thread uses the tables under the lock.
+        std::scoped_lock lock{mutex};
+        if (const auto table = page_tables.find(as_id); table != page_tables.end()) {
+            table->second->Unmap(gpu_addr, size);
+        }
+    }
     if constexpr (requires { runtime.BindMultiRangeStorageBuffer(u64{}, bool{}); }) {
         virtual_ranges.Unmap(as_id, gpu_addr, size);
     }
@@ -759,7 +767,14 @@ void BufferCache<P>::BindHostStageBuffers(size_t stage) {
     }
     if (channel_state->enabled_storage_buffers[stage] != 0) {
         Nx2Profile::Scope scope{Nx2Profile::Zone::BindStorage};
-        BindHostGraphicsStorageBuffers(stage);
+        if (graphics_storage_by_address[stage]) {
+            const u64 written = channel_state->written_storage_buffers[stage];
+            ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
+                MakeResident(residencies[stage][index], ((written >> index) & 1) != 0, ~u64{0});
+            });
+        } else {
+            BindHostGraphicsStorageBuffers(stage);
+        }
     }
     if (channel_state->enabled_texture_buffers[stage] != 0) {
         BindHostGraphicsTextureBuffers(stage);
@@ -770,7 +785,20 @@ template <class P>
 void BufferCache<P>::BindHostComputeBuffers() {
     BindHostComputeUniformBuffers();
     if (channel_state->enabled_compute_storage_buffers != 0) {
-        BindHostComputeStorageBuffers();
+        if (compute_storage_by_address) {
+            const u64 written = channel_state->written_compute_storage_buffers;
+            const u64 native = channel_state->native_compute_storage_buffers;
+            ForEachEnabledBit(channel_state->enabled_compute_storage_buffers, [&](u32 index) {
+                // As BindHostComputeStorageBuffers: a native pointer marks only what the
+                // dispatch can write.
+                const u64 limit = ((native >> index) & 1) != 0
+                                      ? u64{channel_state->compute_storage_write_marks[index]}
+                                      : ~u64{0};
+                MakeResident(residencies[NUM_STAGES][index], ((written >> index) & 1) != 0, limit);
+            });
+        } else {
+            BindHostComputeStorageBuffers();
+        }
     }
     if (channel_state->enabled_compute_texture_buffers != 0) {
         BindHostComputeTextureBuffers();
@@ -2115,7 +2143,15 @@ void BufferCache<P>::DoUpdateGraphicsBuffers(bool is_indexed) {
             UpdateUniformBuffers(stage);
             if (channel_state->enabled_storage_buffers[stage] != 0) {
                 Nx2Profile::Scope scope{Nx2Profile::Zone::UpdateStorage};
-                UpdateStorageBuffers(stage);
+                if (graphics_storage_by_address[stage]) {
+                    ForEachEnabledBit(
+                        channel_state->enabled_storage_buffers[stage], [&](u32 index) {
+                            ResolveResidency(residencies[stage][index],
+                                             channel_state->storage_buffers[stage][index]);
+                        });
+                } else {
+                    UpdateStorageBuffers(stage);
+                }
             }
             UpdateTextureBuffers(stage);
         }
@@ -2131,7 +2167,14 @@ void BufferCache<P>::DoUpdateComputeBuffers() {
     compute_segments.clear();
     BufferOperations([&]() {
         UpdateComputeUniformBuffers();
-        UpdateComputeStorageBuffers();
+        if (compute_storage_by_address) {
+            ForEachEnabledBit(channel_state->enabled_compute_storage_buffers, [&](u32 index) {
+                ResolveResidency(residencies[NUM_STAGES][index],
+                                 channel_state->compute_storage_buffers[index]);
+            });
+        } else {
+            UpdateComputeStorageBuffers();
+        }
         UpdateComputeTextureBuffers();
         RefreshMultiRangeSegments(compute_segments);
     });
@@ -2333,6 +2376,166 @@ void BufferCache<P>::UpdateStorageBuffers(size_t stage) {
     });
     StoreStorageResolve(cache, channel_state->storage_buffers[stage], enabled, written,
                         graphics_segments, start_epoch);
+}
+
+template <class P>
+GpuPageTable* BufferCache<P>::CurrentPageTable() {
+    if constexpr (requires { runtime.SupportsGpuPageTable(); }) {
+        if (gpu_memory == nullptr || !runtime.SupportsGpuPageTable()) {
+            return nullptr;
+        }
+        std::unique_ptr<GpuPageTable>& table = page_tables[gpu_memory->GetID()];
+        if (!table) {
+            table = std::make_unique<GpuPageTable>(PAGE_TABLE_BLOCKS);
+            table->SetNullPage(runtime.NullPageAddress());
+        }
+        return table.get();
+    } else {
+        return nullptr;
+    }
+}
+
+template <class P>
+u64 BufferCache<P>::PageTableAddress() {
+    if constexpr (requires { runtime.SyncPageTable(size_t{}, std::declval<GpuPageTable&>()); }) {
+        GpuPageTable* const table = CurrentPageTable();
+        if (table == nullptr) {
+            return 0;
+        }
+        if (NativeVerify::Enabled(NativeVerify::Layer::Storage)) {
+            NativeVerify::Report();
+        }
+        return runtime.SyncPageTable(gpu_memory->GetID(), *table);
+    } else {
+        return 0;
+    }
+}
+
+template <class P>
+void BufferCache<P>::ResolveResidency(Residency& residency, const Binding& binding) {
+    const u64 map_serial = gpu_memory->MapSerial();
+    const size_t as_id = gpu_memory->GetID();
+    if (residency.epoch == binding_epoch && residency.gpu_addr == binding.gpu_addr &&
+        residency.size == binding.size && residency.map_serial == map_serial &&
+        residency.as_id == as_id && residency.channel == static_cast<const void*>(channel_state)) {
+        return;
+    }
+    residency.runs.clear();
+    residency.mapped = false;
+    residency.epoch = 0;
+    if (binding.gpu_addr == 0 || binding.size == 0) {
+        return;
+    }
+    // The guest range in runs of contiguous device memory; pages that map nothing stay at the
+    // null page.
+    const GPUVAddr end = binding.gpu_addr + binding.size;
+    for (GPUVAddr address = binding.gpu_addr; address < end;) {
+        const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(address);
+        const size_t run = device_addr ? gpu_memory->MaxContinuousRange(address, end - address) : 0;
+        if (run == 0) {
+            address = Common::AlignUp(address + 1, GpuPageTable::PAGE_SIZE);
+            continue;
+        }
+        residency.runs.push_back(ResidentRun{
+            .gpu_addr = address,
+            .device_addr = *device_addr,
+            .size = static_cast<u32>(run),
+            .buffer_id = FindBuffer(*device_addr, static_cast<u32>(run), false),
+        });
+        address += run;
+    }
+    // After the lookups: a buffer one of them created is part of what the runs hold. A lookup
+    // that deleted an earlier run's buffer bumps the epoch past this one, and the update runs
+    // again (has_deleted_buffers).
+    residency.gpu_addr = binding.gpu_addr;
+    residency.size = binding.size;
+    residency.epoch = binding_epoch;
+    residency.map_serial = map_serial;
+    residency.as_id = as_id;
+    residency.channel = channel_state;
+}
+
+template <class P>
+void BufferCache<P>::MakeResident(Residency& residency, bool is_written, u64 write_mark_limit) {
+    if constexpr (requires { runtime.SyncPageTable(size_t{}, std::declval<GpuPageTable&>()); }) {
+        GpuPageTable* const table = CurrentPageTable();
+        if (table == nullptr) {
+            return;
+        }
+        for (const ResidentRun& run : residency.runs) {
+            if (!slot_buffers.contains(run.buffer_id)) {
+                // Deleted since the update: its entries are already back at the null page.
+                residency.epoch = 0;
+                continue;
+            }
+            Buffer& buffer = slot_buffers[run.buffer_id];
+            TouchBuffer(buffer, run.buffer_id);
+            if (!residency.mapped) {
+                const u64 host_address = buffer.DeviceAddress() + buffer.Offset(run.device_addr);
+                if (!table->Map(run.gpu_addr, run.size, host_address) && !page_table_full_logged) {
+                    page_table_full_logged = true;
+                    LOG_ERROR(HW_GPU, "GPU page table full: {} blocks of 2 MiB",
+                              table->UsedBlocks());
+                }
+                page_table_buffers.insert(run.buffer_id.index);
+            }
+            SynchronizeBuffer(buffer, run.device_addr, run.size);
+            buffer.MarkUsage(buffer.Offset(run.device_addr), run.size);
+            if (is_written && write_mark_limit != 0) {
+                const u32 mark = static_cast<u32>((std::min<u64>)(run.size, write_mark_limit));
+                MarkWrittenBuffer(run.buffer_id, run.device_addr, mark, true);
+                if (write_mark_limit != ~u64{0}) {
+                    write_mark_limit -= mark;
+                }
+            }
+        }
+        residency.mapped = true;
+        if (NativeVerify::Enabled(NativeVerify::Layer::Storage)) {
+            VerifyResidency(residency);
+        }
+    }
+}
+
+template <class P>
+void BufferCache<P>::VerifyResidency(const Residency& residency) {
+    if constexpr (requires { runtime.SyncPageTable(size_t{}, std::declval<GpuPageTable&>()); }) {
+        const GpuPageTable* const table = CurrentPageTable();
+        for (const ResidentRun& run : residency.runs) {
+            if (!slot_buffers.contains(run.buffer_id)) {
+                continue;
+            }
+            // What the classic binding would read: the buffer FindBuffer gives for the bytes.
+            for (const u32 offset : {0U, run.size - 1}) {
+                const DAddr device_addr = run.device_addr + offset;
+                const std::optional<DAddr> mapped =
+                    gpu_memory->GpuToCpuAddress(run.gpu_addr + offset);
+                const BufferId expected_id = FindBuffer(device_addr, 1, false);
+                Buffer& expected = slot_buffers[expected_id];
+                const u64 expected_address =
+                    expected.DeviceAddress() + expected.Offset(device_addr);
+                const u64 translated = table->Translate(run.gpu_addr + offset);
+                NativeVerify::Check(NativeVerify::Layer::Storage,
+                                    mapped == device_addr && translated == expected_address,
+                                    "{:#x} -> {:#x}, the buffer holding device {:#x} is at {:#x}",
+                                    run.gpu_addr + offset, translated, device_addr,
+                                    expected_address);
+            }
+        }
+    }
+}
+
+template <class P>
+void BufferCache<P>::UnmapFromPageTables(BufferId buffer_id) {
+    if constexpr (requires { runtime.SyncPageTable(size_t{}, std::declval<GpuPageTable&>()); }) {
+        if (page_table_buffers.erase(buffer_id.index) == 0) {
+            return;
+        }
+        const Buffer& buffer = slot_buffers[buffer_id];
+        const u64 begin = buffer.DeviceAddress();
+        for (auto& [as_id, table] : page_tables) {
+            table->UnmapDevice(begin, begin + buffer.SizeBytes());
+        }
+    }
 }
 
 template <class P>
@@ -4011,6 +4214,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
 template <class P>
 void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
     ++binding_epoch;
+    UnmapFromPageTables(buffer_id);
     if constexpr (requires { runtime.OnBufferDeleted(slot_buffers[buffer_id]); }) {
         runtime.OnBufferDeleted(slot_buffers[buffer_id]);
     }

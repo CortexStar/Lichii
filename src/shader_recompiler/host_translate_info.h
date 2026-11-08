@@ -36,6 +36,7 @@ struct HostTranslateInfo {
     bool support_float64{};      ///< True when the device supports 64-bit floats
     bool support_float16{};      ///< True when the device supports 16-bit floats
     bool support_int64{};        ///< True when the device supports 64-bit integers
+    bool gpu_page_table{}; ///< Storage and global memory through the GPU page table (no SSBOs)
     bool needs_demote_reorder{}; ///< True when the device needs DemoteToHelperInvocation reordered
     bool support_snorm_render_buffer{};  ///< True when the device supports SNORM render buffers
     bool support_viewport_index_layer{}; ///< True when the device supports gl_Layer in VS

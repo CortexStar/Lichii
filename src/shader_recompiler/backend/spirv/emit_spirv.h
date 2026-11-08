@@ -54,6 +54,15 @@ constexpr u32 RESCALING_LAYOUT_DOWN_FACTOR_OFFSET =
 constexpr u32 RENDERAREA_LAYOUT_OFFSET =
     offsetof(PushConstantLayout, render_area) + offsetof(RenderAreaLayout, render_area);
 constexpr u32 PUSH_CONSTANT_LAYOUT_SIZE = sizeof(PushConstantLayout);
+
+/// The GPU page table as shaders read it (VideoCommon::GpuPageTable): L1 holds a u32 block index
+/// per 2^PAGE_TABLE_BLOCK_BITS bytes of guest address space, the L2 blocks after it hold a u64
+/// host device address per 2^PAGE_TABLE_PAGE_BITS bytes.
+constexpr u32 PAGE_TABLE_ADDRESS_BITS = 40;
+constexpr u32 PAGE_TABLE_PAGE_BITS = 12;
+constexpr u32 PAGE_TABLE_BLOCK_BITS = 21;
+constexpr u64 PAGE_TABLE_L1_BYTES =
+    (u64{1} << (PAGE_TABLE_ADDRESS_BITS - PAGE_TABLE_BLOCK_BITS)) * sizeof(u32);
 static_assert(RESCALING_LAYOUT_WORDS_OFFSET == 32 && RESCALING_LAYOUT_IMAGES_OFFSET == 48 &&
                   RESCALING_LAYOUT_DOWN_FACTOR_OFFSET == 56 && RENDERAREA_LAYOUT_OFFSET == 64 &&
                   PUSH_CONSTANT_LAYOUT_SIZE == 80,

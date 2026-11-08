@@ -90,6 +90,14 @@ void CollectInterpolationInfo(Environment& env, IR::Program& program) {
     }
 }
 
+/// With the GPU page table, a program that reaches guest memory reads the table's address and
+/// leaves its storage buffer descriptors unbound.
+void MarkStorageByAddress(IR::Program& program, const HostTranslateInfo& host_info) {
+    program.info.storage_by_address =
+        host_info.gpu_page_table &&
+        (program.info.uses_global_memory || !program.info.storage_buffers_descriptors.empty());
+}
+
 void AddNVNStorageBuffers(IR::Program& program, const HostTranslateInfo& host_info) {
     if (!program.info.uses_global_memory) {
         return;
@@ -486,6 +494,7 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
     CollectInterpolationInfo(env, program);
     AddNVNStorageBuffers(program, normalized_host_info);
     Optimization::LimitSampledTextureArrays(program, normalized_host_info);
+    MarkStorageByAddress(program, normalized_host_info);
     return program;
 }
 
@@ -526,6 +535,7 @@ IR::Program MergeDualVertexPrograms(IR::Program& vertex_a, IR::Program& vertex_b
         Optimization::VerificationPass(result);
     }
     Optimization::CollectShaderInfoPass(env_vertex_b, result);
+    MarkStorageByAddress(result, host_info);
     return result;
 }
 
