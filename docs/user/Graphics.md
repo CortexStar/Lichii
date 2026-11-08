@@ -23,14 +23,24 @@ scRGB. The emulator starts with an SDR swapchain and selects HDR output when the
 supplies native HDR frames, and sends HDR10 metadata (BT.2020 primaries, the
 reported peak).
 
-The emulator selects the requested presentation format when creating the actual
-swapchain; this is not automatic setup or a compatibility workaround. It does
-not enable operating-system HDR, tone-map HDR into SDR, or reinterpret HDR pixels
-as SDR. HDR swapchain creation failures follow the normal Vulkan error path, with
-no HDR-specific fallback. Live display changes and operating-system HDR toggles during gameplay are
-intentionally unsupported. Captures are not promised HDR-to-SDR tone mapping.
-Handling HDR content on an SDR desktop is an operating-system concern, not behavior
-this feature attempts to emulate.
+The emulator does not enable operating-system HDR, tone-map HDR into SDR, or
+reinterpret HDR pixels as SDR. If the surface does not offer the HDR format the game
+needs, it logs an error and presents SDR. Captures are not promised HDR-to-SDR tone
+mapping.
+
+On Windows, Auto follows changes during play: toggling Windows HDR, moving the window
+to another monitor, changing the SDR content brightness or running the Windows HDR
+Calibration app is picked up within half a second, and the game is asked to query the
+display again (games that listen switch between SDR and HDR images; the HDR10 metadata
+is updated too). Run the Windows HDR Calibration app for your monitor first: Windows
+reports the peak from the display's colour profile where one is set, else from its
+EDID, and the game tone maps to that peak.
+
+Windows Auto HDR applies to SDR output of DirectX 11 and 12 games. With HDR on Auto
+and Windows HDR on, a game with an HDR mode presents native HDR10, which Auto HDR
+leaves alone. If you keep HDR Off on an HDR desktop and Auto HDR engages for the
+emulator, turn Auto HDR off for `lichii.exe` / `eden-cli.exe` in Settings > System > Display > Graphics, so
+SDR frames are shown as SDR.
 
 ### Anti-aliasing
 
