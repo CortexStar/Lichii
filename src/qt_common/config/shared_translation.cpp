@@ -325,8 +325,9 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, pin_gpu_threads, tr("Pin GPU threads to their own cores"),
            tr("Pins the emulator's GPU threads to dedicated physical CPU cores and keeps the "
               "emulated CPU cores off them.\n"
-              "Can hurt performance on CPUs with few cores. Skipped on CPUs with fewer than 6 "
-              "physical performance cores.\n"
+              "Can hurt performance on CPUs with few cores, and badly while other programs keep "
+              "the CPU busy: the pinned threads cannot move to a free core. Skipped on CPUs with "
+              "fewer than 6 physical performance cores.\n"
               "Windows and Linux only. Takes effect when a game starts."));
 
     INSERT(Settings, use_vulkan_driver_pipeline_cache, tr("Use Vulkan pipeline cache"),
