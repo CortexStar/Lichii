@@ -219,6 +219,18 @@ TEST_CASE("Block linear swizzle matches the GOB layout", "[block_linear_swizzle]
     }
 }
 
+TEST_CASE("Large block linear unswizzles split over threads match the GOB layout",
+          "[block_linear_swizzle]") {
+    // From 1 MiB, unswizzles go over the helper threads in chunks of whole GOB rows, and the
+    // AVX-512 path moves whole GOBs: a height that ends inside a GOB row, a partial GOB at the
+    // right, and both tilings.
+    for (const bool native : {false, true}) {
+        CheckLayout({1024, 256, 1, 4, 4, 0, 0}, native);
+        CheckLayout({1000, 263, 1, 4, 3, 0, 0}, native);
+        CheckLayout({260, 300, 1, 16, 5, 0, 0}, native);
+    }
+}
+
 TEST_CASE("Block linear subrect swizzle microbenchmark", "[.block_linear_swizzle_benchmark]") {
     // A DMA copy of a 1024x1024 RGBA8 region from pitch linear into block linear.
     const Layout layout{1024, 1024, 1, 4, 4, 0, 0};
