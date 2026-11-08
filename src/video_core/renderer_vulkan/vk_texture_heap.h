@@ -50,6 +50,48 @@ public:
     /// Sampler slot `logical_slot` in `physical`: the descriptor of `sampler`'s `variant`.
     void WriteSampler(u32 physical, u32 logical_slot, const Sampler& sampler, VkSampler variant);
 
+    /// Applies the mirror's pending changes of the graphics (or compute) pools: prepares the
+    /// fresh pages and writes the image and sampler slots. Call it before recording a draw that
+    /// reads the heaps, under the texture cache's lock.
+    template <typename Cache>
+    void ApplyMirrorUpdates(Cache& texture_cache, bool compute) {
+        namespace PoolMirror = VideoCommon::PoolMirror;
+        texture_cache.TakeMirrorUpdates(compute, draw_seq, [&](const auto& update) {
+            switch (update.kind) {
+            case PoolMirror::UpdateKind::Image:
+                if (update.fresh && !PreparePage(update.heap, update.physical, update.copy_from)) {
+                    return;
+                }
+                WriteImage(update.physical, update.slot,
+                           update.view ? &texture_cache.GetImageView(update.view) : nullptr,
+                           static_cast<Shader::TextureType>(update.type));
+                return;
+            case PoolMirror::UpdateKind::Sampler: {
+                if (update.fresh && !PreparePage(update.heap, update.physical, update.copy_from)) {
+                    return;
+                }
+                auto& sampler = texture_cache.GetSampler(update.sampler);
+                WriteSampler(update.physical, update.slot, sampler,
+                             sampler.HandleForClass(update.class_key, update.depth_use));
+                return;
+            }
+            case PoolMirror::UpdateKind::Reset:
+            case PoolMirror::UpdateKind::Layout:
+            case PoolMirror::UpdateKind::Table:
+            case PoolMirror::UpdateKind::Meta:
+                // The CPU reads layouts, page tables and meta words from the texture cache when
+                // it writes a draw's index tables.
+                return;
+            }
+        });
+    }
+
+    /// A draw that reads the heaps was recorded (page versions: a page mapped after it may be
+    /// read).
+    void NoteDraw() noexcept {
+        ++draw_seq;
+    }
+
     [[nodiscard]] VkBindHeapInfoEXT ResourceHeapBinding() const noexcept;
     [[nodiscard]] VkBindHeapInfoEXT SamplerHeapBinding() const noexcept;
 
@@ -79,6 +121,7 @@ private:
     std::array<u8, VideoCommon::PoolMirror::IMAGE_DESCRIPTOR_SIZE> null_image{};
     std::array<u8, VideoCommon::PoolMirror::SAMPLER_DESCRIPTOR_SIZE> null_sampler{};
     bool usable{};
+    u64 draw_seq{};
 };
 
 } // namespace Vulkan

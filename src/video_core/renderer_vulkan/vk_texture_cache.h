@@ -23,6 +23,7 @@
 #endif
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
+#include "video_core/renderer_vulkan/vk_texture_heap.h"
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -103,6 +104,11 @@ public:
 
     /// GPU progress: the texture cache frees a deleted image once the GPU is past its last use.
     [[nodiscard]] u64 CurrentTick() const noexcept;
+
+    /// The descriptor heaps that mirror the guest pools, when the device can use them.
+    [[nodiscard]] TextureHeap* Heap() noexcept {
+        return texture_heap && texture_heap->Usable() ? &*texture_heap : nullptr;
+    }
 
     [[nodiscard]] bool IsFree(u64 tick) const noexcept;
 
@@ -244,6 +250,7 @@ public:
     VkFormat GetSupportedFormat(VkFormat requested_format, VkFormatFeatureFlags required_features) const;
 
     const Device& device;
+    std::optional<TextureHeap> texture_heap;
     Scheduler& scheduler;
     MemoryAllocator& memory_allocator;
     StagingBufferPool& staging_buffer_pool;

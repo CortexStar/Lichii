@@ -595,6 +595,11 @@ public:
     template <typename Func>
     void TakeMirrorUpdates(bool compute, u64 draw_seq, Func&& func);
 
+    /// The backend runtime (the descriptor heap the mirror feeds lives there).
+    [[nodiscard]] Runtime& GetRuntime() noexcept {
+        return runtime;
+    }
+
     /// Moves whenever TakeMirrorUpdates hands over anything for the channel's heap.
     [[nodiscard]] u64 MirrorVersion(bool compute) const noexcept {
         return (compute ? channel_state->compute_mirror : channel_state->graphics_mirror).version;
