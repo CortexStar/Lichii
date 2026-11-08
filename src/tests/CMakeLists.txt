@@ -20,6 +20,7 @@ add_executable(tests
     video_core/aftermath_dump.cpp
     video_core/frame_dump_schedule.cpp
     video_core/draw_class_stats.cpp
+    video_core/draw_input_watch.cpp
     video_core/host_mip_limits.cpp
     video_core/gpu_timestamp.cpp
     video_core/unbacked_image_policy.cpp
