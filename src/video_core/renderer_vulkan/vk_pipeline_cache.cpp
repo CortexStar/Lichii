@@ -882,7 +882,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
 
     if (current_pipeline) {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
-        if (next) {
+        if (next && !cached_pipeline_retries.NeedsRetry(next)) {
             current_pipeline = next;
             current_pipeline->MarkUsed(frame_count);
             return BuiltPipeline(current_pipeline);
@@ -1941,11 +1941,15 @@ void PipelineCache::StartMeshWarm(u64 title_id) {
                 try {
                     // Synchronous, monolithic and transient. No runtime cache, used list or
                     // transferable cache receives speculative metadata or this pipeline.
-                    auto pipeline = IsGraphicsKeyCompatible(key)
-                                        ? CreateGraphicsPipeline(
-                                              pools, key, std::span{pointers.data(), count},
-                                              nullptr, false, nullptr, nullptr, false, false, false)
-                                        : nullptr;
+                    // Descriptor-set fallback creates pool banks even without a draw. Keep
+                    // them local to this record; the synchronous pipeline dies before its pool.
+                    DescriptorPool transient_descriptors{device, scheduler};
+                    auto pipeline =
+                        IsGraphicsKeyCompatible(key)
+                            ? CreateGraphicsPipeline(pools, key, std::span{pointers.data(), count},
+                                                     nullptr, false, nullptr, nullptr, false, false,
+                                                     false, &transient_descriptors)
+                            : nullptr;
                     if (!pipeline) {
                         ++rejected;
                     } else if (pipeline->Failed()) {
@@ -2195,12 +2199,27 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     if (is_new) {
         ReportNewPipelineKey(graphics_key);
         pipeline = background_pipelines.Take(graphics_key);
-        if (pipeline && pipeline->Failed()) {
-            pipeline.reset();
-        }
+        cached_pipeline_retries.Mark(pipeline.get());
         if (!pipeline) {
             pipeline = CreateGraphicsPipeline();
         }
+    }
+    if (cached_pipeline_retries.Consume(pipeline.get())) {
+        LOG_WARNING(Render_Vulkan,
+                    "Retrying failed cached graphics pipeline {:016x} from live state",
+                    graphics_key.Hash());
+        // Already recorded commands can still refer to this object. Retire it using the same
+        // GPU tick protection as normal eviction, and remove every CPU transition to it.
+        used_this_session.erase(pipeline.get());
+        scheduler.ForgetGraphicsPipeline(pipeline.get());
+        evicted_pipelines.emplace_back(scheduler.CurrentTick(), std::move(pipeline));
+        current_pipeline = nullptr;
+        for (auto& [key, other] : graphics_cache) {
+            if (other) {
+                other->ClearTransitions();
+            }
+        }
+        pipeline = CreateGraphicsPipeline();
     }
     if (!pipeline) {
         return nullptr;
@@ -2307,6 +2326,7 @@ void PipelineCache::EvictUnusedPipelines() {
         if (used_this_session.erase(pipeline) != 0) {
             used_and_evicted.insert(it->first.Hash());
         }
+        cached_pipeline_retries.Forget(pipeline);
         evicted_pipelines.emplace_back(tick, std::move(it->second));
         it = graphics_cache.erase(it);
         ++evicted;
@@ -2539,7 +2559,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
     bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools,
     std::unique_ptr<EmissionBudget::Reservation> reservation, bool libraries_only,
-    bool account_runtime_emission, bool notify_runtime_build) try {
+    bool account_runtime_emission, bool notify_runtime_build,
+    DescriptorPool* transient_descriptors) try {
     auto hash = key.Hash();
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
     size_t env_index{0};
@@ -2941,10 +2962,11 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     };
     auto pipeline = std::make_unique<GraphicsPipeline>(
         scheduler, buffer_cache, texture_cache, vulkan_pipeline_cache,
-        libraries_only || !notify_runtime_build ? nullptr : &shader_notify, device, descriptor_pool,
-        guest_descriptor_queue, descriptor_buffer_ring, thread_worker, statistics,
-        render_pass_cache, key, std::move(modules), infos, std::move(emit_stages),
-        std::move(mesh_emulation), library_params);
+        libraries_only || !notify_runtime_build ? nullptr : &shader_notify, device,
+        transient_descriptors ? *transient_descriptors : descriptor_pool, guest_descriptor_queue,
+        descriptor_buffer_ring, thread_worker, statistics, render_pass_cache, key,
+        std::move(modules), infos, std::move(emit_stages), std::move(mesh_emulation),
+        library_params);
     pipeline->SetSourceWords(source_words);
     return pipeline;
 

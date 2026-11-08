@@ -9,12 +9,41 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include "common/unique_function.h"
 #include "video_core/renderer_vulkan/pipeline_build.h"
 
 namespace Vulkan {
+
+/// GPU-thread bookkeeping: an adopted cached build may fail after metadata was published.
+/// Allow one live-environment retry without turning normal runtime failures into a retry loop.
+template <typename Pipeline>
+class CachedPipelineRetries {
+public:
+    void Mark(Pipeline* pipeline) {
+        if (pipeline) {
+            cached.insert(pipeline);
+        }
+    }
+    bool NeedsRetry(Pipeline* pipeline) const {
+        return pipeline && cached.contains(pipeline) && pipeline->Failed();
+    }
+    bool Consume(Pipeline* pipeline) {
+        if (!NeedsRetry(pipeline)) {
+            return false;
+        }
+        cached.erase(pipeline);
+        return true;
+    }
+    void Forget(Pipeline* pipeline) {
+        cached.erase(pipeline);
+    }
+
+private:
+    std::unordered_set<Pipeline*> cached;
+};
 
 template <typename Key, typename Pipeline>
 class PipelinePrebuild {

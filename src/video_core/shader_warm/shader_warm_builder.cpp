@@ -313,7 +313,9 @@ bool WarmPending(u64 title_id) {
     std::error_code ec;
     for (const auto& file : {ComputeWarmPath(title_id), GraphicsWarmPath(title_id),
                              MeshWarmPath(title_id)}) {
-        if (fs::exists(file, ec) && !fs::exists(WarmMarkerPath(file), ec)) {
+        // A header-only file has no jobs (including titles with no mesh recipes).
+        if (fs::exists(file, ec) && fs::file_size(file, ec) > 12 && !ec &&
+            !fs::exists(WarmMarkerPath(file), ec)) {
             return true;
         }
     }

@@ -571,3 +571,33 @@ TEST_CASE("Mesh warm preflight rejects overflowing lengths and invalid instructi
     std::istringstream stream(bytes);
     REQUIRE_THROWS(InspectMeshWarmEnvironment(stream, 8, bytes.size()));
 }
+
+TEST_CASE("Adopted cached builds permit one live retry after a delayed driver failure",
+          "[video_core][pipeline_prebuild]") {
+    Common::ThreadWorker workers{1, "CachedFailureTest"};
+    std::promise<void> entered, release;
+    auto gate = release.get_future().share();
+    PipelineBuild cached{&workers, [&] {
+                             entered.set_value();
+                             gate.wait();
+                             throw std::runtime_error("cached driver build rejected");
+                         }};
+    Vulkan::CachedPipelineRetries<PipelineBuild> retries;
+    retries.Mark(&cached);
+    entered.get_future().wait();
+    const bool pending_retry = retries.Consume(&cached);
+    release.set_value();
+    cached.Wait();
+    REQUIRE_FALSE(pending_retry);
+    REQUIRE(retries.NeedsRetry(&cached));
+    REQUIRE(retries.Consume(&cached));
+    REQUIRE_FALSE(retries.Consume(&cached));
+    PipelineBuild runtime{nullptr, [] { throw std::runtime_error("runtime build rejected"); }};
+    REQUIRE_FALSE(retries.NeedsRetry(&runtime));
+    PipelineBuild successful{nullptr, [] {}};
+    retries.Mark(&successful);
+    REQUIRE_FALSE(retries.Consume(&successful));
+    retries.Mark(&cached);
+    retries.Forget(&cached);
+    REQUIRE_FALSE(retries.NeedsRetry(&cached));
+}

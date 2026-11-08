@@ -182,7 +182,7 @@ private:
         bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools = nullptr,
         std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr,
         bool libraries_only = false, bool account_runtime_emission = false,
-        bool notify_runtime_build = true);
+        bool notify_runtime_build = true, DescriptorPool* transient_descriptors = nullptr);
 
     [[nodiscard]] bool StaleNullPointerSlot(const ComputePipelineCacheEntry& entry) const;
 
@@ -325,6 +325,7 @@ private:
     Common::ThreadWorker serialization_thread;
     DynamicFeatures dynamic_features;
     PipelinePrebuild<GraphicsPipelineCacheKey, GraphicsPipeline> background_pipelines;
+    CachedPipelineRetries<GraphicsPipeline> cached_pipeline_retries;
 };
 
 } // namespace Vulkan

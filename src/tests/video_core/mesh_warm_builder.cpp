@@ -8,6 +8,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "common/cityhash.h"
+#include "common/fs/path_util.h"
+#include "video_core/shader_warm/shader_warm_builder.h"
 #include "video_core/shader_warm/mesh_warm_builder.h"
 
 namespace {
@@ -244,4 +246,74 @@ TEST_CASE("Mesh predictions deduplicate, respect caps and exclude known pipeline
     unsupported[2].code = other_fragment;
     unrelated.AddVariation(unsupported);
     REQUIRE(unrelated.Write(out, {}) == 0);
+}
+
+TEST_CASE("Mesh warm variants preserve allocation-tail constant specialization", "[mesh_warm]") {
+    const auto donor = Donor();
+    CacheFile cache{*MakeMeshWarmCandidate(donor.stages, donor)};
+    const auto task = Native(7, 1), fragment = Native(4, 3);
+    auto mesh_a = Native(8, 2);
+    mesh_a.resize(400);
+    Put<u32>(mesh_a, 144, 0x12345678);
+    auto mesh_b = mesh_a;
+    Put<u32>(mesh_b, 144, 0x87654321);
+    LoweredCode lowered_a, lowered_b;
+    REQUIRE_FALSE(LowerProgram(mesh_a, true, lowered_a));
+    REQUIRE_FALSE(LowerProgram(mesh_b, true, lowered_b));
+    REQUIRE(lowered_a.code == lowered_b.code);
+    REQUIRE(StageHash(lowered_a.code) == donor.stages[1].code_hash);
+    auto stages = donor.stages;
+    stages[1] = {8, StageHash(lowered_a.code), GraphicsEnv(8, lowered_a, mesh_a)};
+    const auto candidate = MakeMeshWarmCandidate(stages, donor);
+    REQUIRE(candidate);
+    CacheFile predicted{*candidate};
+    const auto loaded = ReadMeshWarmTemplates({predicted.path});
+    REQUIRE(loaded.size() == 1);
+    REQUIRE(loaded[0].key == donor.key);
+    const auto& environment = loaded[0].stages[1].environment;
+    const size_t first_constant = 76 + Get<u64>(environment, 0);
+    REQUIRE(Get<u32>(environment, first_constant + 8) == 0x12345678);
+    REQUIRE(environment != donor.stages[1].environment);
+
+    MeshWarmRecipes recipes{{cache.path}, 8};
+    const std::array<ShaderRecord, 3> variation{{{ProgramStage::Task, task, {}},
+                                                 {ProgramStage::Mesh, mesh_a, {}},
+                                                 {ProgramStage::Fragment, fragment, {}}}};
+    recipes.AddVariation(variation);
+    auto second = variation;
+    second[1].code = mesh_b;
+    recipes.AddVariation(second);
+    recipes.AddVariation(variation);
+    REQUIRE(recipes.VariationCount() == 2);
+    std::ostringstream out;
+    REQUIRE(recipes.Write(out, {}) == 2);
+}
+
+TEST_CASE("Empty mesh warm files do not leave the preparation prompt pending", "[mesh_warm]") {
+    CacheFile fixture{std::span<const u8>{}};
+    const auto directory = std::filesystem::path{fixture.path.string() + ".dir"};
+    std::filesystem::create_directories(directory);
+    struct Restore {
+        std::filesystem::path old_path, temporary;
+        ~Restore() {
+            Common::FS::SetEdenPath(Common::FS::EdenPath::ShaderDir, old_path);
+            std::filesystem::remove_all(temporary);
+        }
+    } restore{Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir), directory};
+    Common::FS::SetEdenPath(Common::FS::EdenPath::ShaderDir, directory);
+    constexpr u64 Title = 123;
+    const auto mesh = MeshWarmPath(Title);
+    std::filesystem::create_directories(mesh.parent_path());
+    std::filesystem::copy_file(fixture.path, mesh);
+    REQUIRE_FALSE(WarmPending(Title));
+    {
+        std::ofstream append(mesh, std::ios::app | std::ios::binary);
+        append.put('x');
+    }
+    REQUIRE(WarmPending(Title));
+    {
+        std::ofstream marker(WarmMarkerPath(mesh));
+        marker << "done";
+    }
+    REQUIRE_FALSE(WarmPending(Title));
 }

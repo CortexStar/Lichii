@@ -60,6 +60,37 @@ std::optional<size_t> EnvSize(std::span<const u8> bytes) {
     return size + tail;
 }
 
+std::optional<std::map<u64, u32>> Bank1Values(std::span<const u8> env) {
+    if (env.size() < HeaderSize || env.size() > MaxRecordBytes) {
+        return std::nullopt;
+    }
+    size_t offset = HeaderSize;
+    for (size_t field = 0; field < 3; ++field) {
+        const size_t stride = field == 0 ? 1 : 8;
+        const u64 count = Get<u64>(env, field * 8);
+        if (count > (env.size() - offset) / stride) {
+            return std::nullopt;
+        }
+        offset += count * stride;
+    }
+    const u64 count = Get<u64>(env, 24);
+    if (count > (env.size() - offset) / 12) {
+        return std::nullopt;
+    }
+    std::map<u64, u32> values;
+    for (u64 i = 0; i < count; ++i, offset += 12) {
+        const auto key = Get<u64>(env, offset);
+        if (key >> 32 == 1) {
+            values.emplace(key, Get<u32>(env, offset + 8));
+        }
+    }
+    return values;
+}
+
+u128 RecordIdentity(std::span<const u8> bytes) {
+    return Common::CityHash128(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+}
+
 std::span<const u8> MeshContext(const MeshWarmTemplate& donor) {
     const auto& mesh = donor.stages[donor.stages.size() - 2].environment;
     return std::span{mesh}.last(MeshTailSize);
@@ -187,8 +218,17 @@ std::optional<std::vector<u8>> MakeMeshWarmCandidate(
         const auto& stage = variation[i];
         const auto& captured = donor.stages[i];
         std::vector<u8> env;
-        if (stage.code_hash == captured.code_hash) {
-            env = captured.environment; // Exact code: preserve the observed descriptor/cbuf reads.
+        const auto archive_bank1 = Bank1Values(stage.environment);
+        const auto captured_bank1 = Bank1Values(captured.environment);
+        if (!archive_bank1 || !captured_bank1) {
+            return std::nullopt;
+        }
+        const bool matching_constants = std::ranges::all_of(*captured_bank1, [&](const auto& word) {
+            const auto it = archive_bank1->find(word.first);
+            return it != archive_bank1->end() && it->second == word.second;
+        });
+        if (stage.code_hash == captured.code_hash && matching_constants) {
+            env = captured.environment; // Preserve observed reads only for matching specialization.
         } else {
             env = stage.environment;
             // Fresh GraphicsEnv records have no mesh trailer until a candidate supplies it.
@@ -196,6 +236,9 @@ std::optional<std::vector<u8>> MakeMeshWarmCandidate(
                 return std::nullopt;
             }
             if (stage.stage == 7 || stage.stage == 8) {
+                if (const auto existing = EnvSize(env); existing && *existing == env.size()) {
+                    env.resize(env.size() - MeshTailSize);
+                }
                 env.insert(env.end(), context.begin(), context.begin() + 12);
                 if (stage.stage == 8) {
                     env.insert(env.end(), context.begin() + 12, context.end());
@@ -227,7 +270,7 @@ std::optional<std::vector<u8>> MakeMeshWarmCandidate(
 struct MeshWarmRecipes::Impl {
     std::vector<MeshWarmTemplate> donors;
     std::map<std::pair<u32, u128>, std::shared_ptr<MeshWarmStage>> programs;
-    std::set<std::array<u64, 3>> seen_variations;
+    std::set<std::array<u128, 3>> seen_variations;
     std::vector<std::vector<std::shared_ptr<MeshWarmStage>>> variations;
     size_t bytes{};
     size_t skipped{};
@@ -289,9 +332,11 @@ void MeshWarmRecipes::AddVariation(std::span<const ShaderRecord> variation) {
         }
         prepared.push_back(it->second);
     }
-    std::array<u64, 3> identity{};
+    std::array<u128, 3> identity{};
     for (const auto& stage : prepared) {
-        identity[stage->stage == 7 ? 0 : stage->stage == 8 ? 1 : 2] = stage->code_hash;
+        identity[stage->stage == 7   ? 0
+                 : stage->stage == 8 ? 1
+                                     : 2] = RecordIdentity(stage->environment);
     }
     if (impl->seen_variations.insert(identity).second) {
         impl->variations.push_back(std::move(prepared));
@@ -299,11 +344,17 @@ void MeshWarmRecipes::AddVariation(std::span<const ShaderRecord> variation) {
 }
 
 size_t MeshWarmRecipes::Write(std::ostream& out, std::stop_token stop) {
-    struct Choice { size_t group; size_t donor; int score; };
+    struct Choice {
+        size_t group;
+        size_t donor;
+        int score;
+    };
     std::vector<Choice> choices;
-    std::set<GraphicsKey> known;
+    std::set<u128> known;
     for (const auto& donor : impl->donors) {
-        known.insert(donor.key);
+        if (const auto record = MakeMeshWarmCandidate(donor.stages, donor)) {
+            known.insert(RecordIdentity(*record));
+        }
     }
     for (size_t g = 0; g < impl->variations.size(); ++g) {
         if (stop.stop_requested()) {
@@ -358,9 +409,7 @@ size_t MeshWarmRecipes::Write(std::ostream& out, std::stop_token stop) {
             ++impl->skipped;
             continue;
         }
-        GraphicsKey key;
-        std::memcpy(key.data(), candidate->data() + candidate->size() - key.size(), key.size());
-        if (!known.insert(key).second) {
+        if (!known.insert(RecordIdentity(*candidate)).second) {
             continue;
         }
         out.write(reinterpret_cast<const char*>(candidate->data()), candidate->size());
