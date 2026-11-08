@@ -18,6 +18,7 @@
 #include "video_core/renderer_vulkan/vk_multi_range_buffer.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
+#include "video_core/renderer_vulkan/vk_upload_reorder_check.h"
 #include "video_core/surface.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -63,6 +64,10 @@ public:
 
     /// GPU work recorded now reads or writes [offset, offset + size).
     void MarkUsage(u64 offset, u64 size) noexcept;
+
+    /// An upload recorded now writes [offset, offset + size): uploads of these bytes after it in
+    /// this submission run after it (DecideUploadOrder). The check hears of it from the copy.
+    void TrackUploadWrite(u64 offset, u64 size) noexcept;
 
     [[nodiscard]] std::span<const u8> Mapped() const noexcept {
         return buffer.IsHostCoherent() ? buffer.Mapped() : std::span<const u8>{};
@@ -160,10 +165,11 @@ public:
     void PreCopyBarrier();
 
     /// order: where an upload from the stream buffer runs (DecideUploadOrder); other copies run
-    /// in order.
+    /// in order. location: the caller, named by EDEN_NX2_UPLOAD_REORDER_CHECK.
     void CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
                     std::span<const VideoCommon::BufferCopy> copies, bool barrier,
-                    VideoCommon::UploadOrder order = {});
+                    VideoCommon::UploadOrder order = {},
+                    std::source_location location = std::source_location::current());
 
     void PostCopyBarrier();
 
@@ -239,6 +245,7 @@ public:
     }
 
     void PushMultiRangeSource(const Buffer& buffer, u32 offset, u32 size) {
+        NoteCheckUse(buffer.Handle(), offset, size, UploadReorderCheck::Source::MultiRange);
         const vk::MemoryLocation location = buffer.Location();
         multi_range_sources.push_back(MultiRangeSource{
             .handle = buffer.Handle(),
@@ -277,6 +284,7 @@ public:
         if (format == VideoCore::Surface::PixelFormat::Invalid) {
             format = VideoCore::Surface::PixelFormat::R8_UNORM;
         }
+        NoteCheckUse(buffer.Handle(), offset, size, UploadReorderCheck::Source::Texel);
         guest_descriptor_queue.AddTexelBuffer(buffer.View(offset, size, format),
                                               buffer.DeviceAddress(), offset, size,
                                               TexelBufferFormat(format));
@@ -291,8 +299,16 @@ public:
     }
 
 private:
+    /// EDEN_NX2_UPLOAD_REORDER_CHECK: work recorded now uses these bytes.
+    void NoteCheckUse(VkBuffer handle, u64 offset, u64 size, UploadReorderCheck::Source source) {
+        if (reorder_check) [[unlikely]] {
+            reorder_check->NoteUse(handle, offset, size, source);
+        }
+    }
+
     void BindBuffer(const Buffer& buffer, u32 offset, u32 size) {
         const VkBuffer handle = buffer.Handle();
+        NoteCheckUse(handle, offset, size, UploadReorderCheck::Source::Descriptor);
         if (handle == VK_NULL_HANDLE) {
             guest_descriptor_queue.AddBuffer(handle, 0, 0, VK_WHOLE_SIZE);
         } else {
@@ -330,6 +346,9 @@ private:
 
     u32 uniform_buffer_alignment{1}; ///< Asked once per bound uniform buffer: kept here
     u32 storage_buffer_alignment{1};
+
+    /// EDEN_NX2_UPLOAD_REORDER_CHECK (diagnostic, null when off)
+    std::unique_ptr<UploadReorderCheck> reorder_check;
 
     bool limit_dynamic_storage_buffers = false;
     u32 max_dynamic_storage_buffers = (std::numeric_limits<u32>::max)();
