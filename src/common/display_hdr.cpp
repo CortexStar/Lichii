@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 
 #include "common/display_hdr.h"
 
@@ -59,18 +61,10 @@ float QuerySdrWhiteLevel(const wchar_t* gdi_name) {
     return 0.0f;
 }
 
-} // Anonymous namespace
-
-std::optional<DisplayHdrInfo> QueryDisplayHdr(void* window) {
-    if (window == nullptr) {
-        return std::nullopt;
-    }
-    const HMONITOR monitor = MonitorFromWindow(static_cast<HWND>(window), MONITOR_DEFAULTTONULL);
+// Reads the monitor showing window through factory, which must be current.
+std::optional<DisplayHdrInfo> QueryDisplayHdr(IDXGIFactory1* factory, HWND window) {
+    const HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONULL);
     if (monitor == nullptr) {
-        return std::nullopt;
-    }
-    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
-    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
         return std::nullopt;
     }
     Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
@@ -83,6 +77,8 @@ std::optional<DisplayHdrInfo> QueryDisplayHdr(void* window) {
                 desc.Monitor != monitor) {
                 continue;
             }
+            // MaxLuminance comes from the display's current colour profile where it has one (a
+            // Windows HDR Calibration profile), else from its EDID/DisplayID.
             return DisplayHdrInfo{
                 .hdr_enabled = desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
                 .max_luminance = desc.MaxLuminance,
@@ -92,11 +88,81 @@ std::optional<DisplayHdrInfo> QueryDisplayHdr(void* window) {
     }
     return std::nullopt;
 }
+
+} // Anonymous namespace
+
+std::optional<DisplayHdrInfo> QueryDisplayHdr(void* window) {
+    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+    if (window == nullptr || FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+        return std::nullopt;
+    }
+    return QueryDisplayHdr(factory.Get(), static_cast<HWND>(window));
+}
+
+void DisplayHdrMonitor::Watch(void* new_window) {
+    if (new_window == nullptr || window.exchange(new_window) == new_window) {
+        return;
+    }
+    Update(QueryDisplayHdr(new_window));
+    if (!thread.joinable()) {
+        thread = std::jthread([this](std::stop_token stop) { Run(stop); });
+    }
+}
+
+void DisplayHdrMonitor::Run(std::stop_token stop) {
+    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+    std::mutex wait_mutex;
+    std::condition_variable_any wake;
+    while (!stop.stop_requested()) {
+        {
+            std::unique_lock lock{wait_mutex};
+            wake.wait_for(lock, stop, std::chrono::milliseconds{500}, [] { return false; });
+        }
+        if (stop.stop_requested()) {
+            break;
+        }
+        if (!factory || !factory->IsCurrent()) {
+            factory.Reset();
+            if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+                continue;
+            }
+        }
+        Update(QueryDisplayHdr(factory.Get(), static_cast<HWND>(window.load())));
+    }
+}
 #else
 std::optional<DisplayHdrInfo> QueryDisplayHdr(void*) {
     return std::nullopt;
 }
+
+void DisplayHdrMonitor::Watch(void*) {}
+
+void DisplayHdrMonitor::Run(std::stop_token) {}
 #endif
+
+DisplayHdrMonitor::DisplayHdrMonitor() = default;
+
+DisplayHdrMonitor::~DisplayHdrMonitor() = default;
+
+DisplayHdrMonitor& DisplayHdrMonitor::Instance() {
+    static DisplayHdrMonitor monitor;
+    return monitor;
+}
+
+std::optional<DisplayHdrInfo> DisplayHdrMonitor::Current() const {
+    std::scoped_lock lock{mutex};
+    return current;
+}
+
+bool DisplayHdrMonitor::Update(const std::optional<DisplayHdrInfo>& info) {
+    std::scoped_lock lock{mutex};
+    if (info == current) {
+        return false;
+    }
+    current = info;
+    generation.fetch_add(1, std::memory_order_acq_rel);
+    return true;
+}
 
 HdrOutput ResolveHdrOutput(const std::optional<DisplayHdrInfo>& display, Settings::HdrMode mode,
                            u16 peak_setting, u16 reference_white_setting) {

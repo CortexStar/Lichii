@@ -54,3 +54,33 @@ TEST_CASE("HDR luminance without a monitor uses the Switch 2 calibration", "[dis
     REQUIRE(ResolveHdrOutput(std::nullopt, HdrMode::Auto, 30, 0).peak_luminance == 80);
     REQUIRE(ResolveHdrOutput(std::nullopt, HdrMode::Auto, 1000, 0).reference_white == 300);
 }
+
+TEST_CASE("The HDR monitor counts only real changes", "[display_hdr]") {
+    Common::DisplayHdrMonitor monitor;
+    REQUIRE_FALSE(monitor.Current().has_value());
+    REQUIRE(monitor.Generation() == 0);
+    const DisplayHdrInfo hdr{
+        .hdr_enabled = true, .max_luminance = 1000.0f, .sdr_white_level = 240.0f};
+    REQUIRE(monitor.Update(hdr));
+    REQUIRE(monitor.Generation() == 1);
+    REQUIRE_FALSE(monitor.Update(hdr)); // the same reading every 500 ms
+    REQUIRE(monitor.Generation() == 1);
+    // Windows HDR off, then a new calibration peak, then the window off every monitor.
+    REQUIRE(monitor.Update(
+        DisplayHdrInfo{.hdr_enabled = false, .max_luminance = 1000.0f, .sdr_white_level = 240.0f}));
+    REQUIRE(monitor.Update(
+        DisplayHdrInfo{.hdr_enabled = false, .max_luminance = 800.0f, .sdr_white_level = 240.0f}));
+    REQUIRE(monitor.Update(std::nullopt));
+    REQUIRE(monitor.Generation() == 4);
+    REQUIRE_FALSE(monitor.Current().has_value());
+}
+
+TEST_CASE("HDR Auto switches with the monitor's reading", "[display_hdr]") {
+    Common::DisplayHdrMonitor monitor;
+    monitor.Update(
+        DisplayHdrInfo{.hdr_enabled = true, .max_luminance = 1000.0f, .sdr_white_level = 240.0f});
+    REQUIRE(ResolveHdrOutput(monitor.Current(), HdrMode::Auto, 0, 0).enabled);
+    monitor.Update(
+        DisplayHdrInfo{.hdr_enabled = false, .max_luminance = 1000.0f, .sdr_white_level = 240.0f});
+    REQUIRE_FALSE(ResolveHdrOutput(monitor.Current(), HdrMode::Auto, 0, 0).enabled);
+}
