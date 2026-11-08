@@ -4137,11 +4137,25 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
                                       color_output_mask != last_color_output_mask;
     // The AMD logic op workaround's value moves with the vertex formats, without a flag.
     const bool logic_op_changed = logic_op_float_workaround && LogicOpEnableChanged(regs);
+    // Alpha to coverage/one follow the pipeline's fragment outputs, the blend enables the
+    // render target formats (integer targets don't blend); neither raises their flags.
+    // With both registers off the value is off whatever the pipeline (and turning one off
+    // raises its flag).
+    const bool pipeline_changed = device.IsExtExtendedDynamicState3EnablesSupported() &&
+                                  pipeline != last_dyn_pipeline &&
+                                  (regs.anti_alias_alpha_control.alpha_to_coverage != 0 ||
+                                   regs.anti_alias_alpha_control.alpha_to_one != 0);
+    bool rt_formats_changed = false;
+    if (device.IsExtExtendedDynamicState3BlendingSupported()) {
+        for (size_t index = 0; index < Maxwell::NumRenderTargets; ++index) {
+            rt_formats_changed |= regs.rt[index].format != last_rt_formats[index];
+        }
+    }
     const bool verify =
         VideoCommon::NativeVerify::Enabled(VideoCommon::NativeVerify::Layer::DynState);
     // Nothing dirty: every slot below holds its value already.
-    if (!topology_changed && !logic_op_changed && !color_output_changed &&
-        !(flags & dyn_state_mask).any()) {
+    if (!topology_changed && !logic_op_changed && !color_output_changed && !pipeline_changed &&
+        !rt_formats_changed && !(flags & dyn_state_mask).any()) {
         if (verify) {
             VerifyDynamicState(regs, pipeline, emulated_mesh);
         }
@@ -4151,6 +4165,7 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
         flags[Dirty::DepthBiasEnable] = true;
         flags[Dirty::PrimitiveRestartEnable] = true;
     }
+    last_dyn_pipeline = pipeline;
     const auto stage = [&](Slot slot) { StageDynamicState(slot, regs, pipeline); };
 
     if (state_tracker.TouchViewports()) {
@@ -4248,21 +4263,24 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
         if (state_tracker.TouchConservativeRasterizationMode()) {
             stage(Slot::ConservativeRasterizationMode);
         }
-        if (state_tracker.TouchAlphaToCoverageEnable()) {
+        if (state_tracker.TouchAlphaToCoverageEnable() || pipeline_changed) {
             stage(Slot::AlphaToCoverageEnable);
         }
-        if (state_tracker.TouchAlphaToOneEnable()) {
+        if (state_tracker.TouchAlphaToOneEnable() || pipeline_changed) {
             stage(Slot::AlphaToOneEnable);
         }
     }
 
     if (device.IsExtExtendedDynamicState3BlendingSupported()) {
-        if (state_tracker.TouchBlending() || color_output_changed) {
+        if (state_tracker.TouchBlending() || color_output_changed || rt_formats_changed) {
             if (state_tracker.TouchColorMask() || color_output_changed) {
                 last_color_output_mask = color_output_mask;
                 stage(Slot::ColorWriteMask);
             }
-            if (state_tracker.TouchBlendEnable()) {
+            if (state_tracker.TouchBlendEnable() || rt_formats_changed) {
+                for (size_t index = 0; index < Maxwell::NumRenderTargets; ++index) {
+                    last_rt_formats[index] = regs.rt[index].format;
+                }
                 stage(Slot::ColorBlendEnable);
             }
             if (state_tracker.TouchBlendEquations()) {
