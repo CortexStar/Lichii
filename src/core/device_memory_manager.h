@@ -149,6 +149,11 @@ public:
     /// Traps the next guest CPU read of these pages, to learn which GPU writes the CPU reads.
     void ArmReadTraps(DAddr addr, size_t size);
 
+    /// Changes whenever Map or Unmap changed a translation.
+    [[nodiscard]] u64 MappingGeneration() const {
+        return translation_generation.load(std::memory_order_acquire);
+    }
+
 private:
     struct TranslationEntry {
         DAddr guest_page{};
