@@ -126,6 +126,13 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
         case TitleID::NinjaGaidenRagebound:
             Settings::values.use_squashed_iterated_blend = true;
             break;
+        case TitleID::DuskbloodsNetworkTest:
+            // The game reads values its GPU passes wrote (the tone pass's exposure among them)
+            // back on the CPU. Without reactive flushing it reads stale ones and the whole picture
+            // brightens and darkens every few frames. Only for this session; saved settings stay.
+            Settings::values.use_reactive_flushing.SetGlobal(false);
+            Settings::values.use_reactive_flushing.SetValue(true);
+            break;
         default:
             break;
     }
