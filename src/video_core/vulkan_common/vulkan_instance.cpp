@@ -40,6 +40,8 @@ namespace {
     return true;
 }
 
+/// Collect available instance extensions for the window system, diagnostics, and optional
+/// NVIDIA DLSS.
 [[nodiscard]] std::vector<const char*> RequiredExtensions(
     const vk::InstanceDispatch& dld, std::vector<VkExtensionProperties> const& properties,
     Core::Frontend::WindowSystemType window_type, bool enable_validation) {

@@ -16,6 +16,8 @@ int normalExponent(float value) {
 int e4m3Exponent(float value) { return std::max(normalExponent(value), -6); }
 int f16Exponent(float value) { return std::max(normalExponent(value), -14); }
 
+/// Shift an unsigned value right with round-to-nearest-even, returning zero for shifts above
+/// 31.
 uint32_t roundShiftRightEven(uint32_t value, uint32_t shift) {
   if (shift == 0) return value;
   if (shift > 31) return 0;
@@ -25,6 +27,7 @@ uint32_t roundShiftRightEven(uint32_t value, uint32_t shift) {
   return truncated + ((remainder > halfway || (remainder == halfway && (truncated & 1))) ? 1u : 0u);
 }
 
+/// Count leading zero bits in a 32-bit value, returning 32 for zero.
 int countLeadingZeros(uint32_t value) {
   int count = 0;
   for (int bit = 31; bit >= 0; --bit) { if (value & (1u << bit)) break; ++count; }
@@ -69,6 +72,7 @@ float loadHalf(const nr::Tensor& tensor, uint32_t byteOffset) {
   return num::f16ToF32((uint16_t)(tensor.bytes[byteOffset] | (tensor.bytes[byteOffset + 1] << 8)));
 }
 
+/// Read attention bias from the packed tensor using tiled query/key token coordinates.
 float loadRelativeBias(const nr::Tensor& tensor, uint32_t relativeByteOffset, uint32_t head, uint32_t queryLocal,
                        uint32_t keyLocal) {
   uint32_t q = mapRelativeTokenTiled(queryLocal), k = mapRelativeTokenTiled(keyLocal);
@@ -94,6 +98,7 @@ float addF16(float a, float b) { return roundF16((float)((double)a + (double)b))
 
 float roundF16(float value) { return num::roundF16(value); }
 
+/// Quantize to finite E4M3 values, saturating at 448 and mapping NaNs to zero.
 float fp8Domain(float value) {
   if (value != value) return 0.0f;
   float magnitude = std::min(std::fabs(value), 448.0f);
@@ -116,12 +121,14 @@ float mpCubicSilu(float value) {
   return roundF16(value * polynomial);
 }
 
+/// Generate the model SiLU approximation for every half-precision input bit pattern.
 std::vector<uint16_t> siluTable() {
   std::vector<uint16_t> table(65536);
   for (uint32_t bits = 0; bits < 65536; ++bits) table[bits] = num::f16Bits(mpCubicSilu(num::f16ToF32((uint16_t)bits)));
   return table;
 }
 
+/// Evaluate the reference FP8 dot-product accumulation with the modeled Ada rounding behavior.
 float adaFp8Fdpa16(const float* a, const float* b, int count, float accumulator) {
   if (std::isinf(accumulator) || std::isnan(accumulator)) return accumulator;
   int maximumExponent = -21;
@@ -145,6 +152,8 @@ float adaFp8Fdpa16(const float* a, const float* b, int count, float accumulator)
   return roundF16((float)(fused * std::ldexp(1.0, maximumExponent)));
 }
 
+/// Evaluate the reference half-precision dot-product accumulation with the modeled Ada rounding
+/// behavior.
 float adaF16Fdpa8(const float* a, const float* b, int count, float accumulator) {
   int maximumExponent = -21;
   if (accumulator != 0.0f) maximumExponent = f16Exponent(accumulator);
@@ -167,6 +176,8 @@ float adaF16Fdpa8(const float* a, const float* b, int count, float accumulator) 
   return fixedToF16(fixedSum, maximumExponent - 24);
 }
 
+/// Compute one reference E4M3 GEMM output using the model packing and partitioned accumulation
+/// order.
 float gemmFp8Element(const GemmRef& gemm, const float* inputRow, uint32_t column, float initial) {
   float sums = roundF16(initial);
   float partitionSums = 0.0f;
@@ -190,6 +201,7 @@ float gemmFp8Element(const GemmRef& gemm, const float* inputRow, uint32_t column
   return gemm.partition ? partitionSums : sums;
 }
 
+/// Compute one reference half-precision GEMM output from the model packed weights.
 float gemmF16Element(const nr::Tensor& tensor, uint32_t weightByteOffset, uint32_t K, uint32_t N,
                      const float* inputRow, uint32_t column) {
   const uint32_t nTiles = (N + 15) / 16;
@@ -212,6 +224,7 @@ float gemmF16Element(const nr::Tensor& tensor, uint32_t weightByteOffset, uint32
   return value;
 }
 
+/// Normalize and quantize one head of window Q/K/V in the reference arithmetic order.
 void windowNormalizeRef(const float* qkvRow, uint32_t head, float scale, float* out) {
   const float* q = qkvRow + head * 96;
   const float* k = q + 32;
@@ -235,6 +248,7 @@ void windowNormalizeRef(const float* qkvRow, uint32_t head, float scale, float* 
   }
 }
 
+/// Evaluate reference window attention, including relative bias and boundary token handling.
 void windowAttendRef(const std::vector<float>& normalized, uint32_t width, uint32_t height, uint32_t channels,
                      uint32_t head, int windowX, int windowY, const nr::Tensor& tensor, uint32_t relativeByteOffset,
                      float* out) {

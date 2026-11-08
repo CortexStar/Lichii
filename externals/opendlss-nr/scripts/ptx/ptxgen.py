@@ -22,6 +22,7 @@ class Ptx:
         return f"%{prefix}{n}"
 
     def regs(self, kind, count):
+        """Allocate count distinct registers of the requested PTX type."""
         return [self.reg(kind) for _ in range(count)]
 
     def label(self, base="L"):
@@ -50,6 +51,8 @@ class Ptx:
             self.lines.append(".extern .shared .align 128 .b8 smem[];")
 
     def finish(self):
+        """Return the complete PTX entry with register declarations, shared storage, and emitted
+        instructions."""
         header, shared_bytes = self._entry
         regdecl = []
         for kind, count in self.counter.items():

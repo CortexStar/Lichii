@@ -28,6 +28,7 @@ PREFETCH0 = 0                            # weight tiles prefetched into L2 in th
 
 
 def generate(K, flags, splits, stages=STAGES, bstages=BSTAGES, prefetch=PREFETCH, max_regs=None, prefetch0=PREFETCH0, BM=192):
+    """Return PTX for a row-tiled E4M3 GEMM with independent input and weight staging rings."""
     assert K % 32 == 0 and (K // 32) % splits == 0
     assert BM % 48 == 0 and (BM // 48) in (1, 2, 4)
     rowQs = BM // 48                                       # 48-row warp quarters
@@ -100,12 +101,14 @@ def generate(K, flags, splits, stages=STAGES, bstages=BSTAGES, prefetch=PREFETCH
     bIssued = [0]; pfIssued = [lead + stages - 1]                      # prefetching starts beyond the staged prologue tiles
 
     def issue_A(stepLocal):
+        """Copy the input step into its shared-memory ring slot, guarding incomplete rows."""
         slot = stepLocal % stages
         for i in range(len(aDst)):
             guard = f"@{aPred[i]} " if aPred[i] is not None else ""
             p.emit(f"{guard}cp.async.cg.shared.global [{aDst[i]}+{A_RING + slot * A_BYTES}], [{aSrc[i]}+{32 * stepLocal}], 16;")
 
     def issue_B(stepLocal):
+        """Stage the next weight step and advance its global-memory pointers."""
         assert stepLocal == bIssued[0]
         bIssued[0] += 1
         slot = stepLocal % bstages
@@ -114,6 +117,7 @@ def generate(K, flags, splits, stages=STAGES, bstages=BSTAGES, prefetch=PREFETCH
             p.emit(f"add.u64 {bPtr[i]}, {bPtr[i]}, {wStep64};")
 
     def prefetch_B(stepLocal):
+        """Prefetch the next in-range weight step into L2 and advance the prefetch pointer."""
         if stepLocal >= steps: return
         assert stepLocal == pfIssued[0]
         p.emit(f"@{pPf} prefetch.global.L2 [{pfPtr}];")
@@ -130,6 +134,7 @@ def generate(K, flags, splits, stages=STAGES, bstages=BSTAGES, prefetch=PREFETCH
     bPchL = p.xor32(bChunkL, p.and32(p.shr32(bNL, 2), 1))
     bLane = p.add32(smem, p.add32(p.imm32(B_RING), p.add32(p.shl32(p.add32(bNL, p.shl32(colH, 6)), 5), p.shl32(bPchL, 4))))
     def load_A(stepLocal):
+        """Load this input step into the three MMA fragments for a warp quarter."""
         slot = stepLocal % stages
         return [ldm4(p, f"{aLane}+{A_RING + slot * A_BYTES + 512 * m}") for m in range(3)]
 
@@ -200,6 +205,8 @@ def generate(K, flags, splits, stages=STAGES, bstages=BSTAGES, prefetch=PREFETCH
             A = load_A(0); B = load_B(0, 0)
         j = s + stages - 1
         def issue_step():
+            """Schedule weight prefetches and asynchronous input/weight copies for the current
+            step."""
             if j + lead < steps: issue_B(j + lead)
             if prefetch: prefetch_B(j + lead + prefetch0 + prefetch)
             p.emit("cp.async.commit_group;")

@@ -31,6 +31,7 @@ A2A_SMEM = 0      # accumulator -> A fragment through the per-warp staging tile 
 
 
 def generate(flags, max_regs=None):
+    """Return PTX for a fused 32-channel block specialized by the preprocessing and output flags."""
     pre, post, upres = bool(flags & F_PRE), bool(flags & F_POST), bool(flags & F_UPRES)
     head, pool, outE4 = bool(flags & F_HEAD), bool(flags & F_POOL), bool(flags & F_OUT_E4)
     assert pre + post + upres <= 1
@@ -57,6 +58,7 @@ def generate(flags, max_regs=None):
 
     # ---- stage the block weights once: [rows][32 B] tiles, chunk ^= (row >> 2) & 1
     def stage_e4_rows(src, dstBase, chunks):
+        """Emit guarded copies of E4M3 rows into the swizzled shared-memory tile."""
         for i in range((chunks + THREADS - 1) // THREADS):
             c = p.add32(tid, i * THREADS)
             pv = p.setp("lt.u32", c, chunks) if chunks % THREADS else None
@@ -102,6 +104,7 @@ def generate(flags, max_regs=None):
     # skip scale pairs: accumulator tile j of either row half holds columns 8j + 2t, +1
     auxBase = P["pAux"]
     def aux_pairs(halfOffsetReg):
+        """Load four packed half pairs from the auxiliary tensor at a half-element offset."""
         regs = []
         for j in range(4):
             off = p.add32(p.shl32(halfOffsetReg, 1), p.add32(p.shl32(t, 2), p.imm32(16 * j)))
@@ -169,6 +172,7 @@ def generate(flags, max_regs=None):
 
     # ================= persistent window loop (the next window's input words are prefetched into registers)
     def geometry(windowReg):
+        """Compute shifted window coordinates, input addresses, and validity predicates."""
         wx = p.reg("b32"); p.emit(f"rem.u32 {wx}, {windowReg}, {P['windowsX']};")
         wy = p.reg("b32"); p.emit(f"div.u32 {wy}, {windowReg}, {P['windowsX']};")
         gm = {}
@@ -197,6 +201,7 @@ def generate(flags, max_regs=None):
     pWaitOn = p.setp("ne.u64", P["pWait"], 0)
     pSignalOn = p.setp("ne.u64", P["pSignal"], 0)
     def wait_window(gm, guard=None):
+        """Emit producer-counter waits for this window, optionally guarded by a predicate."""
         g2 = pWaitOn
         if guard is not None:
             g2 = p.reg("pred"); p.emit(f"and.pred {g2}, {pWaitOn}, {guard};")
@@ -212,6 +217,8 @@ def generate(flags, max_regs=None):
         return r
 
     def issue_loads(gm, pred):
+        """Load the window inputs for the selected preprocessing, postprocessing, or residual
+        route."""
         pixel = gm["pixel"]
         if pre:
             # features [tokens][16] f32: 64 B per token, this lane's 8 floats at part * 32

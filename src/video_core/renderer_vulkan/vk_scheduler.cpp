@@ -868,6 +868,7 @@ void Scheduler::InvalidateState() {
     state_tracker.InvalidateCommandBufferState();
 }
 
+/// Close active query counting when available and end the render pass before submission.
 void Scheduler::EndPendingOperations() {
     // Pause, don't reset: a submission can land between a guest's counter reset and its report,
     // and resetting here would drop the samples counted so far (the report then reads too low).

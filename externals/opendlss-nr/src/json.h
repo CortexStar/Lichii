@@ -17,11 +17,13 @@ struct Value {
   std::vector<Value> array;
   std::map<std::string, Value> object;
 
+  /// Return an object member, throwing when the requested key is absent.
   const Value& operator[](const std::string& key) const {
     auto it = object.find(key);
     if (it == object.end()) throw std::runtime_error("missing JSON key " + key);
     return it->second;
   }
+  /// Return an array element, throwing when the index is out of range.
   const Value& operator[](size_t index) const {
     if (index >= array.size()) throw std::runtime_error("JSON index out of range");
     return array[index];
@@ -29,12 +31,14 @@ struct Value {
   bool has(const std::string& key) const { return object.count(key) != 0; }
   int64_t integer() const { return (int64_t)number; }
   const std::string& str() const { return string; }
+  /// Return the element count for an array or the member count for an object.
   size_t size() const { return kind == Array ? array.size() : object.size(); }
 };
 
 class Parser {
  public:
   explicit Parser(const std::string& text) : text_(text) {}
+  /// Parse one JSON value and reject trailing non-whitespace characters.
   Value parse() {
     Value value = parseValue();
     skipSpace();
@@ -44,9 +48,13 @@ class Parser {
 
  private:
   void fail(const char* what) { throw std::runtime_error(std::string("JSON: ") + what + " at " + std::to_string(position_)); }
+  /// Advance past whitespace without reading beyond the input.
   void skipSpace() { while (position_ < text_.size() && isspace((unsigned char)text_[position_])) ++position_; }
+  /// Return the next non-whitespace character, or a zero sentinel at end of input.
   char peek() { skipSpace(); return position_ < text_.size() ? text_[position_] : '\0'; }
+  /// Consume the expected non-whitespace character or report a parse error.
   void expect(char c) { if (peek() != c) fail("unexpected character"); ++position_; }
+  /// Parse the next object, array, string, number, boolean, or null value recursively.
   Value parseValue() {
     char c = peek();
     Value value;
@@ -93,6 +101,7 @@ class Parser {
     }
     return value;
   }
+  /// Decode a quoted JSON string and its supported escapes, rejecting unterminated strings.
   std::string parseString() {
     expect('"');
     std::string result;

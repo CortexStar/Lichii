@@ -407,6 +407,8 @@ public:
         : ComputePass(device_, scheduler, pool, BINDINGS, TEMPLATES, BANK, {},
                       code) {}
 
+    /// Record the color conversion pass, optionally skipping it after the required DLSS
+    /// evaluation fails.
     void Record(Scheduler& scheduler, const void* descriptors, VkImage input,
                 VkExtent2D extent, const NvidiaDlssUpscaler* require_success = nullptr) {
         scheduler.Record([this, descriptors, input, extent, require_success](vk::CommandBuffer cmd) {
@@ -431,6 +433,8 @@ public:
             cmd.Dispatch((extent.width + 7) / 8, (extent.height + 7) / 8, 1);
         });
     }
+    /// Record conversion of a successful DLSS output with the current frame and history-reset
+    /// parameters.
     void RecordOutput(Scheduler& scheduler, const void* descriptors,
                       const NvidiaDlssUpscaler& upscaler, VkExtent2D extent, u64 frame,
                       bool reset) {
@@ -490,6 +494,7 @@ public:
         : ComputePass(device_, scheduler, pool, bindings, templates, bank, push,
                       OCARINA_DLSS_4K_COMPOSITE_COMP_SPV) {}
 
+    /// Record Ocarina output composition with the selected upscaler result and fallback state.
     void Record(Scheduler& scheduler, const void* descriptors, VkImage image,
                 const NvidiaDlssUpscaler& upscaler, u64 frame) {
         scheduler.Record([this, descriptors, image, &upscaler, frame](vk::CommandBuffer cmd) {

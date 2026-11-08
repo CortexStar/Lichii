@@ -107,6 +107,8 @@ sl::Resource Resource(VkImage image, VkImageView view, VkFormat format, VkImageL
 
 } // Anonymous namespace
 
+/// Acquire Streamline DLSS entry points and initialize the upscaler after availability has been
+/// established.
 NvidiaDlssUpscaler::NvidiaDlssUpscaler(const Device& device_, Scheduler& scheduler_,
                                                MemoryAllocator& memory_allocator_)
     : device{device_}, scheduler{scheduler_}, memory_allocator{memory_allocator_} {
@@ -123,6 +125,8 @@ NvidiaDlssUpscaler::NvidiaDlssUpscaler(const Device& device_, Scheduler& schedul
     CreateSampler();
 }
 
+/// Wait for outstanding device work and release Streamline DLSS resources after renderer
+/// recording stops.
 NvidiaDlssUpscaler::~NvidiaDlssUpscaler() {
     // Not scheduler.Finish(): this runs when the renderer goes away, after the game's channels are
     // released, and a submit would touch their state. Nothing more gets recorded by then.
@@ -132,6 +136,8 @@ NvidiaDlssUpscaler::~NvidiaDlssUpscaler() {
     }
 }
 
+/// Record Streamline DLSS using the common image contract, recreating extent-dependent state
+/// and tracking failure.
 bool NvidiaDlssUpscaler::Upscale(const Inputs& in) {
     if (failed) {
         return false;

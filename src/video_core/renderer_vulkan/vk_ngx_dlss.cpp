@@ -22,11 +22,14 @@ namespace Vulkan {
 namespace NR = VideoCore::NeuralRendering;
 namespace {
 
+/// Read an integer environment override, using the supplied fallback when the variable is
+/// absent.
 int EnvInt(const char *name, int fallback) {
     const char *value = std::getenv(name);
     return value ? std::atoi(value) : fallback;
 }
 
+/// Choose DLAA or a DLSS quality mode from the render-to-output width ratio.
 NVSDK_NGX_PerfQuality_Value ModeFor(VkExtent2D render, VkExtent2D output) {
     const float ratio = static_cast<float>(render.width) / static_cast<float>(output.width);
     if (ratio >= 0.99f)
@@ -40,6 +43,7 @@ NVSDK_NGX_PerfQuality_Value ModeFor(VkExtent2D render, VkExtent2D output) {
     return NVSDK_NGX_PerfQuality_Value_UltraPerformance;
 }
 
+/// Read the supported DLSS preset override, defaulting to preset K.
 unsigned Preset() {
     const char *value = std::getenv("EDEN_NX2_DLSS_PRESET");
     if (value && value[0] >= 'J' && value[0] <= 'M') {
@@ -79,6 +83,8 @@ VkImageMemoryBarrier Barrier(const NvidiaDlssUpscaler::Image &image, VkAccessFla
 
 } // namespace
 
+/// Initialize the native NGX upscaler and capture the requested neural style; NGX must already
+/// be available.
 NvidiaDlssUpscaler::NvidiaDlssUpscaler(const Device &device_, Scheduler &scheduler_,
                                        MemoryAllocator &memory_allocator_)
     : device{device_}, scheduler{scheduler_}, memory_allocator{memory_allocator_} {
@@ -93,6 +99,8 @@ NvidiaDlssUpscaler::NvidiaDlssUpscaler(const Device &device_, Scheduler &schedul
     }
 }
 
+/// Serialize device-idle waits and release neural/NGX resources after renderer recording has
+/// stopped.
 NvidiaDlssUpscaler::~NvidiaDlssUpscaler() {
     // Renderer shutdown has already stopped recording; do not submit to released game channels.
     std::scoped_lock queue_lock{scheduler.submit_mutex};
@@ -105,6 +113,8 @@ NvidiaDlssUpscaler::~NvidiaDlssUpscaler() {
         api.destroy_parameters(parameters);
 }
 
+/// Record native DLSS and optional neural rendering, recreating changed resources and reporting
+/// fallback on failure.
 bool NvidiaDlssUpscaler::Upscale(const Inputs &in) {
     if (failed) {
         return false;
@@ -286,6 +296,8 @@ bool NvidiaDlssUpscaler::Upscale(const Inputs &in) {
     return true;
 }
 
+/// Verify and initialize or rebind neural resources after draining work, serializing queue use
+/// and failure cleanup.
 void NvidiaDlssUpscaler::PrepareNeuralRendering(const Inputs& in) {
     if (!neural_requested || neural_failed ||
         (neural_rendering && neural_motion_view == in.motion_vectors.view)) {

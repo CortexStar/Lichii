@@ -11,6 +11,7 @@ F_SILU, F_E4, F_F16 = 2, 4, 8
 
 
 def generate(splits, flags):
+    """Return split-K reduction PTX with optional SiLU and E4M3 or half-precision output."""
     siluF, outE4, outF16 = bool(flags & F_SILU), bool(flags & F_E4), bool(flags & F_F16)
     name = f"reduce_e4m3_s{splits}_f{flags}"
     p = Ptx()

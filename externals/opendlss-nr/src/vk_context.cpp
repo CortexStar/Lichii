@@ -13,11 +13,13 @@ constexpr VkDeviceSize kStagingBytes = 256ull << 20;  // 256 MiB staging window
 constexpr const char* kValidationLayer = "VK_LAYER_KHRONOS_validation";
 std::atomic<uint32_t> g_validationErrors{0};
 
+/// Treat a nonempty environment value other than zero as an enabled flag.
 bool envFlag(const char* name) {
   const char* value = getenv(name);
   return value && *value && strcmp(value, "0") != 0;
 }
 
+/// Count validation errors and forward Vulkan diagnostic messages to standard error.
 VkBool32 VKAPI_PTR onDebugMessage(VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessageTypeFlagsEXT type,
                                   const VkDebugUtilsMessengerCallbackDataEXT* data, void*) {
   if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) && (type & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT))
@@ -29,6 +31,8 @@ VkBool32 VKAPI_PTR onDebugMessage(VkDebugUtilsMessageSeverityFlagBitsEXT severit
 
 uint32_t Context::validationErrors() { return g_validationErrors.load(); }
 
+/// Create an owned Vulkan context with the features and shared resources required for
+/// inference.
 Context::Context() {
   try {
   if (volkInitialize() != VK_SUCCESS) throw std::runtime_error("vulkan-1.dll unavailable");
@@ -175,6 +179,8 @@ Context::Context() {
   } catch (...) { release(); throw; }
 }
 
+/// Adopt a caller-owned Vulkan device and queue; the caller must serialize queue access during
+/// initialization.
 Context::Context(VkInstance instance, VkPhysicalDevice physical, VkDevice device, uint32_t queueFamily, uint32_t queueIndex) {
   try {
   if (volkInitialize() != VK_SUCCESS) throw std::runtime_error("vulkan-1.dll unavailable");
@@ -252,6 +258,8 @@ DeviceRequirements::DeviceRequirements() {
                               VK_NV_SHADER_SM_BUILTINS_EXTENSION_NAME};
 }
 
+/// Create inference command and descriptor pools plus staging and dummy buffers for the
+/// selected queue.
 void Context::initCommon() {
   vkGetDeviceQueue(device_, queueFamily_, queueIndex_, &queue_);
 
@@ -292,6 +300,8 @@ void Context::initCommon() {
 
 Context::~Context() { release(); }
 
+/// Wait for device work and release context resources; adopted devices and instances remain
+/// caller-owned.
 void Context::release() noexcept {
   if (device_) {
   vkDeviceWaitIdle(device_);
@@ -310,6 +320,7 @@ void Context::release() noexcept {
   }
 }
 
+/// Find an allowed memory type with every requested property, or throw if none is available.
 uint32_t Context::findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags required) {
   for (uint32_t index = 0; index < memoryProperties_.memoryTypeCount; ++index) {
     if ((typeBits & (1u << index)) &&
@@ -319,6 +330,8 @@ uint32_t Context::findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags requir
   throw std::runtime_error("no suitable memory type");
 }
 
+/// Allocate a buffer with device-address support, optionally mapping host-visible coherent
+/// memory.
 Buffer Context::createBuffer(VkDeviceSize size, bool hostVisible, const char* label, VkBufferUsageFlags extra) {
   Buffer result;
   result.size = std::max<VkDeviceSize>(size, 16);
@@ -349,6 +362,7 @@ Buffer Context::createBuffer(VkDeviceSize size, bool hostVisible, const char* la
   } catch (...) { destroyBuffer(result); throw; }
 }
 
+/// Unmap and free a buffer, clearing its handles so repeated cleanup is harmless.
 void Context::destroyBuffer(Buffer& buffer) {
   if (buffer.mapped) vkUnmapMemory(device_, buffer.memory);
   if (buffer.buffer) vkDestroyBuffer(device_, buffer.buffer, nullptr);
@@ -356,6 +370,8 @@ void Context::destroyBuffer(Buffer& buffer) {
   buffer = Buffer{};
 }
 
+/// Copy checked host bytes to a GPU buffer through staging chunks, waiting for each submitted
+/// copy.
 void Context::upload(const Buffer& target, const void* data, VkDeviceSize size, VkDeviceSize offset) {
   if (offset + size > target.size) throw std::runtime_error(std::string("upload overflows ") + target.label);
   const uint8_t* bytes = static_cast<const uint8_t*>(data);
@@ -377,6 +393,7 @@ void Context::fillZero(const Buffer& target) {
   endAndSubmit(commands, true);
 }
 
+/// Read a checked GPU buffer range through staging chunks, waiting before accessing each chunk.
 std::vector<uint8_t> Context::download(const Buffer& source, VkDeviceSize size, VkDeviceSize offset) {
   if (offset + size > source.size) throw std::runtime_error(std::string("download overflows ") + source.label);
   std::vector<uint8_t> result(size);
@@ -404,6 +421,7 @@ VkShaderModule Context::loadShaderModule(const std::string& spvPath) {
   return module;
 }
 
+/// Create a compute pipeline with specialization values and an optional required subgroup size.
 Pipeline Context::createComputePipeline(VkShaderModule module, const SpecConstants& constants,
                                         const char* label, uint32_t requiredSubgroupSize) {
   VkSpecializationInfo specialization{};
@@ -432,6 +450,8 @@ Pipeline Context::createComputePipeline(VkShaderModule module, const SpecConstan
   return result;
 }
 
+/// Collect pipeline executable statistics and optionally internal representations when
+/// available.
 std::string Context::pipelineStatistics(const Pipeline& pipeline, bool includeInternal) {
   std::string report;
   VkPipelineInfoKHR pipelineInfo{VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR};
@@ -482,11 +502,14 @@ std::string Context::pipelineStatistics(const Pipeline& pipeline, bool includeIn
   return report;
 }
 
+/// Destroy a compute pipeline and clear its handle.
 void Context::destroyPipeline(Pipeline& pipeline) {
   if (pipeline.pipeline) vkDestroyPipeline(device_, pipeline.pipeline, nullptr);
   pipeline = Pipeline{};
 }
 
+/// Allocate and populate a generic buffer descriptor set, substituting the dummy buffer for
+/// unused bindings.
 VkDescriptorSet Context::allocateSet(const Buffer* const bindings[kGenericBindings],
                                      const VkDeviceSize offsets[kGenericBindings],
                                      const VkDeviceSize ranges[kGenericBindings]) {
@@ -536,6 +559,8 @@ VkCommandBuffer Context::beginCommands() {
   return commands;
 }
 
+/// End and submit commands, optionally waiting and freeing them; the caller must serialize
+/// queue access.
 void Context::endAndSubmit(VkCommandBuffer commands, bool wait) {
   VK_CHECK(vkEndCommandBuffer(commands));
   VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -586,6 +611,7 @@ VkQueryPool Context::createTimestampPool(uint32_t count) {
   return pool;
 }
 
+/// Wait for timestamp queries and convert device ticks to milliseconds.
 std::vector<double> Context::readTimestampsMs(VkQueryPool pool, uint32_t count) {
   std::vector<uint64_t> ticks(count);
   VK_CHECK(vkGetQueryPoolResults(device_, pool, 0, count, ticks.size() * 8, ticks.data(), 8,
@@ -623,10 +649,12 @@ VkCudaFunctionNV Context::createCudaFunction(VkCudaModuleNV module, const char* 
   return function;
 }
 
+/// Destroy a non-null Vulkan CUDA entry-point handle after GPU use has completed.
 void Context::destroyCudaFunction(VkCudaFunctionNV function) {
   if (function) vkDestroyCudaFunctionNV(device_, function, nullptr);
 }
 
+/// Destroy a non-null Vulkan CUDA module after its functions and GPU work are no longer in use.
 void Context::destroyCudaModule(VkCudaModuleNV module) {
   if (module) vkDestroyCudaModuleNV(device_, module, nullptr);
 }

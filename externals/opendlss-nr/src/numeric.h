@@ -39,6 +39,8 @@ inline uint16_t f16Bits(float value) {
   return (uint16_t)(sign | ((uint32_t)halfExponent << 10) | rounded);
 }
 
+/// Expand IEEE half-precision bits into a float, preserving zeros, subnormals, infinities, and
+/// NaNs.
 inline float f16ToF32(uint16_t bits) {
   uint32_t sign = (uint32_t)(bits & 0x8000) << 16;
   uint32_t exponent = (bits >> 10) & 0x1f;

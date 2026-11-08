@@ -21,6 +21,8 @@ constexpr std::size_t PackedBytes = 147683778;
     throw std::runtime_error(std::string{"Invalid neural rendering model: "} + reason);
 }
 
+/// Return a checked byte range, rejecting truncation without overflowing the bounds
+/// calculation.
 Bytes Slice(Bytes data, std::uint64_t offset, std::uint64_t size) {
     if (offset > data.size() || size > data.size() - offset) {
         Invalid("truncated data");
@@ -28,6 +30,7 @@ Bytes Slice(Bytes data, std::uint64_t offset, std::uint64_t size) {
     return data.subspan(static_cast<std::size_t>(offset), static_cast<std::size_t>(size));
 }
 
+/// Decode a little-endian integer from a checked byte range.
 template <typename T>
 T Read(Bytes data, std::uint64_t offset) {
     const auto bytes = Slice(data, offset, sizeof(T));
@@ -44,6 +47,8 @@ struct TensorName {
     std::string parameter;
 };
 
+/// Parse a supported block/layer tensor name, rejecting malformed numbers and unexpected
+/// suffixes.
 TensorName ParseName(std::string_view name) {
     const auto number = [&](std::string_view prefix, char separator, std::string_view& remaining) {
         if (!remaining.starts_with(prefix)) {
@@ -69,6 +74,7 @@ TensorName ParseName(std::string_view name) {
     return {block, layer, std::string{name}};
 }
 
+/// Return the lowercase SHA-256 digest, throwing if OpenSSL cannot compute it.
 std::string Digest(Bytes bytes) {
     std::array<unsigned char, 32> digest{};
     unsigned int size{};
@@ -86,6 +92,7 @@ std::string Digest(Bytes bytes) {
     return result;
 }
 
+/// Read a nonempty model file within the size limit, rejecting incomplete reads.
 std::vector<std::uint8_t> ReadFile(const std::filesystem::path& path, std::size_t maximum) {
     std::ifstream stream(path, std::ios::binary | std::ios::ate);
     const auto size = stream.tellg();
@@ -101,6 +108,7 @@ std::vector<std::uint8_t> ReadFile(const std::filesystem::path& path, std::size_
     return bytes;
 }
 
+/// Write all model bytes and report write or close failures.
 void WriteFile(const std::filesystem::path& path, Bytes bytes) {
     std::ofstream stream(path, std::ios::binary | std::ios::trunc);
     stream.write(reinterpret_cast<const char*>(bytes.data()),
@@ -112,6 +120,8 @@ void WriteFile(const std::filesystem::path& path, Bytes bytes) {
 }
 } // namespace
 
+/// Locate the weights resource in an x64 PE file with bounds checks, without loading executable
+/// code.
 Bytes ReadWeightsResource(Bytes dll) {
     if (Read<std::uint16_t>(dll, 0) != 0x5a4d) {
         Invalid("not a Windows model file");
@@ -203,6 +213,8 @@ Bytes ReadWeightsResource(Bytes dll) {
     return from_rva(Read<std::uint32_t>(data, 0), Read<std::uint32_t>(data, 4));
 }
 
+/// Parse the packed tensor map into borrowed byte spans, rejecting invalid names, sizes, and
+/// duplicates.
 TensorMap ReadPackedWeights(Bytes resource) {
     if (Read<std::uint64_t>(resource, 0) != resource.size()) {
         Invalid("weight map size mismatch");
@@ -253,6 +265,8 @@ TensorMap ReadPackedWeights(Bytes resource) {
     return tensors;
 }
 
+/// Verify the installed manifest, tensor table, and packed weights against the supported model
+/// hashes.
 bool IsInstalled(const std::filesystem::path& directory) {
     try {
         const auto data = ReadFile(directory / "manifest.json", 128 * 1024);
@@ -280,6 +294,8 @@ bool IsInstalled(const std::filesystem::path& directory) {
     }
 }
 
+/// Validate and extract the supported DLL into a new installation, publishing only after all
+/// model files are complete.
 void ImportModel(const std::filesystem::path& dll, const std::filesystem::path& destination) {
     const auto source = ReadFile(dll, MaxDllBytes);
     const auto resource = ReadWeightsResource(source);

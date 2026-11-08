@@ -21,6 +21,7 @@ KROWS = 2048                  # [padded][32 B] swizzled
 
 
 def generate(padded):
+    """Return fused global-attention PTX for a padded token count divisible by 64 and at most 256."""
     assert padded % 64 == 0 and padded <= 256
     blocks = padded // 64
     VT = KROWS + padded * 32                        # [32 dims][VT_STRIDE B]

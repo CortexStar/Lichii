@@ -1809,6 +1809,7 @@ void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,
     });
 }
 
+/// Report whether temporal replacement needs depth, honoring the forced stand-in override.
 bool TextureCacheRuntime::WantsTemporalUpscaleDepth() const {
     // FSR 3.1 replaces DLSS; the temporal stand-in only runs when FSR cannot (no depth, a device
     // without the formats, a failed start). EDEN_NX2_DLSS_REPLACEMENT=standin forces
@@ -1828,6 +1829,7 @@ bool TextureCacheRuntime::WantsTemporalUpscaleDepth() const {
     return !fsr3_unsupported;
 }
 
+/// Report NVIDIA DLSS availability while honoring forced FSR and prior unsupported-input failures.
 bool TextureCacheRuntime::UsesNvidiaDlss() const {
 #ifdef EGLANTINE_NVIDIA_DLSS
     static const bool force_fsr = [] {
@@ -1850,6 +1852,8 @@ std::optional<VideoCore::GameDlssProbe> TextureCacheRuntime::ProbeGameDlssOutput
                                      output.Handle(Shader::TextureType::Color2D));
 }
 
+/// Try depth-aware FSR presentation with the supplied motion and jitter, returning false when
+/// unavailable.
 bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageView& input_color,
                                           ImageView& motion_vectors, ImageView& depth,
                                           std::array<u32, 2> render_size,
@@ -1975,6 +1979,8 @@ void TextureCacheRuntime::DrawUpscaledOutput(Framebuffer* dst_framebuffer, VkIma
 }
 
 #ifdef EGLANTINE_NVIDIA_DLSS
+/// Try NVIDIA DLSS for the destination framebuffer, honoring quality settings and preserving
+/// fallback on failure.
 bool TextureCacheRuntime::UpscaleWithDlss(Framebuffer* dst_framebuffer, ImageView& input_color,
                                           ImageView& motion_vectors, ImageView& depth,
                                           std::array<u32, 2> render_size,

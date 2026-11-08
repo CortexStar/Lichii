@@ -49,6 +49,8 @@ std::wstring WidePath(const std::filesystem::path &path) {
     return {utf32.begin(), utf32.end()};
 }
 
+/// Forward trimmed NGX messages to the emulator log only when NGX diagnostic logging is
+/// enabled.
 void LogFromNgx(const char *message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature) {
     if (const char *enabled = std::getenv("EDEN_NX2_DLSS_LOG"); enabled && enabled[0] == '1') {
         std::string_view text{message ? message : ""};
@@ -67,6 +69,8 @@ std::filesystem::path UserFolder() {
     return Common::FS::GetEdenPath(Common::FS::EdenPath::EdenDir) / "ngx";
 }
 
+/// Find the Linux DLSS library in override, user-data, and executable-relative runtime
+/// locations.
 std::filesystem::path FindModel() {
     std::vector<std::filesystem::path> dirs;
     if (const char *dir = std::getenv("LICHII_NGX_DIR"); dir && *dir) {
@@ -112,6 +116,8 @@ void ReportEvaluation() { evaluations.fetch_add(1, std::memory_order_relaxed); }
 
 namespace NvidiaDlss {
 
+/// Reset status and load the native NGX API and model when enabled, reporting startup failures
+/// for the UI.
 bool Start() {
     Stop();
     {
@@ -183,6 +189,7 @@ bool Start() {
     return true;
 }
 
+/// Report whether NGX startup succeeded and is still waiting for a Vulkan device attachment.
 bool WantsDevice() {
     const auto& state = GetState();
     return state.started && !state.device;
@@ -193,6 +200,7 @@ std::vector<std::string> DeviceExtensions(VkInstance, VkPhysicalDevice) {
     return GetState().device_extensions;
 }
 
+/// Initialize NGX on one supported NVIDIA Vulkan device and verify DLSS availability.
 bool AttachDevice(VkInstance instance, VkPhysicalDevice physical, VkDevice device, u32,
                   vk::DeviceDispatch &dld) {
     State &state = GetState();
@@ -244,6 +252,8 @@ bool AttachDevice(VkInstance instance, VkPhysicalDevice physical, VkDevice devic
     return true;
 }
 
+/// Shut down the attached NGX runtime and unload its API after renderer-owned features have
+/// been released.
 void Stop() {
     State &state = GetState();
     if (state.device) {

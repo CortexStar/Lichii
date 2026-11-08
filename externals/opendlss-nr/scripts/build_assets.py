@@ -10,6 +10,7 @@ import sys
 
 
 def main():
+    """Compile shaders and generate PTX, then atomically replace the embedded C++ asset table."""
     parser = argparse.ArgumentParser()
     parser.add_argument('--glslang', required=True)
     parser.add_argument('--output', type=pathlib.Path, required=True)

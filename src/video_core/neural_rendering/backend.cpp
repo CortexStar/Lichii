@@ -29,6 +29,8 @@ void MemoryBarrier(VkCommandBuffer commands, VkPipelineStageFlags source,
     vkCmdPipelineBarrier(commands, source, target, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 }
 
+/// Transition a color image with full read/write ordering, treating an undefined layout as
+/// uninitialized.
 void ImageBarrier(VkCommandBuffer commands, VkImage image, VkImageLayout before,
                   VkImageLayout after) {
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -77,6 +79,8 @@ struct Backend::Impl {
     Style previous_style{};
     bool previous_hdr{};
 
+    /// Wait for GPU use and destroy backend resources; the caller must hold device queue
+    /// synchronization.
     ~Impl() {
         if (!context)
             return;
@@ -99,6 +103,8 @@ struct Backend::Impl {
         // The graph, kernels and model are destroyed before their adopted context.
     }
 
+    /// Allocate a device-local RGBA16F history or output image and its view at the backend
+    /// extent.
     void CreateImage(Image& image) {
         VkImageCreateInfo create{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         create.imageType = VK_IMAGE_TYPE_2D;
@@ -144,6 +150,8 @@ struct Backend::Impl {
         VK_CHECK(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &create, nullptr, &pipeline));
     }
 
+    /// Upload constants, warm the inference graph, and create frame resources while device
+    /// queues are serialized.
     void Initialize() {
         geometry = nr::Geometry::fromValid(extent.width, extent.height);
         kernels = std::make_unique<nr::Kernels>(*context, "embedded");
@@ -254,6 +262,8 @@ struct Backend::Impl {
         RecordCommands();
     }
 
+    /// Rebuild secondary commands for both history parities after previous backend commands
+    /// have completed.
     void RecordCommands() {
         VK_CHECK(vkResetCommandPool(device, command_pool, 0));
         for (uint32_t h = 0; h < 2; ++h) {
@@ -283,6 +293,8 @@ struct Backend::Impl {
     }
 };
 
+/// Adopt renderer resources and initialize a preverified model; queues must be idle and
+/// externally synchronized.
 Backend::Backend(VkInstance instance, VkPhysicalDevice physical, VkDevice device,
                  uint32_t queue_family, const std::filesystem::path& model, VkExtent2D extent,
                  VkImage color, VkImageView color_view, VkImageView motion_view)
@@ -302,6 +314,8 @@ Backend::Backend(VkInstance instance, VkPhysicalDevice physical, VkDevice device
 
 Backend::~Backend() = default;
 
+/// Replace color and motion descriptors and rerecord commands without resetting history; prior
+/// GPU use must finish.
 void Backend::Rebind(VkImage color, VkImageView color_view, VkImageView motion_view) {
     auto& state = *impl;
     state.color = color;
@@ -326,6 +340,8 @@ void Backend::Rebind(VkImage color, VkImageView color_view, VkImageView motion_v
     state.RecordCommands();
 }
 
+/// Append inference and output copy commands, resetting history when frame, style, or HDR state
+/// requires it.
 void Backend::Record(VkCommandBuffer commands, const Frame& frame) {
     auto& state = *impl;
     const uint32_t h = state.frames & 1u;

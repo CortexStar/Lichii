@@ -450,6 +450,7 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     return translations;
 }
 
+/// Build the localized labels for each settings enum exposed through a configuration combobox.
 std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
     std::unique_ptr<ComboboxTranslationMap> translations =
         std::make_unique<ComboboxTranslationMap>();

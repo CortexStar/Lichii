@@ -35,11 +35,13 @@ void chooseGemmShape(uint32_t N, uint32_t rows, uint32_t batches, uint32_t smCou
   }
 }
 
+/// Reject an unsupported kernel argument or layout with the supplied diagnostic.
 void check(bool condition, const char* message) {
   if (!condition) throw std::runtime_error(message);
 }
 }  // namespace
 
+/// Load the embedded compute modules used by this kernel set; the context must outlive it.
 Kernels::Kernels(vk::Context& context, const std::string& shaderDirectory) : context_(context) {
   ptxDirectory_ = "embedded";
   for (const char* name : {"gemm_fp8", "gemm_f16", "ops", "window_normalize", "window_attend", "global_normalize",
@@ -48,6 +50,8 @@ Kernels::Kernels(vk::Context& context, const std::string& shaderDirectory) : con
   }
 }
 
+/// Release cached pipelines, PTX objects, queries, and scratch buffers after GPU use has
+/// finished.
 Kernels::~Kernels() {
   for (auto& [key, pipeline] : pipelines_) context_.destroyPipeline(pipeline);
   for (auto& [file, kernel] : ptxKernels_) {
@@ -61,12 +65,15 @@ Kernels::~Kernels() {
   context_.destroyBuffer(splitScratch_);
 }
 
+/// Upload the 65,536-entry half-precision SiLU lookup table, allocating its buffer on first
+/// use.
 void Kernels::setSiluTable(const std::vector<uint16_t>& table) {
   if (table.size() != 65536) throw std::runtime_error("SiLU table must have 65536 entries");
   if (!siluTable_.buffer) siluTable_ = context_.createBuffer(65536 * 2, false, "SiLU table");
   context_.upload(siluTable_, table.data(), 65536 * 2);
 }
 
+/// Find or create the compute pipeline for a shader and its specialization values.
 VkPipeline Kernels::pipeline(const char* shader, const vk::SpecConstants& constants, uint32_t requiredSubgroupSize) {
   std::string key = shader;
   for (uint32_t value : constants.data) key += ":" + std::to_string(value);
@@ -77,6 +84,7 @@ VkPipeline Kernels::pipeline(const char* shader, const vk::SpecConstants& consta
   return created.pipeline;
 }
 
+/// Reset dispatch profiling and record the initial timestamp in the supplied command buffer.
 void Kernels::beginProfile(VkCommandBuffer commands, uint32_t maxDispatches) {
   if (profileQueries_) vkDestroyQueryPool(context_.device(), profileQueries_, nullptr);
   profileCapacity_ = maxDispatches + 1;
@@ -88,6 +96,7 @@ void Kernels::beginProfile(VkCommandBuffer commands, uint32_t maxDispatches) {
   dispatches_ = 0;
 }
 
+/// Wait for recorded timestamps and return per-dispatch durations, releasing the query pool.
 std::vector<Kernels::ProfileEntry> Kernels::endProfile() {
   std::vector<ProfileEntry> entries;
   if (!profileQueries_) return entries;
@@ -98,6 +107,7 @@ std::vector<Kernels::ProfileEntry> Kernels::endProfile() {
   return entries;
 }
 
+/// Bind buffers and constants, record a compute dispatch, and publish its writes to later work.
 void Kernels::dispatch(VkCommandBuffer commands, VkPipeline pipeline,
                        const vk::Buffer* const bindings[vk::kGenericBindings], const void* push, uint32_t pushBytes,
                        uint32_t x, uint32_t y, uint32_t z) {
@@ -118,6 +128,7 @@ static bool g_chainEnabled = getenv("DLSS5VK_CHAIN") ? atoi(getenv("DLSS5VK_CHAI
 bool Kernels::chainEnabled() { return g_chainEnabled; }
 void Kernels::setChainEnabled(bool on) { g_chainEnabled = on; }
 
+/// Return a checked synchronization-counter address, lazily allocating and zeroing the buffer.
 VkDeviceAddress Kernels::syncAddress(int block, SyncRegion region) {
   if (syncBuffer_.buffer == VK_NULL_HANDLE) { syncBuffer_ = context_.createBuffer((VkDeviceSize)kSyncSlots * kSyncSlotBytes, false, "sync counters"); context_.fillZero(syncBuffer_); }
   check(block >= 0 && (uint32_t)block < kSyncSlots, "sync slot");
@@ -140,10 +151,12 @@ void Kernels::resetSync(VkCommandBuffer commands) {
   chainLaunches_.clear();
 }
 
+/// Record a dispatch dependency for subsequent producer-before-consumer validation.
 void Kernels::noteChain(VkDeviceAddress waitA, VkDeviceAddress waitB, VkDeviceAddress signal) {
   if (waitA || waitB || signal) chainLaunches_.push_back({stageLabel_ + " | " + dispatchLabel_, {waitA, waitB}, signal});
 }
 
+/// Reject a chained launch that waits on itself or on counters no earlier launch signals.
 void Kernels::checkChainOrder() const {
   for (size_t i = 0; i < chainLaunches_.size(); ++i) {
     const ChainLaunch& launch = chainLaunches_[i];
@@ -157,6 +170,7 @@ void Kernels::checkChainOrder() const {
   }
 }
 
+/// Return the device address of the lazily allocated, host-visible timeout report.
 VkDeviceAddress Kernels::chainStatusAddress() {
   if (chainStatus_.buffer == VK_NULL_HANDLE) {
     chainStatus_ = context_.createBuffer(16, true, "chain status");
@@ -165,6 +179,8 @@ VkDeviceAddress Kernels::chainStatusAddress() {
   return context_.deviceAddress(chainStatus_);
 }
 
+/// Read the kernel timeout report and identify the failing counter when it belongs to the sync
+/// buffer.
 Kernels::ChainTimeouts Kernels::chainTimeouts() const {
   ChainTimeouts timeouts;
   if (!chainStatus_.mapped) return timeouts;
@@ -181,10 +197,12 @@ Kernels::ChainTimeouts Kernels::chainTimeouts() const {
   return timeouts;
 }
 
+/// Clear the mapped timeout report before a new run; prior GPU access must be complete.
 void Kernels::resetChainTimeouts() {
   if (chainStatus_.mapped) memset(chainStatus_.mapped, 0, 16);
 }
 
+/// Record a PTX launch, its optional barrier, and dispatch profiling counters.
 void Kernels::cudaLaunchTracked(VkCommandBuffer commands, VkCudaFunctionNV function, uint32_t gridX, uint32_t gridY,
                                 uint32_t gridZ, uint32_t blockX, uint32_t sharedBytes, const void* const* params,
                                 size_t paramCount, bool chained) {
@@ -205,16 +223,20 @@ void Kernels::dispatchLinear(VkCommandBuffer commands, VkPipeline pipeline,
   dispatch(commands, pipeline, bindings, push, pushBytes, std::min(groups, 65535u), y, 1);
 }
 
+/// Return the cached PTX GEMM override, which defaults to enabled.
 bool Kernels::ptxGemmEnabled() {
   static const bool enabled = getenv("DLSS5VK_PTX_GEMM") ? atoi(getenv("DLSS5VK_PTX_GEMM")) != 0 : true;
   return enabled;
 }
 
+/// Return the cached PTX Q/K/V override, which defaults to enabled.
 bool Kernels::ptxQkvEnabled() {
   static const bool enabled = getenv("DLSS5VK_PTX_QKV") ? atoi(getenv("DLSS5VK_PTX_QKV")) != 0 : true;
   return enabled;
 }
 
+/// Validate E4M3 GEMM shapes and record the selected PTX or GLSL route, including split-K
+/// reduction.
 void Kernels::gemmFp8(VkCommandBuffer commands, const GemmFp8Args& a) {
   check(a.input && a.input->format == Format::E4, "FP8 GEMM input must be E4M3");
   check(a.K % 32 == 0, "FP8 GEMM K must be a multiple of 32");
@@ -460,6 +482,8 @@ void Kernels::gemmFp8(VkCommandBuffer commands, const GemmFp8Args& a) {
   }
 }
 
+/// Record half-precision GEMM with the requested output format and optional quantized side
+/// output.
 void Kernels::gemmF16(VkCommandBuffer commands, const GemmF16Args& a) {
   check(a.input && a.input->format == Format::F16, "f16 GEMM input must be f16");
   check(a.K % 16 == 0 && a.paddedN % 16 == 0 && a.N <= a.paddedN, "f16 GEMM shape");
@@ -492,6 +516,7 @@ struct OpsPush {
 };
 }  // namespace
 
+/// Convert a proxy image buffer into the padded 16-channel float feature tensor.
 void Kernels::preprocessFromProxy(VkCommandBuffer commands, const vk::Buffer& proxy, Activation& features,
                                   const PreprocessArgs& a) {
   check(features.format == Format::F32 && features.channels == 16 && features.rows == a.fullWidth * a.fullHeight,
@@ -509,6 +534,7 @@ void Kernels::preprocessFromProxy(VkCommandBuffer commands, const vk::Buffer& pr
            (a.fullHeight + 7) / 8, 1);
 }
 
+/// Record float-to-half activation conversion; the element count must be divisible by eight.
 void Kernels::convertF32ToF16(VkCommandBuffer commands, const Activation& input, Activation& output) {
   check(input.format == Format::F32 && output.format == Format::F16, "convert formats");
   uint32_t count = input.rows * input.channels;
@@ -523,6 +549,7 @@ void Kernels::convertF32ToF16(VkCommandBuffer commands, const Activation& input,
   dispatchLinear(commands, pipeline("ops", constants), bindings, &push, sizeof(push), count / 8);
 }
 
+/// Record half-to-E4M3 activation quantization for an element count divisible by eight.
 void Kernels::quantize(VkCommandBuffer commands, const Activation& input, Activation& output) {
   check(input.format == Format::F16 && output.format == Format::E4, "quantize formats");
   uint32_t count = input.rows * input.channels;
@@ -537,6 +564,8 @@ void Kernels::quantize(VkCommandBuffer commands, const Activation& input, Activa
   dispatchLinear(commands, pipeline("ops", constants), bindings, &push, sizeof(push), count / 8);
 }
 
+/// Record spatial downsampling from half activations into an E4M3 output of the supplied
+/// geometry.
 void Kernels::downsample2x(VkCommandBuffer commands, const Activation& input, Activation& output, uint32_t inWidth,
                            uint32_t inHeight, uint32_t outWidth, uint32_t outHeight) {
   check(input.format == Format::F16 && output.format == Format::E4, "downsample formats");
@@ -553,6 +582,7 @@ void Kernels::downsample2x(VkCommandBuffer commands, const Activation& input, Ac
   dispatchLinear(commands, pipeline("ops", constants), bindings, &push, sizeof(push), count / 8);
 }
 
+/// Blend upsampled and adapter features with learned scales, producing half and E4M3 outputs.
 void Kernels::postBlend(VkCommandBuffer commands, const Activation& upsampleSource, const Activation& adapter,
                         const Tensor& tensor, uint32_t inputScaleByteOffset, uint32_t skipScaleByteOffset,
                         Activation& rawOutput, Activation& quantizedOutput, uint32_t inWidth, uint32_t inHeight,
@@ -575,6 +605,8 @@ void Kernels::postBlend(VkCommandBuffer commands, const Activation& upsampleSour
   dispatchLinear(commands, pipeline("ops", constants), bindings, &push, sizeof(push), count / 8);
 }
 
+/// Upsample projected features and combine the scaled skip input, optionally preserving half
+/// output.
 void Kernels::upsampleResidual(VkCommandBuffer commands, const Activation& projection, const Activation& skip,
                                const Tensor& tensor, uint32_t scaleByteOffset, Activation& output,
                                Activation* rawOutput, uint32_t inWidth, uint32_t inHeight, uint32_t outWidth,
@@ -599,11 +631,14 @@ void Kernels::upsampleResidual(VkCommandBuffer commands, const Activation& proje
   dispatchLinear(commands, pipeline("ops", constants), bindings, &push, sizeof(push), count / 8);
 }
 
+/// Enable the ViT PTX GEMM route only when both its override and the global PTX GEMM switch
+/// allow it.
 bool Kernels::ptxGemmVEnabled() {
   static const bool enabled = getenv("DLSS5VK_PTX_GEMMV") ? atoi(getenv("DLSS5VK_PTX_GEMMV")) != 0 : true;
   return enabled && ptxGemmEnabled();   // DLSS5VK_PTX_GEMM=0 turns off every PTX GEMM route
 }
 
+/// Choose the ViT row tile size for a single small group or larger token grids.
 uint32_t Kernels::vitGemmTileRows(uint32_t rows) {
   // 192-row tiles (8 warps, one per SM) for the ViT's single row group; 96-row tiles (4 warps, two per SM) for the
   // few-row-group shapes (split-512: 672 rows -> 7 x 4 workgroups, 12% faster than gemm2's 64 x 64 tiles).
@@ -617,11 +652,13 @@ uint32_t Kernels::vitGemmSignals(uint32_t rows, uint32_t N) {
   return (N / 128) * ((rows + bm - 1) / bm);
 }
 
+/// Return the cached override for fused 32-channel PTX blocks, enabled by default.
 bool Kernels::ptxBlock32Enabled() {
   static const bool enabled = getenv("DLSS5VK_PTX_BLOCK32") ? atoi(getenv("DLSS5VK_PTX_BLOCK32")) != 0 : true;
   return enabled;
 }
 
+/// Record a specialized 32-channel PTX block with its optional producer and consumer counters.
 void Kernels::fusedBlock32Ptx(VkCommandBuffer commands, const FusedBlock32Args& a) {
   check(a.w1Ptx && a.w2Ptx, "PTX fused block needs the permuted / tiled weights");
   check(!a.skip16 && !a.outF16, "PTX fused block: f16 skip / raw output variants are not generated");
@@ -657,10 +694,12 @@ void Kernels::fusedBlock32Ptx(VkCommandBuffer commands, const FusedBlock32Args& 
   cudaLaunchTracked(commands, kernel.function, groups, 1, 1, 128, 0, params, 29, a.chained);
 }
 
+/// Report whether the block options permit the fused 32-channel PTX implementation.
 bool Kernels::fusedBlock32IsPtx(const FusedBlock32Args& a) {
   return ptxBlock32Enabled() && a.w1Ptx && a.w2Ptx && !a.skip16 && !a.outF16;
 }
 
+/// Validate fused-block layouts and select the PTX implementation or specialized GLSL fallback.
 void Kernels::fusedBlock32(VkCommandBuffer commands, const FusedBlock32Args& a) {
   if (fusedBlock32IsPtx(a)) { fusedBlock32Ptx(commands, a); return; }
   check(!a.chainWait && !a.chainSignal && !a.chained, "the GLSL fused block does not implement counter chaining");
@@ -706,6 +745,7 @@ void Kernels::fusedBlock32(VkCommandBuffer commands, const FusedBlock32Args& a) 
   dispatch(commands, pipeline("fused_block32", constants), bindings, &push, sizeof(push), groups, 1, 1);
 }
 
+/// Load and cache an embedded PTX module, its entry point, and launch metadata.
 Kernels::PtxKernel& Kernels::ptxKernel(const std::string& file, const std::string& entry) {
   auto it = ptxKernels_.find(file);
   if (it != ptxKernels_.end()) return it->second;
@@ -719,6 +759,8 @@ Kernels::PtxKernel& Kernels::ptxKernel(const std::string& file, const std::strin
   return kernel;
 }
 
+/// Build the hidden-channel permutation that maps the first MLP accumulator to the second
+/// input.
 std::vector<uint32_t> Kernels::mlpHiddenPermutation(uint32_t hidden) {
   // W1' column c holds hidden unit u(c) (mlp_e4m3.py hidden_permutation): per 32-block and 16-half,
   // columns 2t + i -> units 4t + i, columns 8 + 2t + i -> units 4t + 2 + i.
@@ -733,6 +775,7 @@ std::vector<uint32_t> Kernels::mlpHiddenPermutation(uint32_t hidden) {
   return perm;
 }
 
+/// Record the fused PTX MLP with its model buffers, residual data, and chaining parameters.
 void Kernels::mlpPtx(VkCommandBuffer commands, const MlpArgs& a) {
   check(a.input && a.input->format == Format::E4 && a.output && a.output->format == Format::E4, "PTX MLP formats");
   check(a.hidden % 32 == 0 && a.nout % 16 == 0 && a.K % 32 == 0, "PTX MLP shape");
@@ -753,6 +796,7 @@ void Kernels::mlpPtx(VkCommandBuffer commands, const MlpArgs& a) {
   cudaLaunchTracked(commands, kernel.function, a.batches, rowGroups, 1, 128, 0, params, 9);
 }
 
+/// Record the fused MLP through PTX when supported, otherwise through the GLSL pipeline.
 void Kernels::gemmMlp(VkCommandBuffer commands, const MlpArgs& a) {
   check(a.input && a.input->format == Format::E4, "MLP input must be E4M3");
   check(a.output && a.output->format == Format::E4, "MLP output must be E4M3");
@@ -783,15 +827,19 @@ void Kernels::gemmMlp(VkCommandBuffer commands, const MlpArgs& a) {
            std::min(rowGroups, 65535u), (rowGroups + 65534) / 65535);
 }
 
+/// Return the cached expert-FFN PTX override, which defaults to enabled.
 bool Kernels::ptxFfnEnabled() {
   static const bool enabled = getenv("DLSS5VK_PTX_FFN") ? atoi(getenv("DLSS5VK_PTX_FFN")) != 0 : true;
   return enabled;
 }
 
+/// Choose the expert-FFN row tile count from the channel width.
 uint32_t Kernels::ffnRowTiles(uint32_t channels) {
   return channels == 256 ? 3u : 4u;   // warps = E * rowTiles (<= 32); C=256: 24 warps at .maxnreg 80 keep one workgroup per SM
 }
 
+/// Record the expert feed-forward PTX kernel, including optional attention projection and
+/// chaining.
 void Kernels::expertFfnPtx(VkCommandBuffer commands, const ExpertFfnArgs& a, const Chain& chain) {
   check(a.input && a.input->format == Format::E4 && a.output && a.output->format == Format::E4, "PTX FFN formats");
   check(a.channels == 64 || a.channels == 128 || a.channels == 256, "PTX FFN channels");
@@ -829,6 +877,7 @@ void Kernels::expertFfnPtx(VkCommandBuffer commands, const ExpertFfnArgs& a, con
   cudaLaunchTracked(commands, kernel.function, groups, 1, 1, 32 * E * rowTiles, sharedBytes, params, 24, chain.chained);
 }
 
+/// Record fused Q/K/V projection and window attention through the selected PTX or GLSL route.
 void Kernels::qkvAttention(VkCommandBuffer commands, const Activation& input, const vk::Buffer& weights, uint32_t Nmatrix,
                            const Tensor& tensor, uint32_t scaleByteOffset, const vk::Buffer& prior, Activation& attended,
                            uint32_t width, uint32_t height, uint32_t heads, uint32_t shiftX, uint32_t shiftY, const Chain& chain) {
@@ -875,6 +924,7 @@ void Kernels::qkvAttention(VkCommandBuffer commands, const Activation& input, co
            std::min(windows, 65535u), (windows + 65534) / 65535);
 }
 
+/// Record per-window Q/K/V normalization and E4M3 quantization using the learned scale.
 void Kernels::windowNormalize(VkCommandBuffer commands, const Activation& qkv, const Tensor& tensor,
                               uint32_t scaleByteOffset, Activation& normalized, uint32_t tokens, uint32_t heads) {
   check(qkv.format == Format::F16 && normalized.format == Format::E4, "normalize formats");
@@ -888,6 +938,7 @@ void Kernels::windowNormalize(VkCommandBuffer commands, const Activation& qkv, c
   dispatchLinear(commands, pipeline("window_normalize", {}), bindings, &push, sizeof(push), tokens * heads);
 }
 
+/// Record window attention from normalized Q/K/V and the model relative-position bias.
 void Kernels::windowAttend(VkCommandBuffer commands, const Activation& normalized, const vk::Buffer& prior,
                            Activation& attended, uint32_t width, uint32_t height, uint32_t heads, uint32_t shiftX,
                            uint32_t shiftY) {
@@ -907,11 +958,13 @@ void Kernels::windowAttend(VkCommandBuffer commands, const Activation& normalize
            (windows + 65534) / 65535);
 }
 
+/// Return the cached global-attention PTX override, which defaults to enabled.
 bool Kernels::ptxGlobalAttentionEnabled() {
   static const bool enabled = getenv("DLSS5VK_PTX_ATTN") ? atoi(getenv("DLSS5VK_PTX_ATTN")) != 0 : true;
   return enabled;
 }
 
+/// Report whether the token count and normalized input support a global-attention PTX route.
 bool Kernels::globalAttentionPtx(uint32_t paddedTokens, const Activation* normalized) const {
   return ptxGlobalAttentionEnabled() && !normalized && paddedTokens <= 256;
 }
@@ -926,6 +979,7 @@ bool Kernels::globalAttentionStreamPtx(uint32_t paddedTokens) const {
   return available;
 }
 
+/// Record global Q/K/V normalization with optional producer waits and completion signaling.
 void Kernels::globalNormalizePtx(VkCommandBuffer commands, const Activation& qkv, const Tensor& tensor, uint32_t scaleByteOffset,
                                  Activation& normalized, uint32_t tokens, uint32_t paddedTokens, uint32_t heads, const Chain* chain) {
   check(qkv.format == Format::F16 && qkv.channels == heads * 96 && normalized.format == Format::E4 &&
@@ -944,6 +998,7 @@ void Kernels::globalNormalizePtx(VkCommandBuffer commands, const Activation& qkv
   cudaLaunchTracked(commands, kernel.function, paddedTokens / 64, heads, 1, 64, 0, params, 11, chain && chain->chained);
 }
 
+/// Record streamed global-attention PTX using normalized input and optional chaining.
 void Kernels::globalAttentionStream(VkCommandBuffer commands, const Activation& normalized, Activation& attended, uint32_t tokens,
                                     uint32_t paddedTokens, uint32_t heads, const Chain* chain) {
   check(normalized.format == Format::E4 && attended.format == Format::E4 && attended.channels == heads * 32, "global attention (stream) formats");
@@ -960,6 +1015,7 @@ void Kernels::globalAttentionStream(VkCommandBuffer commands, const Activation& 
   cudaLaunchTracked(commands, kernel.function, heads, paddedTokens / 64, 1, 128, 0, params, 9, chain && chain->chained);
 }
 
+/// Select fused, streamed, or GLSL global attention for the supplied padded token grid.
 void Kernels::globalAttention(VkCommandBuffer commands, const Activation& qkv, const Tensor& tensor, uint32_t scaleByteOffset,
                               Activation& attended, uint32_t tokens, uint32_t paddedTokens, uint32_t heads,
                               const Activation* normalized, const Chain* chain) {
@@ -1000,6 +1056,7 @@ void Kernels::globalAttention(VkCommandBuffer commands, const Activation& qkv, c
   dispatch(commands, pipeline("global_attention", constants), bindings, &push, sizeof(push), heads, paddedTokens / 64, 1);
 }
 
+/// Record GLSL global Q/K/V normalization using the model scale tensor.
 void Kernels::globalNormalize(VkCommandBuffer commands, const Activation& qkv, const Tensor& tensor,
                               uint32_t scaleByteOffset, Activation& normalized, uint32_t tokens, uint32_t heads) {
   check(qkv.format == Format::F16 && normalized.format == Format::E4, "global normalize formats");
@@ -1012,6 +1069,7 @@ void Kernels::globalNormalize(VkCommandBuffer commands, const Activation& qkv, c
   dispatchLinear(commands, pipeline("global_normalize", {}), bindings, &push, sizeof(push), tokens * heads);
 }
 
+/// Record GLSL global attention from normalized Q/K/V into the requested activation.
 void Kernels::globalAttend(VkCommandBuffer commands, const Activation& normalized, Activation& attended,
                            uint32_t tokens, uint32_t paddedTokens, uint32_t heads) {
   check(normalized.format == Format::E4 && attended.format == Format::E4, "global attend formats");

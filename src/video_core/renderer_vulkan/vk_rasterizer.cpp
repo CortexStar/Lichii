@@ -520,6 +520,8 @@ bool RasterizerVulkan::TryNx2IndirectReset(bool is_indexed, u32 instance_count) 
     return true;
 }
 
+/// Prepare guest draw state and resources, then invoke the supplied indexed or non-indexed draw
+/// operation.
 template <typename Func>
 void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_indirect) {
 
@@ -1278,6 +1280,8 @@ void RasterizerVulkan::DrawIndirect() {
     buffer_cache.SetDrawIndirect(nullptr);
 }
 
+/// Return the Ocarina sharpening-bypass state only when active NVIDIA DLSS does not take
+/// precedence.
 VideoCommon::OotNetwork::BypassState* RasterizerVulkan::OotNetworkBypass() {
 #ifdef EGLANTINE_NVIDIA_DLSS
     // NVIDIA DLSS replaces the same output pass and takes precedence until its evaluation fails.
@@ -1734,6 +1738,8 @@ void RasterizerVulkan::Clear(u32 layer_count) {
     }
 }
 
+/// Translate and dispatch guest compute work, applying supported replacements and cache
+/// synchronization.
 void RasterizerVulkan::DispatchCompute() {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Compute};
     FlushWork();
@@ -2444,6 +2450,7 @@ void RasterizerVulkan::TracePendingCpuWrites(bool compute, std::span<const u64> 
 }
 
 #ifdef EGLANTINE_NVIDIA_DLSS
+/// Report whether this title and renderer state permit the selected NVIDIA DLSS replacement.
 bool RasterizerVulkan::OcarinaDlssEnabled() const {
     constexpr u64 ocarina_program = 0x0400486024DEC000ULL;
     return program_id == ocarina_program && !oot_live_failed &&
@@ -2996,6 +3003,8 @@ void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
     pipeline_cache.InvalidateRegion(*cpu_addr, copy_size);
 }
 
+/// Resolve a guest framebuffer into a cached display texture, applying any active presentation
+/// replacement.
 std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
     const Tegra::FramebufferConfig& config, DAddr framebuffer_addr, u32 pixel_stride) {
     if (!framebuffer_addr) {

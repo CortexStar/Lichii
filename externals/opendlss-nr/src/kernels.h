@@ -12,6 +12,7 @@ namespace nr {
 
 enum class Format { E4, F16, F32 };
 
+/// Return the storage size in bytes for one activation element.
 inline uint32_t formatBytes(Format format) { return format == Format::E4 ? 1 : format == Format::F16 ? 2 : 4; }
 inline uint32_t alignRows(uint32_t rows) { return (rows + 63) & ~63u; }
 

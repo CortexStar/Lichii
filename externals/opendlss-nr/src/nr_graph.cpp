@@ -8,6 +8,7 @@ namespace nr {
 
 namespace {
 uint32_t alignUp(uint32_t value, uint32_t alignment) { return (value + alignment - 1) / alignment * alignment; }
+/// Return the fused hidden width for a supported channel count, rejecting other layouts.
 uint32_t standardHidden(uint32_t channels) {
   if (channels == 32 || channels == 64 || channels == 128 || channels == 256) return 128;
   throw std::runtime_error("no fused layout for " + std::to_string(channels) + " channels");
@@ -37,6 +38,7 @@ static uint32_t fieldAlignment(uint32_t valid) {
   return 1u << reductions;
 }
 
+/// Derive padded inference dimensions and token grids from the visible image extent.
 Geometry Geometry::fromValid(uint32_t validWidth, uint32_t validHeight) {
   Geometry g;
   g.validWidth = validWidth;
@@ -65,6 +67,7 @@ Geometry Geometry::fromValid(uint32_t validWidth, uint32_t validHeight) {
   return g;
 }
 
+/// Compute packed weight and auxiliary offsets for a fused block at the given channel width.
 FusedLayout fusedLayout(uint32_t channels, uint32_t base) {
   FusedLayout l;
   l.hidden = standardHidden(channels);
@@ -94,6 +97,8 @@ FusedLayout preFusedLayout() {
   return l;
 }
 
+/// Compute the fused upsampling layout, requiring twice as many input channels as output
+/// channels.
 FusedLayout upsampleFusedLayout(uint32_t inputChannels, uint32_t channels) {
   if (inputChannels != channels * 2) throw std::runtime_error("upsample layout expects 2x input channels");
   FusedLayout l;
@@ -128,6 +133,7 @@ FusedLayout postFusedLayout() {
   return l;
 }
 
+/// Read the inference fusion and chaining overrides into a graph route configuration.
 Graph::Routes Graph::routesFromEnvironment() {
   Routes r;
   r.fusePre = !getenv("DLSS5VK_NO_FUSE_PRE");
@@ -140,6 +146,8 @@ Graph::Routes Graph::routesFromEnvironment() {
   return r;
 }
 
+/// Choose compatible inference routes and initialize the graph using caller-owned context,
+/// model, and kernels.
 Graph::Graph(vk::Context& context, Model& model, Kernels& kernels, const Geometry& geometry, Options options)
     : routes_(routesFromEnvironment()), context_(context), model_(model), kernels_(kernels),
       geometry_(geometry), options_(options) {
@@ -166,10 +174,13 @@ Graph::Graph(vk::Context& context, Model& model, Kernels& kernels, const Geometr
                              std::to_string(kBlockCount) + "-block network");
 }
 
+/// Free graph-owned activation buffers after commands referencing them have completed.
 Graph::~Graph() {
   for (auto& activation : activations_) context_.destroyBuffer(activation->buffer);
 }
 
+/// Allocate or reuse a named activation, rejecting duplicate use of the same allocation within
+/// one recording.
 Activation* Graph::allocate(const std::string& label, uint32_t rows, uint32_t channels, Format format) {
   // Re-recording the graph reuses the buffers allocated by the first pass.
   std::string key = label + "/" + std::to_string(rows) + "x" + std::to_string(channels) + "/" + std::to_string((int)format);
@@ -193,6 +204,7 @@ Activation* Graph::allocate(const std::string& label, uint32_t rows, uint32_t ch
   return activations_.back().get();
 }
 
+/// Return the ordered block and transition names used for reference-output comparisons.
 const std::vector<std::string>& Graph::referenceBoundaryNames() {
   static const std::vector<std::string> names = [] {
     std::vector<std::string> list;
@@ -207,6 +219,7 @@ const std::vector<std::string>& Graph::referenceBoundaryNames() {
   return names;
 }
 
+/// Record a copy of a named graph boundary when boundary capture is enabled.
 void Graph::capture(VkCommandBuffer commands, const std::string& name, const Activation& source) {
   if (!options_.captureBoundaries) return;
   Activation* copy = allocate("boundary " + name, source.rows, source.channels, source.format);
@@ -217,6 +230,7 @@ void Graph::capture(VkCommandBuffer commands, const std::string& name, const Act
   boundaries_[name] = copy;
 }
 
+/// Allocate the scratch activations required by the chosen fused or unfused block route.
 Graph::Temporaries Graph::createTemporaries(const std::string& label, uint32_t rows, uint32_t channels) {
   Temporaries t;
   FusedLayout layout = fusedLayout(channels);
@@ -248,6 +262,8 @@ Graph::SplitTemporaries Graph::createSplitTemporaries(const std::string& label, 
   return t;
 }
 
+/// Connect compatible 32-channel PTX blocks through counters, clearing the chain when
+/// unsupported.
 void Graph::chainBlock32(Kernels::FusedBlock32Args& f, int block, uint32_t waitScale, bool chainOut) {
   const bool chain = routes_.chain && (routes_.chainMask & 2) && Kernels::fusedBlock32IsPtx(f);
   if (!chain) { c32Prev_.valid = false; return; }
@@ -667,6 +683,8 @@ void Graph::encodeVit(VkCommandBuffer commands, Activation& state, uint32_t toke
   }
 }
 
+/// Record the inference graph from padded float features through the output head, reusing graph
+/// allocations.
 void Graph::record(VkCommandBuffer commands, const Activation& inputFeatures) {
   kernels_.resetDispatchCount();
   kernels_.resetSync(commands);   // chaining and split-K tile counters

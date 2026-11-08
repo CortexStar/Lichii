@@ -40,6 +40,7 @@ def hidden_permutation(hidden=HIDDEN):
 
 
 def generate(K, stages=STAGES, ksub=KSUB, mt=MT, max_regs=None, HIDDEN=HIDDEN, NOUT=NOUT):
+    """Return PTX for the fused two-layer E4M3 MLP at the requested tile and pipeline sizes."""
     assert K % (32 * ksub) == 0
     BM = 64 * mt                      # rows per workgroup (4 warps x 16 mt)
     steps = K // (32 * ksub)          # pipeline stages (each ksub k32 tiles)
@@ -96,6 +97,7 @@ def generate(K, stages=STAGES, ksub=KSUB, mt=MT, max_regs=None, HIDDEN=HIDDEN, N
         copies.append((dst, src, adv))
 
     def issue_stage(stage_off_reg, step_reg):
+        """Emit asynchronous input and first-layer weight copies for one MLP pipeline step."""
         for dst, src, adv in copies:
             saddr = p.add32(p.add32(smem, stage_off_reg), dst)
             gaddr = p.mad_wide(adv, step_reg, src)

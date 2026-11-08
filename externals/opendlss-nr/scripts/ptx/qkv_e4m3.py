@@ -30,6 +30,7 @@ SHARED_BYTES = STG + 4 * 512
 
 
 def generate(C, max_regs=None):
+    """Return PTX that fuses Q/K/V projection, normalization, and window attention for C channels."""
     assert C % 32 == 0
     steps = C // 32
     stages = min(STAGES, steps)
@@ -127,12 +128,14 @@ def generate(C, max_regs=None):
     pWaitOn = p.setp("ne.u64", P["pWait"], 0)
     pSignalOn = p.setp("ne.u64", P["pSignal"], 0)
     def wait_item(gm, guard=None):
+        """Wait for the producer row groups needed by this window, respecting an optional guard."""
         g2 = pWaitOn
         if guard is not None:
             g2 = p.reg("pred"); p.emit(f"and.pred {g2}, {pWaitOn}, {guard};")
         sync_wait(p, P["pWait"], gm["band0"], gm["band1"], lambda b: band_expected(p, b, P["width"], rowsTotal, P["waitMul"], P["waitGroupRows"]), lane, g2, warp, error64=P["pError"])
 
     def issue_stage(gm, stageIndex, step, guard=None):
+        """Stage the window input and head weights for one projection step."""
         # the head's weight tiles (L1-cached, constant) and the window's A tile (L2 only: produced by the chained FFN)
         for dst, srcOff, pv in copies:
             saddr = p.add32(dst, p.imm32(stageIndex * STEP_BYTES))
@@ -152,6 +155,7 @@ def generate(C, max_regs=None):
                 "aSrc": p.reg("b64"), "aSize": p.reg("b32"), "wHead": p.reg("b64")}
 
     def carry_assign(dst, gm, aList=None):
+        """Copy window geometry and source addresses into the registers carried to the next item."""
         for k in ("head", "windowX", "windowY", "wy", "aSize"): p.emit(f"mov.b32 {dst[k]}, {gm[k]};")
         p.emit(f"mov.b64 {dst['aSrc']}, {gm['aSrc']};")
         p.emit(f"mov.b64 {dst['wHead']}, {gm['wHead']};")

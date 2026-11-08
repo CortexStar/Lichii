@@ -10,6 +10,8 @@
 
 namespace NR = VideoCore::NeuralRendering;
 namespace {
+/// Write a little-endian integer into a synthetic model fixture, extending its storage as
+/// needed.
 template <typename T>
 void Put(std::vector<std::uint8_t>& bytes, std::size_t offset, T value) {
     if (bytes.size() < offset + sizeof(T)) {
@@ -20,6 +22,7 @@ void Put(std::vector<std::uint8_t>& bytes, std::size_t offset, T value) {
     }
 }
 
+/// Construct a minimal x64 PE fixture containing a weights resource without executable code.
 std::vector<std::uint8_t> PeResource() {
     std::vector<std::uint8_t> bytes(0x308);
     Put<std::uint16_t>(bytes, 0, 0x5a4d);
@@ -74,6 +77,7 @@ std::size_t AddTensor(std::vector<std::uint8_t>& bytes, std::string_view name) {
 }
 } // namespace
 
+/// Verify resource extraction and rejection of truncated PE data without loading the DLL.
 TEST_CASE("NR model resource parsing accepts data without loading executable code", "[nr_model]") {
     const auto dll = PeResource();
     const auto resource = NR::ReadWeightsResource(dll);
@@ -104,6 +108,7 @@ TEST_CASE("NR rejects malformed resource pointers and ambiguous payloads", "[nr_
     REQUIRE_THROWS_AS(NR::ReadWeightsResource(dll), std::runtime_error);
 }
 
+/// Verify packed tensor bytes survive parsing and truncated records are rejected.
 TEST_CASE("NR packed tensor records retain their original bytes", "[nr_model]") {
     std::vector<std::uint8_t> bytes(8);
     AddTensor(bytes, "block0.layer0.layer");

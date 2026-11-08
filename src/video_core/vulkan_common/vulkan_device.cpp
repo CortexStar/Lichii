@@ -472,6 +472,8 @@ void Device::RemoveExtensionFeatureIfUnsuitable(bool is_suitable, Feature& featu
     }
 }
 
+/// Select supported Vulkan features, create renderer resources, and attach optional DLSS to the
+/// logical device.
 Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR surface,
                const vk::InstanceDispatch& dld_)
     : instance{instance_}, dld{dld_}, physical{physical_},
@@ -866,6 +868,8 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 #endif
 }
 
+/// Enable native inference only when requested and all required device extensions, features,
+/// and limits are supported.
 bool Device::EnableNeuralRendering() {
 #ifdef EGLANTINE_NGX
     namespace NR = VideoCore::NeuralRendering;
@@ -952,6 +956,7 @@ bool Device::EnableNeuralRendering() {
 #endif
 }
 
+/// Detach optional DLSS and release renderer resources before the logical device is destroyed.
 Device::~Device() {
 #ifdef EGLANTINE_NGX
     if (nvidia_dlss_attached) {
@@ -1282,6 +1287,8 @@ bool Device::MustEmulateBGR565() const {
     return Settings::values.emulate_bgr565.GetValue();
 }
 
+/// Query device capabilities and check renderer requirements, including presentation when
+/// requested.
 bool Device::GetSuitability(bool requires_swapchain) {
     // Assume we will be suitable.
     bool suitable = true;

@@ -10,6 +10,7 @@
 
 namespace nr {
 
+/// Map a logical input channel to the model packing order within each group of 32.
 uint32_t packedInputIndex(uint32_t k) {
   uint32_t base = k & ~31u;
   uint32_t within = k & 31u;
@@ -34,6 +35,7 @@ uint32_t packedWeightIndex(uint32_t k, uint32_t n, uint32_t outputChannels) {
 }
 
 namespace {
+/// Read a model text file into a string, throwing if it cannot be opened.
 std::string readText(const std::string& path) {
   std::ifstream file(path, std::ios::binary);
   if (!file) throw std::runtime_error("cannot read " + path);
@@ -42,6 +44,7 @@ std::string readText(const std::string& path) {
   return stream.str();
 }
 
+/// Read a model binary file into a byte vector, throwing if it cannot be opened.
 std::vector<uint8_t> readBinary(const std::string& path) {
   std::ifstream file(path, std::ios::binary | std::ios::ate);
   if (!file) throw std::runtime_error("cannot read " + path);
@@ -72,6 +75,8 @@ uint32_t tiledToken(uint32_t token) {
 }
 }  // namespace
 
+/// Load the manifest and tensor buffers, optionally verifying hashes; the context must outlive
+/// the model.
 Model::Model(vk::Context& context, const std::string& directory, bool verifyHashes) : context_(context) {
   try {
   json::Value manifest = json::parse(readText(directory + "/manifest.json"));
@@ -121,11 +126,13 @@ Model::Model(vk::Context& context, const std::string& directory, bool verifyHash
 
 Model::~Model() { release(); }
 
+/// Release uploaded tensor and cached matrix buffers, including after partial construction.
 void Model::release() noexcept {
   for (auto& [name, buffer] : matrices_) context_.destroyBuffer(buffer);
   for (auto& [name, tensor] : tensors_) context_.destroyBuffer(tensor.raw);
 }
 
+/// Look up a tensor by block, layer, and parameter name, throwing if the model lacks it.
 const Tensor& Model::tensor(int block, int layer, const std::string& parameter) const {
   std::string name = "block" + std::to_string(block) + ".layer" + std::to_string(layer) + "." + parameter;
   auto it = tensors_.find(name);
@@ -133,6 +140,8 @@ const Tensor& Model::tensor(int block, int layer, const std::string& parameter) 
   return it->second;
 }
 
+/// Repack checked E4M3 weights for the requested batching, tiling, and optional column
+/// permutation.
 std::vector<uint8_t> Model::fp8MatrixBytes(const Tensor& tensor, uint32_t byteOffset, uint32_t K, uint32_t Nmatrix,
                                            bool swizzleK, uint32_t batchK, bool tileMajor,
                                            const std::vector<uint32_t>* columnSource) {
@@ -159,6 +168,7 @@ std::vector<uint8_t> Model::fp8MatrixBytes(const Tensor& tensor, uint32_t byteOf
   return plain;
 }
 
+/// Return a cached GPU matrix, repacking and uploading E4M3 weights on first use.
 const vk::Buffer& Model::fp8Matrix(const Tensor& tensor, uint32_t byteOffset, uint32_t K, uint32_t Nmatrix,
                                    bool swizzleK, uint32_t batchK, bool tileMajor) {
   if (batchK == 0) batchK = K;
@@ -173,6 +183,7 @@ const vk::Buffer& Model::fp8Matrix(const Tensor& tensor, uint32_t byteOffset, ui
   return buffer;
 }
 
+/// Return a cached E4M3 matrix with the supplied column permutation and cache tag.
 const vk::Buffer& Model::fp8MatrixPermuted(const Tensor& tensor, uint32_t byteOffset, uint32_t K, uint32_t Nmatrix,
                                            uint32_t batchK, const std::vector<uint32_t>& columnSource, const std::string& tag) {
   std::string key = tensor.name + "/fp8perm/" + tag + "/" + std::to_string(byteOffset) + "/" + std::to_string(K) + "x" +
@@ -187,6 +198,8 @@ const vk::Buffer& Model::fp8MatrixPermuted(const Tensor& tensor, uint32_t byteOf
   return buffer;
 }
 
+/// Return a cached half-precision matrix and report its column count padded to a multiple of
+/// 16.
 const vk::Buffer& Model::f16Matrix(const Tensor& tensor, uint32_t byteOffset, uint32_t K, uint32_t N,
                                    uint32_t& paddedN) {
   paddedN = (N + 15) & ~15u;
@@ -210,6 +223,7 @@ const vk::Buffer& Model::f16Matrix(const Tensor& tensor, uint32_t byteOffset, ui
   return buffer;
 }
 
+/// Unpack and cache attention bias with natural-order queries and tiled-order keys.
 const vk::Buffer& Model::relativeBias(const Tensor& tensor, uint32_t relativeByteOffset, uint32_t heads) {
   std::string key = tensor.name + "/prior/" + std::to_string(relativeByteOffset) + "/" + std::to_string(heads);
   auto it = matrices_.find(key);

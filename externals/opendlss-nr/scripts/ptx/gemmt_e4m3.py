@@ -27,6 +27,7 @@ STAGE_BYTES = (BM + BN) * 32     # 8 KB
 PREFETCH = 8                     # weight k32 steps prefetched into L2 ahead of the cp.async issue (DRAM latency hiding)
 
 def generate(K, flags, partSteps, splits, max_regs=None, stagesWanted=STAGES, prefetch=PREFETCH):
+    """Return PTX for partitioned E4M3 GEMM with optional split-K reduction and prefetching."""
     assert K % 32 == 0
     steps = K // 32
     if partSteps == 0: partSteps = steps
@@ -78,6 +79,7 @@ def generate(K, flags, partSteps, splits, max_regs=None, stagesWanted=STAGES, pr
     pfBase = p.add64(P["pW"], p.widen(p.add32(p.shl32(p.add32(P["weightColumnOffset"], colBase), 5), p.shl32(tid, 7))))
 
     def prefetch_step(stepLocal):
+        """Prefetch the weight step into L2 when prefetching is enabled and the step is in range."""
         if not prefetch or stepLocal >= stepsPerSplit: return
         stepG = p.add32(kStep0, p.imm32(stepLocal))
         p.emit(f"@{pPf} prefetch.global.L2 [{p.mad_wide(wStep, stepG, pfBase)}];")

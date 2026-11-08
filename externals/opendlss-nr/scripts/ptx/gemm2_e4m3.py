@@ -98,6 +98,7 @@ def generate(K, flags, max_regs=None, stagesWanted=STAGES, ksub=1, ws=False):
         copies.append((dst, src, adv))
 
     def issue_stage(stageIndex, step):
+        """Stage input and weight subtiles for one GEMM pipeline step and commit their copies."""
         for sub in range(ksub):
             for dst, src, adv in copies:
                 saddr = p.add32(p.add32(smem, dst), p.imm32(stageIndex * STAGE_BYTES + sub * (BM + BN) * 32))
@@ -122,6 +123,7 @@ def generate(K, flags, max_regs=None, stagesWanted=STAGES, ksub=1, ws=False):
     # tile row / chunk of this thread for the 64 x 64 B residual / output tiles: 256 chunks, 2 per thread (the copy
     # warp: 8 per lane for the residual)
     def tile_chunks(count, base):
+        """Compute shared/global offsets and row-validity predicates for residual tile chunks."""
         out = []
         for i in range(count):
             c = p.add32(base, i * (256 // count))
@@ -135,6 +137,7 @@ def generate(K, flags, max_regs=None, stagesWanted=STAGES, ksub=1, ws=False):
     resChunks = tile_chunks(8, copyLane) if ws else tileChunks
 
     def issue_residual():
+        """Emit guarded asynchronous copies of the residual tile into shared memory."""
         # residual tile through shared memory (16-byte copies), then the C-layout pairs
         for sOff, gOff, ok in resChunks:
             saddr = p.add32(p.add32(smem, sOff), p.imm32(RESS))
@@ -149,6 +152,7 @@ def generate(K, flags, max_regs=None, stagesWanted=STAGES, ksub=1, ws=False):
             r = p.reg("b32"); p.emit(f"ld.global.nc.b32 {r}, [{auxAddr}+{16 * j}];"); scales.append(r)
 
     def seed_from_residual():
+        """Initialize MMA accumulators from the scaled E4M3 residual tile."""
         cRes = p.add32(p.add32(smem, RESS), p.add32(p.shl32(p.add32(p.shl32(warp, 4), g), 6), p.shl32(t, 1)))
         for j in range(8):
             d = []

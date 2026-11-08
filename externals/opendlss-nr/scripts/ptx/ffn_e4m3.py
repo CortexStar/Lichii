@@ -98,6 +98,7 @@ def generate(C, rowt, max_regs=None, proj=False):
         src = p.add64(P["pW1"], p.widen(p.add32(p.mul32(ce, steps * 4096), p.add32(p.shl32(n, 5), p.shl32(half, 4)))))
         w1Copies.append((dst, src))
     def issue_w1(stage, step):
+        """Stage the first expert weight tile and, when needed, its input activations."""
         for (dst, src), pv in zip(w1Copies, w1Preds):
             saddr = p.add32(stgAddr[stage], dst)
             gaddr = p.add64(src, p.widen(p.imm32(step * 4096)))
@@ -107,6 +108,7 @@ def generate(C, rowt, max_regs=None, proj=False):
         p.emit("cp.async.commit_group;")
     # W2 tiles [e][4 kt][32 n][32 B] (E x 4 KB): same chunk mapping (row = kt * 32 + n within the expert)
     def issue_w2(stage):
+        """Stage second-layer expert weights in the shared-memory layout used by MMA."""
         for i in range(copiesPerThread):
             c = p.add32(tid, i * threads)
             pv = None if copyExact else p.setp("lt.u32", c, 256 * E)
@@ -130,6 +132,7 @@ def generate(C, rowt, max_regs=None, proj=False):
         src = p.add64(P["pW3"], p.widen(p.add32(p.shl32(n, 5), p.shl32(half, 4))))
         w3Copies.append((dst, src, pv))
     def issue_w3(stage, step):
+        """Stage the third expert weight tile and commit the asynchronous copy group."""
         for dst, src, pv in w3Copies:
             saddr = p.add32(p.add32(smem, RING + stage * w3StageBytes), dst)
             gaddr = p.add64(src, p.widen(p.imm32(step * C * 32)))
@@ -219,6 +222,7 @@ def generate(C, rowt, max_regs=None, proj=False):
             wpCopies.append((dst, src, pv))
         wpB = [p.add32(p.add32(smem, RING + st * wpStageBytes), p.add32(p.shl32(e, 10), bLaneOff)) for st in range(2)]
         def issue_wproj(stage, step):
+            """Stage projection weights and attention inputs for the selected pipeline step."""
             for dst, src, pv in wpCopies:
                 saddr = p.add32(p.add32(smem, RING + stage * wpStageBytes), dst)
                 gaddr = p.add64(src, p.widen(p.imm32(step * C * 32)))

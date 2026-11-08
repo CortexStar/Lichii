@@ -18,6 +18,7 @@ struct Image {
     VkImage image{};
     VkImageView view{};
     VkDeviceMemory memory{};
+    /// Allocate an RGBA16F image and view for the standalone inference test.
     Image(vk::Context& context_, uint32_t width, uint32_t height) : context(context_) {
         VkImageCreateInfo create{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         create.imageType = VK_IMAGE_TYPE_2D;
@@ -79,6 +80,8 @@ void Barrier(VkCommandBuffer cmd) {
                          nullptr);
 }
 
+/// Run the native backend on a supplied float proxy image and write outputs for visual
+/// comparison.
 int main(int argc, char** argv) {
     if (argc != 6) {
         std::fprintf(stderr,

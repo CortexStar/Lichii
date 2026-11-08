@@ -56,6 +56,8 @@ QNetworkRequest Request(const QUrl &url) {
 bool ValidModel(const QByteArray &data) {
     return QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex() == Ngx::ModelSha256;
 }
+/// Atomically save imported or downloaded bytes after ensuring the user runtime directory
+/// exists.
 bool Save(const QString &path, const QByteArray &data) {
     if (!QDir().mkpath(PathText(Ngx::UserFolder())))
         return false;
@@ -64,6 +66,7 @@ bool Save(const QString &path, const QByteArray &data) {
 }
 } // namespace
 
+/// Build Linux runtime controls, probe driver availability once, and connect status refreshes.
 NvidiaDlssPanel::NvidiaDlssPanel(QWidget *parent) : QWidget(parent) {
     driver_present = Common::DynamicLibrary{"libnvidia-ngx.so.1"}.IsOpen();
     auto *layout = new QVBoxLayout(this);
@@ -123,6 +126,8 @@ void NvidiaDlssPanel::showEvent(QShowEvent *event) {
     Refresh();
 }
 
+/// Update runtime and model status plus action availability, reusing cached driver and model
+/// checks.
 void NvidiaDlssPanel::Refresh() {
     const auto model = Ngx::FindModel();
     const auto state = Ngx::GetStatus();
@@ -171,6 +176,7 @@ void NvidiaDlssPanel::Refresh() {
     neural_import_button->setEnabled(neural_model_checked && !neural_importing);
 }
 
+/// Import a selected neural-model DLL on a worker and refresh the UI with success or failure.
 void NvidiaDlssPanel::ImportNeuralModel() {
     const auto path =
         QFileDialog::getOpenFileName(this, Tr("Import NVIDIA neural rendering model"), {},
@@ -211,6 +217,8 @@ void NvidiaDlssPanel::ImportNeuralModel() {
     }));
 }
 
+/// Validate a selected Linux DLSS library and atomically save it into the user runtime
+/// directory.
 void NvidiaDlssPanel::Import() {
     const QString path = QFileDialog::getOpenFileName(this, Tr("Import Linux NVIDIA DLSS"), {},
                                                       Tr("Linux DLSS (libnvidia-ngx-dlss.so*)"));
@@ -234,6 +242,8 @@ void NvidiaDlssPanel::Import() {
     Refresh();
 }
 
+/// Fetch the runtime license for user acceptance, then download and validate the pinned Linux
+/// DLSS asset.
 void NvidiaDlssPanel::Download() {
     download_button->setEnabled(false);
     import_button->setEnabled(false);

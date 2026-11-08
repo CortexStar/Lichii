@@ -35,6 +35,7 @@
 namespace {
 using namespace Vulkan;
 
+/// Fail the hardware smoke test with a diagnostic when an invariant is violated.
 void Require(bool condition, const char *message) {
     if (!condition) {
         throw std::runtime_error(message);
@@ -75,6 +76,8 @@ InputImage MakeInput(const Device &device, MemoryAllocator &allocator, VkFormat 
     return result;
 }
 
+/// Check DLSS output, resizing, rebinding, and failure handling while another thread submits to
+/// the queue.
 void RenderCases(const Device& device, u32 scale, bool expect_neural) {
     MemoryAllocator allocator{device};
     StateTracker tracker;
@@ -230,6 +233,7 @@ void RenderCases(const Device& device, u32 scale, bool expect_neural) {
 }
 } // namespace
 
+/// Exercise NGX startup, model fallback, and repeated device lifecycles on the selected GPU.
 int main(int argc, char **argv) try {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc < 2) {

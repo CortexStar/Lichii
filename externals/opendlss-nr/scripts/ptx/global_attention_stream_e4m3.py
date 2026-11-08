@@ -37,6 +37,7 @@ def key_position(p, token):
 
 
 def generate_normalize():
+    """Return PTX that normalizes and quantizes global Q/K/V rows before streamed attention."""
     name = "global_normalize_e4m3"
     p = Ptx()
     params = [("u64", "pQkv"), ("u64", "pAux"), ("u64", "pOut"), ("u32", "tokens"), ("u32", "padded"), ("u32", "heads"),
@@ -59,6 +60,7 @@ def generate_normalize():
     src = p.add64(P["pQkv"], p.widen(p.add32(p.mul32(token, rowBytes), headByte)))
 
     def load_row(part):
+        """Load one row part as packed words, substituting zeros for padded tokens."""
         w = []
         for c in range(4):
             r = p.regs("b32", 4)
@@ -97,6 +99,7 @@ def generate_normalize():
 
 
 def generate_attention(stages=4):
+    """Return global-attention PTX that streams key/value tiles through a staged shared buffer."""
     name = "global_attention_stream_e4m3"
     shared_bytes = STAGE0 + stages * STAGE_BYTES
     p = Ptx()

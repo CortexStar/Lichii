@@ -42,6 +42,8 @@ void NvidiaDlssUpscaler::CreateSampler() {
     linear_sampler = device.GetLogical().CreateSampler(info);
 }
 
+/// Recreate the output after outstanding work finishes and transition it for NGX compute writes
+/// or transfer clears.
 void NvidiaDlssUpscaler::CreateOutput(VkExtent2D upscale_size) {
     if (output_image) {
         scheduler.Finish(); // the old output may still be in use
