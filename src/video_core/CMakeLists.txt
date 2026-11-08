@@ -112,6 +112,8 @@ add_library(video_core STATIC
     gpu.cpp
     gpu.h
     gpu_timestamp.h
+    gpu_page_table.cpp
+    gpu_page_table.h
     gpu_split.cpp
     gpu_split.h
     gpu_thread.cpp
