@@ -22,10 +22,12 @@ void Scheduler::BindChannel(GPU& gpu, s32 bind_id) {
     // With the GPU thread split the rasterizer's channel switches with the methods around it, on
     // the back thread (deferred outside the lock: the back takes it to bind).
     if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
-        split.Defer([this, gpu_ptr = &gpu, bind_id] {
-            std::scoped_lock lk{scheduling_guard};
-            gpu_ptr->BindChannel(bind_id);
-        });
+        split.Defer(
+            [this, gpu_ptr = &gpu, bind_id] {
+                std::scoped_lock lk{scheduling_guard};
+                gpu_ptr->BindChannel(bind_id);
+            },
+            VideoCommon::GpuSplit::Writes::Noted);
         return;
     }
     std::scoped_lock lk{scheduling_guard};
@@ -80,6 +82,11 @@ bool Scheduler::ResumePending(GPU& gpu) {
             }
             if (!can_resume) {
                 continue;
+            }
+            // The back ran the release: it may be out of work by the time the channel's next
+            // commands would otherwise go to it.
+            if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
+                split.PublishSoon();
             }
             BindChannel(gpu, state->bind_id);
             dma_pusher.DispatchCalls();

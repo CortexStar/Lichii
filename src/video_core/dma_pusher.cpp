@@ -96,10 +96,13 @@ void DmaPusher::DispatchCalls() {
         }
     }
     if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
-        split.Defer([gpu = &system.GPU()] {
-            gpu->FlushCommands();
-            gpu->OnCommandListEnd();
-        });
+        // Submits, and releases the fences done (downloads where the GPU wrote).
+        split.Defer(
+            [gpu = &system.GPU()] {
+                gpu->FlushCommands();
+                gpu->OnCommandListEnd();
+            },
+            VideoCommon::GpuSplit::Writes::Caches);
         split.Publish();
         return;
     }
@@ -186,10 +189,12 @@ bool DmaPusher::Step() {
                 auto* const engine_state = subchannels[dma_state.subchannel];
                 if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
                     // The caches behind IsMemoryDirty belong to the split's back thread.
-                    split.Defer([engine_state, memory = &memory_manager, address = GPUVAddr{dma_state.dma_get},
-                                 bytes = words * sizeof(u32)] {
-                        engine_state->current_dirty = memory->IsMemoryDirty(address, bytes);
-                    });
+                    split.Defer(
+                        [engine_state, memory = &memory_manager,
+                         address = GPUVAddr{dma_state.dma_get}, bytes = words * sizeof(u32)] {
+                            engine_state->current_dirty = memory->IsMemoryDirty(address, bytes);
+                        },
+                        VideoCommon::GpuSplit::Writes::Noted);
                 } else {
                     engine_state->current_dirty = memory_manager.IsMemoryDirty(dma_state.dma_get, words * sizeof(u32));
                 }
@@ -526,8 +531,12 @@ void DmaPusher::CallMethod(u32 argument) {
                     }
                 }
             }
+            // A method the engine only keeps for later (its method sink) writes nothing yet.
+            using Writes = VideoCommon::GpuSplit::Writes;
             split.Method(subchannel, dma_state.method, argument, dma_state.is_last_call,
-                         WantsSegment() ? &segment : nullptr);
+                         WantsSegment() ? &segment : nullptr,
+                         subchannel->execution_mask[dma_state.method] ? Writes::Anywhere
+                                                                      : Writes::Noted);
             if (engine_type == Engines::EngineTypes::MaxwellDMA) {
                 NoteDmaSemaphore(dma_state.method, argument);
             }
@@ -685,14 +694,17 @@ void DmaPusher::CheckUnwaitedWriters(GPUVAddr address, size_t size) {
     // The list did not wait for compute or copy work sent after the last sync. At the list's
     // place, the back has run that work: did it make the list's pages GPU-written?
     VideoCommon::Nx2DrainCheck::NoteListUnwaited();
-    split.Defer([memory = &memory_manager, address, size] {
-        bool written = false;
-        for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < address + size; page += 0x1000) {
-            const auto device = memory->GpuToCpuAddress(page);
-            written = written || (device && Tegra::Nx2IsGpuWritten(*device));
-        }
-        VideoCommon::Nx2DrainCheck::NoteListChecked(written);
-    });
+    split.Defer(
+        [memory = &memory_manager, address, size] {
+            bool written = false;
+            for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < address + size;
+                 page += 0x1000) {
+                const auto device = memory->GpuToCpuAddress(page);
+                written = written || (device && Tegra::Nx2IsGpuWritten(*device));
+            }
+            VideoCommon::Nx2DrainCheck::NoteListChecked(written);
+        },
+        VideoCommon::GpuSplit::Writes::Noted);
 }
 
 bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count) {

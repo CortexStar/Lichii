@@ -90,6 +90,9 @@ public:
         /// the drain this replaces.
         u64 sent_at{};
         bool fences_released{};
+        /// CanResumeAcquire found it met: the channel resumes when it runs next, without
+        /// asking again (Control::Scheduler asks before it runs a suspended channel).
+        bool met{};
         bool flushed{}; ///< TEST (EDEN_NX2_ACQUIRE_STATS): a flush was sent for it
 
         [[nodiscard]] bool Matches(u32 current) const;
