@@ -163,6 +163,14 @@ public:
     bool IsMemoryDirty(GPUVAddr gpu_addr, size_t size,
                        VideoCommon::CacheType which = VideoCommon::CacheType::All) const;
 
+    /// Whether [gpu_addr, gpu_addr + size) overlaps the Switch 2 syncpoint shim, whose words
+    /// Read<u32> answers from the syncpoint manager instead of memory.
+    [[nodiscard]] bool OverlapsSyncpointShim(GPUVAddr gpu_addr, size_t size) const {
+        const GPUVAddr shim = native_syncpoint_shim.load(std::memory_order_acquire);
+        return shim != 0 && gpu_addr < shim + NumShimSyncpoints * sizeof(u32) &&
+               gpu_addr + size > shim;
+    }
+
     size_t MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const;
 
     [[nodiscard]] u64 MapSerial() const {

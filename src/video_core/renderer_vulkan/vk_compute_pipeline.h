@@ -121,6 +121,13 @@ private:
     bool uses_push_descriptor{false};
     bool uses_descriptor_buffer{false};
     DescriptorBufferLayout descriptor_buffer_layout;
+    std::vector<u32> binding_kinds; ///< Binding memo kind per texture/image view, in read order
+    // The previous dispatch's descriptor buffer allocation
+    std::vector<DescriptorUpdateEntry> last_descriptor_payload;
+    VkDeviceSize last_descriptor_buffer_offset{};
+    u32 last_descriptor_buffer_chunk{};
+    u64 last_descriptor_buffer_generation{};
+    bool has_last_descriptor_buffer{};
     DescriptorAllocator descriptor_allocator;
     vk::PipelineLayout pipeline_layout;
     vk::DescriptorUpdateTemplate descriptor_update_template;

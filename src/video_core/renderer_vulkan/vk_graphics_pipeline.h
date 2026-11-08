@@ -426,6 +426,7 @@ private:
     VkDeviceSize last_descriptor_buffer_offset{};
     u32 last_descriptor_buffer_chunk{};
     u64 last_descriptor_buffer_generation{};
+    std::vector<u32> binding_kinds; ///< Binding memo kind per texture/image view, in read order
 
     const bool worker_only_build;
     bool uses_push_descriptor{false};
