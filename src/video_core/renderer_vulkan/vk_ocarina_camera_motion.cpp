@@ -749,6 +749,10 @@ struct OcarinaUpscaler::Impl {
 #endif
     std::unique_ptr<Fsr3Upscaler> fsr;
     std::unique_ptr<Fsr4Upscaler> fsr4;
+    /// The last recorded frame's output is FSR 4's. Kept per frame: a dispatch failure found on
+    /// the worker thread must not switch that frame's writeback and 4K composite to FSR 3.1,
+    /// which didn't evaluate it.
+    bool output_fsr4{};
     std::optional<std::chrono::steady_clock::time_point> last_evaluation;
 
     bool UsesFsr4() const {
@@ -772,7 +776,7 @@ struct OcarinaUpscaler::Impl {
 #ifdef EGLANTINE_STREAMLINE
         if (dlss) return dlss->OutputView();
 #endif
-        if (UsesFsr4()) return fsr4->OutputView();
+        if (output_fsr4) return fsr4->OutputView();
         return fsr->OutputView();
     }
     CameraMotionPass motion_pass;
@@ -1085,6 +1089,7 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
                      reset || elapsed > 250.0f, bias_view != VK_NULL_HANDLE, jitter[0], jitter[1]);
         }
     }
+    state.output_fsr4 = used_fsr4;
     // A resize can submit the inputs before recording evaluation, so keep the later tick.
     resources.tick = state.scheduler.CurrentTick();
     if (target) {
