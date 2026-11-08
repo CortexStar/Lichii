@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <optional>
 #include <string_view>
 
 namespace VideoCommon {
@@ -23,6 +25,27 @@ constexpr OcarinaUpscaleBackend SelectOcarinaUpscaler(bool fsr_enabled, bool dls
     }
     return dlss_enabled && dlss_available ? OcarinaUpscaleBackend::Dlss
                                           : OcarinaUpscaleBackend::Fsr;
+}
+
+/// Texture LOD bias added to Ocarina's mipmapped samplers while FSR upscales. AMD recommends
+/// log2(render / output) - 1: -1.58 for docked 1440p -> 4K; handheld isn't measured, so none.
+/// `override` is EDEN_NX2_OOT_LOD_BIAS when set (also handheld; 0 turns it off).
+constexpr float OcarinaFsrLodBias(OcarinaUpscaleBackend backend, bool docked,
+                                  std::optional<float> override) {
+    if (backend != OcarinaUpscaleBackend::Fsr) {
+        return 0.0f;
+    }
+    if (override) {
+        return std::clamp(*override, -4.0f, 0.0f);
+    }
+    return docked ? -1.58f : 0.0f;
+}
+
+/// Whether a sampler with that bias keeps it for an image: not for images the GPU wrote (render
+/// targets would read a mip too sharp), and not once the upscaler failed this session (the
+/// game's own pass runs again).
+constexpr bool KeepOcarinaFsrLodBias(bool upscaler_failed, bool gpu_written) {
+    return !upscaler_failed && !gpu_written;
 }
 
 } // namespace VideoCommon
