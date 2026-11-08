@@ -31,7 +31,11 @@
 #include "video_core/post_processing/fx_chain.h"
 #endif
 #include "video_core/hdr_capture.h"
+#include "video_core/oot_dlss.h"
 #include "video_core/vulkan_common/amd_ffx.h"
+#ifdef _WIN32
+#include "video_core/renderer_vulkan/vk_amd_fsr4_upscaler.h"
+#endif
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
 #include "video_core/renderer_vulkan/vk_blit_screen.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -126,7 +130,7 @@ Device CreateDevice(const vk::Instance& instance, const vk::InstanceDispatch& dl
     }
     const vk::PhysicalDevice physical_device(devices[device_index], dld);
     // Before the device: AMD's FSR runtime decides which queues and features it gets.
-    void(AmdFfx::Load());
+    static_cast<void>(AmdFfx::Load());
     return Device(*instance, physical_device, surface, dld);
 }
 
@@ -202,6 +206,14 @@ try
 
 #ifdef HAS_RESHADE
     VideoCore::FxChain::Instance().LoadFromSettings();
+#endif
+
+#ifdef _WIN32
+    // Ocarina of Time's AMD modes run on the HDR image only with FSR 4 (oot_dlss.h HdrInput).
+    if (VideoCommon::OotDlss::UsesAmd()) {
+        VideoCommon::OotDlss::AmdFsr4Available().store(AmdFsr4Upscaler::IsAvailable(device),
+                                                       std::memory_order_relaxed);
+    }
 #endif
 
     device_info = {

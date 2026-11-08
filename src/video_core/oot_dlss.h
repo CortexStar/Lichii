@@ -24,9 +24,24 @@
 // supplies both: the viewport of every draw into the main scene depth buffer is offset by a
 // sub-pixel Halton jitter, and camera motion vectors are rebuilt from depth and the game's
 // current/previous view-projection matrices. EDEN_OOT_DLSS=1 turns it on (off by default).
+// The same inputs feed AMD FSR 4 (AMD's runtime, vk_amd_fsr4_upscaler.h) or, without it, AMD FSR
+// 3.1 (in-tree, vk_fsr3_upscaler.h) in the two AMD modes.
 namespace VideoCommon::OotDlss {
 
 constexpr u64 ProgramId = 0x0400486024DEC000ULL;
+
+/// One of the AMD FSR modes is chosen (EDEN_OOT_UPSCALER=amd|nvidia overrides the vendor).
+inline bool UsesAmd() {
+    static const bool amd = [] {
+        if (const char* value = std::getenv("EDEN_OOT_UPSCALER"); value != nullptr && *value) {
+            return value[0] == 'a';
+        }
+        const auto mode = Settings::values.oot_anti_aliasing.GetValue();
+        return mode == Settings::OotAntiAliasing::AmdFsrNativeAa ||
+               mode == Settings::OotAntiAliasing::AmdFsrUpscale;
+    }();
+    return amd;
+}
 
 inline bool Requested() {
     static const bool requested = [] {
@@ -35,9 +50,29 @@ inline bool Requested() {
         }
         const auto mode = Settings::values.oot_anti_aliasing.GetValue();
         return mode == Settings::OotAntiAliasing::NvidiaDlss ||
-               mode == Settings::OotAntiAliasing::NvidiaDlaa;
+               mode == Settings::OotAntiAliasing::NvidiaDlaa ||
+               mode == Settings::OotAntiAliasing::AmdFsrNativeAa ||
+               mode == Settings::OotAntiAliasing::AmdFsrUpscale;
     }();
     return requested;
+}
+
+enum class AmdUpscaler { Fsr4, Fsr31, None };
+
+/// Which AMD upscaler takes a frame: FSR 4 once its context is ready; else FSR 3.1, whose OoT
+/// profile takes the tonemapped (LDR) image only; else none (the game's image is copied).
+constexpr AmdUpscaler PickAmdUpscaler(bool fsr4_ready, bool hdr, bool fsr31_usable) {
+    if (fsr4_ready) {
+        return AmdUpscaler::Fsr4;
+    }
+    return !hdr && fsr31_usable ? AmdUpscaler::Fsr31 : AmdUpscaler::None;
+}
+
+/// AMD's runtime offers FSR 4 for this GPU (set once the renderer checked). FSR 3.1, the
+/// fallback, only takes the tonemapped (LDR) image.
+inline std::atomic<bool>& AmdFsr4Available() {
+    static std::atomic<bool> available{};
+    return available;
 }
 
 /// DLSS output: 4K, with the 3D at 4K (DLAA) or at the game's 2560x1440 (Quality: only the
@@ -53,8 +88,9 @@ inline Settings::OotDlssOutput Output() {
         return value[0] == 'd' ? Settings::OotDlssOutput::Dlaa4k
                                : Settings::OotDlssOutput::Quality4k;
     }();
-    return override_output.value_or(Settings::values.oot_anti_aliasing.GetValue() ==
-                                            Settings::OotAntiAliasing::NvidiaDlaa
+    const auto mode = Settings::values.oot_anti_aliasing.GetValue();
+    return override_output.value_or(mode == Settings::OotAntiAliasing::NvidiaDlaa ||
+                                            mode == Settings::OotAntiAliasing::AmdFsrNativeAa
                                         ? Settings::OotDlssOutput::Dlaa4k
                                         : Settings::OotDlssOutput::Quality4k);
 }
@@ -82,7 +118,11 @@ inline float UpscaleLodBias() {
     if (override_bias) {
         return *override_bias;
     }
-    return (OutputOnlyRescale() ? std::log2(1.0f / 1.5f) : 0.0f) - 1.0f;
+    // AMD gives the same formula for FSR 3 and FSR 4 (super-resolution-upscaler.md and
+    // super-resolution-ml.md "Mipmap biasing"). The ratio is the resolution scale: the AMD
+    // upscaling mode takes any scale, DLSS Quality 1.5x.
+    const float ratio = OutputOnlyRescale() ? Settings::values.resolution_info.up_factor : 1.0f;
+    return std::log2(1.0f / (ratio > 0.0f ? ratio : 1.0f)) - 1.0f;
 }
 
 /// The 3D's images are rescaled (DLAA at 4K).
@@ -100,7 +140,8 @@ inline bool HdrInput() {
         return value != nullptr && value[0] == '0';
     }();
     return !disabled && Requested() && !OutputOnlyRescale() &&
-           Settings::GetCurrentProgramID() == ProgramId;
+           Settings::GetCurrentProgramID() == ProgramId &&
+           (!UsesAmd() || AmdFsr4Available().load(std::memory_order_relaxed));
 }
 
 /// Per-object motion vectors for DLSS (on by default with DLSS; EDEN_OOT_OBJECT_MOTION=0 turns

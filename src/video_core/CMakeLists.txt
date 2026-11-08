@@ -630,7 +630,11 @@ endif()
 # from a folder the user chooses (vulkan_common/amd_ffx.cpp). Only the MIT API headers in
 # externals/FidelityFX-API are compiled in; nothing of AMD's is linked or shipped.
 if (WIN32)
-    target_sources(video_core PRIVATE vulkan_common/amd_ffx_api.h)
+    target_sources(video_core PRIVATE
+        renderer_vulkan/vk_amd_fsr4_upscaler.cpp
+        renderer_vulkan/vk_amd_fsr4_upscaler.h
+        vulkan_common/amd_ffx_api.h
+    )
     target_include_directories(video_core PRIVATE ${CMAKE_SOURCE_DIR}/externals/FidelityFX-API)
 endif()
 

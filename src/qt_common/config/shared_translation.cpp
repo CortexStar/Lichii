@@ -214,11 +214,16 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("The Legend of Zelda: Ocarina of Time only.\nGame: the game's own anti-aliasing "
               "network, which sharpens heavily.\nNo sharpening: the image as the game renders it, "
               "without the network (faster; pairs well with a higher resolution).\nNVIDIA DLSS (4K "
-              "Quality): NVIDIA DLSS in its place, upscaling the game's 2560x1440 to 3840x2160 with "
-              "sub-pixel jitter and motion vectors.\nNVIDIA DLAA (4K): the 3D renders at 3840x2160 "
-              "and DLSS only anti-aliases it. Sharper, but slower.\nBoth DLSS modes need \"Use "
-              "NVIDIA DLSS\" on and set the resolution scale to 1.5x for the game.\nTakes effect "
-              "when the game starts."));
+              "Quality): NVIDIA DLSS in its place, upscaling the game's 2560x1440 to 3840x2160 "
+              "with sub-pixel jitter and motion vectors.\nNVIDIA DLAA (4K): the 3D renders at "
+              "3840x2160 and DLSS only anti-aliases it. Sharper, but slower.\nBoth DLSS modes need "
+              "\"Use NVIDIA DLSS\" on and set the resolution scale to 1.5x for the game.\nAMD FSR "
+              "4 Native AA: AMD's machine-learning upscaler (FP8 model on Radeon RX 9000) "
+              "anti-aliases the 3D at the resolution scale (1x: the game's own size), on the HDR "
+              "image before the tonemap. \nAMD FSR 4 upscaling: the 3D at the game's size, "
+              "upscaled by the resolution scale (1.5x unless higher is set). Both need AMD's FSR "
+              "runtime (AMD FSR runtime folder) and fall back to AMD FSR 3.1 without it.\nTakes "
+              "effect when the game starts."));
     INSERT(Settings, post_shader_chain, QString(), QString());
     INSERT(Settings, post_shader_preset, QString(), QString());
     INSERT(Settings, post_shader_enabled, tr("Enable post-processing effects"),
@@ -652,6 +657,9 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                               PAIR(OotAntiAliasing, NoSharpening, tr("No sharpening")),
                               PAIR(OotAntiAliasing, NvidiaDlss, tr("NVIDIA DLSS (4K Quality)")),
                               PAIR(OotAntiAliasing, NvidiaDlaa, tr("NVIDIA DLAA (4K)")),
+                              PAIR(OotAntiAliasing, AmdFsrNativeAa, tr("AMD FSR 4 Native AA")),
+                              PAIR(OotAntiAliasing, AmdFsrUpscale,
+                                   tr("AMD FSR 4 upscaling (ratio = resolution scale)")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::HdrMode>::Index(),
                           {

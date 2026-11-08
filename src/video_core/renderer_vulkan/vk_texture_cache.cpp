@@ -29,6 +29,8 @@
 
 #include <atomic>
 #include "video_core/gpu_logging/gpu_logging.h"
+#include "video_core/fsr.h"
+#include "video_core/oot_camera.h"
 #include "video_core/oot_dlss.h"
 #include "video_core/renderer_vulkan/vk_oot_object_motion.h"
 #include "video_core/nx2.h"
@@ -2131,30 +2133,42 @@ bool TextureCacheRuntime::OotDlss(Framebuffer* dst_framebuffer, ImageView& input
                                   std::array<f32, 2> jitter, const std::array<f32, 16>& reproject,
                                   bool flip_y, bool reset, bool hdr, ImageView* effects,
                                   ImageView* fog) {
+    const bool amd = ::VideoCommon::OotDlss::UsesAmd();
+    const VkExtent2D size{render_size[0], render_size[1]};
+    const VkExtent2D extent = dst_framebuffer->RenderArea();
+    if (amd) {
+        if (!PrepareOotAmd(size, extent, hdr)) {
+            return false;
+        }
+    } else {
 #ifdef EGLANTINE_STREAMLINE
-    if (dlss_unsupported) {
+        if (dlss_unsupported) {
+            return false;
+        }
+        if (!dlss_upscaler) {
+            if (!Streamline::IsDlssAvailable()) {
+                dlss_unsupported = true;
+                LOG_WARNING(Render_Vulkan, "OoT DLSS: NVIDIA DLSS is not available (turn on \"Use "
+                                           "NVIDIA DLSS\" in Graphics); copying the image instead");
+                return false;
+            }
+            try {
+                dlss_upscaler =
+                    std::make_unique<StreamlineDlssUpscaler>(device, scheduler, memory_allocator);
+            } catch (const vk::Exception& exception) {
+                LOG_WARNING(Render_Vulkan, "OoT DLSS: NVIDIA DLSS unavailable ({})",
+                            exception.what());
+                dlss_unsupported = true;
+                return false;
+            }
+        }
+#else
         return false;
-    }
-    if (!dlss_upscaler) {
-        if (!Streamline::IsDlssAvailable()) {
-            dlss_unsupported = true;
-            LOG_WARNING(Render_Vulkan, "OoT DLSS: NVIDIA DLSS is not available (turn on \"Use "
-                                       "NVIDIA DLSS\" in Graphics); copying the image instead");
-            return false;
-        }
-        try {
-            dlss_upscaler =
-                std::make_unique<StreamlineDlssUpscaler>(device, scheduler, memory_allocator);
-        } catch (const vk::Exception& exception) {
-            LOG_WARNING(Render_Vulkan, "OoT DLSS: NVIDIA DLSS unavailable ({})", exception.what());
-            dlss_unsupported = true;
-            return false;
-        }
+#endif
     }
     if (!oot_motion_vectors) {
         oot_motion_vectors = std::make_unique<OotMotionVectors>(device, memory_allocator);
     }
-    const VkExtent2D size{render_size[0], render_size[1]};
     VkBuffer object_pixels = VK_NULL_HANDLE;
     if (OotObjectMotion* const motion = OotObjectMotion::Get(); motion && motion->HasImage()) {
         const VkExtent2D object_size = motion->Extent();
@@ -2174,8 +2188,8 @@ bool TextureCacheRuntime::OotDlss(Framebuffer* dst_framebuffer, ImageView& input
         effects != nullptr ? effects->Handle(Shader::TextureType::Color2D) : VK_NULL_HANDLE;
     const VkImageView fog_view =
         fog != nullptr ? fog->Handle(Shader::TextureType::Color2D) : VK_NULL_HANDLE;
-    // After the tonemap, when it was drawn again without the particles: DLSS gets that image
-    // and they go on top of its output (no effects mask: they are not in its input).
+    // After the tonemap, when it was drawn again without the particles: the upscaler gets that
+    // image and they go on top of its output (no effects mask: they are not in its input).
     const auto& targets = ::VideoCommon::OotDlss::Targets();
     const bool particles_after =
         !hdr && targets.particle_frame.load(std::memory_order_relaxed) ==
@@ -2185,103 +2199,137 @@ bool TextureCacheRuntime::OotDlss(Framebuffer* dst_framebuffer, ImageView& input
         particles_after ? VK_NULL_HANDLE : effects_view, ::VideoCommon::OotDlss::MaskGain(),
         fog_view, ::VideoCommon::OotDlss::FogMaskGain(),
         input_color.Handle(Shader::TextureType::Color2D));
-    const auto image = [&](ImageView& view, VkImageView handle, VkImageAspectFlags aspect) {
-        return StreamlineDlssUpscaler::Image{
-            .view = handle,
-            .image = view.ImageHandle(),
-            .format = MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, view.format)
-                          .format,
-            .range{
-                .aspectMask = aspect,
-                .baseMipLevel = static_cast<u32>(view.range.base.level),
-                .levelCount = 1,
-                .baseArrayLayer = static_cast<u32>(view.range.base.layer),
-                .layerCount = 1,
-            },
-            .barrier_aspect = ImageAspectMask(view.format),
-        };
-    };
-    const VkExtent2D extent = dst_framebuffer->RenderArea();
-    bool upscaled{};
-    try {
-        upscaled = dlss_upscaler->Upscale({
-            .color = image(input_color, input_color.Handle(Shader::TextureType::Color2D),
-                           VK_IMAGE_ASPECT_COLOR_BIT),
-            .depth = image(depth, depth.DepthView(), VK_IMAGE_ASPECT_DEPTH_BIT),
-            .motion_vectors{
-                .view = motion_view,
-                .image = oot_motion_vectors->Image(),
-                .format = VK_FORMAT_R16G16_SFLOAT,
-                .range{
-                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                    .baseMipLevel = 0,
-                    .levelCount = 1,
-                    .baseArrayLayer = 0,
-                    .layerCount = 1,
-                },
-                .barrier_aspect = VK_IMAGE_ASPECT_COLOR_BIT,
-            },
-            .bias_mask =
-                effects_view != VK_NULL_HANDLE || fog_view != VK_NULL_HANDLE
-                    ? std::optional{StreamlineDlssUpscaler::Image{
-                          .view = oot_motion_vectors->MaskView(),
-                          .image = oot_motion_vectors->MaskImage(),
-                          .format = VK_FORMAT_R16_SFLOAT,
-                          .range{
-                              .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                              .baseMipLevel = 0,
-                              .levelCount = 1,
-                              .baseArrayLayer = 0,
-                              .layerCount = 1,
-                          },
-                          .barrier_aspect = VK_IMAGE_ASPECT_COLOR_BIT,
-                      }}
-                    : std::nullopt,
+    const bool has_mask = effects_view != VK_NULL_HANDLE || fog_view != VK_NULL_HANDLE;
+    // The tonemap's exposure for HDR colour (EDEN_OOT_DLSS_EXPOSURE=0: the upscaler's own).
+    const std::optional<f32> exposure = [&]() -> std::optional<f32> {
+        static const bool automatic = [] {
+            const char* value = std::getenv("EDEN_OOT_DLSS_EXPOSURE");
+            return value != nullptr && value[0] == '0';
+        }();
+        const f32 value =
+            ::VideoCommon::OotDlss::Targets().exposure.load(std::memory_order_relaxed);
+        if (!hdr || automatic || value <= 0.0f) {
+            return std::nullopt;
+        }
+        return value;
+    }();
+    const std::array<f32, 16> view_projection = [] {
+        auto& current = ::VideoCommon::OotDlss::CurrentCamera();
+        std::scoped_lock lock{current.mutex};
+        return current.view_projection;
+    }();
+
+    VkImageView output_view{};
+    VkImage output_image{};
+    VkSampler output_sampler{};
+    bool sharpened{};
+    if (amd) {
+        const auto camera = ::VideoCommon::OotCamera::FromViewProjection(view_projection);
+        const OotAmdOutput result = EvaluateOotAmd({
+            .color = input_color,
+            .depth = depth,
+            .motion_view = motion_view,
+            .mask = has_mask,
             .render_size = size,
             .upscale_size = extent,
             .jitter = jitter,
-            // The motion vectors are UV offsets.
-            .motion_vector_scale = {static_cast<f32>(render_size[0]),
-                                    static_cast<f32>(render_size[1])},
             .reset = reset,
-            .depth_inverted = false,
-            // Before the tonemap the colour is linear HDR; after it, display referred.
-            .color_hdr = hdr ? 1 : 0,
-            // Preset K (NVIDIA's Quality and DLAA model): 14-30% more measured detail than M in
-            // 4K Quality in Kokiri Forest.
-            .preset = 11, // sl::DLSSPreset::ePresetK
-            // HDR colour gets the tonemap's own exposure once seen (EDEN_OOT_DLSS_EXPOSURE=0:
-            // DLSS's auto exposure instead).
-            .exposure = [&]() -> std::optional<f32> {
-                static const bool automatic = [] {
-                    const char* value = std::getenv("EDEN_OOT_DLSS_EXPOSURE");
-                    return value != nullptr && value[0] == '0';
-                }();
-                const f32 exposure = ::VideoCommon::OotDlss::Targets().exposure.load(
-                    std::memory_order_relaxed);
-                if (!hdr || automatic || exposure <= 0.0f) {
-                    return std::nullopt;
-                }
-                return exposure;
-            }(),
-            .camera = [&] {
-                StreamlineDlssUpscaler::Inputs::Camera camera{
-                    .reproject = reproject, .view_projection{}, .flip_y = flip_y};
-                auto& current = ::VideoCommon::OotDlss::CurrentCamera();
-                std::scoped_lock lock{current.mutex};
-                camera.view_projection = current.view_projection;
-                return std::optional{camera};
-            }(),
+            .hdr = hdr,
+            .exposure = exposure,
+            // 50 degrees when the camera is not in the expected form (only scales FSR's
+            // depth thresholds).
+            .vertical_fov = camera ? camera->vertical_fov : 0.8726646f,
         });
-    } catch (const vk::Exception& exception) {
-        LOG_WARNING(Render_Vulkan, "OoT DLSS: evaluation unavailable ({})", exception.what());
-    }
-    if (!upscaled) {
-        dlss_unsupported = true;
-        return false;
+        if (!result.view) {
+            return false;
+        }
+        output_view = result.view;
+        output_image = result.image;
+        output_sampler = result.sampler;
+        sharpened = true;
+    } else {
+#ifdef EGLANTINE_STREAMLINE
+        const auto image = [&](ImageView& view, VkImageView handle, VkImageAspectFlags aspect) {
+            return StreamlineDlssUpscaler::Image{
+                .view = handle,
+                .image = view.ImageHandle(),
+                .format =
+                    MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, view.format)
+                        .format,
+                .range{
+                    .aspectMask = aspect,
+                    .baseMipLevel = static_cast<u32>(view.range.base.level),
+                    .levelCount = 1,
+                    .baseArrayLayer = static_cast<u32>(view.range.base.layer),
+                    .layerCount = 1,
+                },
+                .barrier_aspect = ImageAspectMask(view.format),
+            };
+        };
+        bool upscaled{};
+        try {
+            upscaled = dlss_upscaler->Upscale({
+                .color = image(input_color, input_color.Handle(Shader::TextureType::Color2D),
+                               VK_IMAGE_ASPECT_COLOR_BIT),
+                .depth = image(depth, depth.DepthView(), VK_IMAGE_ASPECT_DEPTH_BIT),
+                .motion_vectors{
+                    .view = motion_view,
+                    .image = oot_motion_vectors->Image(),
+                    .format = VK_FORMAT_R16G16_SFLOAT,
+                    .range{
+                        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                        .baseMipLevel = 0,
+                        .levelCount = 1,
+                        .baseArrayLayer = 0,
+                        .layerCount = 1,
+                    },
+                    .barrier_aspect = VK_IMAGE_ASPECT_COLOR_BIT,
+                },
+                .bias_mask = has_mask ? std::optional{StreamlineDlssUpscaler::Image{
+                                            .view = oot_motion_vectors->MaskView(),
+                                            .image = oot_motion_vectors->MaskImage(),
+                                            .format = VK_FORMAT_R16_SFLOAT,
+                                            .range{
+                                                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                                .baseMipLevel = 0,
+                                                .levelCount = 1,
+                                                .baseArrayLayer = 0,
+                                                .layerCount = 1,
+                                            },
+                                            .barrier_aspect = VK_IMAGE_ASPECT_COLOR_BIT,
+                                        }}
+                                      : std::nullopt,
+                .render_size = size,
+                .upscale_size = extent,
+                .jitter = jitter,
+                // The motion vectors are UV offsets.
+                .motion_vector_scale = {static_cast<f32>(render_size[0]),
+                                        static_cast<f32>(render_size[1])},
+                .reset = reset,
+                .depth_inverted = false,
+                // Before the tonemap the colour is linear HDR; after it, display referred.
+                .color_hdr = hdr ? 1 : 0,
+                // Preset K (NVIDIA's Quality and DLAA model): 14-30% more measured detail than
+                // M in 4K Quality in Kokiri Forest.
+                .preset = 11, // sl::DLSSPreset::ePresetK
+                .exposure = exposure,
+                .camera = StreamlineDlssUpscaler::Inputs::Camera{
+                    .reproject = reproject, .view_projection = view_projection, .flip_y = flip_y},
+            });
+        } catch (const vk::Exception& exception) {
+            LOG_WARNING(Render_Vulkan, "OoT DLSS: evaluation unavailable ({})", exception.what());
+        }
+        if (!upscaled) {
+            dlss_unsupported = true;
+            return false;
+        }
+        output_view = dlss_upscaler->OutputView();
+        output_image = dlss_upscaler->OutputImage();
+        output_sampler = dlss_upscaler->PointSampler();
+#endif
     }
     if (particles_after &&
-        !oot_motion_vectors->CompositeParticles(scheduler, dlss_upscaler->OutputView(), extent,
+        !oot_motion_vectors->CompositeParticles(scheduler, output_view, extent,
                                                 input_color.Handle(Shader::TextureType::Color2D),
                                                 size)) {
         ::VideoCommon::OotDlss::NoteFallback("particles not composited");
@@ -2294,41 +2342,185 @@ bool TextureCacheRuntime::OotDlss(Framebuffer* dst_framebuffer, ImageView& input
     }();
     if (motion_debug) {
         DrawUpscaledOutput(dst_framebuffer, motion_view, oot_motion_vectors->Image(),
-                           dlss_upscaler->PointSampler());
+                           output_sampler);
     } else if (const int strength = Settings::values.dlss_sharpening.GetValue();
-               strength > 0 && (render_size[0] != dst_framebuffer->RenderArea().width ||
-                                render_size[1] != dst_framebuffer->RenderArea().height)) {
+               !sharpened && strength > 0 &&
+               (render_size[0] != extent.width || render_size[1] != extent.height)) {
         // Not in DLAA: nothing is upscaled, and on its HDR path RCAS would sharpen linear values
         // before the tonemap.
         // AMD RCAS takes stops of sharpness reduction: 100% is full strength (0 stops), lower
         // settings take up to 2 stops off. It samples DLSS's output in GENERAL, as left.
-        const VkExtent2D out = dst_framebuffer->RenderArea();
         const Region2D region{
             .start = {0, 0},
-            .end = {static_cast<s32>(out.width), static_cast<s32>(out.height)},
+            .end = {static_cast<s32>(extent.width), static_cast<s32>(extent.height)},
         };
         const f32 stops = 2.0f * (1.0f - static_cast<f32>(std::min(strength, 100)) / 100.0f);
-        blit_image_helper.TemporalSharpen(dst_framebuffer, dlss_upscaler->OutputView(), region,
-                                          stops);
+        blit_image_helper.TemporalSharpen(dst_framebuffer, output_view, region, stops);
     } else {
-        DrawUpscaledOutput(dst_framebuffer, dlss_upscaler->OutputView(),
-                           dlss_upscaler->OutputImage(), dlss_upscaler->PointSampler());
+        DrawUpscaledOutput(dst_framebuffer, output_view, output_image, output_sampler);
     }
     static bool logged{};
     if (!std::exchange(logged, true)) {
-        LOG_INFO(Render_Vulkan, "OoT DLSS: NVIDIA DLSS {}x{} -> {}x{}, camera{} motion vectors",
-                 render_size[0], render_size[1], extent.width, extent.height,
+        LOG_INFO(Render_Vulkan, "OoT {}: {}x{} -> {}x{} ({}), camera{} motion vectors",
+                 amd ? "AMD FSR" : "DLSS", render_size[0], render_size[1], extent.width,
+                 extent.height, hdr ? "HDR before the tonemap" : "after the tonemap",
                  object_pixels != VK_NULL_HANDLE ? " and object" : "");
     }
     return true;
-#else
-    return false;
+}
+
+bool TextureCacheRuntime::PrepareOotAmd(VkExtent2D render_size, VkExtent2D upscale_size,
+                                        bool hdr) {
+    bool fsr4_ready = false;
+#ifdef _WIN32
+    if (!oot_fsr4_checked) {
+        oot_fsr4_checked = true;
+        if (AmdFsr4Upscaler::IsAvailable(device)) {
+            oot_fsr4 = std::make_unique<AmdFsr4Upscaler>(device, scheduler, memory_allocator);
+        }
+    }
+    // FSR 4 once its context is made; meanwhile FSR 3.1 (LDR) or the game's image.
+    fsr4_ready = oot_fsr4 && !oot_fsr4->Failed() &&
+                 oot_fsr4->Prepare(render_size, upscale_size, hdr);
 #endif
+    if (!fsr4_ready && !hdr && !oot_fsr3 && !oot_fsr3_unsupported) {
+        if (!Fsr3Upscaler::IsSupported(device)) {
+            LOG_WARNING(Render_Vulkan, "OoT AMD FSR 3.1: this device lacks its formats or features");
+            oot_fsr3_unsupported = true;
+        } else {
+            try {
+                oot_fsr3 = std::make_unique<Fsr3Upscaler>(
+                    device, scheduler, memory_allocator, staging_buffer_pool, descriptor_pool,
+                    compute_pass_descriptor_queue, Fsr3Upscaler::Profile::OcarinaLdr);
+            } catch (const vk::Exception& exception) {
+                LOG_WARNING(Render_Vulkan, "OoT AMD FSR 3.1 failed to start ({})",
+                            exception.what());
+                oot_fsr3_unsupported = true;
+            }
+        }
+    }
+    oot_amd_pick = ::VideoCommon::OotDlss::PickAmdUpscaler(fsr4_ready, hdr,
+                                                            oot_fsr3 && !oot_fsr3_unsupported);
+    if (oot_amd_pick == ::VideoCommon::OotDlss::AmdUpscaler::None) {
+        ::VideoCommon::OotDlss::NoteFallback(hdr ? "AMD FSR 4 not ready for the HDR image"
+                                                 : "no AMD upscaler for this device");
+        return false;
+    }
+    return true;
+}
+
+TextureCacheRuntime::OotAmdOutput TextureCacheRuntime::EvaluateOotAmd(const OotAmdInputs& in) {
+    const auto now = std::chrono::steady_clock::now();
+    const f32 frame_time_ms =
+        oot_amd_last_evaluation
+            ? std::chrono::duration<f32, std::milli>(now - *oot_amd_last_evaluation).count()
+            : 1000.0f / 60.0f;
+    // A gap in the evaluations (a menu, a movie, a load) starts the history again.
+    const bool reset = in.reset || frame_time_ms > 250.0f;
+    oot_amd_last_evaluation = now;
+    // The sharpness slider (stops x 100, 200 = off) drives AMD's own sharpening: FSR 4's pass, or
+    // FSR 3.1's RCAS. EDEN_NX2_TEMPORAL_SHARPEN=<stops>|off overrides it.
+    static const char* const sharpen_override = std::getenv("EDEN_NX2_TEMPORAL_SHARPEN");
+    f32 stops = static_cast<f32>(Settings::values.fsr_sharpening_slider.GetValue()) / 100.0f;
+    bool sharpen = stops < 2.0f;
+    if (sharpen_override) {
+        sharpen = std::string_view{sharpen_override} != "off";
+        stops = static_cast<f32>(std::strtod(sharpen_override, nullptr));
+    }
+    const f32 sharpness = FSR::RcasSharpnessFromStops(stops);
+#ifdef _WIN32
+    if (oot_amd_pick == ::VideoCommon::OotDlss::AmdUpscaler::Fsr4) {
+        // Ocarina's camera: near 0.1, far 25000 (PR #695); the depth is [0,1], not inverted.
+        constexpr f32 CAMERA_NEAR = 0.1f;
+        constexpr f32 CAMERA_FAR = 25000.0f;
+        // The texture cache sized both to the render size (rescaled with the scene in Native AA).
+        const auto layer_of = [](const ImageView& view) {
+            return static_cast<u32>(view.range.base.layer);
+        };
+        const auto format = [&](const ImageView& view) {
+            return MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, view.format)
+                .format;
+        };
+        const bool ok = oot_fsr4->Upscale({
+            .color = {in.color.ImageHandle(), format(in.color), in.render_size,
+                      layer_of(in.color)},
+            .depth = {in.depth.ImageHandle(), format(in.depth), in.render_size,
+                      layer_of(in.depth)},
+            .motion_vectors = {oot_motion_vectors->Image(), VK_FORMAT_R16G16_SFLOAT,
+                               in.render_size, 0},
+            .reactive = in.mask ? std::optional{AmdFsr4Upscaler::Image{
+                                      oot_motion_vectors->MaskImage(), VK_FORMAT_R16_SFLOAT,
+                                      in.render_size, 0}}
+                                : std::nullopt,
+            .render_size = in.render_size,
+            .upscale_size = in.upscale_size,
+            .jitter = in.jitter,
+            // The motion vectors are UV offsets; FSR takes render pixels.
+            .motion_vector_scale = {static_cast<f32>(in.render_size.width),
+                                    static_cast<f32>(in.render_size.height)},
+            .frame_time_ms = frame_time_ms,
+            .reset = reset,
+            .sharpen = sharpen,
+            .sharpness = sharpness,
+            .camera_near = CAMERA_NEAR,
+            .camera_far = CAMERA_FAR,
+            .vertical_fov = in.vertical_fov,
+            .exposure = in.exposure,
+        });
+        if (ok) {
+            return {oot_fsr4->OutputView(), oot_fsr4->OutputImage(), OotPointSampler()};
+        }
+        LOG_WARNING(Render_Vulkan, "OoT AMD FSR 4 failed; AMD FSR 3.1 from the next frame");
+        return {};
+    }
+#endif
+    if (oot_amd_pick != ::VideoCommon::OotDlss::AmdUpscaler::Fsr31) {
+        return {};
+    }
+    try {
+        oot_fsr3->Upscale({
+            .color = in.color.Handle(Shader::TextureType::Color2D),
+            .depth = in.depth.DepthView(),
+            .motion_vectors = in.motion_view,
+            .render_size = in.render_size,
+            .upscale_size = in.upscale_size,
+            .jitter = in.jitter,
+            .motion_vector_scale = {static_cast<f32>(in.render_size.width),
+                                    static_cast<f32>(in.render_size.height)},
+            .frame_time_ms = frame_time_ms,
+            .reset = reset,
+            .sharpen = sharpen,
+            .sharpness = sharpness,
+            .reactive_mask = in.mask ? oot_motion_vectors->MaskView() : VkImageView{},
+            .transparency_mask = in.mask ? oot_motion_vectors->MaskView() : VkImageView{},
+            .vertical_fov = in.vertical_fov,
+        });
+    } catch (const vk::Exception& exception) {
+        LOG_WARNING(Render_Vulkan, "OoT AMD FSR 3.1 evaluation failed ({})", exception.what());
+        oot_fsr3_unsupported = true;
+        return {};
+    }
+    return {oot_fsr3->OutputView(), oot_fsr3->OutputImage(), oot_fsr3->PointSampler()};
+}
+
+VkSampler TextureCacheRuntime::OotPointSampler() {
+    if (!oot_point_sampler) {
+        oot_point_sampler = device.GetLogical().CreateSampler(VkSamplerCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .magFilter = VK_FILTER_NEAREST,
+            .minFilter = VK_FILTER_NEAREST,
+            .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .maxAnisotropy = 1.0f,
+        });
+    }
+    return *oot_point_sampler;
 }
 
 void TextureCacheRuntime::OotSnapshotScene(VkImage image, VideoCore::Surface::PixelFormat format,
                                            std::array<u32, 2> size, u32 which, bool restore) {
-#ifdef EGLANTINE_STREAMLINE
     if (!oot_motion_vectors) {
         oot_motion_vectors = std::make_unique<OotMotionVectors>(device, memory_allocator);
     }
@@ -2336,7 +2528,6 @@ void TextureCacheRuntime::OotSnapshotScene(VkImage image, VideoCore::Surface::Pi
         scheduler, image,
         MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, format).format,
         VkExtent2D{size[0], size[1]}, which, restore);
-#endif
 }
 
 bool TextureCacheRuntime::TemporalUpscale(Framebuffer* dst_framebuffer, ImageView& dst,

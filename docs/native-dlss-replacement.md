@@ -72,6 +72,40 @@ docs/nx2/oot-motion-vectors-plan.md.
   (no sharpening). Every 600 frames the log counts the reasons
   (`OoT DLSS: fallbacks to a copy in the last 600 frames: ...`).
 
+### AMD FSR 4 and AMD FSR 3.1 (Ocarina of Time)
+
+The two AMD modes feed the same jitter, motion vectors, masks, exposure and particle handling to
+AMD's upscalers instead of DLSS, on any vendor's build (no Streamline):
+
+- **AMD FSR 4 Native AA** (`AmdFsrNativeAa`): like DLAA, the 3D renders at the resolution scale
+  and FSR 4 anti-aliases it 1:1 on the HDR scene colour before the tonemap. At 1x this is the
+  game's own size (2560x1440 docked), which fills a 1440p display's 16:9 area and also fits a
+  native 3440x1440 render: the output is always the network's output image at the scale,
+  nothing is hard-coded to 4K.
+- **AMD FSR 4 upscaling** (`AmdFsrUpscale`): like DLSS Quality, the 3D stays at the game's size and
+  FSR upscales the tonemapped image by the resolution scale (1.5x unless a higher scale is set;
+  the scale is the upscale ratio).
+- **Backends:** AMD FSR 4 through AMD's runtime DLLs ("AMD FSR runtime folder", see
+  `vulkan_common/amd_ffx.h`) when it offers FSR 4 for the GPU; the provider picks the model
+  (FP8 on Radeon RX 9000). Its context is created on a worker thread; until it is ready, and
+  without the DLLs, the in-tree AMD FSR 3.1 runs with PR #695's OoT profile (tonemapped colour,
+  finite standard depth near 0.1 / far 25000, unit exposure; HDR input is then off, see
+  `OotDlss::HdrInput`). `EDEN_FFX_UPSCALER=<version name part>` pins an FSR version.
+- **Sharpening:** AMD's own pass, set by the RCAS sharpness slider (`fsr_sharpening_slider`, 0%
+  off): FSR 4's sharpening or FSR 3.1's RCAS. Lichii's RCAS on top (DLSS Sharpness) is not used.
+- **Masks:** the effects/fog bias mask (fairy glow, fireflies, dust, fog) goes to FSR 4 as its
+  reactive mask and to FSR 3.1 as reactive and transparency/composition masks. Particles drawn
+  after the upscaler (the tonemap redraw path) never enter its history.
+- **LOD bias:** AMD's log2(render / display) - 1 (super-resolution-ml.md "Mipmap biasing"), with
+  the resolution scale as the ratio in the upscaling mode, -1 in Native AA.
+- **HUD:** the game draws its HUD after the network, on the upscaler's output, so text never goes
+  through FSR.
+
+What to look for in captures, A/B against Game and NVIDIA DLAA where available: shimmer on
+Kokiri Forest's grass and leaves during a slow pan; ghosting behind Link when he runs across a
+textured wall; trails behind Navi and the fireflies at night; stability of thin fences and
+ropes; HUD and dialogue text edges; water edges.
+
 Shader hashes, program keys and constant buffer offsets are those of the game's current build;
 a game update needs them re-checked. While either DLSS mode is selected, No sharpening
 (docs/nx2/oot-network-bypass.md) steps aside: DLSS replaces the same output pass.

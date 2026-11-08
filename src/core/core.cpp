@@ -485,8 +485,16 @@ struct System::Impl {
         // Ocarina of Time with NVIDIA DLSS outputs 4K: the game's 2560x1440 at 1.5x (only the
         // output side when DLSS upscales from 1440p, see video_core/oot_dlss.h). Per-game value,
         // so the saved configuration is untouched; EDEN_RES_SETUP still wins.
+        // The AMD modes keep the chosen scale: Native AA anti-aliases at it (1x: the game's
+        // size, so it fits any display), upscaling needs one above 1x (the ratio, 1.5x = Quality).
+        const bool amd_upscale = VideoCommon::OotDlss::UsesAmd() &&
+                                 VideoCommon::OotDlss::Output() ==
+                                     Settings::OotDlssOutput::Quality4k &&
+                                 Settings::values.resolution_setup.GetValue() <=
+                                     Settings::ResolutionSetup::Res1X;
         if (params.program_id == VideoCommon::OotDlss::ProgramId &&
-            VideoCommon::OotDlss::Requested() && std::getenv("EDEN_RES_SETUP") == nullptr) {
+            VideoCommon::OotDlss::Requested() && std::getenv("EDEN_RES_SETUP") == nullptr &&
+            (!VideoCommon::OotDlss::UsesAmd() || amd_upscale)) {
             LOG_INFO(Core, "Ocarina of Time DLSS: 4K output ({}), resolution scale 1.5x",
                      VideoCommon::OotDlss::Output() == Settings::OotDlssOutput::Dlaa4k
                          ? "DLAA"

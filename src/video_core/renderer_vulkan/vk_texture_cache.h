@@ -18,9 +18,13 @@
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
 #include "video_core/renderer_vulkan/vk_dlss_network_probe.h"
 #include "video_core/renderer_vulkan/vk_fsr3_upscaler.h"
+#include "video_core/oot_dlss.h"
 #include "video_core/renderer_vulkan/vk_oot_motion_vectors.h"
 #ifdef EGLANTINE_STREAMLINE
 #include "video_core/renderer_vulkan/vk_streamline_dlss.h"
+#endif
+#ifdef _WIN32
+#include "video_core/renderer_vulkan/vk_amd_fsr4_upscaler.h"
 #endif
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
@@ -295,8 +299,43 @@ public:
                          std::array<f32, 2> motion_scale, bool reset);
     std::unique_ptr<StreamlineDlssUpscaler> dlss_upscaler;
     bool dlss_unsupported{};
-    std::unique_ptr<OotMotionVectors> oot_motion_vectors;
 #endif
+    std::unique_ptr<OotMotionVectors> oot_motion_vectors;
+
+    /// Ocarina of Time's AMD modes: AMD FSR 4 through AMD's runtime when it has one for the GPU,
+    /// else (and while FSR 4's context is being made) the in-tree FSR 3.1 on the tonemapped
+    /// image (OoT profile from PR #695).
+    struct OotAmdInputs {
+        ImageView& color;
+        ImageView& depth;
+        VkImageView motion_view;
+        bool mask; ///< OotMotionVectors' bias mask holds this frame's effects
+        VkExtent2D render_size;
+        VkExtent2D upscale_size;
+        std::array<f32, 2> jitter;
+        bool reset;
+        bool hdr;
+        std::optional<f32> exposure;
+        f32 vertical_fov;
+    };
+    struct OotAmdOutput {
+        VkImageView view{};
+        VkImage image{};
+        VkSampler sampler{};
+    };
+    /// Creates the AMD upscalers; false when none can take this frame (the caller copies).
+    bool PrepareOotAmd(VkExtent2D render_size, VkExtent2D upscale_size, bool hdr);
+    OotAmdOutput EvaluateOotAmd(const OotAmdInputs& in);
+    VkSampler OotPointSampler();
+    ::VideoCommon::OotDlss::AmdUpscaler oot_amd_pick{};
+    std::unique_ptr<Fsr3Upscaler> oot_fsr3;
+    bool oot_fsr3_unsupported{};
+#ifdef _WIN32
+    std::unique_ptr<AmdFsr4Upscaler> oot_fsr4;
+    bool oot_fsr4_checked{};
+#endif
+    vk::Sampler oot_point_sampler;
+    std::optional<std::chrono::steady_clock::time_point> oot_amd_last_evaluation;
 
     /// TemporalUpscale's history: its previous result (images[current]) and the image the next
     /// result is stored to.
