@@ -220,3 +220,47 @@ TEST_CASE("A host function replaces a guest function and its guest code runs if 
     CHECK(env.host_function_queries == 2);
     CHECK(host.calls == 5);
 }
+namespace {
+u32 Crc32IsoReference(u32 crc, u64 value, int bytes) {
+    for (int i = 0; i < bytes; ++i) {
+        crc ^= static_cast<u8>(value >> (8 * i));
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ ((crc & 1) != 0 ? 0xEDB88320U : 0U);
+        }
+    }
+    return crc;
+}
+} // namespace
+
+TEST_CASE("CRC32B and CRC32H are exact for every input byte and halfword", "[guest_cpu]") {
+    GuestEnvironment env;
+    // crc32b w0, w0, w1; svc #0; crc32h w0, w0, w1; svc #0
+    env.Load({0x1AC14000, Svc0, 0x1AC14400, Svc0});
+    Dynarmic::A64::Jit jit{BaseConfig(env)};
+    env.jit = &jit;
+    XorShift rng{777};
+    const auto run = [&](u64 pc, u32 crc, u64 data) {
+        jit.SetRegister(0, crc);
+        // Bits above the operand are ignored.
+        jit.SetRegister(1, data);
+        jit.SetPC(pc);
+        jit.Run();
+        return jit.GetRegister(0);
+    };
+    u32 mismatches = 0;
+    for (u32 byte = 0; byte < 256; ++byte) {
+        for (int trial = 0; trial < 512; ++trial) {
+            const u32 crc = trial == 0 ? 0 : trial == 1 ? ~0U : static_cast<u32>(rng.Next());
+            const u64 data = (rng.Next() << 8) | byte;
+            mismatches += run(Entry, crc, data) != Crc32IsoReference(crc, byte, 1);
+        }
+    }
+    for (u32 half = 0; half < 0x10000; ++half) {
+        for (int trial = 0; trial < 8; ++trial) {
+            const u32 crc = trial == 0 ? 0 : trial == 1 ? ~0U : static_cast<u32>(rng.Next());
+            const u64 data = (rng.Next() << 16) | half;
+            mismatches += run(Entry + 8, crc, data) != Crc32IsoReference(crc, half, 2);
+        }
+    }
+    CHECK(mismatches == 0);
+}

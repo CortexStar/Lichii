@@ -7,6 +7,7 @@
  */
 
 #include <array>
+#include <bit>
 #include <climits>
 
 #include "dynarmic/backend/x64/block_of_code.h"
@@ -37,38 +38,46 @@ static void EmitCRC32Castagnoli(BlockOfCode& code, EmitContext& ctx, IR::Inst* i
     }
 }
 
+// Byte-at-a-time table of the reflected ISO polynomial: crc' = table[(crc ^ byte) & 0xFF] ^ (crc >> 8).
+constexpr std::array<u32, 256> crc32_iso_table = [] {
+    std::array<u32, 256> table{};
+    for (u32 i = 0; i < 256; ++i) {
+        u32 crc = i;
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ ((crc & 1) != 0 ? 0xEDB88320U : 0U);
+        }
+        table[i] = crc;
+    }
+    return table;
+}();
+
 static void EmitCRC32ISO(BlockOfCode& code, EmitContext& ctx, IR::Inst* inst, const int data_size) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
 
-    if (code.HasHostFeature(HostFeature::PCLMULQDQ) && data_size < 32) {
+    if (data_size < 32) {
+        // CRC32B/CRC32H: one table lookup per byte. A loop over a buffer is a chain through crc,
+        // and this step is a load and two ALU ops on it instead of the PCLMULQDQ reduction's
+        // ~15-cycle chain.
         const Xbyak::Reg32 crc = ctx.reg_alloc.UseScratchGpr(code, args[0]).cvt32();
-        const Xbyak::Reg64 value = ctx.reg_alloc.UseScratchGpr(code, args[1]);
-        const Xbyak::Xmm xmm_value = ctx.reg_alloc.ScratchXmm(code);
-        const Xbyak::Xmm xmm_const = ctx.reg_alloc.ScratchXmm(code);
-        const Xbyak::Xmm xmm_tmp = ctx.reg_alloc.ScratchXmm(code);
-
-        code.movdqa(xmm_const, code.Const(xword, 0xb4e5b025'f7011641, 0x00000001'DB710641));
-
-        code.movzx(value.cvt32(), value.changeBit(data_size));
-        code.xor_(value.cvt32(), crc);
-        code.movd(xmm_tmp, value.cvt32());
-        code.pslldq(xmm_tmp, (64 - data_size) / 8);
-
-        if (code.HasHostFeature(HostFeature::AVX)) {
-            code.vpclmulqdq(xmm_value, xmm_tmp, xmm_const, 0x00);
-            code.pclmulqdq(xmm_value, xmm_const, 0x10);
-            code.pxor(xmm_value, xmm_tmp);
+        const Xbyak::Reg32 value = ctx.reg_alloc.UseScratchGpr(code, args[1]).cvt32();
+        const Xbyak::Reg64 table = ctx.reg_alloc.ScratchGpr(code);
+        const Xbyak::Reg64 index = ctx.reg_alloc.ScratchGpr(code);
+        code.mov(table, std::bit_cast<u64>(crc32_iso_table.data()));
+        if (data_size == 8) {
+            code.movzx(value, value.cvt8());
         } else {
-            code.movdqa(xmm_value, xmm_tmp);
-            code.pclmulqdq(xmm_value, xmm_const, 0x00);
-            code.pclmulqdq(xmm_value, xmm_const, 0x10);
-            code.pxor(xmm_value, xmm_tmp);
+            code.movzx(value, value.cvt16());
         }
-
-        code.pextrd(crc, xmm_value, 2);
-
+        // x = crc ^ data. A byte step on x leaves the next data byte in its low byte, so the
+        // halfword is two steps of x' = table[x & 0xFF] ^ (x >> 8).
+        code.xor_(crc, value);
+        for (int step = 0; step < data_size / 8; ++step) {
+            code.movzx(index.cvt32(), crc.cvt8());
+            code.shr(crc, 8);
+            code.xor_(crc, dword[table + index * 4]);
+        }
         ctx.reg_alloc.DefineValue(code, inst, crc);
-    } else  if (code.HasHostFeature(HostFeature::PCLMULQDQ) && data_size == 32) {
+    } else if (code.HasHostFeature(HostFeature::PCLMULQDQ) && data_size == 32) {
         const Xbyak::Reg32 crc = ctx.reg_alloc.UseScratchGpr(code, args[0]).cvt32();
         const Xbyak::Reg32 value = ctx.reg_alloc.UseGpr(code, args[1]).cvt32();
         const Xbyak::Xmm xmm_value = ctx.reg_alloc.ScratchXmm(code);
