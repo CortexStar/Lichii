@@ -368,6 +368,11 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkGetDescriptorSetLayoutBindingOffsetEXT vkGetDescriptorSetLayoutBindingOffsetEXT{};
     PFN_vkGetDescriptorEXT vkGetDescriptorEXT{};
     PFN_vkCmdBindDescriptorBuffersEXT vkCmdBindDescriptorBuffersEXT{};
+    PFN_vkWriteResourceDescriptorsEXT vkWriteResourceDescriptorsEXT{};
+    PFN_vkWriteSamplerDescriptorsEXT vkWriteSamplerDescriptorsEXT{};
+    PFN_vkCmdBindResourceHeapEXT vkCmdBindResourceHeapEXT{};
+    PFN_vkCmdBindSamplerHeapEXT vkCmdBindSamplerHeapEXT{};
+    PFN_vkCmdPushDataEXT vkCmdPushDataEXT{};
     PFN_vkCmdSetDescriptorBufferOffsetsEXT vkCmdSetDescriptorBufferOffsetsEXT{};
     PFN_vkUpdateDescriptorSets vkUpdateDescriptorSets{};
     PFN_vkCreatePipelineBinariesKHR vkCreatePipelineBinariesKHR{};
@@ -1180,6 +1185,20 @@ public:
         dld->vkGetDescriptorEXT(handle, &info, size, descriptor);
     }
 
+    /// Writes resource descriptors for VK_EXT_descriptor_heap at host addresses.
+    void WriteResourceDescriptorsEXT(Span<VkResourceDescriptorInfoEXT> resources,
+                                     const VkHostAddressRangeEXT* descriptors) const {
+        Check(dld->vkWriteResourceDescriptorsEXT(handle, resources.size(), resources.data(),
+                                                 descriptors));
+    }
+
+    /// Writes sampler descriptors for VK_EXT_descriptor_heap at host addresses.
+    void WriteSamplerDescriptorsEXT(Span<VkSamplerCreateInfo> samplers,
+                                    const VkHostAddressRangeEXT* descriptors) const {
+        Check(dld->vkWriteSamplerDescriptorsEXT(handle, samplers.size(), samplers.data(),
+                                                descriptors));
+    }
+
     VkResult AcquireNextImageKHR(VkSwapchainKHR swapchain, u64 timeout, VkSemaphore semaphore,
                                  VkFence fence, u32* image_index) const noexcept {
         return dld->vkAcquireNextImageKHR(handle, swapchain, timeout, semaphore, fence,
@@ -1527,6 +1546,24 @@ public:
 
     void BindDescriptorBuffersEXT(Span<VkDescriptorBufferBindingInfoEXT> bindings) const noexcept {
         dld->vkCmdBindDescriptorBuffersEXT(handle, bindings.size(), bindings.data());
+    }
+
+    void BindResourceHeapEXT(const VkBindHeapInfoEXT& info) const noexcept {
+        dld->vkCmdBindResourceHeapEXT(handle, &info);
+    }
+
+    void BindSamplerHeapEXT(const VkBindHeapInfoEXT& info) const noexcept {
+        dld->vkCmdBindSamplerHeapEXT(handle, &info);
+    }
+
+    void PushDataEXT(u32 offset, const void* data, size_t size) const noexcept {
+        const VkPushDataInfoEXT info{
+            .sType = VK_STRUCTURE_TYPE_PUSH_DATA_INFO_EXT,
+            .pNext = nullptr,
+            .offset = offset,
+            .data = {.address = data, .size = size},
+        };
+        dld->vkCmdPushDataEXT(handle, &info);
     }
 
     void SetDescriptorBufferOffsetsEXT(VkPipelineBindPoint bind_point, VkPipelineLayout layout,
