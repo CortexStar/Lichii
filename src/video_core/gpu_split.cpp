@@ -506,6 +506,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     u64 read_position = 0;
     // Counts across batches, so a stream of short batches still checks hook requests.
     u32 entries = 0;
+    const bool profiling = Nx2Profile::Enabled();
     while (!stop_token.stop_requested()) {
         Nx2Profile::Report("GPU back thread");
         u64 available = published.load(std::memory_order_acquire);
@@ -521,6 +522,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             }
             if (available == read_position && idle_hook != nullptr) {
                 hook_requested.store(false, std::memory_order_seq_cst);
+                Nx2Profile::Scope hook_scope{Nx2Profile::Zone::IdleHook};
                 idle_hook(idle_argument);
                 available = published.load(std::memory_order_acquire);
             }
@@ -542,6 +544,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         if (back_idle.load(std::memory_order_relaxed)) {
             back_idle.store(false, std::memory_order_relaxed);
         }
+        Nx2Profile::Scope ring_scope{Nx2Profile::Zone::RingDecode};
         u64 last_store = read_position;
         // Prefetch the ring lines ahead of the entry, up to a line short of what the front
         // published (a line it may still be writing would only bounce between the two cores). The
@@ -558,11 +561,17 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             }
             const size_t size =
                 Execute(&ring[index], std::min<u64>(available - read_position, RingWords - index));
-            read_position += size != 0 ? size : RingWords - index;
+            const size_t advance = size != 0 ? size : RingWords - index;
+            read_position += advance;
+            if (profiling) [[unlikely]] {
+                Nx2Profile::Add(Nx2Profile::Counter::RingEntries, size != 0 ? 1 : 0);
+                Nx2Profile::Add(Nx2Profile::Counter::RingWords, advance);
+            }
             // The hook request (another thread's cache line) every 4 entries.
             if ((++entries & 3) == 0 && hook_requested.load(std::memory_order_relaxed) &&
                 idle_hook != nullptr) [[unlikely]] {
                 hook_requested.store(false, std::memory_order_seq_cst);
+                Nx2Profile::Scope hook_scope{Nx2Profile::Zone::IdleHook};
                 idle_hook(idle_argument);
             }
             // Hand ring space back now and then while working through a long batch, and at once
