@@ -796,7 +796,9 @@ struct Values {
     SwitchableSetting<bool> gpu_unswizzle_enabled{linkage, false, "gpu_unswizzle_enabled",
                                                   Category::RendererHacks};
 
-    SwitchableSetting<bool> pin_gpu_threads{linkage, true, "pin_gpu_threads",
+    // Off by default: hard CPU-set pinning keeps the pinned threads on their cores while other
+    // processes use them too (9800X3D under background load: 12.3 fps pinned, 216 unpinned).
+    SwitchableSetting<bool> pin_gpu_threads{linkage, false, "pin_gpu_threads",
                                             Category::RendererHacks};
 
     SwitchableSetting<ExtendedDynamicState> dyna_state{linkage,
