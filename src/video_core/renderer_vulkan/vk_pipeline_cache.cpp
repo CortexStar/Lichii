@@ -1596,6 +1596,11 @@ void PipelineCache::StartComputeWarm(u64 title_id) {
                     WriteWarmMarker(warm_file, title_file, device, file_entries);
                 }
                 compute_warm_done = true;
+                if (!stop.stop_requested()) {
+                    // Without this, the stage's builds reach the file only at the next boot,
+                    // game change or clean close, and are lost if the app ends otherwise.
+                    QueueVulkanPipelineCacheSave();
+                }
                 LOG_INFO(Render_Vulkan,
                          "Nx2Perf compute_warm: finished, {} built, {} failed, {} not reached, "
                          "{:.0f} s",
@@ -1772,6 +1777,9 @@ void PipelineCache::StartGraphicsWarm(u64 title_id) {
                 }
                 if (complete && !stop.stop_requested() && !warm_cancel) {
                     WriteWarmMarker(warm_file, title_file, device, reader->read);
+                }
+                if (!stop.stop_requested()) {
+                    QueueVulkanPipelineCacheSave();
                 }
                 LOG_INFO(Render_Vulkan,
                          "Nx2Perf graphics_warm: finished, {} built, {} failed, {:.0f} s",
@@ -2038,6 +2046,23 @@ void PipelineCache::QueueVulkanPipelineCacheFlush() {
         vulkan_pipeline_cache.Read(&size, nullptr);
         last_cache_size.store(size, std::memory_order_relaxed);
         flush_in_flight.store(false, std::memory_order_release);
+    });
+}
+
+void PipelineCache::QueueVulkanPipelineCacheSave() {
+    if (!use_vulkan_pipeline_cache || vulkan_pipeline_cache_filename.empty()) {
+        return;
+    }
+    // Not skipped when a timed flush is in flight: that one may have read the cache before the
+    // stage's last builds. The serialization thread runs the two one after the other.
+    serialization_thread.QueueWork([this] {
+        SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
+                                     CACHE_VERSION);
+        size_t size = 0;
+        vulkan_pipeline_cache.Read(&size, nullptr);
+        last_cache_size.store(size, std::memory_order_relaxed);
+        LOG_INFO(Render_Vulkan, "Nx2Perf: driver pipeline cache saved after a warm-up, {} bytes",
+                 size);
     });
 }
 
