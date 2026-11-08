@@ -361,6 +361,12 @@ struct UserConfig {
     /// per guest call.
     bool host_call_return = false;
 
+    /// x64 only, with FastDispatch. Every BR/BLR (and every RET that misses host_call_return)
+    /// site gets a one-entry cache of its last target, compared and jumped through in place,
+    /// so each site has its own indirect jump for the CPU to predict; a miss takes the fast
+    /// dispatcher and refills the entry.
+    bool indirect_branch_cache = false;
+
     /// This option relates to translation. Generally when we run into an unpredictable
     /// instruction the ExceptionRaised callback is called. If this is true, we define
     /// definite behaviour for some unpredictable instructions.

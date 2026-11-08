@@ -735,6 +735,10 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
         // address: the CPU's return predictor predicts guest returns instead of one shared
         // indirect jump through the return stack buffer (multicore only, no cycle counter).
         config.host_call_return = !config.enable_cycle_counting;
+        // Every BR/BLR site jumps through its own cache of its last target, so each site has its
+        // own indirect jump for the branch predictor (virtual calls) instead of all sharing the
+        // fast dispatcher's; sites that keep changing target are patched to the dispatcher.
+        config.indirect_branch_cache = true;
     }
 #endif
     m_jit.emplace(config);
