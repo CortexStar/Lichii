@@ -2911,6 +2911,14 @@ bool RasterizerVulkan::UsesNvidiaDlss() const {
     return texture_cache_runtime.UsesNvidiaDlss();
 }
 
+bool RasterizerVulkan::EmulatesNativeTensorPrograms() const {
+    // Intel's software tensor expansion can stall compilation. Use the upscale stand-in on
+    // both Intel drivers; native tensor hardware support is a separate backend.
+    const auto driver = device.GetDriverID();
+    return driver != VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA &&
+           driver != VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS;
+}
+
 bool RasterizerVulkan::SupportsGameDlssNetwork() const {
     // Compute pipelines are created 32 threads wide where the device can be told to.
     return device.IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT);
