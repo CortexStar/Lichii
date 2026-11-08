@@ -1063,6 +1063,8 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
             ? std::chrono::duration<f32, std::milli>(now - *state.last_evaluation).count() : 16.67f;
         const f32 sharpness = FSR::RcasSharpnessFromStops(
             static_cast<f32>(Settings::values.fsr_sharpening_slider.GetValue()) / 100.0f);
+        // Taking over from FSR 4: FSR 3.1 has no history of the frames FSR 4 drew.
+        const bool fsr_reset = reset || elapsed > 250.0f || state.output_fsr4;
         state.fsr->Upscale({
             .color = *resources.color_view,
             .depth = depth,
@@ -1072,7 +1074,7 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
             .jitter = jitter,
             .motion_vector_scale = {1.0f, 1.0f},
             .frame_time_ms = elapsed,
-            .reset = reset || elapsed > 250.0f,
+            .reset = fsr_reset,
             .sharpen = sharpness > 0.0f,
             .sharpness = sharpness,
             .reactive_mask = bias_view,
@@ -1081,12 +1083,12 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
         });
         state.last_evaluation = now;
         static const bool trace = std::getenv("EDEN_NX2_DLSS_CONTRACT_TRACE") != nullptr;
-        if (trace || frame % 120 == 0 || reset) {
+        if (trace || frame % 120 == 0 || fsr_reset) {
             LOG_INFO(Render_Vulkan,
                      "Ocarina FSR 3.1 evaluated frame={} {}x{} -> {}x{} reset={} effects={} "
                      "jitter=({:.3f},{:.3f})",
                      frame, extent.width, extent.height, output_extent.width, output_extent.height,
-                     reset || elapsed > 250.0f, bias_view != VK_NULL_HANDLE, jitter[0], jitter[1]);
+                     fsr_reset, bias_view != VK_NULL_HANDLE, jitter[0], jitter[1]);
         }
     }
     state.output_fsr4 = used_fsr4;
