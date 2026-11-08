@@ -278,7 +278,15 @@ std::optional<s64> CoreTiming::Advance() {
     while (!event_queue.empty() && event_queue.top().time <= global_timer) {
         const Event& evt = event_queue.top();
 
-        if (const auto event_type{evt.type.lock()}) {
+        const auto event_type{evt.type.lock()};
+        if (!event_type) {
+            // Its type is gone (destroyed without UnscheduleEvent): drop it. Left at the top, the
+            // loop would spin here for good, holding the lock every ScheduleEvent needs.
+            event_queue.pop();
+            global_timer = GetGlobalTimeNs().count();
+            continue;
+        }
+        {
             const auto evt_time = evt.time;
             const auto evt_sequence_num = event_type->sequence_number;
 

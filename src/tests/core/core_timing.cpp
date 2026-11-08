@@ -171,3 +171,23 @@ TEST_CASE("CoreTiming[ClockTicksCpuClock]", "[core]") {
     Settings::values.cpu_clock.SetValue(Settings::CpuClock::Normal);
     Settings::SetCurrentProgramIsSwitch2(false);
 }
+
+TEST_CASE("CoreTiming[DroppedEventType]", "[core]") {
+    // An event whose type is destroyed while it is queued is dropped when it falls due; it used
+    // to stay at the top of the queue and keep Advance looping forever.
+    Core::Timing::CoreTiming core_timing;
+    core_timing.SetMulticore(false);
+    bool later_ran = false;
+    auto gone = Core::Timing::CreateEvent(
+        "gone", [](s64, std::chrono::nanoseconds) { return std::nullopt; });
+    const auto later = Core::Timing::CreateEvent("later", [&](s64, std::chrono::nanoseconds) {
+        later_ran = true;
+        return std::nullopt;
+    });
+    core_timing.ScheduleEvent(std::chrono::nanoseconds{0}, gone);
+    core_timing.ScheduleEvent(std::chrono::nanoseconds{1}, later);
+    gone.reset();
+    core_timing.AddTicks(1'000'000);
+    REQUIRE_FALSE(core_timing.Advance().has_value());
+    REQUIRE(later_ran);
+}
