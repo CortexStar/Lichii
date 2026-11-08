@@ -248,6 +248,31 @@ public:
     void PublishSoon() {
         publish_every = PublishAfterWait;
     }
+    /// Keeps the entries the front sends unpublished while it notes what they write from guest
+    /// memory as the back will find it running them (the QMD view: descriptors, and the words
+    /// maxima and reductions combine with). An idle back gets a published entry at once and may
+    /// run it before the front reads, which then reads what the entry wrote. While `hold`, Commit
+    /// publishes nothing; Publish (drains, waits, a full ring) still does.
+    class PublishHold {
+    public:
+        PublishHold(GpuSplit& split_, bool hold) : split{split_}, was_held{split_.publish_held} {
+            if (hold) {
+                split.publish_held = true;
+            }
+        }
+        ~PublishHold() {
+            if (split.publish_held != was_held) {
+                split.publish_held = was_held;
+                split.PublishIfDue();
+            }
+        }
+        PublishHold(const PublishHold&) = delete;
+        PublishHold& operator=(const PublishHold&) = delete;
+
+    private:
+        GpuSplit& split;
+        bool was_held;
+    };
     /// Waits until the back executed everything sent so far.
     void Drain(DrainSite site = DrainSite::Other);
 
@@ -457,16 +482,29 @@ private:
             NoteFirstUnpublished(); // TEST
         }
         write_position += words;
+        if (PublishDue() && !publish_held) {
+            PublishNow();
+        }
+    }
+    /// Whether Commit publishes now.
+    [[nodiscard]] bool PublishDue() const {
         const u64 unpublished = write_position - published_local;
         // The back waits for work at the last position published (it stored it in back_idle_at
         // before it spun): it gets these words after a few, not after publish_every.
-        if (unpublished >= publish_every ||
-            (unpublished >= PublishAfterWait &&
-             back_idle_at.load(std::memory_order_relaxed) == published_local)) {
-            if (profile_publishes && unpublished < publish_every) [[unlikely]] {
-                NoteEarlyPublish(); // TEST
-            }
-            Publish();
+        return unpublished >= publish_every ||
+               (unpublished >= PublishAfterWait &&
+                back_idle_at.load(std::memory_order_relaxed) == published_local);
+    }
+    void PublishNow() {
+        if (profile_publishes && write_position - published_local < publish_every) [[unlikely]] {
+            NoteEarlyPublish(); // TEST
+        }
+        Publish();
+    }
+    /// What Commit would have published during a PublishHold.
+    void PublishIfDue() {
+        if (PublishDue()) {
+            PublishNow();
         }
     }
     /// TEST (EDEN_NX2_GPU_PROFILE): how long the back waited for work while the front held words
@@ -541,6 +579,8 @@ private:
     std::array<u64, size_t{1} << WriteSlotBits> write_positions{};
     std::array<u64, size_t{1} << CoarseSlotBits> coarse_positions{};
     u64 published_local{};
+    /// PublishHold: Commit publishes nothing.
+    bool publish_held{};
     u64 consumed_cache{};
     u64 first_unpublished_ticks{}; ///< TEST: when the first word not published yet was sent
     /// Words between publishes: small right after the front waited for the back (Drain,

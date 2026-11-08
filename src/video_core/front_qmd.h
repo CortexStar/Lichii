@@ -31,8 +31,10 @@ namespace VideoCommon {
 ///   (Nx2MayBeGpuWritten);
 /// - from the inline QMD a LOAD_INLINE_QMD_DATA still queued writes there, when that is the last
 ///   write sent there (NoteInlineWrite).
-/// No change of the GPU's mappings may be queued either (GpuSplit::LastMappingChange). Where the
-/// front can't tell what the back reads, its table may no longer be the back's: it stops valuing,
+/// No change of the GPU's mappings may be queued either (GpuSplit::LastMappingChange). Memory holds
+/// what the back finds there only while the back has not run the signal's entry yet: the front
+/// sends and values it under a GpuSplit::PublishHold. Where the front can't tell what the back
+/// reads, its table may no longer be the back's: it stops valuing,
 /// the launches count as writing guest memory anywhere, and it takes the back's table over again
 /// the next time the back has run everything sent, between commands or at a QMD method
 /// (MaybeTakeOver).
@@ -123,7 +125,8 @@ public:
 
     /// The scheduling of PCAS action `argument` on the QMD at `address` that the back runs at the
     /// entry just sent (KeplerCompute::ProcessNativeMethod); `inline_qmd`: the QMD it writes there
-    /// right before. Notes what the launches it runs release.
+    /// right before. Notes what the launches it runs release. The entry must still be unpublished
+    /// (GpuSplit::PublishHold): the back must not have run it.
     template <typename Memory>
     void Signal(GpuSplit& split, const Memory& memory, GPUVAddr address, u32 argument,
                 const Descriptor* inline_qmd) {
@@ -319,7 +322,9 @@ private:
 
     /// The word the back finds at `address` (`device`) when it runs the entry just sent, where
     /// the front knows it: the last release sent there, if nothing sent since may have written
-    /// over it, else memory, once the back ran every write sent there.
+    /// over it, else memory, once the back ran every write sent there before the entry. The entry
+    /// itself is held unpublished (PublishHold): an idle back that ran it before this read would
+    /// leave its own increment in memory, and the front would count it twice.
     template <typename Memory>
     [[nodiscard]] std::optional<u32> WordAt(const GpuSplit& split, const Memory& memory,
                                             GPUVAddr address, u64 device) const {

@@ -154,6 +154,7 @@ void GpuSplit::Stop() {
     write_positions.fill(0);
     coarse_positions.fill(0);
     published_local = 0;
+    publish_held = false;
     consumed_cache = 0;
     publish_every = PublishEvery;
     front_engine = nullptr;
