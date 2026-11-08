@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -18,6 +19,14 @@ DescriptorBufferRing::DescriptorBufferRing(const Device& device_,
     if (!device.IsExtDescriptorBufferSupported() || !device.IsBufferDeviceAddressSupported()) {
         return;
     }
+    // EXPERIMENT (do not merge): EDEN_NX2_EXP_DESCRIPTOR_BUFFER=0 keeps every pipeline on push
+    // descriptors and descriptor sets, for the A/B that names the descriptor buffer path.
+    if (const char* const value = std::getenv("EDEN_NX2_EXP_DESCRIPTOR_BUFFER");
+        value != nullptr && value[0] == '0') {
+        LOG_INFO(Render_Vulkan, "Descriptor buffers: off (EDEN_NX2_EXP_DESCRIPTOR_BUFFER=0)");
+        return;
+    }
+    LOG_INFO(Render_Vulkan, "Descriptor buffers: on for layouts past the push descriptor limit");
     const VkPhysicalDeviceDescriptorBufferPropertiesEXT& props{device.DescriptorBufferProperties()};
     alignment = std::max<VkDeviceSize>(props.descriptorBufferOffsetAlignment, 1);
 
