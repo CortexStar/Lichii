@@ -42,8 +42,19 @@ struct EventType {
     /// changed externally.
     size_t sequence_number;
     /// The event may run up to an OS timer tick late (a poll, not a deadline): the timer thread
-    /// sleeps in the OS until it instead of waiting for it in a monitor wait.
-    const bool relaxed;
+    /// sleeps in the OS until it instead of waiting for it in a monitor wait. Its owner may change
+    /// it (SetRelaxed), for example from the callback: it applies from the next time the event
+    /// is scheduled or rescheduled, and the time already queued keeps the old choice.
+    std::atomic<bool> relaxed;
+
+    /// Changes `relaxed` for the event's next schedule (a looping event: its next run).
+    void SetRelaxed(bool value) {
+        relaxed.store(value, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] bool IsRelaxed() const {
+        return relaxed.load(std::memory_order_relaxed);
+    }
 };
 
 enum class UnscheduleEventType {
@@ -182,6 +193,8 @@ public:
     s64 planned_wake{(std::numeric_limits<s64>::min)()};
     /// How late an OS wait of the timer thread can end (Advance; see Common::OsWakeTime).
     s64 os_wake_guard{};
+    /// Tests: the guard Advance uses instead of the OS's timer tick (negative: the OS's).
+    s64 os_wake_guard_override{-1};
     /// EDEN_NX2_TIMING_TRACE=1: what the timer thread waits for and runs, logged every 2 s.
     std::unique_ptr<TimingTrace> trace;
     u64 event_fifo_id = 0;

@@ -222,6 +222,41 @@ TEST_CASE("CoreTiming[WakeOnlyWhenNeeded]", "[core]") {
     core_timing.UnscheduleEvent(later);
 }
 
+TEST_CASE("CoreTiming[SetRelaxedFromCallback]", "[core]") {
+    // A looping event that turns itself relaxed is slept for until its due time from its next run
+    // on; while precise, the timer thread is up os_wake_guard before it to wait precisely.
+    Core::Timing::CoreTiming core_timing;
+    core_timing.SetMulticore(false);
+    core_timing.os_wake_guard_override = 100'000;
+    bool relax = false;
+    std::shared_ptr<Core::Timing::EventType> looping;
+    looping = Core::Timing::CreateEvent("looping", [&](s64, std::chrono::nanoseconds) {
+        looping->SetRelaxed(relax);
+        return std::nullopt;
+    });
+    core_timing.ScheduleLoopingEvent(std::chrono::milliseconds{1}, std::chrono::milliseconds{1},
+                                     looping);
+    const auto run_once = [&] {
+        core_timing.AddTicks(Common::WallClock::CPUTickFreq / 1000); // 1 ms
+        const auto top = core_timing.Advance();
+        REQUIRE(top.has_value());
+        return *top;
+    };
+
+    s64 top = run_once();
+    CHECK(core_timing.next_wait.until == top - 100'000);
+
+    relax = true;
+    top = run_once();
+    CHECK(looping->IsRelaxed());
+    CHECK(core_timing.next_wait.until == top);
+
+    relax = false;
+    top = run_once();
+    CHECK(core_timing.next_wait.until == top - 100'000);
+    core_timing.UnscheduleEvent(looping);
+}
+
 TEST_CASE("CoreTiming::GuestCounterIsHostClock", "[core]") {
     using Core::Timing::CoreTiming;
     // Multicore, native clock, no core-speed sync, a Switch 2 title: the JIT reads the TSC.

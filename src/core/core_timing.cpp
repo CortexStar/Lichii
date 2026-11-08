@@ -291,11 +291,12 @@ void CoreTiming::ScheduleEvent(std::chrono::nanoseconds ns_into_future,
     {
         std::scoped_lock scope{basic_lock};
         const auto next_time{absolute_time ? ns_into_future : GetGlobalTimeNs() + ns_into_future};
+        const bool relaxed = event_type->IsRelaxed();
 
         auto h{event_queue.emplace(Event{next_time.count(), event_fifo_id++, event_type, 0,
-                                         heap_t::handle_type{}, event_type->relaxed})};
+                                         heap_t::handle_type{}, relaxed})};
         (*h).handle = h;
-        wake = NeedsWake(next_time.count(), event_type->relaxed);
+        wake = NeedsWake(next_time.count(), relaxed);
     }
     if (trace) {
         trace->NoteSchedule(event_type->name, wake);
@@ -313,12 +314,12 @@ void CoreTiming::ScheduleLoopingEvent(std::chrono::nanoseconds start_time,
     {
         std::scoped_lock scope{basic_lock};
         const auto next_time{absolute_time ? start_time : GetGlobalTimeNs() + start_time};
+        const bool relaxed = event_type->IsRelaxed();
 
         auto h{event_queue.emplace(Event{next_time.count(), event_fifo_id++, event_type,
-                                         resched_time.count(), heap_t::handle_type{},
-                                         event_type->relaxed})};
+                                         resched_time.count(), heap_t::handle_type{}, relaxed})};
         (*h).handle = h;
-        wake = NeedsWake(next_time.count(), event_type->relaxed);
+        wake = NeedsWake(next_time.count(), relaxed);
     }
     if (trace) {
         trace->NoteSchedule(event_type->name, wake);
@@ -473,8 +474,10 @@ std::optional<s64> CoreTiming::Advance() {
                     next_time = pause_end_time + next_schedule_time;
                 }
 
-                event_queue.update(evt.handle, Event{next_time, event_fifo_id++, evt.type,
-                                                     next_schedule_time, evt.handle, evt.relaxed});
+                // The callback may have changed whether the event is relaxed (SetRelaxed).
+                event_queue.update(evt.handle,
+                                   Event{next_time, event_fifo_id++, evt.type, next_schedule_time,
+                                         evt.handle, event_type->IsRelaxed()});
             }
         }
 
@@ -482,7 +485,7 @@ std::optional<s64> CoreTiming::Advance() {
     }
 
     if (!event_queue.empty()) {
-        os_wake_guard = OsWakeGuardNs();
+        os_wake_guard = os_wake_guard_override >= 0 ? os_wake_guard_override : OsWakeGuardNs();
         s64 os_wake = std::numeric_limits<s64>::max();
         const EventType* os_wake_type{};
         for (const Event& queued : event_queue) {
