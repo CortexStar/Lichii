@@ -4,6 +4,7 @@
 # does, so the tool does not link the whole emulator.
 add_executable(nx2-precompile main.cpp
     ${CMAKE_SOURCE_DIR}/src/core/file_sys/nx2_shader_extract.cpp
+    ${CMAKE_SOURCE_DIR}/src/video_core/nx2_recipe.cpp
     ${CMAKE_SOURCE_DIR}/src/core/file_sys/nup_container.cpp
     ${CMAKE_SOURCE_DIR}/src/core/file_sys/vfs/vfs.cpp
     ${CMAKE_SOURCE_DIR}/src/core/file_sys/vfs/vfs_real.cpp

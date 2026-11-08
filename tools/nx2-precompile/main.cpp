@@ -53,6 +53,7 @@
 #include "core/file_sys/nup_container.h"
 #include "core/file_sys/nx2_shader_extract.h"
 #include "core/file_sys/vfs/vfs_real.h"
+#include "video_core/nx2_recipe.h"
 #include "video_core/pipeline_cache_files.h"
 
 namespace {
@@ -60,9 +61,7 @@ using Json = nlohmann::json;
 using Shader::Stage;
 using Shader::Ampere::Instruction;
 
-constexpr u64 NativeHashTag = 0x4f554e4345000002ULL;
 constexpr size_t SphSize = sizeof(Shader::ProgramHeader);
-constexpr u32 NativeHeaderSize = 128;
 constexpr size_t GraphicsKeySize = 1056;
 constexpr size_t ComputeKeySize = 24;
 
@@ -74,10 +73,7 @@ u64 IndirectCbufKey(u32 bank, u32 offset, u32 indirect) {
     return (u64{1} << 63) | (u64{indirect & 0x3fffff} << 40) | CbufKey(bank, offset);
 }
 
-u64 NativeShaderHash(std::span<const u64> code) {
-    return Common::CityHash64(reinterpret_cast<const char*>(code.data()), code.size() * sizeof(u64)) ^
-           NativeHashTag;
-}
+using VideoCommon::Nx2Recipe::NativeShaderHash;
 
 std::vector<u8> ReadFile(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -204,95 +200,10 @@ struct Packages {
 // ---------------------------------------------------------------------------------------------
 // Capture + lowering, as GenericEnvironment::LowerNativeCode does it.
 
-struct Lowered {
-    std::vector<u64> code; // SPH + lowered words with scheduling slots + pad + native address map
-    u32 texture_bound{~0U};
-    u64 hash{};
-    u64 native_key{};
-};
+using VideoCommon::Nx2Recipe::Lowered;
 
 std::optional<Lowered> CaptureAndLower(const PackageProgram& program, std::string& error) {
-    const bool compute = program.stage == Stage::Compute;
-    Shader::ProgramHeader sph{};
-    size_t start = 0;
-    size_t available = 0;
-    if (compute) {
-        if (program.control.size() < 0x3c) {
-            error = "short control section";
-            return std::nullopt;
-        }
-        available = std::min<size_t>(Load<u32>(program.control, 56), program.code.size());
-    } else {
-        if (program.code.size() <= NativeHeaderSize) {
-            error = "short code area";
-            return std::nullopt;
-        }
-        std::memcpy(&sph, program.code.data(), SphSize);
-        start = NativeHeaderSize;
-        available = program.code.size() - NativeHeaderSize;
-    }
-    std::vector<Instruction> native;
-    Shader::Ampere::ProgramCaptureState capture;
-    bool complete = false;
-    const size_t count = available / sizeof(Instruction);
-    for (u32 index = 0; index < Shader::Ampere::ProgramCaptureState::MaximumInstructions; ++index) {
-        if (index >= count) {
-            // The runtime reads on past the code area; the package holds only the code area.
-            break;
-        }
-        Instruction instruction;
-        std::memcpy(&instruction, program.code.data() + start + index * sizeof(Instruction),
-                    sizeof(Instruction));
-        native.push_back(instruction);
-        const auto status = capture.Observe(instruction, index);
-        if (status == Shader::Ampere::ProgramCaptureState::Result::InvalidTarget) {
-            error = "branch outside capture bounds";
-            return std::nullopt;
-        }
-        if (status == Shader::Ampere::ProgramCaptureState::Result::Complete) {
-            complete = true;
-            break;
-        }
-    }
-    if (!complete) {
-        error = "capture incomplete inside the code area";
-        return std::nullopt;
-    }
-    std::vector<u32> traps;
-    for (u32 i = 0; i < native.size(); ++i) {
-        if (native[i].Bits(0, 12) == 0x95c)
-            traps.push_back(i * sizeof(Instruction));
-    }
-    if (!traps.empty()) {
-        // Trap guards are checked against live constants; such programs are never serialized.
-        error = "trap guards";
-        return std::nullopt;
-    }
-    const auto lowered = Shader::Ampere::LowerToMaxwell(
-        native, {.geometry = false,
-                 .tensor = true,
-                 .native_code_address = 0x100000000ULL + start,
-                 .verified_traps = traps,
-                 .tessellation_stage = Shader::Ampere::TessellationStage::None});
-    if (!lowered) {
-        error = fmt::format("lowering failed at {:#x}: {}", lowered.error_offset, lowered.error);
-        return std::nullopt;
-    }
-    Lowered result;
-    result.native_key = Shader::Ampere::NativeProgramKey(native);
-    result.texture_bound = lowered.required_texture_buffer;
-    auto& code = result.code;
-    code.resize(SphSize / sizeof(u64));
-    std::memcpy(code.data(), &sph, SphSize);
-    for (const u64 instruction : lowered.instructions) {
-        if ((code.size() * sizeof(u64)) % 32 == 0)
-            code.push_back(0);
-        code.push_back(instruction);
-    }
-    code.push_back(0);
-    Shader::Ampere::AppendNativeAddressMap(code, lowered.source_instruction_offsets);
-    result.hash = NativeShaderHash(code);
-    return result;
+    return VideoCommon::Nx2Recipe::Lower(program.stage, program.control, program.code, error);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1426,62 +1337,87 @@ int Check(const std::filesystem::path& path, unsigned threads) {
 // ---------------------------------------------------------------------------------------------
 // extract: the game's own shader programs, found by content (core/file_sys/nx2_shader_extract).
 
-int Extract(const std::filesystem::path& game, const std::filesystem::path& prefix,
-            const std::string& packages, unsigned threads) {
-    namespace X = FileSys::Nx2ShaderExtract;
+/// The game's RomFS as extract reads it, and which game it is.
+struct Game {
     FileSys::RealVfsFilesystem filesystem;
-    std::vector<FileSys::VirtualDir> roots;
     std::unique_ptr<FileSys::NupContainer> container;
+    std::vector<FileSys::VirtualDir> roots;
+    u64 title_id{};
+    u32 version{};
+};
+
+void OpenGame(Game& out, const std::filesystem::path& game, const std::filesystem::path& spill,
+              const std::string& packages) {
     if (std::filesystem::is_directory(game)) {
-        roots.push_back(filesystem.OpenDirectory(Common::FS::PathToUTF8String(game),
-                                                 FileSys::OpenMode::Read));
-    } else {
-        const auto file =
-            filesystem.OpenFile(Common::FS::PathToUTF8String(game), FileSys::OpenMode::Read);
-        if (!file || !FileSys::NupContainer::IsNupFile(file)) {
-            throw std::runtime_error("--game must be a .nup file or an unpacked RomFS directory");
+        out.roots.push_back(out.filesystem.OpenDirectory(Common::FS::PathToUTF8String(game),
+                                                         FileSys::OpenMode::Read));
+        return;
+    }
+    const auto file =
+        out.filesystem.OpenFile(Common::FS::PathToUTF8String(game), FileSys::OpenMode::Read);
+    if (!file || !FileSys::NupContainer::IsNupFile(file)) {
+        throw std::runtime_error("--game must be a .nup file or an unpacked RomFS directory");
+    }
+    std::filesystem::create_directories(spill);
+    out.container = std::make_unique<FileSys::NupContainer>(
+        file, FileSys::NupContainer::DefaultCacheCap, spill);
+    if (out.container->GetStatus() != Loader::ResultStatus::Success) {
+        throw std::runtime_error("cannot read the NUP");
+    }
+    FileSys::VirtualDir merged;
+    for (size_t i = 0; i < out.container->GetPackages().size(); ++i) {
+        const auto& package = out.container->GetPackages()[i];
+        const auto romfs = out.container->GetRomFSDir(i);
+        fmt::print("package {}: {:016X} v{} kind {}{}\n", i, package.title_id, package.version,
+                   static_cast<int>(package.kind), romfs ? "" : " (no RomFS)");
+        if (package.kind == FileSys::NupContainer::PackageKind::Base) {
+            out.title_id = package.title_id;
         }
-        auto spill = prefix;
-        spill += ".spill";
-        std::filesystem::create_directories(spill);
-        container = std::make_unique<FileSys::NupContainer>(
-            file, FileSys::NupContainer::DefaultCacheCap, spill);
-        if (container->GetStatus() != Loader::ResultStatus::Success) {
-            throw std::runtime_error("cannot read the NUP");
+        if (package.kind != FileSys::NupContainer::PackageKind::Addon) {
+            out.version = std::max(out.version, package.version);
         }
-        FileSys::VirtualDir merged;
-        for (size_t i = 0; i < container->GetPackages().size(); ++i) {
-            const auto& package = container->GetPackages()[i];
-            const auto romfs = container->GetRomFSDir(i);
-            fmt::print("package {}: {:016X} v{} kind {}{}\n", i, package.title_id, package.version,
-                       static_cast<int>(package.kind), romfs ? "" : " (no RomFS)");
-            if (!romfs) {
-                continue;
-            }
-            if (packages == "union") {
-                roots.push_back(romfs); // every version, as nxnative's shader_split.py reads them
-            } else {
-                // What the game loads: later packages replace the base's files.
-                merged = merged ? FileSys::NupContainer::MergeShadowDirs(merged, romfs) : romfs;
-            }
+        if (!romfs) {
+            continue;
         }
-        if (merged) {
-            roots.push_back(merged);
+        if (packages == "union") {
+            out.roots.push_back(romfs); // every version, as nxnative's shader_split.py reads them
+        } else {
+            // What the game loads: later packages replace the base's files.
+            merged = merged ? FileSys::NupContainer::MergeShadowDirs(merged, romfs) : romfs;
         }
     }
-    const auto begin = std::chrono::steady_clock::now();
+    if (merged) {
+        out.roots.push_back(merged);
+    }
+}
+
+FileSys::Nx2ShaderExtract::Result ExtractGame(const Game& game, unsigned threads) {
+    namespace X = FileSys::Nx2ShaderExtract;
     X::Progress progress;
-    std::jthread reporter([&](std::stop_token stop) {
-        while (!stop.stop_requested()) {
-            std::this_thread::sleep_for(std::chrono::seconds(10));
-            if (progress.files_total) {
+    std::atomic<bool> done{false};
+    std::jthread reporter([&] {
+        for (int tick = 0; !done.load(); ++tick) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            if (tick % 50 == 49 && progress.files_total) {
                 fmt::print(stderr, "progress: {}/{}\n", progress.files_done.load(),
                            progress.files_total);
             }
         }
     });
-    const auto result = X::Extract(roots, threads, &progress);
-    reporter.request_stop();
+    auto result = X::Extract(game.roots, threads, &progress);
+    done.store(true);
+    return result;
+}
+
+int Extract(const std::filesystem::path& game_path, const std::filesystem::path& prefix,
+            const std::string& packages, unsigned threads) {
+    namespace X = FileSys::Nx2ShaderExtract;
+    Game game;
+    auto spill = prefix;
+    spill += ".spill";
+    OpenGame(game, game_path, spill, packages);
+    const auto begin = std::chrono::steady_clock::now();
+    const auto result = ExtractGame(game, threads);
     const double seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
 
@@ -1540,6 +1476,70 @@ int Extract(const std::filesystem::path& game, const std::filesystem::path& pref
     return 0;
 }
 
+void PrintReport(const VideoCommon::Nx2Recipe::Report& report) {
+    fmt::print("programs {} (not in the game {}, not lowered {}), environments {}, render states "
+               "{}, records {} (dropped {})\n",
+               report.programs, report.programs_missing, report.programs_failed,
+               report.environments, report.states, report.records, report.records_dropped);
+    for (size_t i = 0; i < std::min<size_t>(report.errors.size(), 8); ++i) {
+        fmt::print("  {}\n", report.errors[i]);
+    }
+    if (report.errors.size() > 8) {
+        fmt::print("  ... {} more\n", report.errors.size() - 8);
+    }
+}
+
+// recipe: the precompiled file without the game's code (video_core/nx2_recipe.h).
+int Recipe(const std::filesystem::path& precompiled, const std::filesystem::path& game_path,
+           const std::filesystem::path& out, unsigned threads) {
+    Game game;
+    auto spill = out;
+    spill += ".spill";
+    OpenGame(game, game_path, spill, "merged");
+    const auto programs = ExtractGame(game, threads);
+    const auto bytes = ReadFile(precompiled);
+    VideoCommon::Nx2Recipe::Report report;
+    const auto recipe = VideoCommon::Nx2Recipe::MakeRecipe(
+        bytes,  programs,
+        {.title_id = game.title_id, .game_version = game.version,
+         .cache_version = Load<u32>(bytes, 8)},
+        report, threads);
+    std::ofstream(out, std::ios::binary)
+        .write(reinterpret_cast<const char*>(recipe.data()),
+               static_cast<std::streamsize>(recipe.size()));
+    PrintReport(report);
+    fmt::print("recipe {} bytes (precompiled file {} bytes)\n", recipe.size(), bytes.size());
+    return report.records_dropped ? 1 : 0;
+}
+
+// assemble: a recipe and the game's own programs give this build's precompiled file.
+int Assemble(const std::filesystem::path& recipe_path, const std::filesystem::path& game_path,
+             const std::filesystem::path& out, unsigned threads) {
+    const auto recipe = ReadFile(recipe_path);
+    const auto header = VideoCommon::Nx2Recipe::ReadHeader(recipe);
+    if (!header) {
+        throw std::runtime_error(recipe_path.string() + " is not a precompile recipe");
+    }
+    Game game;
+    auto spill = out;
+    spill += ".spill";
+    OpenGame(game, game_path, spill, "merged");
+    fmt::print("recipe for {:016X} v{} (facts of cache version {}); game {:016X} v{}\n",
+               header->title_id, header->game_version, header->cache_version, game.title_id,
+               game.version);
+    const auto begin = std::chrono::steady_clock::now();
+    const auto programs = ExtractGame(game, threads);
+    VideoCommon::Nx2Recipe::Report report;
+    const auto file = VideoCommon::Nx2Recipe::Assemble(
+        recipe, programs, VideoCommon::VulkanPipelineCacheVersion, report, threads);
+    std::ofstream(out, std::ios::binary)
+        .write(reinterpret_cast<const char*>(file.data()), static_cast<std::streamsize>(file.size()));
+    PrintReport(report);
+    fmt::print("precompiled file {} bytes in {:.1f} s\n", file.size(),
+               std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1555,7 +1555,7 @@ int main(int argc, char** argv) {
             std::cout << VideoCommon::VulkanPipelineCacheVersion << '\n';
             return 0;
         }
-        std::filesystem::path pkg, cache, out, priors_path, check_file, game;
+        std::filesystem::path pkg, cache, out, priors_path, check_file, game, recipe;
         std::string packages = "merged";
         unsigned threads = std::max(1U, std::thread::hardware_concurrency() - 2);
         for (int i = 2; i + 1 < argc; i += 2) {
@@ -1568,8 +1568,19 @@ int main(int argc, char** argv) {
             else if (arg == "--priors") priors_path = value;
             else if (arg == "--file") check_file = value;
             else if (arg == "--game") game = value;
+            else if (arg == "--recipe") recipe = value;
             else if (arg == "--packages") packages = value;
             else throw std::runtime_error("Unknown option " + arg);
+        }
+        if (command == "recipe") {
+            if (check_file.empty() || game.empty() || out.empty())
+                throw std::runtime_error("recipe needs --file PRECOMPILED --game GAME --out RECIPE");
+            return Recipe(check_file, game, out, threads);
+        }
+        if (command == "assemble") {
+            if (recipe.empty() || game.empty() || out.empty())
+                throw std::runtime_error("assemble needs --recipe RECIPE --game GAME --out FILE");
+            return Assemble(recipe, game, out, threads);
         }
         if (command == "extract") {
             if (game.empty() || out.empty())
