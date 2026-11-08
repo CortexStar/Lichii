@@ -1680,7 +1680,11 @@ void EmitContext::DefineInputs(const IR::Program& program) {
     if (info.uses_workgroup_id) {
         workgroup_id = DefineInput(*this, U32[3], false, spv::BuiltIn::WorkgroupId);
     }
-    if (info.uses_local_invocation_id) {
+    // The native task prologue elects one invocation by its local id to initialize the mesh
+    // workgroup count, so the builtin is needed even when the guest never reads it.
+    const bool prologue_needs_local_id{stage == Shader::Stage::Task &&
+                                       !runtime_info.mesh_as_compute};
+    if (info.uses_local_invocation_id || prologue_needs_local_id) {
         local_invocation_id = DefineInput(*this, U32[3], false, spv::BuiltIn::LocalInvocationId);
     }
     if (info.uses_invocation_id) {
