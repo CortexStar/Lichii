@@ -9,6 +9,7 @@ add_executable(tests
     video_core/amd_float16.cpp
     video_core/oot_ultrawide.cpp
     video_core/graphics_pipeline_library.cpp
+    video_core/cached_pipeline_policy.cpp
     video_core/pipeline_binary_store.cpp
     video_core/maxwell_half_fmz.cpp
     video_core/vulkan_overlay_filter.cpp

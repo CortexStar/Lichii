@@ -45,6 +45,7 @@
 #include "video_core/pipeline_cache_files.h"
 #include "video_core/pipeline_cache_policy.h"
 #include "video_core/renderer_vulkan/async_draw_policy.h"
+#include "video_core/renderer_vulkan/cached_pipeline_policy.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/mesh_fallback_limits.h"
@@ -496,6 +497,10 @@ namespace {
 // only kept every pipeline the title ever built in host memory (title 1: a 245 MB file, ~0.35 GB
 // of RAM for the session) and copied it whole at each save, which stalled frames; pipelines built
 // no slower without it.
+// Captured environments the background prebuild holds for the cached graphics pipelines it was
+// given, freed as each is built (PlaceCachedPipeline bounds how many).
+constexpr size_t BackgroundCaptureLimit = size_t{256} << 20;
+
 bool DriverCachesPipelines(const Device& device) {
     switch (device.GetDriverID()) {
     case VK_DRIVER_ID_NVIDIA_PROPRIETARY:
@@ -526,7 +531,8 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
       emission_budget{num_pipeline_workers}, binary_cache{device_},
       workers(num_pipeline_workers, "VkPipelineBuilder", {}, Common::ThreadPlacement::Background),
       serialization_thread(1, "VkPipelineSerialization", {}, Common::ThreadPlacement::Background),
-      background_pipelines{64, 16 * 1024 * 1024, device.HasBrokenParallelShaderCompiling()} {
+      background_pipelines{std::numeric_limits<size_t>::max(), BackgroundCaptureLimit,
+                           device.HasBrokenParallelShaderCompiling()} {
     const auto& float_control{device.FloatControlProperties()};
     const VkDriverId driver_id{device.GetDriverID()};
     const VkShaderStageFlags subgroup_stages{device.GetSubgroupSupportedStages()};
@@ -1176,6 +1182,15 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     size_t skipped_pipelines = 0;
     size_t deferred_pipelines = 0;
     size_t queued_graphics = 0;
+    // A Switch 2 title keeps its pipelines up to a memory budget (EvictUnusedPipelines), so every
+    // cached one within it is built: the ones recent sessions used at boot, the rest in the
+    // background. The used list only orders them. Ocarina of Time on the bench PC: the list ages
+    // out after 16 sessions, so 644 of 2,231 cached pipelines were left for the draws and 64
+    // built ahead; each one a walk reached was translated on the GPU thread and compiled while
+    // its draw waited (up to 790 ms for a task/mesh pipeline, which can't use libraries).
+    const CachedPipelinePolicy cached_policy = MakeCachedPipelinePolicy(
+        PreloadAllPipelines(), !used_pipelines.empty(), MaxPipelinesWithoutUsedList,
+        Settings::CurrentProgramIsSwitch2(), Switch2PipelineBudget());
 
     // With the shader precache this boot, the cached graphics pipelines skipped below are built
     // on the loading screen too, unless an earlier precache built them for this driver.
@@ -1328,9 +1343,9 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         if (!disk_pipelines.insert(hash).second) {
             return;
         }
-        if (!PreloadAllPipelines() &&
-            (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
-                                    : !used_pipelines.contains(hash))) {
+        const CachedPipelinePlacement placement = PlaceCachedPipeline(
+            cached_policy, used_pipelines.contains(hash), {queued_graphics, deferred_pipelines});
+        if (placement != CachedPipelinePlacement::Boot) {
             ++skipped_pipelines;
             size_t capture_bytes = (envs.capacity() - envs.size()) * sizeof(FileEnvironment);
             for (const auto& env : envs) {
@@ -1353,7 +1368,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                 }});
                 return;
             }
-            if (background_pipelines.Add(
+            if (placement == CachedPipelinePlacement::Background &&
+                background_pipelines.Add(
                     key, capture_bytes, [this, key, envs = std::move(envs)]() mutable {
                         ShaderPools pools;
                         boost::container::static_vector<Shader::Environment*,
@@ -1419,6 +1435,12 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             Render_Vulkan,
             "{} cached graphics pipelines skipped at boot, {} admitted for background prebuild",
             skipped_pipelines, deferred_pipelines);
+        if (deferred_pipelines < skipped_pipelines && !precache) {
+            LOG_INFO(Render_Vulkan,
+                     "{} cached graphics pipelines are left for the draws that need them "
+                     "(budget {})",
+                     skipped_pipelines - deferred_pipelines, cached_policy.total_budget);
+        }
     }
 
     std::unique_lock lock{state.mutex};
