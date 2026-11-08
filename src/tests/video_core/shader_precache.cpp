@@ -26,7 +26,7 @@ struct TempDir {
     TempDir() {
         const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
         path = std::filesystem::temp_directory_path() /
-               ("eden-shader-precache-" + std::to_string(stamp));
+               ("lichii-shader-precache-" + std::to_string(stamp));
         std::filesystem::create_directories(path);
     }
     ~TempDir() {

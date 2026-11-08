@@ -67,7 +67,7 @@ std::vector<u32> EmitAtomicHelpers(bool native_half, bool explicit_shared) {
     profile.support_workgroup_layout_8bit_access = explicit_shared;
     profile.support_workgroup_layout_16bit_access = explicit_shared;
     auto code = Backend::SPIRV::EmitSPIRV(profile, program);
-    if (const char* directory = std::getenv("EDEN_ATOMIC_TEST_OUTPUT")) {
+    if (const char* directory = std::getenv("LICHII_ATOMIC_TEST_OUTPUT")) {
         std::filesystem::create_directories(directory);
         const auto name = std::string{native_half ? "native-half" : "packed-half"} +
                           (explicit_shared ? "-explicit" : "-implicit") + ".spv";

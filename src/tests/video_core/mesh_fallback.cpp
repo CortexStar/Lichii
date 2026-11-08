@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
@@ -96,9 +97,9 @@ std::vector<u32> Bindings(const std::vector<u32>& code) {
     return bindings;
 }
 
-// EDEN_MESH_FALLBACK_TEST_OUTPUT=<dir>: write the modules for spirv-val.
+// LICHII_MESH_FALLBACK_TEST_OUTPUT=<dir>: write the modules for spirv-val.
 void Dump(const std::vector<u32>& code, std::string_view name) {
-    const char* const directory{std::getenv("EDEN_MESH_FALLBACK_TEST_OUTPUT")};
+    const char* const directory{std::getenv("LICHII_MESH_FALLBACK_TEST_OUTPUT")};
     if (!directory) {
         return;
     }

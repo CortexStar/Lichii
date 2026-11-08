@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "core/file_sys/nup_container.h"
@@ -364,7 +364,7 @@ NupContainer::NupContainer(VirtualFile file_, std::size_t memory_cache_cap,
     : file(std::move(file_)), cache(std::make_shared<NupDecompressCache>()) {
     cache->cap = memory_cache_cap;
     cache->spill_dir = spill_dir_.empty()
-                           ? Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "nup"
+                           ? Common::FS::GetLichiiPath(Common::FS::LichiiPath::CacheDir) / "nup"
                            : std::move(spill_dir_);
     if (file == nullptr) {
         return;

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
@@ -939,20 +939,20 @@ Service::~Service() {
 }
 
 std::unique_ptr<Service> MaybeStartService(System& system, std::string title, u64 program_id) {
-    const char* const text = std::getenv("EDEN_NX2_DEBUG_SERVER");
+    const char* const text = std::getenv("LICHII_NX2_DEBUG_SERVER");
     if (text == nullptr || *text == '\0') {
         return nullptr;
     }
     std::string error;
     const auto endpoint = ParseEndpoint(text, error);
     if (!endpoint) {
-        LOG_ERROR(Debug, "EDEN_NX2_DEBUG_SERVER={}: {}; the debug server is off", text, error);
+        LOG_ERROR(Debug, "LICHII_NX2_DEBUG_SERVER={}: {}; the debug server is off", text, error);
         return nullptr;
     }
-    const char* const directory = std::getenv("EDEN_NX2_DEBUG_DIR");
+    const char* const directory = std::getenv("LICHII_NX2_DEBUG_DIR");
     std::string dump_directory = directory != nullptr && *directory != '\0'
         ? std::string{directory}
-        : (Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "debug-server").generic_string();
+        : (Common::FS::GetLichiiPath(Common::FS::LichiiPath::LogDir) / "debug-server").generic_string();
     try {
         return std::make_unique<Service>(system, std::move(title), program_id, *endpoint,
                                          std::move(dump_directory));

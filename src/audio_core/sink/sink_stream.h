@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2025 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
@@ -284,7 +284,7 @@ private:
     SinkBuffer playing_buffer{};
     /// The last played (or received) frame of audio, used when the callback underruns
     std::array<s16, MaxChannels> last_frame{};
-    /// EDEN_NX2_AUDIO_LEVEL meter state.
+    /// LICHII_NX2_AUDIO_LEVEL meter state.
     s32 level_peak{};
     u64 level_frames{};
     /// Number of buffers waiting to be played

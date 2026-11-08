@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
@@ -42,7 +42,7 @@
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_surface.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
 #include "video_core/vulkan_common/streamline.h"
 #endif
 #ifdef __ANDROID__
@@ -134,7 +134,7 @@ try
     , gpu(gpu_)
     , library(OpenLibrary(context.get()))
     , dld()
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
     , streamline_started(Streamline::Start())
 #endif
     // Create raw Vulkan instance first

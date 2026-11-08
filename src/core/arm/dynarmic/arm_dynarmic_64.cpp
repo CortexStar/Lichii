@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
@@ -249,9 +249,9 @@ u64 DynarmicCallbacks64::GetCNTPCT() {
     // times a second while waiting for the GPU) keeps a host core busy at full speed, and the
     // GPU thread is often on the other half of that SMT core. Two reads within ~1.7 us of each
     // other are such a loop: pause, which hands the core's resources to the sibling thread for a
-    // moment. The guest sees the same counter. EDEN_NX2_CNTPCT_PAUSE=0 turns it off.
+    // moment. The guest sees the same counter. LICHII_NX2_CNTPCT_PAUSE=0 turns it off.
     static const bool pause_spins = [] {
-        const char* value = std::getenv("EDEN_NX2_CNTPCT_PAUSE");
+        const char* value = std::getenv("LICHII_NX2_CNTPCT_PAUSE");
         return value == nullptr || value[0] != '0';
     }();
     if (pause_spins && ticks - m_last_cntpct < m_spin_ticks) {

@@ -131,6 +131,6 @@ the local code for v53 hints. The importer keeps the recorded mesh context and
 requires an exact packed-code match for every stage, including the fragment
 shader. The result is a new cache directory. For testing,
 copy the resulting title directory into an empty portable profile's
-`user/cache/shader` and launch with `EDEN_NX2_PRELOAD_ALL_PIPELINES=1`. The
+`user/cache/shader` and launch with `LICHII_NX2_PRELOAD_ALL_PIPELINES=1`. The
 cache format and pipeline state must be compatible with the recipient's build
 and Vulkan features.

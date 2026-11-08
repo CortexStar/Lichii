@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+# SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 add_executable(maxwell-ir main.cpp)
 target_link_libraries(maxwell-ir PRIVATE common shader_recompiler Threads::Threads)

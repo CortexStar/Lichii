@@ -19,7 +19,7 @@
 #include "common/logging.h"
 #include "video_core/nx2.h"
 
-// EDEN_NX2_CMDPAGE_DIAG: for command list pages that GPU work writes (nx2.h), whether the work
+// LICHII_NX2_CMDPAGE_DIAG: for command list pages that GPU work writes (nx2.h), whether the work
 // writes the lists' own words or only other bytes of their 4 KiB pages, and what the front's slow
 // path (DmaPusher::FlushGpuWrittenCommands: drain the split, flush the pages) costs. Writes are
 // noted at the ranges the buffer cache marks written (a draw's whole storage binding). Lists on
@@ -28,12 +28,12 @@
 // thread logs the counts.
 namespace Tegra::Nx2CmdPageDiag {
 
-inline bool g_enabled = std::getenv("EDEN_NX2_CMDPAGE_DIAG") != nullptr;
+inline bool g_enabled = std::getenv("LICHII_NX2_CMDPAGE_DIAG") != nullptr;
 
 /// Called by VideoCore::CreateGPU: static initialization runs before the frontend loads
 /// nx2_switches.txt, so a switch set only there takes effect from that point on.
 inline void ReadSwitch() {
-    g_enabled = std::getenv("EDEN_NX2_CMDPAGE_DIAG") != nullptr;
+    g_enabled = std::getenv("LICHII_NX2_CMDPAGE_DIAG") != nullptr;
 }
 
 inline constexpr u64 PageBytes = u64{1} << Nx2WrittenPageBits;

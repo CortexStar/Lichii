@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
@@ -1328,7 +1328,7 @@ Macro::Opcode MacroJITx64Impl::GetOpCode() const {
 #endif
 
 static void Dump(u64 hash, std::span<const u32> code, bool decompiled = false) {
-    const auto dump_dir{Common::FS::GetEdenPath(Common::FS::EdenPath::DumpDir)};
+    const auto dump_dir{Common::FS::GetLichiiPath(Common::FS::LichiiPath::DumpDir)};
     if (!Common::FS::CreateDir(dump_dir)) {
         LOG_ERROR(Common_Filesystem, "Failed to create dump directory");
         return;
@@ -1353,13 +1353,13 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
         // read again from guest memory, they are whatever reused that command memory since.
         const auto context = reinterpret_cast<std::uintptr_t>(this);
         static std::unordered_set<std::uintptr_t> captured_contexts;
-        static const bool capture = std::getenv("EDEN_NATIVE_FRAME_CAPTURE") != nullptr;
+        static const bool capture = std::getenv("LICHII_NATIVE_FRAME_CAPTURE") != nullptr;
         if (capture && captured_contexts.insert(context).second) {
             std::ofstream dump("native-graphics-mme-" + std::to_string(context) + ".bin", std::ios::binary);
             dump.write(reinterpret_cast<const char*>(native_code.data()), sizeof(native_code));
         }
-        // EDEN_NX2_MME_LOG: log every macro call (runs ~750,000 times a second in title 1).
-        if (static const bool log_calls = std::getenv("EDEN_NX2_MME_LOG") != nullptr; log_calls) {
+        // LICHII_NX2_MME_LOG: log every macro call (runs ~750,000 times a second in title 1).
+        if (static const bool log_calls = std::getenv("LICHII_NX2_MME_LOG") != nullptr; log_calls) {
             LOG_DEBUG(HW_GPU, "Native MME context={:#x}", context);
             LOG_DEBUG(HW_GPU, "Native MME start={:#x}, parameters={}, data={:08x}", method, parameters.size(), fmt::join(parameters, ","));
         }
@@ -1367,15 +1367,15 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
         // filled only for calls that are interpreted.
         auto& fifo = native_fifo;
         native_interpreter.active_dram = &maxwell3d.GetNativeDataRam();
-        // EDEN_NX2_MME_RECORD=<file>: write the first 200000 calls (u32 start, u32 count, the
+        // LICHII_NX2_MME_RECORD=<file>: write the first 200000 calls (u32 start, u32 count, the
         // parameters) and then the macro code to <file>.code, to check interpreter changes
-        // offline against the previous interpreter. EDEN_NX2_MME_RECORD_SKIP=<n>: skip the first
+        // offline against the previous interpreter. LICHII_NX2_MME_RECORD_SKIP=<n>: skip the first
         // n calls (title 1 makes ~1,000,000 a second in 3D scenes).
-        if (static const char* const record_path = std::getenv("EDEN_NX2_MME_RECORD"); record_path != nullptr) {
+        if (static const char* const record_path = std::getenv("LICHII_NX2_MME_RECORD"); record_path != nullptr) {
             static std::ofstream record{record_path, std::ios::binary};
             static u32 recorded{};
             static u64 to_skip = [] {
-                const char* value = std::getenv("EDEN_NX2_MME_RECORD_SKIP");
+                const char* value = std::getenv("LICHII_NX2_MME_RECORD_SKIP");
                 return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ULL;
             }();
             if (to_skip > 0) {
@@ -1472,7 +1472,7 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                         if (address == DmaReadFifoed) {
                             fifo.push_back(word);
                         } else if (ram + i < native_interpreter.active_dram->size()) {
-                            if (static const bool mme_dump = std::getenv("EDEN_NX2_MME_DUMP") != nullptr;
+                            if (static const bool mme_dump = std::getenv("LICHII_NX2_MME_DUMP") != nullptr;
                                 mme_dump && ram + i == 0x27 && (*native_interpreter.active_dram)[0x27] != word) {
                                 LOG_INFO(HW_GPU, "MME data RAM[0x27] {:#x} -> {:#x} by 3D engine {} (DMA from {:#x})",
                                          (*native_interpreter.active_dram)[0x27], word, fmt::ptr(&maxwell3d), source);
@@ -1485,9 +1485,9 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
             };
 #ifdef ARCHITECTURE_x86_64
         // Macro code runs compiled to x86-64 (macro_turing_jit.h) instead of through the memo
-        // and the interpreter; EDEN_NX2_MME_JIT=0 goes back to those.
+        // and the interpreter; LICHII_NX2_MME_JIT=0 goes back to those.
         static const bool use_jit = [] {
-            const char* value = std::getenv("EDEN_NX2_MME_JIT");
+            const char* value = std::getenv("LICHII_NX2_MME_JIT");
             return value == nullptr || value[0] != '0';
         }();
         if (use_jit) {
@@ -1510,14 +1510,14 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
             return;
         }
 #endif
-        // EDEN_NX2_MME_MEMO=0: interpret every call (see macro_memo.h).
+        // LICHII_NX2_MME_MEMO=0: interpret every call (see macro_memo.h).
         static const bool use_memo = [] {
-            const char* value = std::getenv("EDEN_NX2_MME_MEMO");
+            const char* value = std::getenv("LICHII_NX2_MME_MEMO");
             return value == nullptr || value[0] != '0';
         }();
         if (use_memo) {
-            // EDEN_NX2_MME_MEMO_STATS: log the memo's counters every 2^24 calls.
-            if (static const bool memo_stats = std::getenv("EDEN_NX2_MME_MEMO_STATS") != nullptr;
+            // LICHII_NX2_MME_MEMO_STATS: log the memo's counters every 2^24 calls.
+            if (static const bool memo_stats = std::getenv("LICHII_NX2_MME_MEMO_STATS") != nullptr;
                 memo_stats && (++native_calls & 0xffffff) == 0) {
                 const auto& stats = native_memo.GetStatistics();
                 LOG_INFO(HW_GPU,
@@ -1561,7 +1561,7 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
         }
         if (!result.success) {
             native_execution_failed = true;
-            if (static const bool diagnostics = std::getenv("EDEN_NATIVE_DRAW_DIAGNOSTICS") != nullptr;
+            if (static const bool diagnostics = std::getenv("LICHII_NATIVE_DRAW_DIAGNOSTICS") != nullptr;
                 diagnostics) {
                 std::ofstream dump("native-mme-" + std::to_string(method) + ".bin", std::ios::binary);
                 dump.write(reinterpret_cast<const char*>(native_code.data()), sizeof(native_code));

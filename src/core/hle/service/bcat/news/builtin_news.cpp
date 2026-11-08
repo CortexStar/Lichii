@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "common/net/net.h"
@@ -46,17 +46,17 @@ std::mutex images_mutex;
 
 
 std::filesystem::path GetCachePath() {
-    return Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "news" / "github_releases.json";
+    return Common::FS::GetLichiiPath(Common::FS::LichiiPath::CacheDir) / "news" / "github_releases.json";
 }
 
 std::filesystem::path GetDefaultLogoPath(bool large) {
-    return Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "news" /
-           (large ? "eden_logo_large.jpg" : "eden_logo_small.jpg");
+    return Common::FS::GetLichiiPath(Common::FS::LichiiPath::CacheDir) / "news" /
+           (large ? "lichii_logo_large.jpg" : "lichii_logo_small.jpg");
 }
 
 std::filesystem::path GetNewsImagePath(std::string_view news_id, bool large) {
     const std::string filename = fmt::format("{}_{}.jpg", news_id, large ? "large" : "small");
-    return Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "news" / "images" / filename;
+    return Common::FS::GetLichiiPath(Common::FS::LichiiPath::CacheDir) / "news" / "images" / filename;
 }
 
 u32 HashToNewsId(std::string_view key) {
@@ -110,7 +110,7 @@ std::vector<u8> DownloadImage(const std::string& url_path, const std::filesystem
 
 std::vector<u8> LoadDefaultLogo(bool large) {
     const auto path = GetDefaultLogoPath(large);
-    const std::string url = large ? "/news/eden_logo_large.jpg" : "/news/eden_logo_small.jpg";
+    const std::string url = large ? "/news/lichii_logo_large.jpg" : "/news/lichii_logo_small.jpg";
 
     auto data = TryLoadFromDisk(path);
     if (!data.empty()) return data;
@@ -311,7 +311,7 @@ void ImportReleases(const std::vector<Common::Net::Release> &releases) {
         const u64 pickup_limit = published + 600000000;
         const u32 priority = rel.prerelease ? 1500 : 2500;
 
-        std::string author = "Eden";
+        std::string author = "Lichii";
 
         auto payload = BuildMsgpack(title, FormatBody(body, title), title, published,
                                     pickup_limit, priority, {"en"}, author, {},
@@ -351,7 +351,7 @@ std::vector<u8> BuildMsgpack(std::string_view title, std::string_view body,
                              std::optional<u32> override_id) {
     MsgPack::Writer w;
 
-    const u32 news_id = override_id.value_or(HashToNewsId(title.empty() ? "eden" : title));
+    const u32 news_id = override_id.value_or(HashToNewsId(title.empty() ? "lichii" : title));
     const std::string news_id_str = fmt::format("{}", news_id);
 
     const auto img_small = GetNewsImage(news_id_str, false);
@@ -390,7 +390,7 @@ std::vector<u8> BuildMsgpack(std::string_view title, std::string_view body,
     w.WriteKey("display_type");
     w.WriteString("NORMAL");
     w.WriteKey("topic_id");
-    w.WriteString("eden");
+    w.WriteString("lichii");
 
     w.WriteKey("no_photography"); // still show image
     w.WriteUInt(0);
@@ -411,7 +411,7 @@ std::vector<u8> BuildMsgpack(std::string_view title, std::string_view body,
 
     // Topic name = who wrote it
     w.WriteKey("topic_name");
-    w.WriteString("Eden");
+    w.WriteString("Lichii");
 
     w.WriteKey("list_image");
     w.WriteBinary(img_small);

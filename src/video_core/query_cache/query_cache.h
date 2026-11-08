@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
@@ -238,10 +238,10 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     const bool is_fence = True(flags & QueryPropertiesFlags::IsAFence);
     const auto requested_type = counter_type;
     static const GPUVAddr watch = [] {
-        const char* value = std::getenv("EDEN_NX2_SEM_WATCH");
+        const char* value = std::getenv("LICHII_NX2_SEM_WATCH");
         return value ? GPUVAddr{std::strtoull(value, nullptr, 16)} : GPUVAddr{};
     }();
-    if (static const bool trace = std::getenv("EDEN_NX2_QUERY_TRACE") != nullptr;
+    if (static const bool trace = std::getenv("LICHII_NX2_QUERY_TRACE") != nullptr;
         trace || (watch != 0 && (addr & ~GPUVAddr{0xf}) == watch)) {
         LOG_INFO(HW_GPU, "nx2 report addr={:#x} type={} flags={:#x} payload={:#x} as={} device={:#x}", addr,
                  static_cast<u32>(counter_type), static_cast<u32>(flags), payload, gpu_memory->GetID(),

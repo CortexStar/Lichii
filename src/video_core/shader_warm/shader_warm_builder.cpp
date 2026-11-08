@@ -47,7 +47,7 @@ constexpr size_t MaxPendingJobs = 2048;
 constexpr u32 PrecachedPipelinesMagic = 0x31504750; // "PGP1"
 
 fs::path TitleDir(u64 title_id) {
-    return Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir) /
+    return Common::FS::GetLichiiPath(Common::FS::LichiiPath::ShaderDir) /
            fmt::format("{:016x}", title_id);
 }
 

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2025 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright 2023 Citra Emulator Project
 // Licensed under GPLv2 or any later version

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
@@ -12,7 +12,7 @@
 
 #include "common/common_types.h"
 
-/// Requests from the debug server (EDEN_NX2_DEBUG_SERVER, docs/nx2/debug-mcp.md) to the thread
+/// Requests from the debug server (LICHII_NX2_DEBUG_SERVER, docs/nx2/debug-mcp.md) to the thread
 /// that owns the rasterizer. The server posts them from its own thread; RasterizerVulkan takes
 /// them at the end of each presented frame, so every cache they touch is used from its owner.
 /// Without the server nothing is posted and the per-frame cost is one relaxed atomic load.
@@ -80,7 +80,7 @@ void CancelGpuRead(u64 id);
 /// Rasterizer thread.
 void FinishGpuRead(u64 id, GpuReadResult result);
 
-/// Server thread: adds or removes native program keys or shader hashes (as EDEN_NX2_REJECT_HASH
+/// Server thread: adds or removes native program keys or shader hashes (as LICHII_NX2_REJECT_HASH
 /// takes them). Returns the generation to wait for.
 u64 SetRejected(std::span<const u64> hashes, bool rejected);
 [[nodiscard]] std::vector<u64> RejectedHashes();

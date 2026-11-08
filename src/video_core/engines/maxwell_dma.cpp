@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
@@ -64,9 +64,9 @@ void MaxwellDMA::CallMultiMethod(Core::System& system, u32 method, const u32* ba
 
 void MaxwellDMA::Launch() {
     LOG_TRACE(Render_OpenGL, "DMA copy {:#x} -> {:#x}", static_cast<GPUVAddr>(regs.offset_in), GPUVAddr(regs.offset_out));
-    // EDEN_NX2_TRACE_DST=<hex>: also log copies writing within 32 MiB above that GPU address.
+    // LICHII_NX2_TRACE_DST=<hex>: also log copies writing within 32 MiB above that GPU address.
     static const u64 trace_destination = [] {
-        const char* value = std::getenv("EDEN_NX2_TRACE_DST");
+        const char* value = std::getenv("LICHII_NX2_TRACE_DST");
         return value != nullptr ? std::strtoull(value, nullptr, 16) : 0ULL;
     }();
     if (trace_destination != 0 && GPUVAddr(regs.offset_out) >= trace_destination &&
@@ -82,7 +82,7 @@ void MaxwellDMA::Launch() {
                      regs.launch_dma.dst_memory_layout.Value() == LaunchDMA::MemoryLayout::PITCH ? "pitch" : "block");
         }
     }
-    if (static const bool trace = std::getenv("EDEN_NX2_RT_TRACE") != nullptr; trace) {
+    if (static const bool trace = std::getenv("LICHII_NX2_RT_TRACE") != nullptr; trace) {
         static u32 traced{};
         if (traced++ < 64) {
             LOG_INFO(HW_GPU, "nx2 DMA {:#x} -> {:#x} lines={} length={} launch={:#x}",

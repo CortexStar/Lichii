@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 #version 450
 #define OCARINA_COMPARE_SCENE_DEPTH 1
 

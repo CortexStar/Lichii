@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
@@ -1244,10 +1244,10 @@ namespace {
 // arguments live in the caller's stack frame, and the worker has to read them during one of the
 // main thread's next IPC waits, before that frame is reused (otherwise it reads zeros and crashes).
 // When another guest thread got the client's core, give it up to this long before the reply
-// wakes the client. EDEN_NX2_IPC_MIN_US=<n> changes it; 0 turns it off.
+// wakes the client. LICHII_NX2_IPC_MIN_US=<n> changes it; 0 turns it off.
 void HoldHleReply(KernelCore& kernel, KThread* client_thread) {
     static const auto hold = std::chrono::microseconds{[] {
-        const char* text = std::getenv("EDEN_NX2_IPC_MIN_US");
+        const char* text = std::getenv("LICHII_NX2_IPC_MIN_US");
         return text ? std::strtoll(text, nullptr, 10) : 50LL;
     }()};
     if (hold.count() <= 0) {

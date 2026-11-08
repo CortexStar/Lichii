@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
@@ -36,7 +36,7 @@ Result IStorage::Read(
     R_UNLESS(length >= 0, FileSys::ResultInvalidSize);
     R_UNLESS(offset >= 0, FileSys::ResultInvalidOffset);
 
-    // The 40 MB/s throttle emulates a Switch 1 card (Eden cbd4cf2d8c, Mario Strikers' intro).
+    // The 40 MB/s throttle emulates a Switch 1 card (upstream cbd4cf2d8c, Mario Strikers' intro).
     // Switch 2 storage is many times faster, and a Switch 2 title that streams a movie with
     // hundreds of reads a second (Ocarina of Time's opening: 300-460) sleeps most of each second
     // on the thread that also hands decoder images back, so its video falls seconds behind.

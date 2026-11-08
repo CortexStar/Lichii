@@ -22,7 +22,7 @@ the old way there.
 | Demoted fragments stop writing where the guest's control flow says | Moving demotes to the end of the program over nested returns let helper lanes keep writing; AMD drew a black scene | Nested returns are counted before demotes move | [#127] |
 | Fragment subgroup shuffles | AMD's proprietary driver gets them wrong | Broadcast fallback on that driver | [#273] |
 | Depth-compare samples | Undefined on colour or integer images; AMD returned green | Depth-compare images stay floating point. Binding the null image for depth-compare samples of uncomparable images is proposed in the open PR | [#273]; [#354] (open) |
-| Native FP16 arithmetic | Turned off on AMD as a driver workaround | Turned off, with no override yet. An `EDEN_AMD_FP16=1` switch to keep it for testing is proposed in the open PR | [#378] (open) |
+| Native FP16 arithmetic | Turned off on AMD as a driver workaround | Turned off, with no override yet. An `LICHII_AMD_FP16=1` switch to keep it for testing is proposed in the open PR | [#378] (open) |
 
 Not specific to AMD, but easy to mistake for an AMD bug:
 
@@ -47,7 +47,7 @@ Check these before filing a new one.
 
 ## Settings for AMD users
 
-- Keep the split GPU thread on (`EDEN_NX2_SPLIT=2`, the default in `nx2_switches.txt`) and GPU
+- Keep the split GPU thread on (`LICHII_NX2_SPLIT=2`, the default in `nx2_switches.txt`) and GPU
   accuracy below High, which turns the split off. Textures flickering in that setup on an RX 9070
   XT ([#163]) were fixed by [#425].
 - Logging at `*:Info` costs CPU time in busy scenes. Use `*:Error` when you compare frame rates
@@ -57,7 +57,7 @@ Check these before filing a new one.
 
 ## Investigating an AMD-only bug
 
-1. Reproduce it with the live debug server (`EDEN_NX2_DEBUG_SERVER=127.0.0.1:6545`, see
+1. Reproduce it with the live debug server (`LICHII_NX2_DEBUG_SERVER=127.0.0.1:6545`, see
    [debug-mcp.md](./debug-mcp.md)) and take a `capture_frame`. Find the first pass whose output
    holds NaN, values at the format maximum, or zeros where there should be data. The manifest's
    per-channel statistics show this without opening every image, but only for formats the dump

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2025 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "common/android/id_cache.h"
@@ -209,8 +209,8 @@ NetPlayStatus AndroidMultiplayer::NetPlayCreateRoom(const std::string &ipaddress
     LOG_INFO(WebService, "Web Service enabled");
     if (isPublic) {
         WebService::Client client(Settings::values.web_api_url.GetValue(),
-                                  Settings::values.eden_username.GetValue(),
-                                  Settings::values.eden_token.GetValue());
+                                  Settings::values.lichii_username.GetValue(),
+                                  Settings::values.lichii_token.GetValue());
 
         token = client.GetExternalJWT(room->GetVerifyUID()).returned_data;
 

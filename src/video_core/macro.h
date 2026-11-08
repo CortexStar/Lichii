@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
@@ -261,7 +261,7 @@ struct MacroEngine {
     // Calls replayed instead of interpreted (macro_memo.h), and what the current call wrote.
     u64 native_code_generation{};
     BasicMacroMemo<::Common::unordered_map<u64, u32, MacroMemoHash>> native_memo;
-    /// The macro code compiled to x86-64 (EDEN_NX2_MME_JIT=0 turns it off), created on first use.
+    /// The macro code compiled to x86-64 (LICHII_NX2_MME_JIT=0 turns it off), created on first use.
     std::shared_ptr<TuringMacroJit> native_jit;
     MacroMemoPairs native_writes;
     u64 native_calls{};

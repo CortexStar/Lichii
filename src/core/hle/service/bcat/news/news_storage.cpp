@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "core/hle/service/bcat/news/news_storage.h"
@@ -16,7 +16,7 @@ namespace Service::News {
 namespace {
 
 std::filesystem::path GetReadCachePath() {
-    return Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "news" / "news_read";
+    return Common::FS::GetLichiiPath(Common::FS::LichiiPath::CacheDir) / "news" / "news_read";
 }
 
 std::set<std::string> LoadReadIds() {

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: 2018 Citra Emulator Project
@@ -29,7 +29,7 @@ namespace DiscordRPC {
 
 DiscordImpl::DiscordImpl(Core::System& system_) : system{system_} {
     DiscordEventHandlers handlers{};
-    // The number is the client ID for Eden, it's used for images and the
+    // The number is the Discord client ID used for images and the
     // application name
     Discord_Initialize("1397286652128264252", &handlers, 1, nullptr);
 }
@@ -71,8 +71,7 @@ std::string DiscordImpl::GetGameString(const std::string& title) {
 
 static constexpr char DEFAULT_DISCORD_TEXT[] = "Lichii is an emulator for the Nintendo Switch";
 static constexpr char DEFAULT_DISCORD_IMAGE[] =
-    "https://git.eden-emu.dev/eden-emu/eden/raw/branch/master/dist/qt_themes/default/icons/256x256/"
-    "eden.png";
+    "https://raw.githubusercontent.com/CyrixJD115/Lichii/nx2/dist/lichii.png";
 
 void DiscordImpl::UpdateGameStatus(std::string_view game_url, bool has_boxart) {
     const std::string url = std::string{has_boxart ? game_url : DEFAULT_DISCORD_IMAGE};

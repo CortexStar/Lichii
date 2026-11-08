@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
@@ -23,7 +23,7 @@ struct LaunchParams {
     std::optional<int> selected_user{};
     std::optional<u16> override_gdb_port{};
     std::optional<std::string> log_filter{};
-    // --pack-nup <dump> [<out.nup>]: packs a loose dump instead of booting a game (eden-cli).
+    // --pack-nup <dump> [<out.nup>]: packs a loose dump instead of booting a game (lichii-cli).
     std::optional<std::string> pack_nup_source{};
     // --unpack-nup <file.nup> [<out_dir>]: extracts a NUP back into a loose dump.
     std::optional<std::string> unpack_nup_source{};

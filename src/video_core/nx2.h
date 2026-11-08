@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
@@ -18,7 +18,7 @@
 namespace Tegra {
 
 // Set once a Switch 2 (Ampere, NVN2) driver is talking to the GPU. Its command streams use
-// Ampere classes and the Turing+ macro ISA, which Eden's Maxwell engines don't implement.
+// Ampere classes and the Turing+ macro ISA, which the emulator's Maxwell engines don't implement.
 inline std::atomic<bool> g_nx2_ampere{false};
 
 // GPU VA that nx2:gpu GetVaRange and GetUserPartition report to NVN. The in-process

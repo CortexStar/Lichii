@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2025 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 #version 460 core
 layout (location = 0) in vec2 frag_tex_coord;

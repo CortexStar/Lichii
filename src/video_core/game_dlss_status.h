@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
@@ -18,7 +18,7 @@ enum class GameDlssState : u8 {
 /// Why the replacement upscale draws instead of the game's own network.
 enum class GameDlssReason : u8 {
     None,
-    TurnedOff,         ///< EDEN_NX2_DLSS_REPLACEMENT asks for the replacement.
+    TurnedOff,         ///< LICHII_NX2_DLSS_REPLACEMENT asks for the replacement.
     NvidiaDlss,        ///< NVIDIA DLSS is turned on and runs in its place.
     ResolutionScaling, ///< The network only makes the game's own resolution.
     Unsupported,       ///< Not Vulkan, or compute shaders can't be made 32 threads wide.

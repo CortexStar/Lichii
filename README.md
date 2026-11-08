@@ -26,7 +26,7 @@ On Windows, extract the entire build archive and run **lichii.exe**. Only use ga
 
 ### Existing saves and settings
 
-The rebrand intentionally retains the existing Eden/Eglantine data directories and configuration keys. It does not move or delete saves, settings or shader caches. Back up your saves before testing experimental builds.
+This release moves your data out of the old `eden` directory into a `lichii` one. On first launch you are asked to migrate the old data (copy, move or link it); nothing is moved or deleted without your say-so, and your saves, settings and shader caches survive either choice. Back up your saves before testing experimental builds.
 
 ## Compatibility and issue reports
 
@@ -38,7 +38,7 @@ Desktop reporting requires a build containing [PR #303](https://github.com/zorto
 
 Confirm the matching website catalog entry and review the editable machine, game, setup, and enabled add-on details prefilled where available. Check the public preview and give explicit consent before submitting. Nothing uploads automatically, and the native v1 reporter does not read or upload logs or files.
 
-When [reporting an issue](https://github.com/zortos293/Eglantine/issues), include:
+When [reporting an issue](https://github.com/zortos293/Lichii/issues), include:
 
 - The exact build, game version, CPU, GPU and driver version.
 - Relevant settings and steps to reproduce the problem.

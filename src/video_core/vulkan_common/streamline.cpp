@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // NVIDIA DLSS through NVIDIA Streamline, with Streamline's manual hooking.
@@ -57,7 +57,7 @@ State& GetState() {
 }
 
 int LogLevel() {
-    const char* const value = std::getenv("EDEN_NX2_DLSS_LOG");
+    const char* const value = std::getenv("LICHII_NX2_DLSS_LOG");
     return value ? std::atoi(value) : 0;
 }
 
@@ -81,11 +81,11 @@ void LogFromStreamline(sl::LogType type, const char* message) {
     }
 }
 
-/// Where the user may put sl.interposer.dll: EDEN_STREAMLINE_DIR, the user folder's "streamline"
+/// Where the user may put sl.interposer.dll: LICHII_STREAMLINE_DIR, the user folder's "streamline"
 /// folder, then a "streamline" folder next to the executable.
 std::vector<std::filesystem::path> SearchDirs() {
     std::vector<std::filesystem::path> dirs;
-    if (const char* const dir = std::getenv("EDEN_STREAMLINE_DIR"); dir && *dir) {
+    if (const char* const dir = std::getenv("LICHII_STREAMLINE_DIR"); dir && *dir) {
         dirs.emplace_back(dir);
     }
     dirs.push_back(UserFolder());
@@ -232,7 +232,7 @@ std::vector<std::string> Names(uint32_t count, const char** names) {
 } // Anonymous namespace
 
 std::filesystem::path UserFolder() {
-    return Common::FS::GetEdenPath(Common::FS::EdenPath::StreamlineDir);
+    return Common::FS::GetLichiiPath(Common::FS::LichiiPath::StreamlineDir);
 }
 
 bool IsStreamlineModule(const std::filesystem::path& path) {

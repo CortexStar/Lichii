@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Instruction semantics adapted from Mesa mme_tu104_sim.c and mme_tu104.c:
 // Copyright © 2022 Collabora Ltd. SPDX-License-Identifier: MIT

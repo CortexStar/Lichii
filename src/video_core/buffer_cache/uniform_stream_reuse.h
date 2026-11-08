@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
@@ -31,10 +31,10 @@ concept StreamUniformReusable = requires(R& runtime, u32 size) {
     { runtime.CurrentTick() } -> std::convertible_to<u64>;
 };
 
-/// EDEN_NX2_UBOREUSE=0 turns the reuse off (every small uniform buffer is copied, as before).
+/// LICHII_NX2_UBOREUSE=0 turns the reuse off (every small uniform buffer is copied, as before).
 [[nodiscard]] inline bool UniformStreamReuseEnabled() noexcept {
     static const bool enabled = [] {
-        const char* const value = std::getenv("EDEN_NX2_UBOREUSE");
+        const char* const value = std::getenv("LICHII_NX2_UBOREUSE");
         return value == nullptr || value[0] != '0';
     }();
     return enabled;

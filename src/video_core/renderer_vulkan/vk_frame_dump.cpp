@@ -233,14 +233,14 @@ std::string SamplerJson(const Sampler* sampler) {
 FrameDump::FrameDump(const Device& device_, MemoryAllocator& memory_allocator_,
                      Scheduler& scheduler_)
     : device{device_}, memory_allocator{memory_allocator_}, scheduler{scheduler_} {
-    const char* const dir = std::getenv("EDEN_NX2_FRAME_DUMP");
+    const char* const dir = std::getenv("LICHII_NX2_FRAME_DUMP");
     if (!dir || *dir == '\0') {
         return;
     }
-    const char* const sampled_value = std::getenv("EDEN_NX2_FRAME_DUMP_SAMPLED");
+    const char* const sampled_value = std::getenv("LICHII_NX2_FRAME_DUMP_SAMPLED");
     directory = dir;
     start = std::chrono::steady_clock::now();
-    const char* const at = std::getenv("EDEN_NX2_FRAME_DUMP_AT");
+    const char* const at = std::getenv("LICHII_NX2_FRAME_DUMP_AT");
     const std::string_view value = at ? at : "60";
     // "file" captures once <dir>/capture.now exists, so a frame can be picked while playing.
     schedule.Configure(value, directory / "capture.now",

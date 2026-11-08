@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
@@ -216,7 +216,7 @@ void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu
         // Switch 2 titles: upload the CPU's bytes into the buffer instead, as CachedWriteMemory
         // does, so the page stays GPU-owned and nothing waits for the host GPU.
         static const int forced = [] {
-            const char* value = std::getenv("EDEN_NX2_INLINE_PAGE_WRITES");
+            const char* value = std::getenv("LICHII_NX2_INLINE_PAGE_WRITES");
             return value == nullptr ? -1 : (value[0] == '0' ? 0 : 1);
         }();
         const bool inline_writes =
@@ -1483,7 +1483,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         if constexpr (!IS_OPENGL && VideoCommon::StreamUniformReusable<Runtime>) {
             // The same bytes as this slot's previous bind, in the same command buffer: bind that
             // stream allocation again instead of allocating and copying (uniform_stream_reuse.h).
-            // EDEN_NX2_UBOREUSE=0 turns it off.
+            // LICHII_NX2_UBOREUSE=0 turns it off.
             if (VideoCommon::UniformStreamReuseEnabled()) {
                 streamed = VideoCommon::BindSmallUniformReusing(
                     runtime, device_memory, stage, index, binding_index, device_addr, size);
@@ -2243,8 +2243,8 @@ auto BufferCache<P>::Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool 
             }
             const Nx2ListPage& entry = it->second;
             if (entry.draw_written) {
-                // EDEN_NX2_CMDPAGE_DRAIN=1: drain and flush for every list on such pages.
-                static const bool always_drain = std::getenv("EDEN_NX2_CMDPAGE_DRAIN") != nullptr;
+                // LICHII_NX2_CMDPAGE_DRAIN=1: drain and flush for every list on such pages.
+                static const bool always_drain = std::getenv("LICHII_NX2_CMDPAGE_DRAIN") != nullptr;
                 if (always_drain) {
                     return Nx2ListRead::Unknown;
                 }
@@ -2956,7 +2956,7 @@ void BufferCache<P>::TraceTablePointer(bool compute, size_t stage, size_t ssbo_i
     // A table entry is read here from guest memory, and again by the shader from the holder's
     // host buffer. Logs each change of a slot's entry or size, and whether the two copies of the
     // entry can differ: GPU-written (host newer) or CPU-written and not yet uploaded (guest newer).
-    static const bool enabled = std::getenv("EDEN_NX2_TABLE_POINTER_TRACE") != nullptr;
+    static const bool enabled = std::getenv("LICHII_NX2_TABLE_POINTER_TRACE") != nullptr;
     if (!enabled) {
         return;
     }

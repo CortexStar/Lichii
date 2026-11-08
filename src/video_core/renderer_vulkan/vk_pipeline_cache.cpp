@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
@@ -463,7 +463,7 @@ bool GraphicsPipelineCacheKey::operator==(const GraphicsPipelineCacheKey& rhs) c
 }
 
 namespace {
-// NVIDIA's and AMD's drivers keep a disk cache of built pipelines of their own. Eden's copy on top
+// NVIDIA's and AMD's drivers keep a disk cache of built pipelines of their own. Lichii's copy on top
 // only kept every pipeline the title ever built in host memory (title 1: a 245 MB file, ~0.35 GB
 // of RAM for the session) and copied it whole at each save, which stalled frames; pipelines built
 // no slower without it.
@@ -769,10 +769,10 @@ constexpr size_t MaxPipelinesWithoutUsedList = 3000;
 // for a later precache.
 constexpr size_t PrecacheCaptureLimit = size_t{1} << 30;
 
-// EDEN_NX2_PRELOAD_ALL_PIPELINES=1 builds every cached pipeline at boot, as before.
+// LICHII_NX2_PRELOAD_ALL_PIPELINES=1 builds every cached pipeline at boot, as before.
 bool PreloadAllPipelines() {
     static const bool all = [] {
-        const char* value = std::getenv("EDEN_NX2_PRELOAD_ALL_PIPELINES");
+        const char* value = std::getenv("LICHII_NX2_PRELOAD_ALL_PIPELINES");
         return value != nullptr && value[0] == '1';
     }();
     return all;
@@ -979,7 +979,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         }
     }
 
-    const auto shader_dir{Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir)};
+    const auto shader_dir{Common::FS::GetLichiiPath(Common::FS::LichiiPath::ShaderDir)};
     const auto base_dir{shader_dir / fmt::format("{:016x}", title_id)};
     if (!Common::FS::CreateDir(shader_dir) || !Common::FS::CreateDir(base_dir)) {
         LOG_ERROR(Common_Filesystem, "Failed to create pipeline cache directories");
@@ -1516,11 +1516,11 @@ void PipelineCache::QueueVulkanPipelineCacheSave() {
 }
 
 namespace {
-// EDEN_NX2_PIPELINE_DIFF=1: for a new graphics pipeline whose shaders an earlier one uses too,
+// LICHII_NX2_PIPELINE_DIFF=1: for a new graphics pipeline whose shaders an earlier one uses too,
 // log which parts of the fixed state differ from that one (finds state that splits the same
 // draws into many pipelines, each translated on the GPU thread).
 void ReportNewPipelineKey(const GraphicsPipelineCacheKey& key) {
-    static const bool enabled = std::getenv("EDEN_NX2_PIPELINE_DIFF") != nullptr;
+    static const bool enabled = std::getenv("LICHII_NX2_PIPELINE_DIFF") != nullptr;
     if (!enabled) {
         return;
     }
@@ -1688,7 +1688,7 @@ void PipelineCache::EvictUnusedPipelines() {
     if (device.IsMoltenVK()) {
         return;
     }
-    // EDEN_NX2_PRELOAD_ALL_PIPELINES asked for every cached pipeline built: evicting the ones not
+    // LICHII_NX2_PRELOAD_ALL_PIPELINES asked for every cached pipeline built: evicting the ones not
     // used yet threw the preload away after 9000 frames (Ocarina: 22,510 of 24,285, then rebuilt
     // one by one in new places).
     if (PreloadAllPipelines()) {
@@ -1745,7 +1745,7 @@ void PipelineCache::EvictUnusedPipelines() {
 
 /// Returns `pipeline` when it is built or the current draw must wait for it, and nullptr when the
 /// draw may be skipped while it builds (asynchronous shaders; native draws only with
-/// EDEN_NX2_ASYNC_DISCARD=1). Each nullptr returned for an unbuilt pipeline is counted for the log.
+/// LICHII_NX2_ASYNC_DISCARD=1). Each nullptr returned for an unbuilt pipeline is counted for the log.
 GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexcept {
     if (pipeline->IsBuilt()) {
         return pipeline;
@@ -1753,14 +1753,14 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
     if (!use_asynchronous_shaders) {
         return pipeline;
     }
-    // EDEN_NX2_ASYNC_DISCARD=1: skip native draws whose pipeline is still building instead of
+    // LICHII_NX2_ASYNC_DISCARD=1: skip native draws whose pipeline is still building instead of
     // waiting for it (experimental; the draw may be missing for a frame or more).
-    /// Reads EDEN_NX2_ASYNC_DISCARD once and logs when it is on.
+    /// Reads LICHII_NX2_ASYNC_DISCARD once and logs when it is on.
     static const bool discard_native = [] {
-        const char* value = std::getenv("EDEN_NX2_ASYNC_DISCARD");
+        const char* value = std::getenv("LICHII_NX2_ASYNC_DISCARD");
         const bool enabled = value != nullptr && value[0] == '1';
         if (enabled) {
-            LOG_INFO(Render_Vulkan, "EDEN_NX2_ASYNC_DISCARD: native draws skip unbuilt pipelines");
+            LOG_INFO(Render_Vulkan, "LICHII_NX2_ASYNC_DISCARD: native draws skip unbuilt pipelines");
         }
         return enabled;
     }();
@@ -2127,11 +2127,11 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             }
         }
         ConvertLegacyToGeneric(program, runtime_info);
-        // EDEN_NX2_MESH_EMULATION_DUMP=<dir>: write the emulation's vertex shader for spirv-val.
+        // LICHII_NX2_MESH_EMULATION_DUMP=<dir>: write the emulation's vertex shader for spirv-val.
         // (Emitting the mesh program a second time here to dump its compute shader crashed the
         // build that followed, so only the vertex shader is written.)
         if (mesh_emulation && program.stage == Shader::Stage::Mesh) {
-            if (const char* const dump{std::getenv("EDEN_NX2_MESH_EMULATION_DUMP")}) {
+            if (const char* const dump{std::getenv("LICHII_NX2_MESH_EMULATION_DUMP")}) {
                 const auto& code{mesh_emulation->vertex_spirv};
                 std::ofstream file{fmt::format("{}/{:016x}.vert.spv", dump, hash),
                                    std::ios::binary};
@@ -2339,7 +2339,7 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(const ComputePipe
 
     main_pools.ReleaseContents();
     auto entry{CreateComputePipeline(main_pools, key, env, nullptr, true)};
-    if (const char* directory = std::getenv("EDEN_NX2_SHADER_DUMP");
+    if (const char* directory = std::getenv("LICHII_NX2_SHADER_DUMP");
         directory && !entry.pipeline && env.CanBeSerialized()) {
         const auto path = std::filesystem::path{directory} /
                           fmt::format("failed-compute-{:016x}-v{}.env", key.unique_hash, CACHE_VERSION);

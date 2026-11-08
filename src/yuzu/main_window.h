@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: 2014 Citra Emulator Project
@@ -404,7 +404,7 @@ private slots:
     void OnInstallFirmwareFromZIP();
     void OnInstallDecryptionKeys();
     void OnAbout();
-    void OnEdenDependencies();
+    void OnLichiiDependencies();
     void OnDataDialog();
     void OnToggleFilterBar();
     void OnToggleStatusBar();
@@ -630,7 +630,7 @@ private:
     static std::array<int, 3> sig_interrupt_fds;
 #endif
 
-    std::filesystem::path GetEdenCommand();
+    std::filesystem::path GetLichiiCommand();
 
     void CreateShortcut(const std::string& game_path, const u64 program_id,
                         const std::string& game_title, QtCommon::Game::ShortcutTarget target,

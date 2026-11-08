@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+# SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # SPDX-FileCopyrightText: 2018 yuzu Emulator Project
@@ -554,11 +554,11 @@ endif()
 # linked or copied: sl.interposer.dll and the DLSS plugins are loaded at run time from the user's PC.
 cmake_dependent_option(ENABLE_NVIDIA_DLSS "Enable NVIDIA DLSS through NVIDIA Streamline" ON
                        "MSVC AND ARCHITECTURE_x86_64" OFF)
-set(EGLANTINE_STREAMLINE_SDK "" CACHE PATH
+set(LICHII_STREAMLINE_SDK "" CACHE PATH
     "NVIDIA Streamline SDK directory for its headers (empty: download them)")
 if (ENABLE_NVIDIA_DLSS)
-    if (EGLANTINE_STREAMLINE_SDK)
-        set(STREAMLINE_INCLUDE_DIR "${EGLANTINE_STREAMLINE_SDK}/include")
+    if (LICHII_STREAMLINE_SDK)
+        set(STREAMLINE_INCLUDE_DIR "${LICHII_STREAMLINE_SDK}/include")
     else()
         AddJsonPackage(NAME streamline DOWNLOAD_ONLY)
         set(STREAMLINE_INCLUDE_DIR "${streamline_SOURCE_DIR}/include")
@@ -572,7 +572,7 @@ if (ENABLE_NVIDIA_DLSS)
     )
     target_include_directories(video_core PRIVATE "${STREAMLINE_INCLUDE_DIR}")
     target_link_libraries(video_core PRIVATE version wintrust crypt32)
-    target_compile_definitions(video_core PUBLIC EGLANTINE_STREAMLINE)
+    target_compile_definitions(video_core PUBLIC LICHII_STREAMLINE)
     message(STATUS "NVIDIA DLSS through Streamline: ${STREAMLINE_INCLUDE_DIR}")
 endif()
 

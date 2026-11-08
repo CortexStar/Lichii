@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: 2015 Citra Emulator Project
@@ -501,10 +501,10 @@ struct Memory::Impl {
 
         if (current_page_table->fastmem_arena) {
             Common::MemoryPermission perm{};
-            // EDEN_NX2_NO_REACTIVE=1 drops the read traps on Switch 2 programs. Opt-in: without
+            // LICHII_NX2_NO_REACTIVE=1 drops the read traps on Switch 2 programs. Opt-in: without
             // them a CPU read of GPU-written memory can see stale data.
             static const bool nx2_no_reactive = [] {
-                const char* value = std::getenv("EDEN_NX2_NO_REACTIVE");
+                const char* value = std::getenv("LICHII_NX2_NO_REACTIVE");
                 return value != nullptr && value[0] == '1';
             }();
             const bool reactive_flushing =
@@ -582,11 +582,11 @@ struct Memory::Impl {
 
     /// Read traps replace reactive flushing's blanket read protection of every cached page: only
     /// pages the GPU writes are protected, and each one only until its first read
-    /// (EDEN_NX2_READ_TRAPS=0 turns them off). Under NCE every fault is taken as a write, so they
+    /// (LICHII_NX2_READ_TRAPS=0 turns them off). Under NCE every fault is taken as a write, so they
     /// are not used there.
     bool ReadTrapsEnabled() const {
         static const bool disabled = [] {
-            const char* value = std::getenv("EDEN_NX2_READ_TRAPS");
+            const char* value = std::getenv("LICHII_NX2_READ_TRAPS");
             return value != nullptr && value[0] == '0';
         }();
         return !disabled && current_page_table->fastmem_arena &&

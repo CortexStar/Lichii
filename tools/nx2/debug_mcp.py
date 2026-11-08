@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """MCP server (stdio) for Lichii's in-process debug server (docs/nx2/debug-mcp.md).
 
-Run Lichii with EDEN_NX2_DEBUG_SERVER=127.0.0.1:6545, then register this script as a stdio MCP
+Run Lichii with LICHII_NX2_DEBUG_SERVER=127.0.0.1:6545, then register this script as a stdio MCP
 server for the agent:  python3 -I tools/nx2/debug_mcp.py [--server 127.0.0.1:6545]
 or run one request from a shell:
   python3 -I tools/nx2/debug_mcp.py --call '{"method":"screenshot","params":{}}' --out shot.png
@@ -92,7 +92,7 @@ TOOLS = [
     },
     {
         "name": "capture_frame",
-        "description": "EDEN_NX2_FRAME_DUMP for the next frame, now: every pass colour target, "
+        "description": "LICHII_NX2_FRAME_DUMP for the next frame, now: every pass colour target, "
                        "dispatch storage image and the present source as PNG and .raw.zst, plus "
                        "manifest.jsonl. 'sampled' also reads back every sampled texture with its "
                        "sampler state; 'buffers' records every draw's and dispatch's uniform and "
@@ -123,7 +123,7 @@ TOOLS = [
     },
     {
         "name": "reject_shaders",
-        "description": "EDEN_NX2_REJECT_HASH at runtime: rejects (or with reject=false restores) "
+        "description": "LICHII_NX2_REJECT_HASH at runtime: rejects (or with reject=false restores) "
                        "native programs by native program key (shader dump names) or shader hash "
                        "(frame dump 'shaders'); their cached pipelines are dropped at the next "
                        "frame end. With no hashes, lists the rejected ones.",
@@ -296,7 +296,7 @@ class Emulator:
                     raise EmulatorError(f"no answer within {timeout} s") from error
                 raise EmulatorError(
                     f"nothing listens on {self.host}:{self.port}: start Lichii with "
-                    f"EDEN_NX2_DEBUG_SERVER={self.host}:{self.port} and boot a game") from error
+                    f"LICHII_NX2_DEBUG_SERVER={self.host}:{self.port} and boot a game") from error
             except OSError as error:
                 # A stale connection from an earlier boot: reconnect once.
                 self.close()
@@ -444,7 +444,7 @@ def call_once(adapter, request_text, out, stdout):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--server", default=os.environ.get("LICHII_DEBUG_SERVER", DEFAULT_SERVER),
-                        help=f"host:port of EDEN_NX2_DEBUG_SERVER (default {DEFAULT_SERVER})")
+                        help=f"host:port of LICHII_NX2_DEBUG_SERVER (default {DEFAULT_SERVER})")
     parser.add_argument("--call", metavar="JSON",
                         help='run one request and exit, e.g. \'{"method":"screenshot","params":{}}\'')
     parser.add_argument("--out", metavar="PNG", help="with --call: where to save the PNG")

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
@@ -14,9 +14,9 @@ Common::ThreadWorker& GetThreadWorkers() {
     // A quarter of the hardware threads (at least 2). Half took ~3.5 cores from the emulated
     // CPU cores and the GPU thread on an 8-core laptop when textures were thrashing; with an
     // eighth (2) both threads stayed saturated and streamed textures arrived seconds late (shown
-    // as placeholders), while 4 cost no frame rate. EDEN_NX2_TRANSCODE_THREADS=<n> overrides.
+    // as placeholders), while 4 cost no frame rate. LICHII_NX2_TRANSCODE_THREADS=<n> overrides.
     static Common::ThreadWorker workers{[] {
-        if (const char* text = std::getenv("EDEN_NX2_TRANSCODE_THREADS")) {
+        if (const char* text = std::getenv("LICHII_NX2_TRANSCODE_THREADS")) {
             return (std::max)(static_cast<u32>(std::strtoul(text, nullptr, 10)), 1U);
         }
         return (std::max)(std::thread::hardware_concurrency() / 4, 2U);

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2017 Citra Emulator Project
@@ -38,9 +38,9 @@ DirectConnectWindow::DirectConnectWindow(Core::System& system_, QWidget* parent)
     ui->nickname->setValidator(validation.GetNickname());
     ui->nickname->setText(
         QString::fromStdString(UISettings::values.multiplayer_nickname.GetValue()));
-    if (ui->nickname->text().isEmpty() && !Settings::values.eden_username.GetValue().empty()) {
+    if (ui->nickname->text().isEmpty() && !Settings::values.lichii_username.GetValue().empty()) {
         // Use yuzu Web Service user name as nickname by default
-        ui->nickname->setText(QString::fromStdString(Settings::values.eden_username.GetValue()));
+        ui->nickname->setText(QString::fromStdString(Settings::values.lichii_username.GetValue()));
     }
     ui->ip->setValidator(validation.GetIP());
     ui->ip->setText(QString::fromStdString(UISettings::values.multiplayer_ip.GetValue()));

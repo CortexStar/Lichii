@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+# SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 set(EFFECT_DIR ${CMAKE_ARGV3})
@@ -29,7 +29,7 @@ get_filename_component(OUTPUT_DIR ${HEADER_FILE} DIRECTORY)
 make_directory(${OUTPUT_DIR})
 
 file(WRITE ${HEADER_FILE}
-"// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+"// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once

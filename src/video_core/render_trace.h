@@ -9,7 +9,7 @@
 namespace VideoCommon::RenderTrace {
 
 inline bool Enabled() {
-    static const bool enabled = std::getenv("EDEN_NX2_RENDER_TRACE") != nullptr;
+    static const bool enabled = std::getenv("LICHII_NX2_RENDER_TRACE") != nullptr;
     return enabled;
 }
 

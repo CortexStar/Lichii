@@ -14,12 +14,12 @@ namespace Vulkan {
 /// @param depth_enabled  The depth test is on for the draw.
 /// @param index_count    Index count of the draw.
 /// @param vertex_count   Vertex count of the draw.
-/// @param discard_native Let native draws follow the heuristic too (EDEN_NX2_ASYNC_DISCARD=1).
+/// @param discard_native Let native draws follow the heuristic too (LICHII_NX2_ASYNC_DISCARD=1).
 /// @return True when the draw may be skipped.
 constexpr bool CanDiscardPendingDraw(bool native, bool depth_enabled, u32 index_count,
                                     u32 vertex_count, bool discard_native = false) {
     // Native draws can produce persistent resources, even with depth enabled. They are only
-    // skipped when the user opts in (EDEN_NX2_ASYNC_DISCARD=1), trading a possible missing
+    // skipped when the user opts in (LICHII_NX2_ASYNC_DISCARD=1), trading a possible missing
     // effect for no stall while a new pipeline builds.
     if (native && !discard_native) {
         return false;
@@ -38,7 +38,7 @@ enum class NativeDrawAction {
     Skip,      ///< Drop the draw.
 };
 
-/// @param mode           Wait, Bounded or Skip (EDEN_NX2_ASYNC_DISCARD=1 passes Skip).
+/// @param mode           Wait, Bounded or Skip (LICHII_NX2_ASYNC_DISCARD=1 passes Skip).
 /// @param can_discard    The legacy heuristic allows skipping this draw.
 /// @param budget_left_us Microseconds left of this frame's wait budget.
 constexpr NativeDrawAction DecideNativePending(NativePendingMode mode, bool can_discard,

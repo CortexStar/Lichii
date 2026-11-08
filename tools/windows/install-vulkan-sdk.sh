@@ -1,5 +1,5 @@
 #!/bin/sh -e
-# SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+# SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 : "${VULKAN_SDK_VER:=1.4.341.1}"

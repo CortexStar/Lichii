@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "core/file_sys/card_image.h"
@@ -181,7 +181,7 @@ void InstallFirmware(const QString& location, bool recursive) {
 
 QString UnzipFirmwareToTmp(const QString& location) {
     namespace fs = std::filesystem;
-    fs::path tmp{fs::temp_directory_path() / "eden" / "firmware"};
+    fs::path tmp{fs::temp_directory_path() / "lichii" / "firmware"};
     std::error_code ec;
     fs::remove_all(tmp, ec);
     if (!fs::create_directories(tmp, ec)) {
@@ -326,7 +326,7 @@ void FixProfiles() {
     QtCommon::Frontend::Critical(
         tr("Orphaned Profiles Detected!"),
         tr("UNEXPECTED BAD THINGS MAY HAPPEN IF YOU DON'T READ THIS!<br>"
-           "Eden has detected the following save directories with no attached profile:<br>"
+           "Lichii has detected the following save directories with no attached profile:<br>"
            "%1<br><br>"
            "The following profiles are valid:<br>"
            "%2<br><br>"
@@ -498,7 +498,7 @@ bool CheckKeys() {
     if (!ContentManager::AreKeysPresent()) {
         QtCommon::Frontend::Information(
             tr("Keys not installed"),
-            tr("Install decryption keys and restart Eden before attempting to install firmware."));
+            tr("Install decryption keys and restart Lichii before attempting to install firmware."));
         return false;
     }
 
@@ -533,7 +533,7 @@ void InstallFirmwareZip() {
     if (!qCacheDir.isEmpty()) {
         QtCommon::Content::InstallFirmware(qCacheDir, true);
         std::error_code ec;
-        std::filesystem::remove_all(std::filesystem::temp_directory_path() / "eden" / "firmware",
+        std::filesystem::remove_all(std::filesystem::temp_directory_path() / "lichii" / "firmware",
                                     ec);
 
         if (ec) {

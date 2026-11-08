@@ -36,8 +36,8 @@ class FrameDumpSchedule {
 public:
     enum class Step { None, Start, Finish };
 
-    /// EDEN_NX2_FRAME_DUMP_AT: seconds after boot ("45"), a frame number ("2700f"), or "file" to
-    /// capture once `trigger_file` exists. EDEN_NX2_FRAME_DUMP_SAMPLED reads back both the
+    /// LICHII_NX2_FRAME_DUMP_AT: seconds after boot ("45"), a frame number ("2700f"), or "file" to
+    /// capture once `trigger_file` exists. LICHII_NX2_FRAME_DUMP_SAMPLED reads back both the
     /// sampled textures and the bound buffers.
     void Configure(std::string_view at, std::filesystem::path trigger_file, bool sampled);
     /// Captures the next frame for the debug server, which is told `id`. False while a capture
@@ -61,7 +61,7 @@ public:
     [[nodiscard]] u64 Frame() const noexcept {
         return frame;
     }
-    /// The debug server request being captured, 0 for EDEN_NX2_FRAME_DUMP's own capture.
+    /// The debug server request being captured, 0 for LICHII_NX2_FRAME_DUMP's own capture.
     [[nodiscard]] u64 CaptureId() const noexcept {
         return capture_id;
     }
@@ -85,10 +85,10 @@ private:
 /// reads them back runs, so other frames skip the copies.
 [[nodiscard]] bool RecordingSampledTextures() noexcept;
 
-/// EDEN_NX2_FRAME_DUMP=<dir> reads back one whole frame: the color targets of every pass, the
-/// images written by every compute dispatch and the presented image. EDEN_NX2_FRAME_DUMP_AT picks
+/// LICHII_NX2_FRAME_DUMP=<dir> reads back one whole frame: the color targets of every pass, the
+/// images written by every compute dispatch and the presented image. LICHII_NX2_FRAME_DUMP_AT picks
 /// the frame, in seconds after boot ("45") or as a frame number ("2700f").
-/// EDEN_NX2_FRAME_DUMP_SAMPLED=1 also reads back every texture a pass samples (3D and depth
+/// LICHII_NX2_FRAME_DUMP_SAMPLED=1 also reads back every texture a pass samples (3D and depth
 /// included), once per pass, as the first draw sampling it sees it, and the textures each compute
 /// shader samples, once per shader, before its first dispatch, with each texture's sampler state,
 /// and the uniform and storage buffers of every draw and dispatch, once per shader and binding, with
@@ -162,7 +162,7 @@ public:
     void DrainIfFull();
     void TickFrame();
     /// Captures the next frame into `directory` for the debug server, which is told `id` once
-    /// the manifest is complete. Works without EDEN_NX2_FRAME_DUMP.
+    /// the manifest is complete. Works without LICHII_NX2_FRAME_DUMP.
     void Arm(std::filesystem::path directory, bool sampled, bool buffers, u64 id);
 
 private:

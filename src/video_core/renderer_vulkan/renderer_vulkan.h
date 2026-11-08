@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
@@ -95,7 +95,7 @@ private:
 
     std::shared_ptr<Common::DynamicLibrary> library;
     vk::InstanceDispatch dld;
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
     bool streamline_started; ///< NVIDIA Streamline starts before the instance.
 #endif
 

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
@@ -88,7 +88,7 @@ public:
         return sampled_images;
     }
 
-    /// Advances the frame window of EDEN_NX2_UPSCALER_TRACE
+    /// Advances the frame window of LICHII_NX2_UPSCALER_TRACE
     static void TickUpscalerTrace();
 
     /// Whether no build of this pipeline is left queued on a worker thread, which holds it

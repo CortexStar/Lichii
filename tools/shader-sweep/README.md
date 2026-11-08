@@ -111,7 +111,7 @@ capture state machine to find its complete instruction extent. Padding is retain
 in the extraction artifact, not treated as executable instructions. Missing
 completion or invalid branch targets remain context failures.
 
-The [all-library sweep report](../../docs/shader-sweep-all-games-20261104.md)
+The [all-library sweep report](../../docs/investigations/shader-sweep-all-games-20261104.md)
 describes read-only inventory, NUP export, bounded archive extraction, preserved
 control blobs, and static replay. Its cache associations are inferred, and its
 synthetic-context validations are explicitly partial. Neither is a substitute for

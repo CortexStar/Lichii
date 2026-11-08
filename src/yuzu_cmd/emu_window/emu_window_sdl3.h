@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: 2016 Citra Emulator Project
@@ -28,10 +28,10 @@ class InputSubsystem;
 enum class MouseButton;
 } // namespace InputCommon
 
-// EDEN_NX2_HIDE_WINDOW=1 (anything but 0) creates the render window hidden and without focus, for unattended
+// LICHII_NX2_HIDE_WINDOW=1 (anything but 0) creates the render window hidden and without focus, for unattended
 // test runs that must not cover or interrupt the desktop.
 inline SDL_WindowFlags Nx2HiddenWindowFlags() {
-    const char* hide = std::getenv("EDEN_NX2_HIDE_WINDOW");
+    const char* hide = std::getenv("LICHII_NX2_HIDE_WINDOW");
     return hide != nullptr && hide[0] != '0' ? SDL_WINDOW_HIDDEN | SDL_WINDOW_NOT_FOCUSABLE
                                                          : SDL_WindowFlags{0};
 }
@@ -53,7 +53,7 @@ public:
     /// Wait for the next event on the main thread.
     void OnEvent(SDL_Event& event);
 
-    // Sets the window icon from yuzu.bmp
+    // Sets the window icon from lichii.bmp
     void SetWindowIcon();
 
 protected:

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: 2023 yuzu Emulator Project
@@ -249,6 +249,15 @@ void QtConfig::ReadPathValues() {
 void QtConfig::ReadShortcutValues() {
     BeginGroup(Settings::TranslateCategory(Settings::Category::Shortcuts));
 
+    // One-time migration: the exit hotkey's stored name changed in the Lichii
+    // rebrand. Bindings saved by pre-rename builds live under the old group;
+    // pull them forward while the new group is still at its defaults.
+    BeginGroup(std::string("Exit Eglantine"));
+    const auto legacy_keyseq = ReadStringSetting(std::string("KeySeq"), std::string());
+    const auto legacy_controller_keyseq =
+        ReadStringSetting(std::string("Controller_KeySeq"), std::string());
+    EndGroup();
+
     for (const auto& [name, group, shortcut] : UISettings::default_hotkeys) {
         BeginGroup(group);
         BeginGroup(name);
@@ -256,12 +265,22 @@ void QtConfig::ReadShortcutValues() {
         // No longer using ReadSetting for shortcut.second as it inaccurately returns a value of 1
         // for WidgetWithChildrenShortcut which is a value of 3. Needed to fix shortcuts the open
         // a file dialog in windowed mode
+        auto keyseq = ReadStringSetting(std::string("KeySeq"), shortcut.keyseq);
+        auto controller_keyseq =
+            ReadStringSetting(std::string("Controller_KeySeq"), shortcut.controller_keyseq);
+        if (name == "Exit Lichii") {
+            if (keyseq == shortcut.keyseq && !legacy_keyseq.empty()) {
+                keyseq = legacy_keyseq;
+            }
+            if (controller_keyseq == shortcut.controller_keyseq && !legacy_controller_keyseq.empty()) {
+                controller_keyseq = legacy_controller_keyseq;
+            }
+        }
+
         UISettings::values.shortcuts.push_back(
             {name,
              group,
-             {ReadStringSetting(std::string("KeySeq"), shortcut.keyseq),
-              ReadStringSetting(std::string("Controller_KeySeq"), shortcut.controller_keyseq),
-              shortcut.context,
+             {keyseq, controller_keyseq, shortcut.context,
               ReadBooleanSetting(std::string("Repeat"), std::optional(shortcut.repeat))}});
 
         EndGroup(); // name

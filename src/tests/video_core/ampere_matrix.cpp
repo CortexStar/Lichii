@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Half conversion oracle and RTX 4090 reference fragments adapted from Duck912/eden-fefw
 // native_shader.cpp at 8c6f0522b6ee07caa47ab4363823d3dc00aa8ac1.

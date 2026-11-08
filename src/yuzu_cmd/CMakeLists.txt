@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+# SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # SPDX-FileCopyrightText: 2018 yuzu Emulator Project
@@ -45,7 +45,7 @@ if (ENABLE_OPENGL)
 endif()
 target_link_libraries(yuzu-cmd PRIVATE ${PLATFORM_LIBRARIES} Threads::Threads)
 
-create_resource("../../dist/eden.bmp" "yuzu_cmd/yuzu_icon.h" "yuzu_icon")
+create_resource("../../dist/lichii.bmp" "yuzu_cmd/yuzu_icon.h" "yuzu_icon")
 target_include_directories(yuzu-cmd PRIVATE ${RESOURCES_DIR})
 
 target_link_libraries(yuzu-cmd PRIVATE SDL3::SDL3)

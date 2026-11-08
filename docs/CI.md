@@ -1,4 +1,4 @@
-# Eglantine CI and release guide
+# Lichii CI and release guide
 
 This document describes the split GitHub Actions pipeline added with this change. It is not yet a live workflow until the files have been merged to the required branches and the repository settings below have been applied.
 
@@ -28,7 +28,7 @@ X.Y.Z
 X.Y.Z-rcN
 ```
 
-Examples: `0.1.0-rc1`, `0.1.0`, `0.1.1-rc1`. Numeric components cannot have leading zeroes. The bundle starts with `0.1.0-rc1` as a **suggested starting point**, not as an existing Eglantine version convention. The current public releases use `build-<run number>`; confirm the first semantic version with maintainers before merging this value. The included `[0.1.0]` changelog section is intentionally empty and must receive the real initial release notes before the first versioned release can publish.
+Examples: `0.1.0-rc1`, `0.1.0`, `0.1.1-rc1`. Numeric components cannot have leading zeroes. The bundle starts with `0.1.0-rc1` as a **suggested starting point**, not as an existing upstream version convention. The current public releases use `build-<run number>`; confirm the first semantic version with maintainers before merging this value. The included `[0.1.0]` changelog section is intentionally empty and must receive the real initial release notes before the first versioned release can publish.
 
 Add changes to the top `## [Unreleased]` section in `CHANGELOG.md`. When a new candidate is prepared, the bump script moves those entries beneath `## [X.Y.Z]` and leaves an empty `## [Unreleased]` section ready for the next cycle. The RC and stable release notes come from that version section; an absent or empty section fails before the build is published.
 
@@ -83,13 +83,13 @@ Both the scheme-preparation job and the publishing job check out CI helper scrip
 | Windows x86_64      | clang-cl + ThinLTO `.zip`    | clang-cl + ThinLTO + PGO `.zip` |
 | macOS Apple Silicon | App bundle `.zip` and `.dmg` | Not built              |
 
-The existing build steps use the repository's current CMake targets (`yuzu` and `yuzu-cmd`) and package the produced `eglantine` and `eden-cli` binaries. Linux AppImages require glibc 2.39 or newer. Linux tarballs use system Qt and other shared libraries. The standard Windows build uses clang-cl from a pinned LLVM release (`tools/windows/install-llvm.ps1`, shared with the Windows build-check job) in Release mode with ThinLTO, against the MSVC headers, runtime and SDK. MSVC itself still builds the project for development but is not used for releases. Windows archives contain the deployed runtime dependencies. macOS artifacts are ad-hoc signed, not notarized; Gatekeeper may require the user to approve the app on first launch.
+The existing build steps use the repository's current CMake targets (`yuzu` and `yuzu-cmd`) and package the produced `lichii` and `lichii-cli` binaries. Linux AppImages require glibc 2.39 or newer. Linux tarballs use system Qt and other shared libraries. The standard Windows build uses clang-cl from a pinned LLVM release (`tools/windows/install-llvm.ps1`, shared with the Windows build-check job) in Release mode with ThinLTO, against the MSVC headers, runtime and SDK. MSVC itself still builds the project for development but is not used for releases. Windows archives contain the deployed runtime dependencies. macOS artifacts are ad-hoc signed, not notarized; Gatekeeper may require the user to approve the app on first launch.
 
 Build artifacts are retained for seven days. Published GitHub Release assets remain available until a release is deleted. Daily releases are pruned to approximately the seven most recent; branch releases are rolling and are cleaned up when no longer needed.
 
 ## Windows PGO profile
 
-`windows-x86_64-pgo` is the `windows-x86_64` build plus `-fprofile-use=lichii-windows.profdata`. The profile is an LLVM indexed IR profile from clang-cl, so its function names use the MSVC ABI. Linux's `eglantine.profdata` uses Itanium names, and clang-cl cannot use it. The committed profile comes from about six minutes of Ocarina of Time gameplay. Code that run never reached gets no profile data, so other games gain less.
+`windows-x86_64-pgo` is the `windows-x86_64` build plus `-fprofile-use=lichii-windows.profdata`. The profile is an LLVM indexed IR profile from clang-cl, so its function names use the MSVC ABI. Linux's `lichii.profdata` uses Itanium names, and clang-cl cannot use it. The committed profile comes from about six minutes of Ocarina of Time gameplay. Code that run never reached gets no profile data, so other games gain less.
 
 A profile older than the source only produces warnings. Functions whose code changed since training lose their profile data and are compiled as in the ThinLTO build. Retrain when those warnings cover code that matters, or when the LLVM version changes. clang-cl reads only the indexed format its own LLVM writes, so use the version that `tools/windows/install-llvm.ps1` installs.
 
@@ -104,10 +104,10 @@ To retrain:
 
 | Kind              | Tag                    | Release title                            | GitHub Release flag                |
 | ----------------- | ---------------------- | ---------------------------------------- | ---------------------------------- |
-| Stable            | `vX.Y.Z`               | `Eglantine vX.Y.Z`                       | Not a pre-release; marked latest   |
-| Release candidate | `vX.Y.Z-rcN`           | `Eglantine vX.Y.Z-rcN`                   | Pre-release                        |
-| Daily             | `daily-YYYYMMDD`       | `Eglantine Build DD/MM/YYYY`             | Pre-release; replaces same-day tag |
-| Branch / PR       | `branch-<slug>-<hash>` | `Eglantine Branch: <PR title or branch>` | Pre-release; rolling               |
+| Stable            | `vX.Y.Z`               | `Lichii vX.Y.Z`                       | Not a pre-release; marked latest   |
+| Release candidate | `vX.Y.Z-rcN`           | `Lichii vX.Y.Z-rcN`                   | Pre-release                        |
+| Daily             | `daily-YYYYMMDD`       | `Lichii Build DD/MM/YYYY`             | Pre-release; replaces same-day tag |
+| Branch / PR       | `branch-<slug>-<hash>` | `Lichii Branch: <PR title or branch>` | Pre-release; rolling               |
 
 Only stable and RC publications send the optional Discord notification. Daily and branch releases do not.
 
@@ -115,7 +115,7 @@ Only stable and RC publications send the optional Discord notification. Daily an
 
 The local `setup-build` action writes the four root-level files consumed by the repository's `GetSCMRev` CMake module: `GIT-COMMIT`, `GIT-REFSPEC`, `GIT-TAG`, and (for stable/RC only) `GIT-RELEASE`. This avoids depending on tags being present in shallow checkouts or on a named branch being available in detached PR checkouts.
 
-Stable and RC builds get `GIT-RELEASE`, so CMake marks them as release builds. Daily and branch builds omit that file and are configured with `NIGHTLY_BUILD=ON`; stable and RC builds are configured with it off. The project currently disables the update checker in the CI build flags. The SCM/update-server template still contains upstream Eden URLs; do not enable the updater until those URLs are intentionally migrated to Eglantine's own service.
+Stable and RC builds get `GIT-RELEASE`, so CMake marks them as release builds. Daily and branch builds omit that file and are configured with `NIGHTLY_BUILD=ON`; stable and RC builds are configured with it off. The project currently disables the update checker in the CI build flags. The SCM/update-server template still contains upstream Eden URLs; do not enable the updater until those URLs are intentionally migrated to Lichii's own service.
 
 ## Troubleshooting
 

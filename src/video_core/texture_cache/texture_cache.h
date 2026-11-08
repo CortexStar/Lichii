@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: 2023 yuzu Emulator Project
@@ -42,9 +42,9 @@
 
 namespace VideoCommon {
 
-/// EDEN_NATIVE_DRAW_DIAGNOSTICS is read once: getenv scans the whole environment block on Windows.
+/// LICHII_NATIVE_DRAW_DIAGNOSTICS is read once: getenv scans the whole environment block on Windows.
 [[nodiscard]] inline bool NativeDrawDiagnostics() {
-    static const bool enabled = std::getenv("EDEN_NATIVE_DRAW_DIAGNOSTICS") != nullptr;
+    static const bool enabled = std::getenv("LICHII_NATIVE_DRAW_DIAGNOSTICS") != nullptr;
     return enabled;
 }
 
@@ -58,7 +58,7 @@ using namespace Common::Literals;
 template <class P>
 TextureCache<P>::TextureCache(Runtime& runtime_, Tegra::MaxwellDeviceMemoryManager& device_memory_)
     : runtime{runtime_}, device_memory{device_memory_} {
-    debug_stats = std::getenv("EDEN_NX2_TC_LOG") != nullptr &&
+    debug_stats = std::getenv("LICHII_NX2_TC_LOG") != nullptr &&
                   Common::Log::IsLevelEnabled(Common::Log::Class::HW_GPU, Common::Log::Level::Debug);
 
     // Configure null sampler
@@ -149,9 +149,9 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
         aggressive_mode =
             allow_aggressive && (out_of_memory || total_used_memory >= critical_memory);
         ticks_to_destroy = aggressive_mode ? 10ULL : high_priority_mode ? 25ULL : 50ULL;
-        // EDEN_NX2_TC_MIN_AGE=<frames>: never evict images used more recently (thrash tests).
+        // LICHII_NX2_TC_MIN_AGE=<frames>: never evict images used more recently (thrash tests).
         static const u64 min_age = [] {
-            const char* value = std::getenv("EDEN_NX2_TC_MIN_AGE");
+            const char* value = std::getenv("LICHII_NX2_TC_MIN_AGE");
             return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ULL;
         }();
         ticks_to_destroy = (std::max)(ticks_to_destroy, min_age);
@@ -254,7 +254,7 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
     };
     Configure(false);
     static const u64 old_age = [] {
-        const char* value = std::getenv("EDEN_NX2_TC_OLD_AGE");
+        const char* value = std::getenv("LICHII_NX2_TC_OLD_AGE");
         return value != nullptr ? std::strtoull(value, nullptr, 10) : 1800ULL;
     }();
     if (high_priority_mode && old_age != 0 && frame_tick > old_age) {
@@ -335,13 +335,13 @@ void TextureCache<P>::ApplyThresholdOverrides(bool log) {
         (std::min)(expected_memory, critical_memory - (std::min)(critical_memory, u64{768_MiB}));
     minimum_memory =
         (std::min)(minimum_memory, expected_memory - (std::min)(expected_memory, u64{1_GiB}));
-    // EDEN_NX2_TC_EXPECTED_MIB / EDEN_NX2_TC_CRITICAL_MIB raise the collector's thresholds past
+    // LICHII_NX2_TC_EXPECTED_MIB / LICHII_NX2_TC_CRITICAL_MIB raise the collector's thresholds past
     // MaxCriticalMemory, but never past what the device budget allows: set outright, they kept
     // the cache above a shrinking budget (other programs' video memory, out-of-memory margins) and
     // the driver paged (drops to 9 fps on an 8 GB card in Ocarina's Kokiri Forest).
     for (const auto& [name, target, limit] :
-         {std::tuple{"EDEN_NX2_TC_EXPECTED_MIB", &expected_memory, budget_expected},
-          std::tuple{"EDEN_NX2_TC_CRITICAL_MIB", &critical_memory, budget_critical}}) {
+         {std::tuple{"LICHII_NX2_TC_EXPECTED_MIB", &expected_memory, budget_expected},
+          std::tuple{"LICHII_NX2_TC_CRITICAL_MIB", &critical_memory, budget_critical}}) {
         if (const char* value = std::getenv(name)) {
             *target = (std::min)(static_cast<u64>(std::strtoull(value, nullptr, 10)) << 20, limit);
         }
@@ -363,7 +363,7 @@ void TextureCache<P>::TickFrame() {
         }
     }
     if constexpr (HAS_DEVICE_MEMORY_INFO) {
-        // Switch 2 titles (native tiling) stream far more texture data than Eden's thresholds
+        // Switch 2 titles (native tiling) stream far more texture data than the emulator's thresholds
         // were tuned for: title 1's attract loop alone keeps ~5.3 GB resident, so the collector
         // sat in aggressive mode evicting decoded ASTC (and decoding it again). Total use is
         // measured from the driver, so collect only near the device budget instead.
@@ -378,12 +378,12 @@ void TextureCache<P>::TickFrame() {
         }
         // Follow the driver's budget (re-read now and then): it shrinks when other programs use
         // VRAM (another game: 7.0 -> 6.4 GB), and collecting only past it means the driver pages
-        // textures out. It is also the room to use: Eden's device memory figure is capped near
+        // textures out. It is also the room to use: the emulator's device memory figure is capped near
         // 7 GB, which on a 12 GB card (11.2 GB budget) kept title 1 evicting textures with 3 GB
         // unused. Both thresholds stay under it with a margin (1/8 of it, at most 1 GiB): past it
         // allocations fail and images end up unbacked (garbage textures), and Windows shrinks the
         // budget as the card fills (16 GB card: 13.5 GB left mid-race), hence the re-read every 30
-        // frames. EDEN_NX2_TC_*_MIB overrides can raise the thresholds up to this budget.
+        // frames. LICHII_NX2_TC_*_MIB overrides can raise the thresholds up to this budget.
         if constexpr (requires { runtime.GetDeviceMemoryBudget(); }) {
             if constexpr (requires { runtime.MemoryPressureEvents(); }) {
                 // Images that did not fit (made in host memory or with nothing bound) mean the
@@ -460,7 +460,7 @@ void TextureCache<P>::TickFrame() {
     }
     // Every 600 frames: device memory in use against the collector's thresholds.
     // Skip expensive heap allocation, map construction, and sorting unless debug logging is explicitly enabled.
-    static const bool log_tc = std::getenv("EDEN_NX2_TC_LOG") != nullptr;
+    static const bool log_tc = std::getenv("LICHII_NX2_TC_LOG") != nullptr;
     static u64 frames{};
     if (log_tc && ++frames % 600 == 0) {
         u64 image_bytes{};

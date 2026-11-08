@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
@@ -331,7 +331,7 @@ void FrameGen::Rebuild(const Device& device, VkExtent2D extent, VkFormat format,
 
 void FrameGen::DumpDebugImages(u64 count) {
     const std::filesystem::path directory =
-        Common::FS::GetEdenPath(Common::FS::EdenPath::LosslessDir) / "debug";
+        Common::FS::GetLichiiPath(Common::FS::LichiiPath::LosslessDir) / "debug";
     if (!Common::FS::CreateDirs(directory)) {
         return;
     }

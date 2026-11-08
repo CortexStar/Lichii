@@ -1,5 +1,5 @@
 #pragma GCC diagnostic ignored "-Wshadow"
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Encoding reference: Mesa NAK sm70_encode.rs (MIT), Copyright 2022 Collabora, Ltd.
 #pragma once
@@ -984,7 +984,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             const u32 multiplier = insn.words[1];
             if (insn.Bits(64, 8) == 255 && !negate_c && multiplier > 1 && !(multiplier & (multiplier - 1)) &&
                 (insn.words[2] & ~0x2ffU) == 0x078e0000) {
-                // IMAD.SHL by a power of two: one shift (also the form Eden's jump-table tracking
+                // IMAD.SHL by a power of two: one shift (also the form the jump-table tracking
                 // expects between the clamp and the table load).
                 u32 shift = 0;
                 while ((1U << shift) != multiplier) ++shift;
@@ -1198,7 +1198,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         }
         case 0xb82: { // LDC indexed byte offset; bits 78-79 the mode as Maxwell's (2 = IS)
             // .IS: Ra + offset addresses all constant buffers as one space, the buffer in its high
-            // half (Kirby Air Riders' vertex shaders), which Eden's Maxwell LDC implements.
+            // half (Kirby Air Riders' vertex shaders), which the Maxwell LDC implements.
             const u32 width = insn.Bits(73, 3), mode = insn.Bits(78, 2);
             if (width > 5 || (mode != 0 && mode != 2) ||
                 (insn.words[2] & ~0xce00U) || (insn.words[1] & 0xf800003fU) ||
@@ -1389,7 +1389,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             restore_predicate(1U << scratch);
             break;
         }
-        case 0x80d: { // CSMTEST: a test of shading-mode state Eden does not model, taken as false.
+        case 0x80d: { // CSMTEST: a test of shading-mode state the emulator does not model, taken as false.
             // Kirby Air Riders' vertex-side shaders run "CSMTEST.A.FCSM_TR P0" then "@P0 EXIT":
             // never leave early. Outputs of PT discard the result.
             const u32 first = insn.Bits(81, 3), second = insn.Bits(84, 3);
@@ -3117,7 +3117,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 insn.Bits(80, 12) != (opcode == 0xd08 ? 0x800U : 0U))
                 return fail(index, "native MUFU mode");
             // SM70+ MUFU.COS/SIN take the angle in turns (compilers multiply by 1/2pi first);
-            // Eden's Maxwell MUFU takes radians (its RRO is a plain move), so scale by 2pi.
+            // The Maxwell MUFU takes radians (its RRO is a plain move), so scale by 2pi.
             const bool turns = operation == 0 || operation == 1;
             const auto to_radians = [&](u32 source) {
                 emit(0x1e00000000000000ULL | predicate | 250 | (u64{source} << 8) |
@@ -3832,15 +3832,15 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         }
         case 0x945: case 0x941: case 0x942: case 0x948: // (+ WARPSYNC)
             // BSSY / BSYNC / BREAK only manage warp reconvergence: BSYNC waits for the other
-            // threads and falls through, BREAK drops the thread from that wait. Eden runs threads
+            // threads and falls through, BREAK drops the thread from that wait. The emulator runs threads
             // independently, so all three are no-ops (a SYNC would wrongly jump, and a branch
-            // out of a lowered SSY region would leave its token on Eden's flow stack).
+            // out of a lowered SSY region would leave its token on the flow stack).
             break;
         case 0x947: { // BRA
             // The offset's two low bits: .DIV (2) branches when the warp has diverged, .CONV (3)
             // when its active threads are the mask in the uniform register at 24-31 (bit 91;
             // URZ without it). The compiler puts warp-synchronous fast paths behind them (shuffles
-            // on a converged warp; the other path calls a WARPSYNC helper). Eden runs the warp's
+            // on a converged warp; the other path calls a WARPSYNC helper). The emulator runs the warp's
             // threads converged there: .CONV always branches and .DIV never does.
             const u32 mode = insn.Bits(32, 2);
             if ((mode <= 1 && insn.Bits(91, 1)) ||
@@ -3955,7 +3955,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 [&](const Relocation& relocation) { return !relocation.call && relocation.target > index; });
             if (!main_exited && pending_main_branch) break;
             if (main_exited) {
-                // A library function may end the shader instead of returning (Eden inlines
+                // A library function may end the shader instead of returning (the emulator inlines
                 // calls, so this is an ordinary exit at that point).
                 bool complete = std::none_of(relocations.begin(), relocations.end(),
                     [&](const Relocation& relocation) { return relocation.target > index; });

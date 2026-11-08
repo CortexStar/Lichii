@@ -9,7 +9,7 @@
 
 # It also sets CXX_<compiler> for the C++ compiler.
 
-# This module contains contributions from the Eden Emulator Project,
+# This module contains contributions from the Lichii Project,
 # notably from crueter and Lizzie.
 
 if (${CMAKE_SYSTEM_NAME} STREQUAL "SunOS")

@@ -21,7 +21,7 @@
 #include "common/cpu_features.h"
 #include "common/thread_cpu_clock.h"
 
-// EDEN_NX2_GPU_PROFILE: time where the GPU thread spends its time. Each zone counts its own
+// LICHII_NX2_GPU_PROFILE: time where the GPU thread spends its time. Each zone counts its own
 // (exclusive) time, nested zones excluded; every 10 s the thread logs each zone's share.
 namespace VideoCommon::Nx2Profile {
 
@@ -77,12 +77,12 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
 };
 
 // A plain flag: Enabled() runs several times per method write (no guard to check).
-inline bool g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
+inline bool g_enabled = std::getenv("LICHII_NX2_GPU_PROFILE") != nullptr;
 
 /// Called by VideoCore::CreateGPU: static initialization runs before the frontend loads
 /// nx2_switches.txt, so a switch set only there takes effect from that point on.
 inline void ReadSwitch() {
-    g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
+    g_enabled = std::getenv("LICHII_NX2_GPU_PROFILE") != nullptr;
 }
 
 inline bool Enabled() {

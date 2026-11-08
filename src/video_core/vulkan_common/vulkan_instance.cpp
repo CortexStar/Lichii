@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
@@ -18,7 +18,7 @@
 #include "core/frontend/emu_window.h"
 #include "video_core/vulkan_common/vulkan_instance.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
 #include <algorithm>
 #include <string>
 #include "video_core/vulkan_common/streamline.h"
@@ -87,7 +87,7 @@ namespace {
 #endif
     if (enable_validation && AreExtensionsSupported(dld, properties, std::array{VK_EXT_DEBUG_UTILS_EXTENSION_NAME}))
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
     // What NVIDIA's DLSS asks for through Streamline, where available. Static: the returned
     // pointers must outlive this call.
     static std::vector<std::string> streamline;

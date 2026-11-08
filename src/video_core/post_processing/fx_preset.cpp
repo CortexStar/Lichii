@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
@@ -102,7 +102,7 @@ std::string ComposePreset(const FxPresetDesc& desc) {
 } // Anonymous namespace
 
 std::filesystem::path GetFxPresetDirectory() {
-    return Common::FS::GetEdenPath(Common::FS::EdenPath::PostPresetDir);
+    return Common::FS::GetLichiiPath(Common::FS::LichiiPath::PostPresetDir);
 }
 
 void ReloadFxPresetCatalog() {

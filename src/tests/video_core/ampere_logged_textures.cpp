@@ -363,7 +363,7 @@ TEST_CASE("Depth sampling emits float image and result types for integer descrip
             if (depth) {
                 CHECK(dref_result_type == image_sampled_type);
             }
-            if (const char* directory = std::getenv("EDEN_DEPTH_TEST_OUTPUT")) {
+            if (const char* directory = std::getenv("LICHII_DEPTH_TEST_OUTPUT")) {
                 std::filesystem::create_directories(directory);
                 const auto name = std::string{depth ? "depth" : "color"} +
                                   (integer ? "-integer" : "-float") + ".spv";

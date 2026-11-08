@@ -25,7 +25,7 @@ struct TensorMode {
     bool existed{};
 
     explicit TensorMode(const char* mode) {
-        if (const char* value = std::getenv("EDEN_NX2_TENSOR")) {
+        if (const char* value = std::getenv("LICHII_NX2_TENSOR")) {
             previous = value;
             existed = true;
         }
@@ -34,12 +34,12 @@ struct TensorMode {
 
     static void Set(const char* value) {
 #ifdef _WIN32
-        _putenv_s("EDEN_NX2_TENSOR", value ? value : "");
+        _putenv_s("LICHII_NX2_TENSOR", value ? value : "");
 #else
         if (value) {
-            setenv("EDEN_NX2_TENSOR", value, 1);
+            setenv("LICHII_NX2_TENSOR", value, 1);
         } else {
-            unsetenv("EDEN_NX2_TENSOR");
+            unsetenv("LICHII_NX2_TENSOR");
         }
 #endif
     }
@@ -98,7 +98,7 @@ struct TensorProgram {
 
     std::vector<u32> Emit(std::string_view name = {}) {
         auto code = Backend::SPIRV::EmitSPIRV(profile, program);
-        if (const char* directory = std::getenv("EDEN_TENSOR_TEST_OUTPUT");
+        if (const char* directory = std::getenv("LICHII_TENSOR_TEST_OUTPUT");
             directory && !name.empty()) {
             std::filesystem::create_directories(directory);
             std::ofstream file{std::filesystem::path{directory} / (std::string{name} + ".spv"),
@@ -624,7 +624,7 @@ TEST_CASE("Cooperative HMMA self-test shader runs one lowering on one warp",
         REQUIRE(modes.size() == 1);
         REQUIRE(modes[0][1] == 17); // LocalSize
         REQUIRE(modes[0][2] == 32);
-        if (const char* directory = std::getenv("EDEN_TENSOR_TEST_OUTPUT")) {
+        if (const char* directory = std::getenv("LICHII_TENSOR_TEST_OUTPUT")) {
             std::filesystem::create_directories(directory);
             std::ofstream file{std::filesystem::path{directory} /
                                    ("cooperative-self-test-" + std::to_string(version) + ".spv"),

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: 2021 yuzu Emulator Project
@@ -159,8 +159,8 @@ void nvhost_as_gpu::Nx2Map(u64 gpu_address, u64 cpu_address, u64 size) {
             }
             return address;
         };
-        // EDEN_NX2_PRIVATE_DEVICE_RANGES=1 (A/B aid): a range per address space.
-        static const bool private_ranges = std::getenv("EDEN_NX2_PRIVATE_DEVICE_RANGES") != nullptr;
+        // LICHII_NX2_PRIVATE_DEVICE_RANGES=1 (A/B aid): a range per address space.
+        static const bool private_ranges = std::getenv("LICHII_NX2_PRIVATE_DEVICE_RANGES") != nullptr;
         if (private_ranges) {
             range = {allocate(), false};
         } else {

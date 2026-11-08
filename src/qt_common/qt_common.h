@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
@@ -59,5 +59,5 @@ const QString tr(const std::string& str);
 
 
 
-std::filesystem::path GetEdenCommand();
+std::filesystem::path GetLichiiCommand();
 } // namespace QtCommon

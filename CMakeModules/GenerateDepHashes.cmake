@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Eden Emulator Project
+# SPDX-FileCopyrightText: 2025 Lichii Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 get_property(NAMES GLOBAL PROPERTY CPM_PACKAGE_NAMES)

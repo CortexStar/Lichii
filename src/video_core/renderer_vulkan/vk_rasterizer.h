@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
@@ -243,9 +243,9 @@ private:
     void UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs);
 
     void FrameDumpPass(const Framebuffer* framebuffer);
-    /// EDEN_NX2_PENDING_WRITE_TRACE: logs bound buffer ranges with collected, unapplied CPU writes.
+    /// LICHII_NX2_PENDING_WRITE_TRACE: logs bound buffer ranges with collected, unapplied CPU writes.
     void TracePendingCpuWrites(bool compute, std::span<const u64> shader_hashes);
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
     bool OcarinaDlssEnabled() const;
     void TrackOcarinaCamera();
     void TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool is_indirect);
@@ -287,7 +287,7 @@ private:
     boost::container::static_vector<VkSampler, MAX_TEXTURES> sampler_handles;
 
     u32 draw_counter = 0;
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
     std::optional<u64> oot_camera_sample_frame;
     struct OcarinaMotionTrace {
         const Tegra::MemoryManager* camera_channel{};

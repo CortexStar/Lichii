@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
@@ -250,8 +250,8 @@ void SinkStream::ProcessAudioOutAndRender(std::span<s16> output_buffer, std::siz
 
     std::memcpy(last_frame.data(), &output_buffer[(frames_written - 1) * frame_size], frame_size_bytes);
 
-    // EDEN_NX2_AUDIO_LEVEL: log the output peak about every two seconds (is a game audible?).
-    if (static const bool meter = std::getenv("EDEN_NX2_AUDIO_LEVEL") != nullptr;
+    // LICHII_NX2_AUDIO_LEVEL: log the output peak about every two seconds (is a game audible?).
+    if (static const bool meter = std::getenv("LICHII_NX2_AUDIO_LEVEL") != nullptr;
         meter || type == StreamType::Sysmix) {
         for (size_t i = 0; i < num_frames * frame_size; ++i) {
             level_peak = std::max<s32>(level_peak, std::abs(static_cast<s32>(output_buffer[i])));

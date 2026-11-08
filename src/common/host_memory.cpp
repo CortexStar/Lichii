@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
@@ -604,12 +604,12 @@ public:
         fd = shm_open(SHM_ANON, O_RDWR, 0600);
 #elif defined(__APPLE__)
         char shm_name[32];
-        std::snprintf(shm_name, sizeof(shm_name), "/eden_mem_%d", int(getpid()));
+        std::snprintf(shm_name, sizeof(shm_name), "/lichii_mem_%d", int(getpid()));
         fd = shm_open(shm_name, O_RDWR | O_CREAT | O_EXCL, 0600);
         if (fd >= 0) {
             shm_unlink(shm_name);
         } else {
-            char template_path[] = "/tmp/eden_mem_XXXXXX";
+            char template_path[] = "/tmp/lichii_mem_XXXXXX";
             fd = mkstemp(template_path);
             if (fd >= 0) {
                 unlink(template_path);
@@ -617,7 +617,7 @@ public:
         }
 #elif defined(__managarm__)
         // macOS doesn't have memfd_create, use anonymous temporary file
-        char template_path[] = "/tmp/eden_mem_XXXXXX";
+        char template_path[] = "/tmp/lichii_mem_XXXXXX";
         fd = mkstemp(template_path);
         if (fd >= 0) {
             unlink(template_path);
@@ -1118,7 +1118,7 @@ void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 f
 #ifdef __linux__
     // Handing a whole granule back to the kernel frees its RAM; a memset would commit it.
     static const bool punch = [] {
-        const char* value = std::getenv("EDEN_PUNCH_HOLE");
+        const char* value = std::getenv("LICHII_PUNCH_HOLE");
         return value == nullptr || value[0] != '0';
     }();
 #endif

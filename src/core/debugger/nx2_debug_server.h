@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
@@ -25,7 +25,7 @@ struct Endpoint {
     u16 port;
 };
 
-/// Parses EDEN_NX2_DEBUG_SERVER: "<port>" or "<host>:<port>". Only loopback hosts are accepted.
+/// Parses LICHII_NX2_DEBUG_SERVER: "<port>" or "<host>:<port>". Only loopback hosts are accepted.
 [[nodiscard]] std::optional<Endpoint> ParseEndpoint(std::string_view text, std::string& error);
 
 /// Whether the client of the request being handled has disconnected. A handler that waits polls

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
@@ -259,7 +259,7 @@ public:
     bool BypassOotNetwork(u64 program_id, u64 native_key);
     void TraceDlssContract(u64 native_key, bool warn_unvalidated = true);
 
-    /// GPU thread split with macros on its front half (gpu_split.h, EDEN_NX2_SPLIT=2), called by
+    /// GPU thread split with macros on its front half (gpu_split.h, LICHII_NX2_SPLIT=2), called by
     /// the front instead of CallMethod for native compute engines: runs their macros and macro
     /// uploads against a copy of the registers and sends the register writes to the back.
     bool FrontRunsMacros() const { return native_mode; }

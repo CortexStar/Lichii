@@ -1,6 +1,6 @@
 #!/usr/bin/env perl
 
-# SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+# SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Basic script to run dtrace sampling over the program (requires Flamegraph)
 # Usage is either running as: ./dtrace-tool.sh pid (then input the pid of the process)
@@ -12,10 +12,10 @@ use POSIX qw(strftime);
 my $input;
 my $sampling_hz = '997';
 my $sampling_time = '60';
-my $sampling_pid = `pgrep eden`;
+my $sampling_pid = `pgrep lichii`;
 chomp($sampling_pid);
 
-my $sampling_program = 'eden';
+my $sampling_program = 'lichii';
 my $sampling_type = 0;
 
 sub dtrace_ask_params {

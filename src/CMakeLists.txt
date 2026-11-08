@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+# SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # SPDX-FileCopyrightText: 2018 yuzu Emulator Project
@@ -273,7 +273,7 @@ endif()
 
 if (YUZU_ROOM_STANDALONE)
     add_subdirectory(yuzu_room_standalone)
-    set_target_properties(yuzu-room PROPERTIES OUTPUT_NAME "eden-room")
+    set_target_properties(yuzu-room PROPERTIES OUTPUT_NAME "lichii-room")
 endif()
 
 if (YUZU_STATIC_ROOM)
@@ -294,7 +294,7 @@ endif()
 
 if (YUZU_CMD)
     add_subdirectory(yuzu_cmd)
-    set_target_properties(yuzu-cmd PROPERTIES OUTPUT_NAME "eden-cli")
+    set_target_properties(yuzu-cmd PROPERTIES OUTPUT_NAME "lichii-cli")
 endif()
 
 if (ENABLE_QT)

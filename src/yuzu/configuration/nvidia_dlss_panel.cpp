@@ -1,7 +1,7 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
 
 #include "common/httplib.h"
 

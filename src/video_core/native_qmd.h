@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include <algorithm>
@@ -109,7 +109,7 @@ public:
             if (!read(request.address, state.descriptor)) return "unmapped QMD";
             const auto qmd = state.descriptor;
             if ((qmd[18] & 0xff) != 0x30 || (qmd[4] & 0x100)) return "unsupported QMD version or queue";
-            // A program Eden can't run is skipped, but the QMD still completes: its releases
+            // A program the emulator can't run is skipped, but the QMD still completes: its releases
             // are what other queues and the CPU wait on (the console never fails a launch).
             const bool dispatched = !(qmd[12] && (qmd[13] & 0xffff) && (qmd[14] & 0xffff)) || dispatch(qmd);
             if (!dispatched) error = "native shader dispatch required";

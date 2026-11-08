@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <filesystem>
@@ -7,9 +7,9 @@
 #include "ryujinx_dialog.h"
 #include "ui_ryujinx_dialog.h"
 
-RyujinxDialog::RyujinxDialog(std::filesystem::path eden_path, std::filesystem::path ryu_path,
+RyujinxDialog::RyujinxDialog(std::filesystem::path lichii_path, std::filesystem::path ryu_path,
                              QWidget* parent)
-    : QDialog(parent), ui(new Ui::RyujinxDialog), m_eden(eden_path.make_preferred()),
+    : QDialog(parent), ui(new Ui::RyujinxDialog), m_eden(lichii_path.make_preferred()),
       m_ryu(ryu_path.make_preferred()) {
     ui->setupUi(this);
 
@@ -26,7 +26,7 @@ void RyujinxDialog::fromEden() {
     accept();
 
     // Workaround: Ryujinx deletes and re-creates its directory structure???
-    // So we just copy Eden's data to Ryujinx and then link the other way
+    // So we just copy Lichii's data to Ryujinx and then link the other way
     namespace fs = std::filesystem;
     try {
         fs::remove_all(m_ryu);

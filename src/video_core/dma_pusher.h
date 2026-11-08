@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
@@ -118,7 +118,7 @@ struct CommandList final {
 
     boost::container::small_vector<CommandListHeader, 512> command_lists;
     boost::container::small_vector<CommandHeader, 512> prefetch_command_list;
-    /// EDEN_NX2_PB_CHECK: hash of each entry's words when it was submitted.
+    /// LICHII_NX2_PB_CHECK: hash of each entry's words when it was submitted.
     std::vector<u64> submit_hashes;
     /// The entries' words when they were submitted (NX2), each entry's at submitted_offsets[i]:
     /// executed instead of the memory, which the game may already be refilling for a later frame.
@@ -133,7 +133,7 @@ struct CommandList final {
     u64 snapshot_suspensions = 0;
 };
 
-/// FNV-1a over pushbuffer words (EDEN_NX2_PB_CHECK).
+/// FNV-1a over pushbuffer words (LICHII_NX2_PB_CHECK).
 inline u64 HashPushbufferWords(std::span<const u32> words) {
     u64 hash = 0xcbf29ce484222325ULL;
     for (const u32 word : words) {
@@ -221,10 +221,10 @@ public:
     /// Copies the list's deferred entries (CommandList::deferred_entries) from memory.
     void RefreshDeferredEntries(CommandList& list);
 
-    /// EDEN_NX2_RESNAPSHOT=0 turns snapshot refreshes off.
+    /// LICHII_NX2_RESNAPSHOT=0 turns snapshot refreshes off.
     static bool ResnapshotEnabled() {
         static const bool enabled = [] {
-            const char* value = std::getenv("EDEN_NX2_RESNAPSHOT");
+            const char* value = std::getenv("LICHII_NX2_RESNAPSHOT");
             return value == nullptr || value[0] != '0';
         }();
         return enabled;
@@ -278,14 +278,14 @@ public:
 
     // Read per channel, not at static initialization, which runs before the frontend loads
     // nx2_switches.txt.
-    // EDEN_NX2_SEM_WATCH=<gpu address>: log every method whose argument is the low word of an
+    // LICHII_NX2_SEM_WATCH=<gpu address>: log every method whose argument is the low word of an
     // address in the 16 bytes there (finds the engine and method that release a semaphore).
     const u32 semaphore_watch = [] {
-        const char* value = std::getenv("EDEN_NX2_SEM_WATCH");
+        const char* value = std::getenv("LICHII_NX2_SEM_WATCH");
         return value ? static_cast<u32>(std::strtoull(value, nullptr, 16)) : 0U;
     }();
-    // EDEN_NX2_PB_CHECK also keeps the last parsed entries, for DumpCurrentEntry.
-    const bool record_parsed_entries = std::getenv("EDEN_NX2_PB_CHECK") != nullptr;
+    // LICHII_NX2_PB_CHECK also keeps the last parsed entries, for DumpCurrentEntry.
+    const bool record_parsed_entries = std::getenv("LICHII_NX2_PB_CHECK") != nullptr;
 
     // Debug aid: hashes of the words of the last entries as they were parsed.
     struct ParsedEntry {

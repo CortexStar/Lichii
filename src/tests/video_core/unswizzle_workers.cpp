@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
@@ -304,7 +304,7 @@ TEST_CASE("Full upload does not wait behind a saturated shared pool", "[unswizzl
     [[maybe_unused]] const auto original = UnswizzleImage(memory, 0, info, input, expected);
     std::vector<u8> actual(expected.size(), 0xCD);
     auto& pool = GetThreadWorkers();
-    const char* threads_env = std::getenv("EDEN_NX2_TRANSCODE_THREADS");
+    const char* threads_env = std::getenv("LICHII_NX2_TRANSCODE_THREADS");
     const u32 threads =
         threads_env ? (std::max)(static_cast<u32>(std::strtoul(threads_env, nullptr, 10)), 1U)
                     : (std::max)(std::thread::hardware_concurrency() / 4, 2U);

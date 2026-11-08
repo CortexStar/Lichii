@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <regex>
@@ -225,7 +225,7 @@ void ApplyLaunchParams(LaunchParams const& lp) noexcept {
     }
 
     if (lp.print_version) {
-        LOG_INFO(Frontend, "Eden {} {}", Common::g_scm_branch, Common::g_scm_desc);
+        LOG_INFO(Frontend, "Lichii {} {}", Common::g_scm_branch, Common::g_scm_desc);
     }
     if (lp.print_help) {
         LOG_INFO(Frontend,

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
@@ -418,11 +418,11 @@ template <typename Map>
 } // Anonymous namespace
 
 std::filesystem::path GetLosslessDllPath() {
-    return Common::FS::GetEdenPath(Common::FS::EdenPath::LosslessDir) / LOSSLESS_DLL_FILE;
+    return Common::FS::GetLichiiPath(Common::FS::LichiiPath::LosslessDir) / LOSSLESS_DLL_FILE;
 }
 
 std::filesystem::path GetShaderCachePath() {
-    return Common::FS::GetEdenPath(Common::FS::EdenPath::LosslessDir) / LOSSLESS_CACHE_FILE;
+    return Common::FS::GetLichiiPath(Common::FS::LichiiPath::LosslessDir) / LOSSLESS_CACHE_FILE;
 }
 
 LosslessStatus ReadShaderResources(const std::filesystem::path& path,

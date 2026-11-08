@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
@@ -366,10 +366,10 @@ public:
     /// Whether images with no memory bound may be sampled and used as attachments. AMD's drivers
     /// fault on it (the GPU hangs shortly after the first such draw), so large images there are
     /// backed normally. RADV is counted in until someone shows it doesn't need it.
-    /// EDEN_NX2_SPARSE_UNBACKED=1 allows unbound images on any driver, =0 on none.
+    /// LICHII_NX2_SPARSE_UNBACKED=1 allows unbound images on any driver, =0 on none.
     bool CanUseUnbackedSparseImages() const {
         static const char forced = [] {
-            const char* value = std::getenv("EDEN_NX2_SPARSE_UNBACKED");
+            const char* value = std::getenv("LICHII_NX2_SPARSE_UNBACKED");
             return value == nullptr ? '\0' : value[0];
         }();
         if (forced == '0' || forced == '1') {
@@ -1390,7 +1390,7 @@ private:
     bool streamline_attached{};   ///< Streamline has this device.
     std::vector<size_t> valid_heap_memory;                   ///< Heaps used.
     size_t main_heap{};       ///< Largest device-local heap, where images live.
-    u64 heap_size_limit{};    ///< EDEN_NX2_VRAM_LIMIT_MIB for device-local heaps, 0 if unset.
+    u64 heap_size_limit{};    ///< LICHII_NX2_VRAM_LIMIT_MIB for device-local heaps, 0 if unset.
 
     /// Format properties dictionary.
     ::Common::unordered_map<VkFormat, VkFormatProperties> format_properties;

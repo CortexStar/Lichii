@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: 2016 Citra Emulator Project
@@ -227,7 +227,7 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             continue;
         }
 #endif
-#ifndef EGLANTINE_STREAMLINE
+#ifndef LICHII_STREAMLINE
         // Only builds with NVIDIA Streamline (Windows) can use it.
         if (setting->Id() == Settings::values.nvidia_dlss.Id()) {
             continue;
@@ -334,7 +334,7 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
 
             hold_graphics.emplace(setting->Id(), widget);
 #endif
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
         } else if (setting->Id() == Settings::values.nvidia_dlss.Id()) {
             // NVIDIA's files and a download button under the checkbox.
             QWidget* group = new QWidget(this);

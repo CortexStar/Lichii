@@ -71,7 +71,7 @@ worker graphics emission time, and time VulkanWorker spent holding draws for pen
 Emission timing includes shader-module creation. Worker build totals overlap GPUBack work and
 must not be added to GPUBack's elapsed time.
 
-`EDEN_NX2_PERF_VERIFY=1` also emits reference SPIR-V on GPUBack. The worker compares every emitted
+`LICHII_NX2_PERF_VERIFY=1` also emits reference SPIR-V on GPUBack. The worker compares every emitted
 word against that reference, logs any mismatch as `Nx2Perf async_pipelines:`, and uses the
 reference on a mismatch. Verification deliberately adds synchronous work and is not a performance
 measurement mode.

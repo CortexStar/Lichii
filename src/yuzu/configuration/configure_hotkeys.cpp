@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: 2017 Citra Emulator Project
@@ -24,10 +24,6 @@ constexpr int hotkey_column = 1;
 constexpr int controller_column = 2;
 
 static QString HotkeyDisplayName(const QString& action) {
-    // Keep the stored shortcut key compatible with existing configurations.
-    if (action == QStringLiteral("Exit Eglantine")) {
-        return QCoreApplication::translate("Hotkeys", "Exit Lichii");
-    }
     return QCoreApplication::translate("Hotkeys", qPrintable(action));
 }
 

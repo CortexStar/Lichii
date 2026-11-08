@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
@@ -69,7 +69,7 @@ enum class FatalType : u32 {
 static void GenerateErrorReport(Core::System& system, Result error_code, const FatalInfo& info) {
     const auto title_id = system.GetApplicationProcessProgramID();
     std::string crash_report = fmt::format(
-        "Eden {}-{} crash report\n"
+        "Lichii {}-{} crash report\n"
         "Title ID:                        {:016x}\n"
         "Result:                          {:#x} ({:04}-{:04d})\n"
         "Set flags:                       {:#16X}\n"

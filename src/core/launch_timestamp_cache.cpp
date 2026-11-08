@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "core/launch_timestamp_cache.h"
@@ -30,7 +30,7 @@ CountMap g_counts;
 bool g_loaded = false;
 
 std::filesystem::path GetCachePath() {
-    return Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "launched.json";
+    return Common::FS::GetLichiiPath(Common::FS::LichiiPath::CacheDir) / "launched.json";
 }
 
 std::optional<std::string> ReadFileToString(const std::filesystem::path& path) {

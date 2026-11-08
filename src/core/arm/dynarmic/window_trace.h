@@ -23,7 +23,7 @@ constexpr bool EnabledValue(const char* value) {
 }
 
 inline bool Enabled() {
-    static const bool enabled = EnabledValue(std::getenv("EDEN_STARFOX_WINDOW_TRACE"));
+    static const bool enabled = EnabledValue(std::getenv("LICHII_STARFOX_WINDOW_TRACE"));
     return enabled;
 }
 

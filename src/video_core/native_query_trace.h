@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
@@ -30,7 +30,7 @@ inline State& GetState() {
 // 10=DMA destination (value=source, flags=line bytes), 11=inline write.
 // Keep this opt-in and bounded.
 inline void TraceNativeQuery(u32 event, u64 asid, u64 gpu, u64 cpu, u32 type, u64 value, u32 flags) {
-    static const bool diagnostics = std::getenv("EDEN_NATIVE_DRAW_DIAGNOSTICS") != nullptr;
+    static const bool diagnostics = std::getenv("LICHII_NATIVE_DRAW_DIAGNOSTICS") != nullptr;
     if (!diagnostics) return;
     auto& state = NativeQueryDiagnostics::GetState();
     const std::scoped_lock lock{state.mutex};

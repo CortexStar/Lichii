@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <array>
@@ -404,9 +404,9 @@ struct System::Impl {
         // The Switch 2 counter runs at 31.25 MHz and its SDK converts ticks with that constant
         // (nn::os::GetSystemTickFrequency, TickManager::ConvertToTimeSpan/ConvertToTick). At 19.2 MHz
         // every tick-based time in the game was off by 1.63x: elapsed times read short and a frame
-        // deadline in ticks waited ~27 ms. EDEN_NX2_CNTFRQ=<Hz> overrides it (A/B tests).
+        // deadline in ticks waited ~27 ms. LICHII_NX2_CNTFRQ=<Hz> overrides it (A/B tests).
         static const u64 forced_cntfrq = [] {
-            const char* value = std::getenv("EDEN_NX2_CNTFRQ");
+            const char* value = std::getenv("LICHII_NX2_CNTFRQ");
             return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ULL;
         }();
         const u64 cntfrq = forced_cntfrq != 0 ? forced_cntfrq
@@ -652,7 +652,7 @@ struct System::Impl {
     bool exit_locked : 1 = false;
     bool exit_requested : 1 = false;
     bool nvdec_active : 1 = false;
-    /// EDEN_NX2_DEBUG_SERVER; the last member, so it stops before anything it reads goes away.
+    /// LICHII_NX2_DEBUG_SERVER; the last member, so it stops before anything it reads goes away.
     std::unique_ptr<Nx2Debug::Service> debug_service;
 
     void EnsureGeneralChannelInitialized(System& system) {

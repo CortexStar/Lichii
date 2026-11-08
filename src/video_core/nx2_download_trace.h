@@ -13,18 +13,18 @@
 #include "common/common_types.h"
 #include "common/logging.h"
 
-// EDEN_NX2_DOWNLOAD_TRACE: what the buffer cache copies back to guest memory at fences. Every
+// LICHII_NX2_DOWNLOAD_TRACE: what the buffer cache copies back to guest memory at fences. Every
 // 10 s it logs the GPU writes that queued the most bytes for download (by written range), the
 // 64 KiB regions copied back the most, and the first 2000 guest CPU reads of GPU-written ranges
 // (a Preflushable mark sends later GPU writes over the range to a download at every fence).
 namespace VideoCommon::Nx2DownloadTrace {
 
-inline bool g_enabled = std::getenv("EDEN_NX2_DOWNLOAD_TRACE") != nullptr;
+inline bool g_enabled = std::getenv("LICHII_NX2_DOWNLOAD_TRACE") != nullptr;
 
 /// Called by VideoCore::CreateGPU: static initialization runs before the frontend loads
 /// nx2_switches.txt, so a switch set only there takes effect from that point on.
 inline void ReadSwitch() {
-    g_enabled = std::getenv("EDEN_NX2_DOWNLOAD_TRACE") != nullptr;
+    g_enabled = std::getenv("LICHII_NX2_DOWNLOAD_TRACE") != nullptr;
 }
 
 struct Totals {

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
@@ -32,7 +32,7 @@
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
 #include "video_core/vulkan_common/streamline.h"
 #endif
 
@@ -411,7 +411,7 @@ constexpr std::array<char, 8> STATIC_CACHE_MAGIC_NUMBER{'e', 'd', 'e', 'n', 's',
 constexpr u32 STATIC_CACHE_VERSION = 1;
 
 std::filesystem::path StaticPipelineCacheFilename() {
-    const auto shader_dir = Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir);
+    const auto shader_dir = Common::FS::GetLichiiPath(Common::FS::LichiiPath::ShaderDir);
     if (!Common::FS::CreateDir(shader_dir)) {
         return {};
     }
@@ -750,9 +750,9 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         RemoveExtensionFeature(extensions.descriptor_buffer, features.descriptor_buffer,
                                VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME);
     }
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
     // NVIDIA's DLSS needs buffer device addresses: keep the feature enabled for
-    // it, but leave Eglantine's own buffers as they are without descriptor buffers.
+    // it, but leave the emulator's own buffers as they are without descriptor buffers.
     const bool dlss_wants_device_address =
         streamline_extensions && features.buffer_device_address.bufferDeviceAddress;
     if (!extensions.descriptor_buffer && dlss_wants_device_address) {
@@ -785,7 +785,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     graphics_queue = logical.GetQueue(graphics_family);
     present_queue = logical.GetQueue(present_family);
 
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
     if (streamline_extensions) {
         streamline_attached =
             Streamline::AttachDevice(instance, physical, *logical, graphics_family, dld);
@@ -805,7 +805,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     if (extensions.buffer_device_address) {
         flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     }
-    // EDEN_NX2_VRAM_LIMIT_MIB: VMA fails allocations past the limit, like a smaller card.
+    // LICHII_NX2_VRAM_LIMIT_MIB: VMA fails allocations past the limit, like a smaller card.
     std::array<VkDeviceSize, VK_MAX_MEMORY_HEAPS> heap_size_limits;
     heap_size_limits.fill(VK_WHOLE_SIZE);
     if (heap_size_limit != 0) {
@@ -847,7 +847,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 }
 
 Device::~Device() {
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
     if (streamline_attached) {
         Streamline::Stop();
     }
@@ -1238,7 +1238,7 @@ bool Device::GetSuitability(bool requires_swapchain) {
         extensions.robustness_2 = false;
     }
 
-#ifdef EGLANTINE_STREAMLINE
+#ifdef LICHII_STREAMLINE
     // The extensions NVIDIA's DLSS asks for, where the device has them all.
     if (Streamline::WantsDevice()) {
         const std::vector<std::string> wanted = Streamline::DeviceExtensions();
@@ -1711,10 +1711,10 @@ void Device::RemoveUnsuitableExtensions() {
     features.mesh_shader.primitiveFragmentShadingRateMeshShader = VK_FALSE;
     features.mesh_shader.meshShaderQueries = VK_FALSE;
     extensions.mesh_shader = features.mesh_shader.taskShader && features.mesh_shader.meshShader;
-    // EDEN_NX2_FORCE_MESH_FALLBACK=1: leave VK_EXT_mesh_shader disabled, so task/mesh draws take
+    // LICHII_NX2_FORCE_MESH_FALLBACK=1: leave VK_EXT_mesh_shader disabled, so task/mesh draws take
     // the compute fallback a device without it uses.
-    if (extensions.mesh_shader && std::getenv("EDEN_NX2_FORCE_MESH_FALLBACK") != nullptr) {
-        LOG_WARNING(Render_Vulkan, "EDEN_NX2_FORCE_MESH_FALLBACK: VK_EXT_mesh_shader disabled");
+    if (extensions.mesh_shader && std::getenv("LICHII_NX2_FORCE_MESH_FALLBACK") != nullptr) {
+        LOG_WARNING(Render_Vulkan, "LICHII_NX2_FORCE_MESH_FALLBACK: VK_EXT_mesh_shader disabled");
         extensions.mesh_shader = false;
     }
     RemoveExtensionFeatureIfUnsuitable(extensions.mesh_shader, features.mesh_shader,
@@ -1974,14 +1974,14 @@ void Device::CollectPhysicalMemoryInfo() {
     device_access_memory = 0;
     u64 device_initial_usage = 0;
     u64 local_memory = 0;
-    // EDEN_NX2_VRAM_LIMIT_MIB=<n>: treat every device-local heap as n MiB (small card tests).
-    if (const char* value = std::getenv("EDEN_NX2_VRAM_LIMIT_MIB")) {
+    // LICHII_NX2_VRAM_LIMIT_MIB=<n>: treat every device-local heap as n MiB (small card tests).
+    if (const char* value = std::getenv("LICHII_NX2_VRAM_LIMIT_MIB")) {
         heap_size_limit = std::strtoull(value, nullptr, 10) << 20;
         if (heap_size_limit != 0) {
-            LOG_INFO(Render_Vulkan, "EDEN_NX2_VRAM_LIMIT_MIB: device-local heaps limited to {} MiB",
+            LOG_INFO(Render_Vulkan, "LICHII_NX2_VRAM_LIMIT_MIB: device-local heaps limited to {} MiB",
                      heap_size_limit >> 20);
         } else {
-            LOG_WARNING(Render_Vulkan, "EDEN_NX2_VRAM_LIMIT_MIB={} is not a size in MiB, ignored",
+            LOG_WARNING(Render_Vulkan, "LICHII_NX2_VRAM_LIMIT_MIB={} is not a size in MiB, ignored",
                         value);
         }
     }

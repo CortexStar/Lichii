@@ -66,7 +66,7 @@ These options control executables and build flavors.
 
 **Desktop only**:
 
-- `YUZU_CMD` (ON) Compile the SDL-based frontend (eden-cli)
+- `YUZU_CMD` (ON) Compile the SDL-based frontend (lichii-cli)
 - `YUZU_ROOM` (OFF) Compile dedicated room functionality into the main executable
 - `YUZU_ROOM_STANDALONE` (OFF) Compile a separate executable for room functionality
 - `YUZU_STATIC_ROOM` (OFF) Compile the room executable *only* as a static, portable executable
@@ -96,7 +96,7 @@ Also desktop-only, but apply strictly to Qt
 
 ### Retired Options
 
-The following options were a part of Eden at one point, but have since been retired.
+The following options were a part of the project at one point, but have since been retired.
 
 - `ENABLE_OPENSSL` - MbedTLS was fully replaced with OpenSSL in [#3606](https://git.eden-emu.dev/eden-emu/eden/pulls/3606), because OpenSSL straight-up performs better.
 - `ENABLE_SDL2` - While technically possible to *not* use SDL2 on desktop, this is **NOT** a supported configuration under any means, and adding this matrix to our build system was not worth the effort.

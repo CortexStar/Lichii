@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS evaluation.
@@ -49,10 +49,10 @@ sl::DLSSMode ModeFor(VkExtent2D render, VkExtent2D upscale) {
 }
 
 // Preset K for every mode: NVIDIA's defaults for Performance/Ultra Performance (M, L) draw thin
-// horizontal lines in Fire Emblem at 2x resolution scale. EDEN_NX2_DLSS_PRESET=J|K|L|M picks
-// another model, EDEN_NX2_DLSS_PRESET=default leaves the choice to NVIDIA.
+// horizontal lines in Fire Emblem at 2x resolution scale. LICHII_NX2_DLSS_PRESET=J|K|L|M picks
+// another model, LICHII_NX2_DLSS_PRESET=default leaves the choice to NVIDIA.
 sl::DLSSPreset Preset() {
-    const char* const value = std::getenv("EDEN_NX2_DLSS_PRESET");
+    const char* const value = std::getenv("LICHII_NX2_DLSS_PRESET");
     if (value && value[0] >= 'J' && value[0] <= 'M') {
         return static_cast<sl::DLSSPreset>(static_cast<u32>(sl::DLSSPreset::ePresetJ) +
                                            static_cast<u32>(value[0] - 'J'));
@@ -231,15 +231,16 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
     hdr_input = in.hdr;
 
     // Keep the existing HDR controls for linear input such as Fortune's Weave. Tonemapped
-    // input such as Ocarina's already has its exposure applied.
+    // input such as Ocarina's already has its exposure applied. LICHII_NX2_DLSS_HDR=0 /
+    // LICHII_NX2_DLSS_AUTO_EXPOSURE=0 turn them off.
     sl::DLSSOptions options{};
     options.mode = ModeFor(in.render_size, in.upscale_size);
     options.outputWidth = in.upscale_size.width;
     options.outputHeight = in.upscale_size.height;
     options.colorBuffersHDR =
-        in.hdr && EnvInt("EDEN_NX2_DLSS_HDR", 1) != 0 ? sl::eTrue : sl::eFalse;
+        in.hdr && EnvInt("LICHII_NX2_DLSS_HDR", 1) != 0 ? sl::eTrue : sl::eFalse;
     options.useAutoExposure =
-        in.hdr && EnvInt("EDEN_NX2_DLSS_AUTO_EXPOSURE", 1) != 0 ? sl::eTrue : sl::eFalse;
+        in.hdr && EnvInt("LICHII_NX2_DLSS_AUTO_EXPOSURE", 1) != 0 ? sl::eTrue : sl::eFalse;
     const sl::DLSSPreset preset = Preset();
     options.dlaaPreset = preset;
     options.qualityPreset = preset;

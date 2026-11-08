@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds index.html, a contact sheet for an EDEN_NX2_FRAME_DUMP directory.
+"""Builds index.html, a contact sheet for an LICHII_NX2_FRAME_DUMP directory.
 
 Usage: python3 -I tools/nx2/frame_dump_index.py <dump dir>
 """
