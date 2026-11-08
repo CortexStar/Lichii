@@ -273,7 +273,11 @@ const ShaderInfo* ShaderCache::ComputeShader() {
         // A rejected program fails the same way on every dispatch. GetGraphicsEnvironments
         // skips those draws without rethrowing; doing the same here avoids two C++ throws, a
         // mutex-guarded insert and an exception_ptr for each dispatch of the program. The
-        // caller already turns a missing shader into a failed dispatch.
+        // caller already turns a missing shader into a failed dispatch. Backends that replace
+        // tensor dispatches need the original rejection reason to run their stand-in each frame.
+        if (!kepler_compute->EmulatesNativeTensorPrograms()) {
+            RethrowIfRejected(*cpu_shader_addr);
+        }
         return nullptr;
     } else {
         try {

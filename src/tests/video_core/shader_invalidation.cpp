@@ -11,6 +11,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include "core/device_memory.h"
 #include "video_core/nx2_debug_control.h"
+#include "core/core.h"
+#include "tests/core/system_test_context.h"
+#include "video_core/engines/kepler_compute.h"
+#include "video_core/macro.h"
+#include "video_core/memory_manager.h"
+#include "shader_recompiler/exception.h"
 #include "video_core/shader_cache.h"
 
 namespace VideoCommon {
@@ -49,6 +55,18 @@ struct ShaderCacheTestAccess {
         } catch (...) {
             cache.RememberRejection(address);
         }
+    }
+    static void ConfigureCompute(ShaderCache& cache, Tegra::Engines::KeplerCompute& compute,
+                                 Tegra::MemoryManager& memory) {
+        cache.kepler_compute = &compute;
+        cache.gpu_memory = &memory;
+    }
+    static const ShaderInfo* Compute(ShaderCache& cache) {
+        return cache.ComputeShader();
+    }
+    static void RejectMatrix(ShaderCache& cache, VAddr address) {
+        cache.rejected_native.emplace(address, std::make_exception_ptr(
+            Shader::RuntimeError{"native matrix multiply (not emulated on this host)"}));
     }
 };
 } // namespace VideoCommon
@@ -230,4 +248,97 @@ TEST_CASE("Shader invalidation CPU benchmark", "[.][cache_bench]") {
     }
     std::cout << "Shader invalidation: sequential=" << sequential_ms << " ms batched=" << batched_ms
               << " ms (CPU only, not gameplay FPS)\n";
+}
+
+namespace {
+class TensorPolicyRasterizer final : public VideoCore::RasterizerInterface {
+public:
+    bool emulate_tensor = false;
+    bool EmulatesNativeTensorPrograms() const override { return emulate_tensor; }
+    void Draw(bool, u32) override {}
+    void DrawTexture() override {}
+    void Clear(u32) override {}
+    void DispatchCompute() override {}
+    void ResetCounter(VideoCommon::QueryType) override {}
+    void Query(GPUVAddr, VideoCommon::QueryType, VideoCommon::QueryPropertiesFlags, u32,
+               u32) override {}
+    void BindGraphicsUniformBuffer(size_t, u32, GPUVAddr, u32) override {}
+    void DisableGraphicsUniformBuffer(size_t, u32) override {}
+    void SignalFence(std::function<void()>&&) override {}
+    void SyncOperation(std::function<void()>&&) override {}
+    void SignalSyncPoint(u32) override {}
+    void SignalReference() override {}
+    void ReleaseFences(bool) override {}
+    void FlushAll() override {}
+    void FlushRegion(DAddr, u64, VideoCommon::CacheType) override {}
+    bool MustFlushRegion(DAddr, u64, VideoCommon::CacheType) override {
+        return false;
+    }
+    VideoCore::RasterizerDownloadArea GetFlushArea(DAddr addr, u64 size) override {
+        return {addr, addr + size, false};
+    }
+    void InvalidateRegion(DAddr, u64, VideoCommon::CacheType) override {}
+    void OnCacheInvalidation(DAddr, u64) override {}
+    bool OnCPUWrite(DAddr, u64) override {
+        return false;
+    }
+    void InvalidateGPUCache() override {}
+    void UnmapMemory(DAddr, u64) override {}
+    void ModifyGPUMemory(size_t, GPUVAddr, u64) override {}
+    void FlushAndInvalidateRegion(DAddr, u64, VideoCommon::CacheType) override {}
+    void WaitForIdle() override {}
+    void FragmentBarrier() override {}
+    void TiledCacheBarrier() override {}
+    void FlushCommands() override {}
+    void TickFrame() override {}
+    Tegra::Engines::AccelerateDMAInterface& AccessAccelerateDMA() override {
+        std::terminate();
+    }
+    void AccelerateInlineToMemory(GPUVAddr, size_t, std::span<const u8>) override {}
+};
+} // namespace
+
+TEST_CASE("Cached tensor rejections retain the stand-in reason on every dispatch",
+          "[shader_invalidation][tensor_standin]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    Core::DeviceMemory physical;
+    Tegra::MaxwellDeviceMemoryManager device_memory{physical};
+    TensorPolicyRasterizer rasterizer;
+    Tegra::MemoryManager memory{system, device_memory, 32, 1ULL << 31};
+    memory.BindRasterizer(&rasterizer);
+    constexpr GPUVAddr gpu_address = 0x100000;
+    constexpr DAddr device_address = 0x10000;
+    memory.Map(gpu_address, device_address, 0x1000, Tegra::PTEKind::PITCH, false);
+    REQUIRE(memory.GpuToCpuAddress(gpu_address) == device_address);
+    Tegra::Engines::KeplerCompute compute{memory};
+    compute.BindRasterizer(&rasterizer);
+    Tegra::MacroEngine macros{true};
+    compute.SetNativeMacroMode(&macros, {});
+    compute.regs.code_loc.address_low = static_cast<u32>(gpu_address);
+    compute.regs.code_loc.address_high = 0;
+    compute.launch_description.program_start = 0;
+    auto cache = ShaderCacheTestAccess::Create(device_memory);
+    ShaderCacheTestAccess::ConfigureCompute(*cache, compute, memory);
+    ShaderCacheTestAccess::RejectMatrix(*cache, device_address);
+
+    for (unsigned frame = 0; frame < 3; ++frame) {
+        CAPTURE(frame);
+        bool retained_reason = false;
+        try {
+            ShaderCacheTestAccess::Compute(*cache);
+        } catch (const Shader::Exception& error) {
+            retained_reason = true;
+            CHECK(std::string_view{error.what()} ==
+                  "native matrix multiply (not emulated on this host)");
+        }
+        REQUIRE(retained_reason);
+        REQUIRE(ShaderCacheTestAccess::IsRejected(*cache, device_address));
+    }
+    // Hosts that execute tensor shaders retain the existing cached-failure fast path.
+    rasterizer.emulate_tensor = true;
+    for (unsigned frame = 0; frame < 3; ++frame) {
+        REQUIRE(ShaderCacheTestAccess::Compute(*cache) == nullptr);
+        REQUIRE(ShaderCacheTestAccess::IsRejected(*cache, device_address));
+    }
 }
