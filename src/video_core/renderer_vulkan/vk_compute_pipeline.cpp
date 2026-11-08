@@ -736,14 +736,17 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     std::ranges::for_each(info.texture_buffer_descriptors, add_buffer);
     std::ranges::for_each(info.image_buffer_descriptors, add_buffer);
 
-    buffer_cache.UpdateComputeBuffers();
-    if (info.uniforms_by_address) {
-        buffer_cache.BeginBankTable(true);
-    }
-    buffer_cache.BindHostComputeBuffers();
-    if (buffer_cache.any_buffer_uploaded) {
-        buffer_cache.runtime.PostCopyBarrier();
-        buffer_cache.any_buffer_uploaded = false;
+    {
+        VideoCommon::Nx2Profile::Scope buffers_scope{VideoCommon::Nx2Profile::Zone::ComputeBuffers};
+        buffer_cache.UpdateComputeBuffers();
+        if (info.uniforms_by_address) {
+            buffer_cache.BeginBankTable(true);
+        }
+        buffer_cache.BindHostComputeBuffers();
+        if (buffer_cache.any_buffer_uploaded) {
+            buffer_cache.runtime.PostCopyBarrier();
+            buffer_cache.any_buffer_uploaded = false;
+        }
     }
     const u64 page_table{info.storage_by_address ? buffer_cache.PageTableAddress() : 0};
     const u64 bank_table{info.uniforms_by_address ? buffer_cache.BankTableAddress() : 0};

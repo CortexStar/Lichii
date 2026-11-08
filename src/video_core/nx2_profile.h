@@ -107,6 +107,10 @@ enum class Zone : u32 {
     RenderEnableRead,   ///< Conditional rendering decided on the CPU: the predicate's read
     QmdSignal,          ///< KeplerCompute: the QMD scheduler (Signal), dispatches excluded
     QmdRelease,         ///< KeplerCompute: a QMD's semaphore releases (fences, payload queries)
+    ComputeLookup,      ///< RasterizerVulkan::DispatchCompute: CurrentComputePipeline
+    ComputeConfigure,   ///< ComputePipeline::Configure (image lookups in "fill image views")
+    ComputeBarrier,     ///< DispatchCompute's barrier decision (buffer and image hazards)
+    ComputeBuffers,     ///< ComputePipeline::Configure: Update/BindHostComputeBuffers
     Count,
 };
 
@@ -126,6 +130,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "update storage", "bind uniforms", "bind storage", "storage pointer",
     "clear flush", "clear targets", "render target lookup", "render enable flush",
     "render enable read", "QMD signal", "QMD release",
+    "compute lookup", "compute configure", "compute barrier", "compute buffers",
 };
 static_assert(zone_names[static_cast<size_t>(Zone::Count) - 1] != nullptr,
               "every zone needs a name");

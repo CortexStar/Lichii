@@ -2047,7 +2047,10 @@ void RasterizerVulkan::DispatchCompute() {
     }
 
     u64 native_key{};
-    ComputePipeline* const pipeline{pipeline_cache.CurrentComputePipeline(native_key)};
+    ComputePipeline* const pipeline{[&] {
+        VideoCommon::Nx2Profile::Scope lookup_scope{VideoCommon::Nx2Profile::Zone::ComputeLookup};
+        return pipeline_cache.CurrentComputePipeline(native_key);
+    }()};
     if (!pipeline) {
         if (kepler_compute->IsNativeMode()) throw Shader::RuntimeError("Native compute pipeline unavailable");
         return;
@@ -2061,8 +2064,10 @@ void RasterizerVulkan::DispatchCompute() {
             texture_cache_runtime.RetireByteAddressedShadow(*byte_addressed_shadow);
         }
     };
-    if (!pipeline->Configure(*kepler_compute, *gpu_memory, scheduler, buffer_cache,
-                             texture_cache, texture_cache_runtime, byte_addressed_shadow)) {
+    if (VideoCommon::Nx2Profile::Scope configure_scope{
+            VideoCommon::Nx2Profile::Zone::ComputeConfigure};
+        !pipeline->Configure(*kepler_compute, *gpu_memory, scheduler, buffer_cache, texture_cache,
+                             texture_cache_runtime, byte_addressed_shadow)) {
         if (kepler_compute->IsNativeMode()) throw Shader::RuntimeError("Native compute resources unavailable");
         return;
     }
@@ -2111,6 +2116,7 @@ void RasterizerVulkan::DispatchCompute() {
     // dispatches since then, it only has to wait for compute work. The next render pass orders
     // what the dispatch writes (Scheduler::NoteComputeWrites).
     const auto decide_barrier = [&](bool unknown_accesses) -> std::optional<VkPipelineStageFlags> {
+        VideoCommon::Nx2Profile::Scope barrier_scope{VideoCommon::Nx2Profile::Zone::ComputeBarrier};
         const bool other_work = scheduler.RecordedCommands() != dispatch_recorded_commands;
         dispatch_accesses.Clear();
         if (unknown_accesses || byte_addressed_shadow) {
