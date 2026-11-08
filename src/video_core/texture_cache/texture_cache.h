@@ -44,6 +44,7 @@
 #include "video_core/texture_cache/conversion.h"
 #include "video_core/texture_cache/host_mip_limits.h"
 #include "video_core/texture_cache/image_view_base.h"
+#include "video_core/texture_cache/initial_contents.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/texture_cache/util.h"
@@ -582,10 +583,9 @@ void TextureCache<P>::TickFrame() {
         LOG_INFO(HW_GPU, "Texture cache last 600 frames: {} uploads from guest memory, {} MiB (largest {} MiB, {} by layer)",
                  images_uploaded, uploaded_bytes >> 20, largest_upload >> 20, layer_uploads);
         LOG_INFO(HW_GPU,
-                 "Texture cache last 600 frames: stale uploads skipped {} ({} MiB), {} uploaded "
-                 "for buffer-written pages; {} MiB of pages marked stale",
-                 tc_stale_skips, tc_stale_skip_bytes >> 20, tc_stale_gpu_written,
-                 (stale_pages.Count() << StalePages::PAGE_BITS) >> 20);
+                 "Texture cache last 600 frames: {} new images on stale pages left to their first "
+                 "use; {} MiB of pages marked stale",
+                 tc_stale_deferred, (stale_pages.Count() << StalePages::PAGE_BITS) >> 20);
         if (channel_state != nullptr) {
             const auto& tic = channel_state->graphics_image_table;
             const auto& tsc = channel_state->graphics_sampler_table;
@@ -601,7 +601,7 @@ void TextureCache<P>::TickFrame() {
                      tsc.current_limit, tsc.ArmedPages());
         }
         pool_stats = {};
-        tc_stale_skips = tc_stale_skip_bytes = tc_stale_gpu_written = 0;
+        tc_stale_deferred = 0;
         images_uploaded = uploaded_bytes = largest_upload = layer_uploads = 0;
         astc_opaque_images = astc_alpha_images = 0;
         std::vector<std::pair<u32, u64>> shapes;
@@ -3212,21 +3212,6 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         TrackImage(image, image_id);
     }
 
-    // Made where a dropped GPU-written image left stale bytes (MarkStale): nothing to upload.
-    // Pages the buffer cache wrote on the GPU may hold data written back since: upload those.
-    if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed) && image.dirty_layers.empty() &&
-        False(image.flags & (ImageFlagBits::Sparse | ImageFlagBits::SparseLayers |
-                             ImageFlagBits::SparseTiles | ImageFlagBits::Unbacked)) &&
-        stale_pages.IsAll(image.cpu_addr, image.guest_size_bytes)) {
-        if (!Tegra::Nx2MayBeGpuWritten(image.cpu_addr, image.guest_size_bytes)) {
-            ++tc_stale_skips;
-            tc_stale_skip_bytes += image.guest_size_bytes;
-            runtime.TransitionImageLayout(image);
-            return;
-        }
-        ++tc_stale_gpu_written;
-    }
-
     if (True(image.flags & ImageFlagBits::SparseLayers)) {
         RefreshSparseLayers(image);
         return;
@@ -4402,11 +4387,29 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             break;
         }
     }
-    if (overwritten_by_clear()) {
-        // Stays CpuModified: UpdateRenderTargets' PrepareImage drops the upload only when
-        // IsFullClear agrees the clear covers the whole image, and uploads it otherwise.
+    // Made where a dropped GPU-written image left stale bytes (MarkStale). Pages the buffer cache
+    // wrote on the GPU may hold data written back since.
+    const bool stale_guest_memory =
+        Tegra::g_nx2_ampere.load(std::memory_order_relaxed) && new_image.dirty_layers.empty() &&
+        False(new_image.flags & (ImageFlagBits::Sparse | ImageFlagBits::SparseLayers |
+                                 ImageFlagBits::SparseTiles | ImageFlagBits::Unbacked)) &&
+        stale_pages.IsAll(new_image.cpu_addr, new_image.guest_size_bytes) &&
+        !Tegra::Nx2MayBeGpuWritten(new_image.cpu_addr, new_image.guest_size_bytes);
+    const InitialUpload upload = ChooseInitialUpload({
+        .copy_writes_whole = copied_whole,
+        .binding_clear_covers = overwritten_by_clear(),
+        .has_join_copies = !join_copies_to_do.empty(),
+        .stale_guest_memory = stale_guest_memory,
+    });
+    if (upload == InitialUpload::AtFirstUse) {
+        // Stays CpuModified: the first PrepareImage drops the upload only when it is a clear
+        // that covers the whole image (UpdateRenderTargets with IsFullClear), and uploads it
+        // otherwise, so the image is never read with texels nothing wrote.
+        if (stale_guest_memory) {
+            ++tc_stale_deferred;
+        }
         runtime.TransitionImageLayout(new_image);
-    } else if (copied_whole) {
+    } else if (upload == InitialUpload::Never) {
         // What RefreshContents does, without the upload.
         new_image.flags &= ~ImageFlagBits::CpuModified;
         if (False(new_image.flags & ImageFlagBits::Tracked)) {

@@ -1007,7 +1007,8 @@ private:
     /// A GPU-written image dropped without being written back leaves its
     /// guest memory stale (the GPU's data is gone). Its whole pages are marked here and kept
     /// tracked, so CPU writes, unmaps and write-backs clear them. An image made entirely on marked
-    /// pages starts without an upload: the upload would only copy stale bytes the GPU overwrites.
+    /// pages leaves its upload to its first use (ChooseInitialUpload): a clear covering it drops
+    /// it, anything else uploads.
     /// Switch 2 titles only: the buffer cache feeds Nx2MayBeGpuWritten for them alone.
     void MarkStale(const ImageBase& image);
     void ClearStale(DAddr addr, size_t size);
@@ -1015,9 +1016,7 @@ private:
     /// Clears every device range [gpu_addr, gpu_addr + size) maps to.
     void ClearStaleGpu(GPUVAddr gpu_addr, size_t size);
     StalePages stale_pages;
-    u64 tc_stale_skips{};        ///< Uploads skipped (last 600 frames)
-    u64 tc_stale_skip_bytes{};
-    u64 tc_stale_gpu_written{};  ///< Stale but buffer-written pages: uploaded after all
+    u64 tc_stale_deferred{}; ///< New images on stale pages left to their first use (600 frames)
 
     void LogThresholds() const;
 
