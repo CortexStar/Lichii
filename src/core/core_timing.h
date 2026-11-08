@@ -180,7 +180,8 @@ public:
     heap_t event_queue;
     s64 global_timer = 0;
 #ifdef _WIN32
-    s64 timer_resolution_ns{};
+    /// The OS timer tick the frontend set (Advance's OS wake guard), 0 until it sets one.
+    std::atomic<s64> timer_resolution_ns{};
 #endif
     /// Set by Advance for the timer thread: wait until `until`, in the OS (blocks) or precisely.
     struct NextWait {

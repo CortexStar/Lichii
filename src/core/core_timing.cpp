@@ -53,10 +53,15 @@ std::shared_ptr<EventType> CreateRelaxedEvent(std::string name, TimedCallback&& 
 namespace {
 // How late an OS wait of the timer thread can end: one timer tick (0.5 ms at the maximum
 // resolution) plus the time to dispatch the woken thread. Measured on Windows 11 with a 0.5 ms
-// tick: a high-resolution waitable timer fires on the next tick, 13-50 us after it.
-s64 OsWakeGuardNs() {
+// tick: a high-resolution waitable timer fires on the next tick, 13-50 us after it (2026-11-08,
+// 4,000 waits of 0.1-3 ms: lateness p50 261 us, p99 523 us, p99.9 663 us).
+// `known_resolution` is the tick the frontend set (SetTimerResolutionNs), 0 if it set none: asking
+// the OS cost a system call on every Advance (~5,000 a second).
+s64 OsWakeGuardNs([[maybe_unused]] s64 known_resolution) {
 #ifdef _WIN32
-    return Common::Windows::GetCurrentTimerResolution().count() + 100'000;
+    const s64 tick = known_resolution > 0 ? known_resolution
+                                          : Common::Windows::GetCurrentTimerResolution().count();
+    return tick + 100'000;
 #else
     // Elsewhere the timed wait is a condition variable wait either way.
     return 0;
@@ -485,7 +490,13 @@ std::optional<s64> CoreTiming::Advance() {
     }
 
     if (!event_queue.empty()) {
-        os_wake_guard = os_wake_guard_override >= 0 ? os_wake_guard_override : OsWakeGuardNs();
+#ifdef _WIN32
+        const s64 known_resolution = timer_resolution_ns.load(std::memory_order_relaxed);
+#else
+        const s64 known_resolution = 0;
+#endif
+        os_wake_guard =
+            os_wake_guard_override >= 0 ? os_wake_guard_override : OsWakeGuardNs(known_resolution);
         s64 os_wake = std::numeric_limits<s64>::max();
         const EventType* os_wake_type{};
         for (const Event& queued : event_queue) {
@@ -545,7 +556,7 @@ std::chrono::microseconds CoreTiming::GetGlobalTimeUs() const noexcept {
 
 #ifdef _WIN32
 void CoreTiming::SetTimerResolutionNs(std::chrono::nanoseconds ns) {
-    timer_resolution_ns = ns.count();
+    timer_resolution_ns.store(ns.count(), std::memory_order_relaxed);
 }
 #endif
 
