@@ -11,6 +11,8 @@ namespace {
 
 // The "sdk" module (libc, nn::os) of Ocarina of Time version 131072.
 constexpr std::string_view Sdk1643 = "1643A838814F9C10C696F930ED681E7FA3FB9AF8";
+// Ocarina of Time version 131072, "main".
+constexpr std::string_view OotMain200 = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348";
 
 constexpr std::array Sites{
     // memcpy: a branch to __memcpy_aarch64 through the PLT.
@@ -26,6 +28,9 @@ constexpr std::array Sites{
                       GuestFunction::Memmove},
     GuestFunctionSite{Sdk1643, 0x7BD000, {0x8B020024, 0x8B020005, 0xF102005F, 0x54000648},
                       GuestFunction::Memmove},
+    // MurmurHash3_x86_32 of a NUL-terminated name, seed in w1.
+    GuestFunctionSite{OotMain200, 0x1739E0, {0x3940000C, 0x3400086C, 0x5285AA2A, 0x5286B268},
+                      GuestFunction::MurmurHash3String},
 };
 
 } // namespace
