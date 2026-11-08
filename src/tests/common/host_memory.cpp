@@ -12,6 +12,7 @@
 
 #include "common/host_memory.h"
 #include "common/literals.h"
+#include "common/memory_detect.h"
 
 using Common::HostMemory;
 using namespace Common::Literals;
@@ -294,4 +295,16 @@ TEST_CASE("HostMemory: Protect a mapping of memory handed out before", "[common]
     mem.Protect(0x40000, 0x20000, PERMS);
     mem.VirtualBasePointer()[0x5ffff] = 6;
     REQUIRE(mem.BackingBasePointer()[0x21ffff] == 6);
+}
+
+TEST_CASE("HostMemory: cold hints only when the host is short of RAM", "[common]") {
+    constexpr u64 GiB = u64{1} << 30;
+    REQUIRE_FALSE(Common::IsLowOnMemory(0, 32 * GiB)); // unknown
+    REQUIRE_FALSE(Common::IsLowOnMemory(18 * GiB, 32 * GiB));
+    REQUIRE_FALSE(Common::IsLowOnMemory(5 * GiB, 32 * GiB));
+    REQUIRE(Common::IsLowOnMemory(3 * GiB, 32 * GiB));
+    REQUIRE_FALSE(Common::IsLowOnMemory(5 * GiB, 16 * GiB));
+    REQUIRE(Common::IsLowOnMemory(3 * GiB, 16 * GiB));
+    REQUIRE(Common::IsLowOnMemory(1 * GiB, 8 * GiB));
+    REQUIRE_FALSE(Common::IsLowOnMemory(2 * GiB + 1, 8 * GiB));
 }
