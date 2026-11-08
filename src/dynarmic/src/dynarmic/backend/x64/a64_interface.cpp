@@ -10,6 +10,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <xmmintrin.h>
 
 #include <boost/icl/interval_set.hpp>
 #include "common/assert.h"
@@ -256,6 +257,16 @@ private:
     CodePtr GetBlock(IR::LocationDescriptor descriptor) {
         if (auto block = emitter.GetBasicBlock(descriptor))
             return block->entrypoint;
+
+        // The dispatcher looks blocks up with the guest's MXCSR loaded. Compiling runs host code
+        // that does FP arithmetic (hash table load factors), which would raise flags the guest
+        // reads back as FPSR exceptions (IXC on the first run of a block) and run under the
+        // guest's rounding and flush modes: evict and compile with the default MXCSR.
+        struct HostMxcsr {
+            const u32 saved = _mm_getcsr();
+            HostMxcsr() { _mm_setcsr(0x1F80); }
+            ~HostMxcsr() { _mm_setcsr(saved); }
+        } const host_mxcsr;
 
         constexpr size_t MINIMUM_REMAINING_CODESIZE = 1 * 1024 * 1024;
         if (block_of_code.SpaceRemaining() < MINIMUM_REMAINING_CODESIZE) {
