@@ -20,6 +20,7 @@
 #include "common/div_ceil.h"
 #include "common/vector_math.h"
 #include "video_core/host_shaders/astc_decoder_comp_spv.h"
+#include "video_core/host_shaders/bc7_encoder_comp_spv.h"
 #include "video_core/host_shaders/bc_encoder_comp_spv.h"
 #include "video_core/host_shaders/queries_prefix_scan_sum_comp_spv.h"
 #include "video_core/host_shaders/queries_prefix_scan_sum_nosubgroups_comp_spv.h"
@@ -237,6 +238,14 @@ struct BcEncoderPushConstants {
     u32 height;
     u32 bc3;
     u32 out_offset; // in 8-byte units
+};
+
+struct Bc7EncoderPushConstants {
+    u32 blocks_x;
+    u32 blocks_y;
+    u32 width;
+    u32 height;
+    u32 out_offset; // in 16-byte units
 };
 
 struct QueriesPrefixScanPushConstants {
@@ -927,6 +936,44 @@ void BcEncoderPass::Encode(VkImageView source, u32 width, u32 height, u32 layers
         cmdbuf.PushConstants(*layout, VK_SHADER_STAGE_COMPUTE_BIT, uniforms);
         cmdbuf.Dispatch(Common::DivCeil(uniforms.blocks_x, 8U), Common::DivCeil(uniforms.blocks_y, 8U),
                         layers);
+    });
+}
+
+Bc7EncoderPass::Bc7EncoderPass(const Device& device_, Scheduler& scheduler_,
+                               DescriptorPool& descriptor_pool_,
+                               ComputePassDescriptorQueue& compute_pass_descriptor_queue_)
+    : ComputePass(device_, scheduler_, descriptor_pool_, BC_ENCODER_DESCRIPTOR_SET_BINDINGS,
+                  BC_ENCODER_DESCRIPTOR_UPDATE_TEMPLATE, ASTC_BANK_INFO,
+                  COMPUTE_PUSH_CONSTANT_RANGE<sizeof(Bc7EncoderPushConstants)>,
+                  BC7_ENCODER_COMP_SPV),
+      scheduler{scheduler_}, compute_pass_descriptor_queue{compute_pass_descriptor_queue_} {}
+
+Bc7EncoderPass::~Bc7EncoderPass() = default;
+
+void Bc7EncoderPass::Encode(VkImageView source, u32 width, u32 height, u32 layers,
+                            VkBuffer buffer, VkDeviceSize buffer_offset, VkDeviceSize buffer_size,
+                            VkDeviceSize out_offset) {
+    scheduler.RequestOutsideRenderPassOperationContext();
+    compute_pass_descriptor_queue.Acquire(scheduler, 2);
+    compute_pass_descriptor_queue.AddImage(source);
+    compute_pass_descriptor_queue.AddBuffer(buffer, buffer_offset, buffer_size);
+    const void* const descriptor_data{compute_pass_descriptor_queue.UpdateData()};
+    const Bc7EncoderPushConstants uniforms{
+        .blocks_x = Common::DivCeil(width, 4U),
+        .blocks_y = Common::DivCeil(height, 4U),
+        .width = width,
+        .height = height,
+        .out_offset = static_cast<u32>(out_offset / 16),
+    };
+    const VkPipeline vk_pipeline = *pipeline;
+    scheduler.Record([this, vk_pipeline, uniforms, layers, descriptor_data](vk::CommandBuffer cmdbuf) {
+        const VkDescriptorSet set = descriptor_allocator.Commit();
+        device.GetLogical().UpdateDescriptorSet(set, *descriptor_template, descriptor_data);
+        cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, vk_pipeline);
+        cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, *layout, 0, set, {});
+        cmdbuf.PushConstants(*layout, VK_SHADER_STAGE_COMPUTE_BIT, uniforms);
+        // Four blocks of 16 invocations per workgroup, along a block row.
+        cmdbuf.Dispatch(Common::DivCeil(uniforms.blocks_x, 4U), uniforms.blocks_y, layers);
     });
 }
 

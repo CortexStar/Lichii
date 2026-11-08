@@ -126,6 +126,10 @@ public:
     /// True when ASTC is re-compressed to BC3 and opaque images may use BC1 instead.
     bool UseOpaqueAstcFormat() const;
 
+    /// True when two images of the same ASTC format have the same host format (BC1, BC3, BC7
+    /// or RGBA8 depending on the image), so the host can copy between them.
+    bool SameAstcHostFormat(const VideoCommon::ImageInfo& a, const VideoCommon::ImageInfo& b) const;
+
     bool CanDownloadMsaa(const VideoCommon::ImageInfo& info) const;
 
     [[nodiscard]] VkImage AcquireMsaaScratchImage(const VkImageCreateInfo& image_ci);
@@ -285,9 +289,11 @@ public:
 
     std::optional<ASTCDecoderPass> astc_decoder_pass;
     std::optional<BcEncoderPass> bc_encoder_pass;
+    std::optional<Bc7EncoderPass> bc7_encoder_pass;
 
-    /// ASTC decoded on the GPU and re-compressed to BC1/BC3 there (accelerate_astc=Gpu with
-    /// astc_recompression=Bc1/Bc3): decode into a temporary RGBA8 image, encode, copy.
+    /// ASTC decoded on the GPU and re-compressed to BC1/BC3/BC7 there (accelerate_astc=Gpu with
+    /// astc_recompression=Bc1/Bc3; BC7 in place of BC3): decode into a temporary RGBA8 image,
+    /// encode, copy.
     void TranscodeAstcToBcn(Image& image, const StagingBufferRef& map,
                             std::span<const VideoCommon::SwizzleParameters> swizzles);
 

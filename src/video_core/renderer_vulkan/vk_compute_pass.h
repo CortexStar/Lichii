@@ -215,6 +215,26 @@ private:
     ComputePassDescriptorQueue& compute_pass_descriptor_queue;
 };
 
+/// Compresses an RGBA8 image level to BC7 blocks in a buffer (bc7_encoder.comp, a port of
+/// DirectXTex's GPU BC7 encoder limited to the single-subset modes 4, 5 and 6).
+class Bc7EncoderPass final : public ComputePass {
+public:
+    explicit Bc7EncoderPass(const Device& device_, Scheduler& scheduler_,
+                            DescriptorPool& descriptor_pool_,
+                            ComputePassDescriptorQueue& compute_pass_descriptor_queue_);
+    ~Bc7EncoderPass();
+
+    /// Encodes every layer of one level (`source` is its RGBA8 storage view) into `buffer`,
+    /// `out_offset` bytes (a multiple of 16) past `buffer_offset`; blocks are row-major, layer
+    /// after layer.
+    void Encode(VkImageView source, u32 width, u32 height, u32 layers, VkBuffer buffer,
+                VkDeviceSize buffer_offset, VkDeviceSize buffer_size, VkDeviceSize out_offset);
+
+private:
+    Scheduler& scheduler;
+    ComputePassDescriptorQueue& compute_pass_descriptor_queue;
+};
+
 class BlockLinearUnswizzle3DPass final : public ComputePass {
 public:
     explicit BlockLinearUnswizzle3DPass(const Device& device_, Scheduler& scheduler_,

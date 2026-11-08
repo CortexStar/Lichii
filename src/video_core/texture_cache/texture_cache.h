@@ -4046,6 +4046,14 @@ void TextureCache<P>::CopyImage(ImageId dst_id, ImageId src_id, std::vector<Imag
         // same guest data, which is uploaded from guest memory instead.
         return;
     }
+    if constexpr (requires { runtime.SameAstcHostFormat(dst.info, src.info); }) {
+        // The same for ASTC kept in other host formats (BC7 from the GPU encoder, BC3 from the
+        // CPU, RGBA8): the bits of one mean nothing in the other.
+        if (IsPixelFormatASTC(dst.info.format) && IsPixelFormatASTC(src.info.format) &&
+            !runtime.SameAstcHostFormat(dst.info, src.info)) {
+            return;
+        }
+    }
     // As in BlitImage: land a parked deferred clear before the copy overwrites the image.
     runtime.FlushDeferredClear();
     const bool is_rescaled = True(src.flags & ImageFlagBits::Rescaled);

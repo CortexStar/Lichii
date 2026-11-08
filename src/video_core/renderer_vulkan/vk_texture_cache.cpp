@@ -373,10 +373,32 @@ constexpr std::array<VkFormat, 2> HugeAstcViewFormats{VK_FORMAT_A8B8G8R8_UNORM_P
 constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM_BLOCK,
                                                          VK_FORMAT_BC1_RGBA_SRGB_BLOCK};
 
+[[nodiscard]] bool WillUseGpuBcnTranscode(const Device& device, const ImageInfo& info);
+
+// ASTC that the GPU re-compresses to BC3 is encoded as BC7 instead (bc7_encoder.comp): the same
+// 16 bytes per block, with 7- or 8-bit endpoints and up to 16 index levels against BC3's 5:6:5
+// colours with 4. Only the GPU encodes BC7, so CPU-decoded ASTC keeps BC3.
+[[nodiscard]] bool IsBc7Astc(const Device& device, const ImageInfo& info) {
+    static constexpr VkFormatFeatureFlags features = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                                     VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+                                                     VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    return Settings::GetAstcRecompression() == Settings::AstcRecompression::Bc3 &&
+           !IsOpaqueBc1Astc(device, info) && WillUseGpuBcnTranscode(device, info) &&
+           device.IsFormatSupported(VK_FORMAT_BC7_UNORM_BLOCK, features, FormatType::Optimal) &&
+           device.IsFormatSupported(VK_FORMAT_BC7_SRGB_BLOCK, features, FormatType::Optimal);
+}
+
+constexpr std::array<VkFormat, 2> Bc7AstcViewFormats{VK_FORMAT_BC7_UNORM_BLOCK,
+                                                      VK_FORMAT_BC7_SRGB_BLOCK};
+
 [[nodiscard]] std::optional<VkFormat> AstcHostFormat(const Device& device, const ImageInfo& info) {
     if (IsOpaqueBc1Astc(device, info)) {
         return VideoCore::Surface::IsPixelFormatSRGB(info.format) ? VK_FORMAT_BC1_RGBA_SRGB_BLOCK
                                                                   : VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+    }
+    if (IsBc7Astc(device, info)) {
+        return VideoCore::Surface::IsPixelFormatSRGB(info.format) ? VK_FORMAT_BC7_SRGB_BLOCK
+                                                                  : VK_FORMAT_BC7_UNORM_BLOCK;
     }
     return HugeAstcHostFormat(device, info);
 }
@@ -1310,6 +1332,8 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
         if (Settings::GetAstcRecompression() != Settings::AstcRecompression::Uncompressed) {
             bc_encoder_pass.emplace(device, scheduler, descriptor_pool,
                                     compute_pass_descriptor_queue);
+            bc7_encoder_pass.emplace(device, scheduler, descriptor_pool,
+                                     compute_pass_descriptor_queue);
         }
     }
     if (!device.IsKhrImageFormatListSupported()) {
@@ -2879,6 +2903,10 @@ void TextureCacheRuntime::LogMemoryStatistics() const {
     Vulkan::LogMemoryStatistics(device);
 }
 
+bool TextureCacheRuntime::SameAstcHostFormat(const ImageInfo& a, const ImageInfo& b) const {
+    return AstcHostFormat(device, a) == AstcHostFormat(device, b);
+}
+
 bool TextureCacheRuntime::UseOpaqueAstcFormat() const {
     // EDEN_NX2_ASTC_BC1=0 keeps every re-compressed ASTC image in BC3.
     static const bool enabled = [] {
@@ -2988,6 +3016,8 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
                                    ? std::span<const VkFormat>{HugeAstcViewFormats}
                                : IsOpaqueBc1Astc(runtime_.device, info)
                                    ? std::span<const VkFormat>{OpaqueAstcViewFormats}
+                               : IsBc7Astc(runtime_.device, info)
+                                   ? std::span<const VkFormat>{Bc7AstcViewFormats}
                                    : runtime->ViewFormats(info.format),
                                AstcHostFormat(runtime_.device, info),
                                UsesSparseLayers(runtime_.device, info, gpu_addr_) ||
@@ -4345,6 +4375,10 @@ ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::ImageViewI
         format_info.format = VideoCore::Surface::IsPixelFormatSRGB(format)
                                  ? VK_FORMAT_BC1_RGBA_SRGB_BLOCK
                                  : VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+    } else if (IsBc7Astc(*device, image.info) && IsPixelFormatASTC(format)) {
+        format_info.format = VideoCore::Surface::IsPixelFormatSRGB(format)
+                                 ? VK_FORMAT_BC7_SRGB_BLOCK
+                                 : VK_FORMAT_BC7_UNORM_BLOCK;
     }
     if (device->ApiVersion() >= VK_API_VERSION_1_3) {
         const VkFormatProperties3 properties3 =
@@ -5162,9 +5196,10 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
         map, swizzles);
 
     // Encode every level into one buffer, then copy it into the image.
-    const bool bc3 = !IsOpaqueBc1Astc(device, info) &&
+    const bool bc7 = bc7_encoder_pass && IsBc7Astc(device, info);
+    const bool bc3 = !bc7 && !IsOpaqueBc1Astc(device, info) &&
                      Settings::GetAstcRecompression() != Settings::AstcRecompression::Bc1;
-    const u64 block_bytes = bc3 ? 16 : 8;
+    const u64 block_bytes = bc7 || bc3 ? 16 : 8;
     boost::container::small_vector<VideoCommon::BufferImageCopy, 16> copies;
     u64 total = 0;
     for (u32 level = 0; level < levels; ++level) {
@@ -5190,9 +5225,16 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     }
     const auto output = staging_buffer_pool.Request(total, MemoryUsage::DeviceLocal);
     for (u32 level = 0; level < levels; ++level) {
-        bc_encoder_pass->Encode(*pending.views[level], copies[level].image_extent.width,
-                                copies[level].image_extent.height, layers, bc3, output.buffer,
-                                output.offset, total, copies[level].buffer_offset);
+        if (bc7) {
+            bc7_encoder_pass->Encode(*pending.views[level], copies[level].image_extent.width,
+                                     copies[level].image_extent.height, layers, output.buffer,
+                                     output.offset, total, copies[level].buffer_offset);
+        } else {
+            bc_encoder_pass->Encode(*pending.views[level], copies[level].image_extent.width,
+                                    copies[level].image_extent.height, layers, bc3,
+                                    output.buffer, output.offset, total,
+                                    copies[level].buffer_offset);
+        }
     }
     scheduler.Record([](vk::CommandBuffer cmdbuf) {
         const VkMemoryBarrier barrier{
