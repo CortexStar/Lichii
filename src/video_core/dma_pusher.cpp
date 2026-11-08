@@ -95,6 +95,8 @@ bool DmaPusher::Step() {
         }
         pending_list_tick.reset();
         resumed_list_read = true;
+        VideoCommon::Nx2Profile::CountListSuspension(
+            pending_list_key, VideoCommon::Nx2Profile::Now() - pending_list_since);
     }
     // Only for the entry that suspended: an acquire still waiting, the safe-read path or a stopped
     // split must not leave it set for a later list (which would then skip its writer wait).
@@ -254,12 +256,13 @@ bool DmaPusher::Step() {
             Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Safe);
             command_resume_offset +=
                 ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
-        } else if (bool pending = false;
-                   ReadGpuWrittenCommands(dma_state.dma_get, static_cast<u32>(header.size),
-                                          &pending) ||
-                   pending) {
+        } else if (bool pending = false; ReadGpuWrittenListTimed(header, &pending) || pending) {
             if (pending) {
                 // Parsed again once the GPU copied the list; other channels run meanwhile.
+                if (VideoCommon::Nx2Profile::Enabled()) {
+                    pending_list_key = ListKey();
+                    pending_list_since = VideoCommon::Nx2Profile::Now();
+                }
                 return false;
             }
             const std::span<const CommandHeader> commands{command_headers.data(), header.size};
@@ -787,6 +790,38 @@ void DmaPusher::RefreshDeferredEntries(CommandList& list) {
                                        entry.size * sizeof(u32));
     }
     list.deferred_entries.clear();
+}
+
+u32 DmaPusher::ListKey() const {
+    if (dma_state.method_count == 0) {
+        return 0;
+    }
+    u32 engine = 3;
+    switch (subchannel_type[dma_state.subchannel]) {
+    case Engines::EngineTypes::Maxwell3D:
+        engine = 1;
+        break;
+    case Engines::EngineTypes::KeplerCompute:
+        engine = 2;
+        break;
+    default:
+        break;
+    }
+    return engine << 16 | (dma_state.method & 0xffff);
+}
+
+bool DmaPusher::ReadGpuWrittenListTimed(const CommandListHeader& header, bool* pending) {
+    if (!VideoCommon::Nx2Profile::Enabled()) {
+        return ReadGpuWrittenCommands(dma_state.dma_get, static_cast<u32>(header.size), pending);
+    }
+    const u64 start = VideoCommon::Nx2Profile::Ticks();
+    const bool read =
+        ReadGpuWrittenCommands(dma_state.dma_get, static_cast<u32>(header.size), pending);
+    if (read || *pending) {
+        VideoCommon::Nx2Profile::CountGpuWrittenList(ListKey(),
+                                                     VideoCommon::Nx2Profile::Ticks() - start);
+    }
+    return read;
 }
 
 bool DmaPusher::IsGpuWrittenCommands(GPUVAddr address, size_t size) {

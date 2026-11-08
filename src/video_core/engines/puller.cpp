@@ -59,6 +59,8 @@ void OnBack(const Func& func) {
     }
 }
 
+using Outcome = VideoCommon::Nx2Profile::AcquireOutcome;
+
 void DrainBack() {
     VideoCommon::GpuSplit::Get().Drain(VideoCommon::DrainSite::Acquire);
 }
@@ -176,6 +178,7 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
                            static_cast<u32>(GpuSemaphoreOperation::AcquireGequal) &&
                        lower >= pending_acquire->value;
             })) {
+        pending_acquire->met_by = static_cast<u8>(Outcome::Predicted);
         return true;
     }
     // Once, after 2 s without the value, the drained read below (it reports the wait).
@@ -186,6 +189,8 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
         overdue ? std::optional<u32>{} : PollSemaphoreRead(dma_pusher, pending_acquire->address);
     if (polled && (pending_acquire->Matches(*polled) || Nx2SemaphoreWaiters::Get().Latched(this))) {
         NoteAcquireSync(pending_acquire->address);
+        pending_acquire->met_by =
+            static_cast<u8>(pending_acquire->Matches(*polled) ? Outcome::Memory : Outcome::Latched);
         return true;
     }
     // Not met in guest memory: the release may still be queued for the back (one the front
@@ -199,6 +204,7 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     if (narrowed && pending_acquire->Matches(*narrowed)) {
         if (!VideoCommon::GpuSplit::NarrowVerify()) {
             VideoCommon::GpuSplit::Get().NoteSyncDone();
+            pending_acquire->met_by = static_cast<u8>(Outcome::Narrowed);
             return true;
         }
     } else {
@@ -220,9 +226,11 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
                      dma_pusher.channel_state.bind_id, pending_acquire->address,
                      pending_acquire->value, current);
         }
+        pending_acquire->met_by = static_cast<u8>(Outcome::Latched);
         return true;
     }
     if (pending_acquire->Matches(current)) {
+        pending_acquire->met_by = static_cast<u8>(Outcome::Drained);
         return true;
     }
     // With delayed fence operations (Balanced or Accurate fences, accurate GPU), a release
@@ -238,6 +246,7 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
         ReleaseFences(dma_pusher);
         if (Nx2SemaphoreWaiters::Get().Latched(this) ||
             pending_acquire->Matches(ReadSemaphoreWord(dma_pusher, pending_acquire->address))) {
+            pending_acquire->met_by = static_cast<u8>(Outcome::Drained);
             return true;
         }
     }
@@ -266,6 +275,11 @@ bool Puller::ResumeAcquire(DmaPusher& dma_pusher) {
     // counting those made the count odd ("suspended") at random, so submit-time snapshots were
     // thrown away for about half of all entries (CommandList::snapshot_suspensions).
     if (pending_acquire) {
+        VideoCommon::Nx2Profile::CountAcquireResume(
+            static_cast<Outcome>(pending_acquire->met_by),
+            static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 std::chrono::steady_clock::now() - pending_acquire->since)
+                                 .count()));
         pending_acquire.reset();
         dma_pusher.suspensions.fetch_add(1, std::memory_order_release);
         Nx2SemaphoreWaiters::Get().Remove(this);
@@ -404,11 +418,13 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
                                static_cast<u32>(GpuSemaphoreOperation::AcquireGequal) &&
                            lower >= acquire.value;
                 })) {
+            VideoCommon::Nx2Profile::CountAcquire(Outcome::Predicted);
             return;
         }
         if (const std::optional<u32> polled = PollSemaphoreRead(dma_pusher, acquire.address);
             polled && acquire.Matches(*polled)) {
             NoteAcquireSync(acquire.address);
+            VideoCommon::Nx2Profile::CountAcquire(Outcome::Memory);
             return;
         }
         // Not met in guest memory: the release may still be queued for the back, so check it
@@ -417,6 +433,7 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         if (narrowed && acquire.Matches(*narrowed)) {
             if (!VideoCommon::GpuSplit::NarrowVerify()) {
                 VideoCommon::GpuSplit::Get().NoteSyncDone();
+                VideoCommon::Nx2Profile::CountAcquire(Outcome::Narrowed);
                 return;
             }
         } else {
@@ -430,6 +447,7 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
                                                      acquire.address);
         }
         if (acquire.Matches(current)) {
+            VideoCommon::Nx2Profile::CountAcquire(Outcome::Drained);
             return;
         }
         // Registered before the fences run, so a release among them that meets the value counts
@@ -445,6 +463,7 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireWaits, 1);
         } else {
             waiters.Remove(this);
+            VideoCommon::Nx2Profile::CountAcquire(Outcome::Latched);
         }
     } else {
         DrainBack();

@@ -442,6 +442,129 @@ inline thread_local std::array<u32, 0x2000> t_dma_reads{};
 /// Split front: macro calls without a native replacement (macro_hle_oot.h), which the JIT ran.
 inline thread_local std::array<u32, 0x2000> t_jit_macros{};
 
+// What the GPU thread's front waits on (the critical path once no unit is saturated): how each
+// semaphore acquire was decided, how long each suspended channel stayed suspended and what met
+// it, and the command lists on GPU-written pages by the call whose parameters they hold.
+enum class AcquireOutcome : u8 {
+    Predicted, ///< Met by a release still queued or held by its fence (prediction, QMD view)
+    Memory,    ///< Met in guest memory once the recorded writes over it ran (no drain)
+    Narrowed,  ///< Met once the queued writes that may write it ran
+    Drained,   ///< Met after a full drain of the back
+    Latched,   ///< Met by a fenced GPU release that landed while it waited
+    Count,
+};
+inline constexpr std::array<const char*, static_cast<size_t>(AcquireOutcome::Count)>
+    acquire_outcome_names{"predicted", "memory", "narrowed", "drained", "latched"};
+
+struct FrontWaits {
+    /// Acquires decided when sent, by outcome (no suspension).
+    std::array<u64, static_cast<size_t>(AcquireOutcome::Count)> at_once{};
+    /// Suspended acquires by what met them at the resume, and the wall time they stayed suspended.
+    std::array<u64, static_cast<size_t>(AcquireOutcome::Count)> resumed{};
+    std::array<u64, static_cast<size_t>(AcquireOutcome::Count)> resumed_ns{};
+    /// GPU-written command lists by the call they continue (engine << 16 | method; 0: a list
+    /// that starts with a method header): count, front wait for their writers (ticks), copies
+    /// the channel suspended for, and the wall time of those suspensions.
+    struct List {
+        u64 count{};
+        u64 wait_ticks{};
+        u64 suspended{};
+        u64 suspended_ns{};
+    };
+    std::unordered_map<u32, List> lists;
+};
+inline thread_local FrontWaits t_front_waits;
+
+inline void CountAcquire(AcquireOutcome outcome) {
+    if (Enabled()) {
+        ++t_front_waits.at_once[static_cast<size_t>(outcome)];
+    }
+}
+
+/// A suspended acquire resumed after `suspended_ns` of wall time, met as `outcome`.
+inline void CountAcquireResume(AcquireOutcome outcome, u64 suspended_ns) {
+    if (Enabled()) {
+        ++t_front_waits.resumed[static_cast<size_t>(outcome)];
+        t_front_waits.resumed_ns[static_cast<size_t>(outcome)] += suspended_ns;
+    }
+}
+
+/// A GPU-written list continuing call `key` (engine << 16 | method) waited `wait_ticks` for its
+/// writers on the front.
+inline void CountGpuWrittenList(u32 key, u64 wait_ticks) {
+    if (Enabled()) {
+        auto& list = t_front_waits.lists[key];
+        ++list.count;
+        list.wait_ticks += wait_ticks;
+    }
+}
+
+/// The channel reading GPU-written list `key` stayed suspended `suspended_ns` for its copy.
+inline void CountListSuspension(u32 key, u64 suspended_ns) {
+    if (Enabled()) {
+        auto& list = t_front_waits.lists[key];
+        ++list.suspended;
+        list.suspended_ns += suspended_ns;
+    }
+}
+
+/// "front waits: acquires at once ..., resumed ..., GPU-written lists ...", or empty.
+inline std::string FrontWaitsLine(u64 window, u64 window_ticks) {
+    auto& waits = t_front_waits;
+    const double window_d = static_cast<double>(window);
+    const double ticks_d = static_cast<double>(window_ticks);
+    std::string line;
+    std::string at_once;
+    std::string resumed;
+    for (size_t i = 0; i < waits.at_once.size(); ++i) {
+        if (waits.at_once[i] != 0) {
+            at_once += fmt::format(" {} {:.0f}/s,", acquire_outcome_names[i],
+                                   static_cast<double>(waits.at_once[i]) * 1e9 / window_d);
+        }
+        if (waits.resumed[i] != 0) {
+            resumed += fmt::format(" {} {:.0f}/s {:.1f} ms,", acquire_outcome_names[i],
+                                   static_cast<double>(waits.resumed[i]) * 1e9 / window_d,
+                                   static_cast<double>(waits.resumed_ns[i]) * 1000.0 / window_d);
+        }
+    }
+    if (!at_once.empty()) {
+        at_once.pop_back();
+        line += " | acquires decided at once:" + at_once;
+    }
+    if (!resumed.empty()) {
+        resumed.pop_back();
+        line += " | suspended acquires by what met them (suspended time per s):" + resumed;
+    }
+    std::vector<std::pair<u32, FrontWaits::List>> lists(waits.lists.begin(), waits.lists.end());
+    // By the front's time on them: the writer waits (in ticks) and the suspensions (in ns).
+    const double ns_per_tick = window_d / ticks_d;
+    const auto front_ns = [ns_per_tick](const FrontWaits::List& list) {
+        return static_cast<double>(list.wait_ticks) * ns_per_tick +
+               static_cast<double>(list.suspended_ns);
+    };
+    std::ranges::sort(lists, [&front_ns](const auto& a, const auto& b) {
+        return front_ns(a.second) > front_ns(b.second);
+    });
+    std::string listed;
+    for (size_t i = 0; i < lists.size() && i < 8; ++i) {
+        const auto& [key, list] = lists[i];
+        static constexpr std::array<const char*, 4> engines{"header", "3D", "compute", "other"};
+        const u32 engine = (std::min)(key >> 16, 3U);
+        listed += fmt::format(" {} {:#x} {:.0f}/s wait {:.1f} ms, suspended {:.0f}/s {:.1f} ms,",
+                              engines[engine], key & 0xffff,
+                              static_cast<double>(list.count) * 1e9 / window_d,
+                              static_cast<double>(list.wait_ticks) * 1000.0 / ticks_d,
+                              static_cast<double>(list.suspended) * 1e9 / window_d,
+                              static_cast<double>(list.suspended_ns) * 1000.0 / window_d);
+    }
+    if (!listed.empty()) {
+        listed.pop_back();
+        line += " | GPU-written lists by call:" + listed;
+    }
+    waits = {};
+    return line;
+}
+
 inline void CountMethod(u32 method, bool same) {
     if (Enabled() && method < t_method_count.size()) {
         ++t_method_count[method];
@@ -661,6 +784,9 @@ inline bool Report(const char* thread_name = "GPU thread") {
     }
     if (const std::string jit = TopMethods(t_jit_macros, nullptr, window); !jit.empty()) {
         LOG_INFO(HW_GPU, "{} macros run by the JIT per second:{}", thread_name, jit);
+    }
+    if (const std::string waits = FrontWaitsLine(window, window_ticks); !waits.empty()) {
+        LOG_INFO(HW_GPU, "{} front waits per second:{}", thread_name, waits);
     }
     if (t_method_times) {
         if (const std::string times = TopMethodTimes(*t_method_times, window, window_ticks);

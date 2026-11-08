@@ -257,6 +257,9 @@ public:
     /// flushes and reads guest memory. With `pending`, a copy the GPU has not finished sets
     /// `*pending` and pending_list_tick instead of waiting (the result is false then).
     bool ReadGpuWrittenCommands(GPUVAddr address, u32 count, bool* pending = nullptr);
+    /// ReadGpuWrittenCommands for the entry `header` at dma_get, counted in the profile by the
+    /// call it continues (Nx2Profile::CountGpuWrittenList).
+    bool ReadGpuWrittenListTimed(const CommandListHeader& header, bool* pending);
     /// Brings command list words the GPU wrote (still only in host buffers) to guest memory.
     bool FlushGpuWrittenCommands(GPUVAddr address, size_t size);
 
@@ -332,6 +335,13 @@ public:
     std::optional<u64> pending_list_tick;
     /// The entry parsed next was suspended on pending_list_tick, which is done now.
     bool resumed_list_read{};
+    /// EDEN_NX2_GPU_PROFILE: the call the list suspended on pending_list_tick continues (ListKey)
+    /// and when it suspended (Nx2Profile::Now).
+    u32 pending_list_key{};
+    u64 pending_list_since{};
+    /// The call a command list continues, for the profile: engine (1 3D, 2 compute, 3 other)
+    /// << 16 | its method, or 0 for a list that starts with a method header.
+    [[nodiscard]] u32 ListKey() const;
 
     // Not bitfields: the fence thread sets synced, and a bitfield write would rewrite the byte it
     // shares with dma_increment_once and signal_sync (#479).
