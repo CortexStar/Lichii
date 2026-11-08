@@ -464,6 +464,11 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
         // init guards), each a LOCK XADD that bounced the guard's cache line between the cores.
         config.tso_ordered_loads = true;
         config.elide_ld_st_barriers = true;
+        // The JIT spilled ~9% of its instructions to stack slots in Ocarina of Time's hot code
+        // while callee-saved GPRs sat empty: evictions go to a free callee-saved GPR first, and an
+        // operand that is overwritten but still needed is copied to a free register instead.
+        config.spill_to_free_gpr = true;
+        config.scratch_copy_to_free_reg = true;
     }
 #endif
     m_jit.emplace(config);
