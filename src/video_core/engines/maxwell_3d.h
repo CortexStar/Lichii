@@ -38,6 +38,10 @@ namespace Tegra {
 class MemoryManager;
 }
 
+namespace Tegra::OotMacros {
+enum class Id : u8;
+}
+
 namespace VideoCommon {
 class GpuSplit;
 }
@@ -3103,8 +3107,18 @@ public:
         void DrawDeferred(Maxwell3D& maxwell3d, bool loop_continues = false);
         /// Instances after the first wait to be drawn together (DrawDeferred).
         [[nodiscard]] bool HasDeferredDraw() const noexcept {
-            return draw_state.draw_mode == DrawMode::Instance && draw_state.instance_count != 0;
+            return (draw_state.draw_mode == DrawMode::Instance && draw_state.instance_count != 0) ||
+                   first_folded;
         }
+        /// Split front, Ocarina's draw macros: the next draw.end ends the first instance of an
+        /// instance loop. The loop's deferred draw covers that instance too (DrawDeferred draws
+        /// instance_count + 1), so it isn't drawn on its own (it was drawn twice).
+        void FoldFirstInstance() noexcept {
+            fold_first_instance = true;
+        }
+        bool fold_first_instance{};
+        /// A folded first instance whose loop's deferred draw hasn't come yet.
+        bool first_folded{};
         /// Methods an instance loop writes between its draws; any other write ends the loop.
         [[nodiscard]] static bool IsInstanceLoopMethod(u32 method) noexcept;
         void DrawArray(Maxwell3D& maxwell3d, Maxwell3D::Regs::PrimitiveTopology topology, u32 vertex_first, u32 vertex_count, u32 base_instance, u32 num_instances);
@@ -3455,6 +3469,15 @@ private:
     /// GpuSplit::PendingFlush: sends the constant buffer run, the batch, the partial capture and
     /// the delta.
     static void FrontFlushPending(void* maxwell3d);
+    /// Runs Ocarina macro replacement `id` for the call; false: the JIT runs it (nothing done).
+    bool FrontRunOotMacro(VideoCommon::GpuSplit& split, FrontState& state, u32 method,
+                          OotMacros::Id id);
+    /// What a replacement runs against (macro_hle_oot.h).
+    struct OotContext;
+    /// The held-back draw batch is `count` writes equal to `writes`: `more` further repeats of
+    /// them are counted as FrontSend would count each. False: send them one by one.
+    bool FrontBatchRepeats(VideoCommon::GpuSplit& split, FrontState& state,
+                           const std::array<u32, 2>* writes, u32 count, u32 more);
     std::unique_ptr<FrontState> front;
     bool front_macros{};
     // EDEN_NX2_SPLIT_VERIFY: the last SET_SHADOW_RAM_CONTROL writes each side saw (argument,
