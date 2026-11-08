@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -74,6 +75,22 @@ constexpr std::array PreferredAv1GpuDecoders = {
 
 std::span<const AVHWDeviceType> PreferredDevices(const AVCodec* codec) {
     if (codec->id == AV_CODEC_ID_AV1) {
+        // EXPERIMENT (do not merge): EDEN_NX2_VDEC_HWDEVICE=<FFmpeg device type> decodes AV1 on
+        // that device type only (vulkan, d3d12va, d3d11va, cuda); "none" on the CPU.
+        static const std::optional<AVHWDeviceType> forced = []() -> std::optional<AVHWDeviceType> {
+            const char* name = std::getenv("EDEN_NX2_VDEC_HWDEVICE");
+            if (name == nullptr) {
+                return std::nullopt;
+            }
+            return av_hwdevice_find_type_by_name(name);
+        }();
+        if (forced) {
+            static const std::array<AVHWDeviceType, 1> only{*forced};
+            if (*forced == AV_HWDEVICE_TYPE_NONE) {
+                return {};
+            }
+            return only;
+        }
         return PreferredAv1GpuDecoders;
     }
     return PreferredGpuDecoders;
