@@ -37,6 +37,7 @@
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/native_query_trace.h"
+#include "video_core/nx2_reactive.h"
 #include "video_core/native_indirect_reset.h"
 #include "video_core/render_trace.h"
 #include "video_core/indirect_reset.h"
@@ -2134,6 +2135,47 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
     return new_area;
 }
 
+namespace {
+/// The buffer cache's queue of a range's GPU-written bytes for the next fence's downloads
+/// (BufferCache::Nx2QueueReadDownload), where the cache has it.
+template <typename Cache>
+bool QueueBufferReadDownload(Cache& cache, DAddr addr, u64 size) {
+    if constexpr (requires { cache.Nx2QueueReadDownload(addr, size); }) {
+        return cache.Nx2QueueReadDownload(addr, size);
+    } else {
+        return false;
+    }
+}
+} // Anonymous namespace
+
+bool RasterizerVulkan::QueueFlushRegion(DAddr addr, u64 size) {
+    // A guest read of GPU-written buffer data that no fence download covered (~34 a second in
+    // Ocarina, each page read a few times a minute): the flush waited for the host GPU to finish
+    // all work submitted so far (Scheduler::Finish, ~0.4 ms) on this thread. Instead the range is
+    // downloaded at a fence made and submitted now, as prefetched data is, and the reader waits
+    // for it to land: the copy holds the same data (what the GPU wrote up to this point), and
+    // this thread goes on.
+    if (addr == 0 || size == 0) {
+        return false;
+    }
+    {
+        // Image data is flushed as before.
+        std::scoped_lock lock{texture_cache.mutex};
+        if (texture_cache.IsRegionGpuModified(addr, size)) {
+            return false;
+        }
+    }
+    {
+        std::scoped_lock lock{buffer_cache.mutex};
+        if (!QueueBufferReadDownload(buffer_cache, addr, size)) {
+            return false;
+        }
+    }
+    fence_manager.SignalReference();
+    scheduler.Flush();
+    return true;
+}
+
 void RasterizerVulkan::PrepareRegionWrite(DAddr addr, u64 size, VideoCommon::CacheType which) {
     if (addr == 0 || size == 0 || False(which & VideoCommon::CacheType::BufferCache)) {
         return;
@@ -3008,7 +3050,46 @@ void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
         gpu_memory->WriteBlock(address, memory.data(), copy_size);
         return;
     }
-    gpu_memory->WriteBlockUnsafe(address, memory.data(), copy_size);
+    // Most writes land within one 4 KiB page of a page written just before. While the mappings
+    // don't change (map serial), a page inside the mapped runs is written where GpuToCpuAddress
+    // points, as the page walk would; sparse pages still take the walk.
+    bool written = false;
+    if (copy_size != 0 && (address & Core::DEVICE_PAGEMASK) + copy_size <= Core::DEVICE_PAGESIZE &&
+        (address + copy_size <= Tegra::g_nx2_sparse_low.load(std::memory_order_relaxed) ||
+         address >= Tegra::g_nx2_sparse_high.load(std::memory_order_relaxed))) {
+        struct MappedPage {
+            const Tegra::MemoryManager* memory{};
+            size_t id{};
+            GPUVAddr page{~GPUVAddr{0}};
+            u64 serial{};
+            bool mapped{};
+        };
+        thread_local MappedPage last{};
+        const GPUVAddr page = address & ~static_cast<GPUVAddr>(Core::DEVICE_PAGEMASK);
+        const u64 serial = gpu_memory->MapSerial();
+        if (last.memory != gpu_memory || last.id != gpu_memory->GetID() || last.page != page ||
+            last.serial != serial) {
+            last = MappedPage{
+                .memory = gpu_memory,
+                .id = gpu_memory->GetID(),
+                .page = page,
+                .serial = serial,
+                .mapped = gpu_memory->MaxContinuousRange(page, Core::DEVICE_PAGESIZE) >=
+                          Core::DEVICE_PAGESIZE,
+            };
+        }
+        if (last.mapped) {
+            if (u8* const pointer = device_memory.GetPointer<u8>(*cpu_addr)) {
+                std::memcpy(pointer, memory.data(), copy_size);
+                written = true;
+            }
+        }
+    }
+    VideoCommon::Nx2BufCache::Note(written ? VideoCommon::Nx2BufCache::Stat::InlineFast
+                                           : VideoCommon::Nx2BufCache::Stat::InlineSlow);
+    if (!written) {
+        gpu_memory->WriteBlockUnsafe(address, memory.data(), copy_size);
+    }
     // EDEN_NX2_INLINE_DEFER=0: invalidate every cache at once (for comparisons).
     static const bool defer = [] {
         const char* value = std::getenv("EDEN_NX2_INLINE_DEFER");
@@ -3016,14 +3097,42 @@ void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
     }();
     // One cache at a time: holding both while waiting for either (std::lock) waited longer, the
     // fencing thread and CPU write traps holding one of them most of the time.
-    bool uploaded;
-    {
+    bool uploaded = false;
+    // A run of inline writes into one page: the first finds the page free of GPU-written data
+    // under the buffer cache lock, the rest skip the lock while no GPU write was marked since
+    // and the page holds no command list. Only this thread marks GPU writes. The skipped
+    // Nx2NoteListHostWrite acts only on command list pages, so the page's own bit is enough.
+    struct CleanPage {
+        const void* cache{};
+        DAddr page{~DAddr{0}};
+        u64 serial{};
+    };
+    thread_local CleanPage clean{};
+    const DAddr device_page = *cpu_addr & ~static_cast<DAddr>(Core::DEVICE_PAGEMASK);
+    const bool one_page =
+        copy_size != 0 && (*cpu_addr & Core::DEVICE_PAGEMASK) + copy_size <= Core::DEVICE_PAGESIZE;
+    const bool known_clean =
+        defer && one_page && clean.cache == &buffer_cache && clean.page == device_page &&
+        clean.serial == buffer_cache.gpu_modified_serial.load(std::memory_order_relaxed) &&
+        !Tegra::Nx2IsCommandListPage(device_page);
+    if (!known_clean) {
         std::scoped_lock lock{buffer_cache.mutex};
         // Guest memory has the words now: a command list copy of the page no longer does.
         buffer_cache.Nx2NoteListHostWrite(*cpu_addr, copy_size);
-        uploaded = buffer_cache.InlineMemory(*cpu_addr, copy_size, memory);
+        // For a write within one page InlineMemory checks exactly that page for GPU-written
+        // data: its answer sets the memo, without a second lookup.
+        bool page_clean = false;
+        uploaded = buffer_cache.InlineMemory(*cpu_addr, copy_size, memory, &page_clean);
         if (!uploaded && !defer) {
             buffer_cache.WriteMemory(*cpu_addr, copy_size);
+        }
+        clean.cache = nullptr;
+        if (!uploaded && one_page && page_clean) {
+            clean = CleanPage{
+                .cache = &buffer_cache,
+                .page = device_page,
+                .serial = buffer_cache.gpu_modified_serial.load(std::memory_order_relaxed),
+            };
         }
     }
     // Pending query results must not land over the new words later: drop them now.
