@@ -10,6 +10,15 @@
 #if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
 #endif
+#if defined(_M_X64) || defined(__x86_64__)
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
+#include <x86intrin.h>
+#endif
+#include "common/cpu_features.h"
+#include "common/x64/monitor_wait.h"
+#endif
 
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
@@ -162,6 +171,38 @@ bool SpinBeforeWait(KernelCore& kernel, KThread* cur_thread, uint64_t addr, bool
         return *reinterpret_cast<const volatile s32*>(pointer);
     };
     const PhysicalCore& core = kernel.CurrentPhysicalCore();
+#if defined(_M_X64) || defined(__x86_64__)
+    // Past the first 2 us, wait for a write to the word's line with MONITORX/MWAITX instead of
+    // polling (the SMT sibling gets the core), 1 us at a time so an interrupt is still seen.
+    if (Common::g_wall_clock.IsNative() && Common::X64::HasMonitorWait()) {
+        const u64 budget = Common::g_wall_clock.NsToTicks(ArbSpin);
+        const u64 poll = Common::g_wall_clock.NsToTicks(std::chrono::microseconds{2});
+        const u64 slice = Common::g_wall_clock.NsToTicks(std::chrono::microseconds{1});
+        const u64 start = __rdtsc();
+        for (u32 spin = 1;; ++spin) {
+            const s64 word = load_word();
+            if (!still_waits(word)) {
+                credit = static_cast<u8>((std::min)(credit + 2, 16));
+                return !cur_thread->IsTerminationRequested();
+            }
+            const u64 elapsed = __rdtsc() - start;
+            if (elapsed >= budget ||
+                (((spin & 31) == 0 || elapsed >= poll) && core.IsInterrupted())) {
+                break;
+            }
+            if (elapsed < poll) {
+                _mm_pause();
+                continue;
+            }
+            Common::X64::MonitorWait(pointer, static_cast<u64>(word), is_64_bit ? 8 : 4,
+                                     static_cast<u32>((std::min)(slice, budget - elapsed)));
+        }
+        if (credit > 0) {
+            --credit;
+        }
+        return false;
+    }
+#endif
     const auto deadline = std::chrono::steady_clock::now() + ArbSpin;
     for (u32 spin = 1;; ++spin) {
 #if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
