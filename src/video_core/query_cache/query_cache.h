@@ -566,10 +566,12 @@ bool QueryCacheBase<Traits>::HasUncommittedFlushes() const {
 }
 
 template <typename Traits>
-bool QueryCacheBase<Traits>::HasPendingFenceWork() const {
+bool QueryCacheBase<Traits>::HasPendingFenceWork(bool ignore_payload_sync) const {
     bool result = false;
-    impl->ForEachStreamer([&result](StreamerInterface* streamer) {
-        result |= streamer->HasUnsyncedQueries() || streamer->HasPendingSync();
+    StreamerInterface* const payload = impl->streamers[static_cast<size_t>(QueryType::Payload)];
+    impl->ForEachStreamer([&](StreamerInterface* streamer) {
+        result |= streamer->HasUnsyncedQueries() ||
+                  ((!ignore_payload_sync || streamer != payload) && streamer->HasPendingSync());
         return result;
     });
     return result;
