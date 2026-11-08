@@ -155,6 +155,8 @@ struct Nx2VideoDecoder::Impl {
     bool on_gpu{};                    ///< Decoding on a host GPU
     size_t device_index{};            ///< Its place in the codec's device order
     bool confirmed{};                 ///< The decoder produced a picture
+    /// Format, depth and colour description of the last logged picture (DescribePictures).
+    std::string described;
     size_t packets_without_picture{}; ///< Since it was opened
     /// Packets to send again to the next decoder if the GPU one fails: AV1 from the last packet
     /// with a sequence header (a decoder can start there), other codecs until the first picture.
@@ -300,9 +302,31 @@ struct Nx2VideoDecoder::Impl {
         }
     }
 
+    // Always logged when it changes: what the stream decodes to, before any conversion.
+    void DescribePictures(const AVFrame* f) {
+        const auto format = static_cast<AVPixelFormat>(f->format);
+        const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(format);
+        const AVCodecContext* codec_context = context->GetCodecContext();
+        const std::string description = fmt::format(
+            "{}x{} {} ({} bits{}), range {}, matrix {}, primaries {}, transfer {}, profile {}",
+            f->width, f->height, av_get_pix_fmt_name(format) ? av_get_pix_fmt_name(format) : "?",
+            desc ? desc->comp[0].depth : 0, on_gpu ? ", copied from the GPU" : "",
+            av_color_range_name(f->color_range) ? av_color_range_name(f->color_range) : "?",
+            av_color_space_name(f->colorspace) ? av_color_space_name(f->colorspace) : "?",
+            av_color_primaries_name(f->color_primaries) ? av_color_primaries_name(f->color_primaries)
+                                                        : "?",
+            av_color_transfer_name(f->color_trc) ? av_color_transfer_name(f->color_trc) : "?",
+            codec_context->profile);
+        if (description != described) {
+            described = description;
+            LOG_INFO(HW_GPU, "nx2 video: \"{}\" decodes to {}", name, description);
+        }
+    }
+
     void Receive(std::vector<Nx2Picture>& pictures) {
         while (auto frame = context->ReceiveFrame()) {
             const AVFrame* f = frame->GetFrame();
+            DescribePictures(f);
             const s64 stamp = f->best_effort_timestamp != AV_NOPTS_VALUE ? f->best_effort_timestamp
                                                                          : f->pts;
             u64 pts{};
