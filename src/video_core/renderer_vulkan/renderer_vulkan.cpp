@@ -212,6 +212,9 @@ try
 
 RendererVulkan::~RendererVulkan() {
     scheduler.RegisterOnSubmit([] {});
+    // Members are destroyed before the scheduler: run the commands that still point into them,
+    // such as frame generation's optical flow copies.
+    scheduler.WaitWorker();
     void(device.GetLogical().WaitIdle());
 }
 
