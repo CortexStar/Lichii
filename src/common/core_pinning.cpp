@@ -66,8 +66,9 @@ std::vector<u32> ParseCpuList(std::string_view list) {
             last < first || last - first >= 4096) {
             return {};
         }
-        for (u32 cpu = first; cpu <= last; ++cpu) {
-            cpus.push_back(cpu);
+        // 64-bit, so a range ending at the largest u32 doesn't wrap to 0 and loop forever.
+        for (u64 cpu = first; cpu <= last; ++cpu) {
+            cpus.push_back(static_cast<u32>(cpu));
         }
     }
     return cpus;

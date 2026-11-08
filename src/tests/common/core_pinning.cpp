@@ -186,6 +186,9 @@ TEST_CASE("Core pinning: sysfs CPU lists", "[common][core_pinning]") {
     CHECK(ParseCpuList("1,x").empty());
     CHECK(ParseCpuList("0-").empty());
     CHECK(ParseCpuList("0-4294967295").empty());
+    CHECK(ParseCpuList("4294967295") == std::vector<u32>{4294967295U});
+    CHECK(ParseCpuList("4294967294-4294967295") == std::vector<u32>{4294967294U, 4294967295U});
+    CHECK(ParseCpuList("4294967296").empty());
 }
 
 TEST_CASE("Core pinning: a 4P+4E CPU whose E-cores rank lower is skipped",
