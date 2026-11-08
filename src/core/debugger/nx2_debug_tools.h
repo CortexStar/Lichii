@@ -15,6 +15,7 @@
 #include <nlohmann/json.hpp>
 
 #include "common/common_types.h"
+#include "common/nx2_switches.h"
 #include "hid_core/frontend/emulated_controller.h"
 
 namespace Core {
@@ -91,6 +92,16 @@ struct InputStep {
 /// std::runtime_error on unknown keys, buttons or out-of-range values, and unless exactly one of
 /// frames and ms is given.
 [[nodiscard]] InputStep ParseInputStep(const nlohmann::json& step);
+
+/// EXPERIMENT (do not merge): a `switch` request, {name, value?}. A missing or null value unsets
+/// the variable; a number counts as its decimal text.
+struct SwitchRequest {
+    Common::Nx2Switches::Switch which;
+    std::optional<std::string> value;
+};
+
+/// Throws std::runtime_error on a name that is no runtime switch, naming the ones that are.
+[[nodiscard]] SwitchRequest ParseSwitchRequest(const nlohmann::json& params);
 
 /// The steps of one input or input_sequence call, run back to back from present count start on.
 /// A frames step ends after that many presents, an ms step after that much wall time. Callers

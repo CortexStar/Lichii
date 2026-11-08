@@ -55,6 +55,8 @@ add_library(
     nx2_sampler.h
     nx2_address_wait.cpp
     nx2_address_wait.h
+    nx2_switches.cpp
+    nx2_switches.h
     dynamic_library.cpp
     dynamic_library.h
     elf.h

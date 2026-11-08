@@ -438,6 +438,29 @@ TEST_CASE("Debug server tells a waiting handler that its client left", "[core][n
     REQUIRE(noticed);
 }
 
+TEST_CASE("Debug switch requests name a runtime switch", "[core][nx2_debug_server]") {
+    using Common::Nx2Switches::Switch;
+    const auto set =
+        Core::Nx2Debug::ParseSwitchRequest(json{{"name", "EDEN_NX2_EXP_NO_PARK"}, {"value", "1"}});
+    REQUIRE(set.which == Switch::NoPark);
+    REQUIRE(set.value == "1");
+    const auto number =
+        Core::Nx2Debug::ParseSwitchRequest(json{{"name", "EDEN_NX2_DYNSTATE_BATCH"}, {"value", 0}});
+    REQUIRE(number.which == Switch::DynStateUnbatched);
+    REQUIRE(number.value == "0");
+    REQUIRE_FALSE(
+        Core::Nx2Debug::ParseSwitchRequest(json{{"name", "EDEN_NX2_EXP_EVICT_9000"}}).value);
+    REQUIRE_FALSE(Core::Nx2Debug::ParseSwitchRequest(
+                      json{{"name", "EDEN_NX2_EXP_EVICT_9000"}, {"value", nullptr}})
+                      .value);
+    for (const json& bad :
+         {json{{"name", "EDEN_NX2_EXP_NO_GPL"}}, json{{"name", 3}},
+          json{{"name", "EDEN_NX2_EXP_NO_PARK"}, {"value", 1.5}}, json{{"value", "1"}}}) {
+        CAPTURE(bad.dump());
+        REQUIRE_THROWS(Core::Nx2Debug::ParseSwitchRequest(bad));
+    }
+}
+
 TEST_CASE("Debug input steps parse buttons, sticks, frames and ms", "[core][nx2_debug_server]") {
     const auto step = Core::Nx2Debug::ParseInputStep(
         json{{"buttons", {"A", "ZL"}}, {"left_stick", {1.0, -0.5}}, {"frames", 3}});

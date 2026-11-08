@@ -21,6 +21,7 @@
 #include "common/input_latency.h"
 #include "common/logging.h"
 #include "common/nx2_sampler.h"
+#include "common/nx2_switches.h"
 #include "common/scm_rev.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -800,6 +801,48 @@ json InputSequence(ToolState& state, const json& params, const ClientGone& clien
     return RunInput(state, steps, params, client_gone);
 }
 
+/// EXPERIMENT (do not merge): `switch` {name?, value?, timeout_s?} sets an A/B switch
+/// (common/nx2_switches.h) and waits until it took effect at a frame boundary; without a name it
+/// lists them. The registry is thread-safe: no tool lock, so status polls go on meanwhile.
+json SwitchTool(const json& params, const ClientGone& client_gone) {
+    namespace S = Common::Nx2Switches;
+    const auto describe = [](S::Switch which) {
+        const auto text = S::Text(which);
+        return json{{"name", S::Name(which)},
+                    {"value", text ? json(*text) : json(nullptr)},
+                    {"state", S::Get(which)},
+                    {"at_launch", S::AtLaunch(which)}};
+    };
+    if (!params.contains("name")) {
+        json list = json::array();
+        for (u32 i = 0; i < static_cast<u32>(S::Switch::Count); ++i) {
+            list.push_back(describe(static_cast<S::Switch>(i)));
+        }
+        return {{"switches", std::move(list)}};
+    }
+    const SwitchRequest request = ParseSwitchRequest(params);
+    const int timeout = Param<int>(params, "timeout_s", 2, 1, 30);
+    const u32 target =
+        S::Request(request.which,
+                   request.value ? std::optional<std::string_view>{*request.value} : std::nullopt);
+    // TickFrame latches it: wait for the next frame, so the caller knows the flip is in.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{timeout};
+    while (S::Get(request.which) != target && std::chrono::steady_clock::now() < deadline &&
+           !client_gone()) {
+        std::this_thread::sleep_for(1ms);
+    }
+    json result = describe(request.which);
+    result["applied"] = S::Get(request.which) == target;
+    result["present"] = g_nx2_present_count.load(std::memory_order_relaxed);
+    if (request.which == S::Switch::GuestCpuOff) {
+        result["note"] = "cntpct and hostfn take effect only at launch (emitted code)";
+    }
+    LOG_INFO(Debug, "Debug server: switch {} requested {} ({})", S::Name(request.which),
+             request.value ? *request.value : std::string{"(unset)"},
+             result["applied"].get<bool>() ? "applied" : "not applied yet");
+    return result;
+}
+
 Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
     const auto handler = [&state](json (*tool)(ToolState&, const json&)) -> Handler {
         return [state, tool](const json& params, const ClientGone&) {
@@ -830,6 +873,7 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
         {"read_gpu_memory", handler(ReadGpuMemory)},
         {"input", waiting(Input)},
         {"input_sequence", waiting(InputSequence)},
+        {"switch", SwitchTool},
     };
 }
 
@@ -982,6 +1026,32 @@ GuestSearch SearchGuestMemory(Memory::Memory& memory, std::span<const u8> patter
         address = page_end;
     }
     return search;
+}
+
+SwitchRequest ParseSwitchRequest(const json& params) {
+    namespace S = Common::Nx2Switches;
+    const json& name = params.at("name");
+    const auto which = name.is_string() ? S::Find(name.get<std::string>()) : std::nullopt;
+    if (!which) {
+        std::string names;
+        for (u32 i = 0; i < static_cast<u32>(S::Switch::Count); ++i) {
+            names += names.empty() ? "" : ", ";
+            names += S::Name(static_cast<S::Switch>(i));
+        }
+        throw std::runtime_error{
+            fmt::format("{} is no runtime switch: want one of {}", name.dump(), names)};
+    }
+    SwitchRequest request{.which = *which, .value = std::nullopt};
+    if (const auto it = params.find("value"); it != params.end() && !it->is_null()) {
+        if (it->is_string()) {
+            request.value = it->get<std::string>();
+        } else if (it->is_number_integer()) {
+            request.value = std::to_string(it->get<s64>());
+        } else {
+            throw std::runtime_error{"value must be a string, an integer or null"};
+        }
+    }
+    return request;
 }
 
 InputStep ParseInputStep(const json& step) {
