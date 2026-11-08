@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 
+#include "dynarmic/interface/halt_reason.h"
 #include "dynarmic/interface/optimization_flags.h"
 
 namespace Dynarmic {
@@ -335,6 +336,16 @@ struct UserConfig {
     /// flags directly when the flag-setting instruction was emitted right before them, instead
     /// of reloading NZCV from the guest state (the state is still written).
     bool reuse_host_flags = false;
+
+    /// x64 only, with fastmem exclusives and Unsafe_IgnoreGlobalMonitor. LSE atomics (LDADD
+    /// and friends, SWP, CAS) become one host atomic instruction (or a host CAS loop) instead
+    /// of an exclusive load/store pair that ends the block.
+    bool native_lse_atomics = false;
+
+    /// The halt reasons the memory callbacks raise when they refuse an access. An LSE atomic on
+    /// the callback path (native_lse_atomics) retries a refused exclusive write until the word
+    /// changes, and stops retrying once one of these is set.
+    HaltReason memory_abort_halt_reasons = HaltReason::MemoryAbort;
 
     /// This option relates to translation. Generally when we run into an unpredictable
     /// instruction the ExceptionRaised callback is called. If this is true, we define
