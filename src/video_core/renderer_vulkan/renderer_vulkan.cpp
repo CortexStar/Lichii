@@ -14,6 +14,7 @@
 
 #include <fmt/ranges.h>
 
+#include "common/display_hdr.h"
 #include "common/logging.h"
 #include <ranges>
 #include "common/scope_exit.h"
@@ -28,6 +29,7 @@
 #ifdef HAS_RESHADE
 #include "video_core/post_processing/fx_chain.h"
 #endif
+#include "video_core/hdr_capture.h"
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
 #include "video_core/renderer_vulkan/vk_blit_screen.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -356,7 +358,7 @@ void RendererVulkan::Report() const {
 
 vk::Buffer RendererVulkan::RenderToBuffer(std::span<const Tegra::FramebufferConfig> framebuffers,
                                           const Layout::FramebufferLayout& layout, VkFormat format,
-                                          VkDeviceSize buffer_size) {
+                                          VkDeviceSize buffer_size, bool hdr_output) {
     auto frame = [&]() {
         Frame f{};
         f.image =
@@ -367,7 +369,8 @@ vk::Buffer RendererVulkan::RenderToBuffer(std::span<const Tegra::FramebufferConf
     }();
 
     auto dst_buffer = CreateWrappedBuffer(memory_allocator, buffer_size, MemoryUsage::Download);
-    blit_capture.DrawToFrame(device, rasterizer, &frame, framebuffers, layout, 1, format, false);
+    blit_capture.DrawToFrame(device, rasterizer, &frame, framebuffers, layout, 1, format,
+                             hdr_output);
 
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([&](vk::CommandBuffer cmdbuf) {
@@ -392,11 +395,36 @@ void RendererVulkan::RenderScreenshot(std::span<const Tegra::FramebufferConfig> 
         framebuffers, renderer_settings.screenshot_layer_stack, screenshot_layer_scratch);
 
     const auto& layout{renderer_settings.screenshot_framebuffer_layout};
-    const auto dst_buffer = RenderToBuffer(screenshot_layers, layout, VK_FORMAT_B8G8R8A8_UNORM,
-                                           layout.width * layout.height * 4);
-
-    std::memcpy(renderer_settings.screenshot_bits, dst_buffer.Mapped().data(),
-                dst_buffer.Mapped().size());
+    const size_t pixels = size_t{layout.width} * layout.height;
+    const auto hdr_layer = std::ranges::find_if(screenshot_layers, [](const auto& framebuffer) {
+        return framebuffer.color_space != Tegra::ColorSpace::RGB709;
+    });
+    if (hdr_layer != screenshot_layers.end()) {
+        // The HDR image drawn unchanged into a float frame, then converted to what the game's
+        // SDR output would look like (an 8-bit copy of PQ codes looks grey and washed out).
+        const auto dst_buffer = RenderToBuffer(screenshot_layers, layout,
+                                               VK_FORMAT_R16G16B16A16_SFLOAT, pixels * 8, true);
+        const auto output = Common::ResolveHdrOutput(
+            Common::QueryDisplayHdr(render_window.GetWindowInfo().render_surface),
+            Settings::HdrMode::On, Settings::values.hdr_peak_luminance.GetValue(),
+            Settings::values.hdr_reference_white.GetValue());
+        const std::span<const u8> mapped = dst_buffer.Mapped();
+        VideoCore::HdrCapture::Convert(
+            std::span{reinterpret_cast<const u16*>(mapped.data()), pixels * 4},
+            std::span{static_cast<u8*>(renderer_settings.screenshot_bits), pixels * 4},
+            {
+                .color_space = hdr_layer->color_space,
+                .reference_white = static_cast<f32>(output.reference_white),
+                .nits_per_unit = hdr_layer->linear_unit_luminance != 0
+                                     ? static_cast<f32>(hdr_layer->linear_unit_luminance)
+                                     : 80.0f,
+            });
+    } else {
+        const auto dst_buffer =
+            RenderToBuffer(screenshot_layers, layout, VK_FORMAT_B8G8R8A8_UNORM, pixels * 4);
+        std::memcpy(renderer_settings.screenshot_bits, dst_buffer.Mapped().data(),
+                    dst_buffer.Mapped().size());
+    }
     renderer_settings.screenshot_complete_callback(false);
     renderer_settings.screenshot_requested = false;
 }
