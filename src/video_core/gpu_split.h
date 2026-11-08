@@ -130,6 +130,85 @@ public:
         Commit(1);
     }
 
+    // Front-owned register state (Maxwell3D::FrontState): state register writes stay on the front
+    // until something else is sent, then go as one StateDelta entry (Maxwell3D::ApplyFrontDelta);
+    // runs of identical instance-loop draws go as one DrawBatch; constant buffer data runs as one
+    // CbWrite, bind group writes as CbBind.
+    /// `count` (method | value << 32) words written by `fill(u64*)`, applied in order.
+    template <typename Fill>
+    void StateDelta(Tegra::Engines::EngineInterface* engine, u32 count, const Fill& fill) {
+        SelectEngine(engine);
+        u64* const entry = Reserve(1 + size_t{count});
+        entry[0] = static_cast<u64>(Kind::StateDelta) | (u64{count} << 32);
+        fill(entry + 1);
+        Commit(1 + size_t{count});
+    }
+    /// `count` (method | argument << 32) instance-loop writes, run once, then `repeats - 1` more
+    /// instances counted (Maxwell3D::RunDrawBatch).
+    void DrawBatch(Tegra::Engines::EngineInterface* engine, const u64* methods, u32 count,
+                   u32 repeats) {
+        SelectEngine(engine);
+        u64* const entry = Reserve(1 + size_t{count});
+        entry[0] =
+            static_cast<u64>(Kind::DrawBatch) | (u64{count & 0xff} << 8) | (u64{repeats} << 32);
+        std::memcpy(entry + 1, methods, size_t{count} * sizeof(u64));
+        Commit(1 + size_t{count});
+    }
+    /// `count` (1-4) words written to the constant buffer data registers, register i being
+    /// const_buffer.buffer + nibble i of `nibbles` (Maxwell3D::BackCbWrite). Never more words
+    /// than the single method entries it stands for.
+    void CbWrite(Tegra::Engines::EngineInterface* engine, u32 nibbles, const u32* words,
+                 u32 count) {
+        SelectEngine(engine);
+        const size_t size = 1 + size_t{count} / 2;
+        u64* const entry = Reserve(size);
+        entry[0] = static_cast<u64>(Kind::CbWrite) | (u64{count & 7} << 8) |
+                   (u64{nibbles & 0xffff} << 12) | (u64{words[0]} << 32);
+        if (count > 1) {
+            entry[size - 1] = 0;
+            std::memcpy(entry + 1, words + 1, size_t{count - 1} * sizeof(u32));
+        }
+        Commit(size);
+    }
+    /// A write of `argument` to bind group `stage`'s raw_config (Maxwell3D::BackCbBind).
+    void CbBind(Tegra::Engines::EngineInterface* engine, u32 stage, u32 argument) {
+        SelectEngine(engine);
+        u64* const entry = Reserve(1);
+        entry[0] =
+            static_cast<u64>(Kind::CbBind) | (u64{stage & 0xff} << 8) | (u64{argument} << 32);
+        Commit(1);
+    }
+    /// Work the front holds back (a register delta, a draw batch): `hook(argument)` sends it
+    /// before anything else is sent and before the front waits for the back. Another holder's
+    /// work is sent first.
+    using PendingFlush = void (*)(void*);
+    void SetPendingFlush(PendingFlush hook, void* argument) {
+        if (pending_flush != hook || pending_flush_argument != argument) {
+            RunPendingFlush();
+            pending_flush = hook;
+            pending_flush_argument = argument;
+        }
+    }
+    /// Sends the held-back work now.
+    void RunPendingFlush() {
+        if (pending_flush != nullptr) [[unlikely]] {
+            const PendingFlush hook = pending_flush;
+            pending_flush = nullptr;
+            hook(pending_flush_argument);
+        }
+    }
+    /// The holder sends its work itself (it calls SetPendingFlush again for what it keeps).
+    void ClearPendingFlush() {
+        pending_flush = nullptr;
+    }
+    /// `argument` goes away: forget its held-back work.
+    void DropPendingFlush(void* argument) {
+        if (pending_flush_argument == argument) {
+            pending_flush = nullptr;
+            pending_flush_argument = nullptr;
+        }
+    }
+
     /// Runs `func` on the back after everything sent before it. Must be trivially copyable.
     template <typename Func>
     void Defer(const Func& func) {
@@ -165,6 +244,7 @@ public:
     /// Before the front yields or sleeps: the back gets what the front decoded so far instead of
     /// idling until the next 256 words.
     void PublishBeforeWait() {
+        RunPendingFlush();
         Publish();
     }
     /// Waits until the back executed everything sent so far.
@@ -270,11 +350,15 @@ private:
     friend struct GpuSplitTestAccess;
 
     enum class Kind : u64 {
-        Wrap,   ///< The rest of the ring is unused: continue at its start
-        Engine, ///< The engine the next methods go to: word 1
-        Method, ///< Bits 8-23 method, 32-63 argument; flags IsLast, HasSegment (word 1)
-        Multi,  ///< Bits 8-23 method, 32-63 amount; word 1 methods pending, [segment], words
-        Call,   ///< Bits 8-31 payload size in words; word 1 thunk, then the payload
+        Wrap,       ///< The rest of the ring is unused: continue at its start
+        Engine,     ///< The engine the next methods go to: word 1
+        Method,     ///< Bits 8-23 method, 32-63 argument; flags IsLast, HasSegment (word 1)
+        Multi,      ///< Bits 8-23 method, 32-63 amount; word 1 methods pending, [segment], words
+        Call,       ///< Bits 8-31 payload size in words; word 1 thunk, then the payload
+        StateDelta, ///< Bits 32-63 count; then count words (method | value << 32), Maxwell3D
+        DrawBatch,  ///< Bits 8-15 count, 32-63 repeats; then count words (method | arg << 32)
+        CbWrite,    ///< Bits 8-10 count (1-4), 12-27 register nibbles, 32-63 word 0; then words
+        CbBind,     ///< Bits 8-15 stage, 32-63 argument (Maxwell3D bind group raw_config)
     };
     static constexpr u64 IsLast = 1 << 4;
     static constexpr u64 HasSegment = 1 << 5;
@@ -308,6 +392,8 @@ private:
 
     /// Room for an entry of `words` at the write position (never across the ring's end).
     u64* Reserve(size_t words) {
+        // Held-back front state goes before any other entry (SetPendingFlush).
+        RunPendingFlush();
         const size_t index = write_position & RingMask;
         if (index + words <= RingWords && write_position + words - consumed_cache <= RingWords)
             [[likely]] {
@@ -326,6 +412,9 @@ private:
     }
     void WaitForSpace(size_t words);
     void SelectEngine(Tegra::Engines::EngineInterface* engine) {
+        // Before the engine is chosen: another engine's held-back work selects its own, and the
+        // entry after it must go to this one.
+        RunPendingFlush();
         if (engine != front_engine) [[unlikely]] {
             SwitchEngine(engine);
         }
@@ -373,6 +462,9 @@ private:
     /// Words between publishes: small right after a drain, while the back has nothing to do.
     size_t publish_every{PublishEvery};
     Tegra::Engines::EngineInterface* front_engine{};
+    /// Held-back front work (SetPendingFlush).
+    PendingFlush pending_flush{};
+    void* pending_flush_argument{};
 
     // Back side.
     Tegra::Engines::EngineInterface* back_engine{};
