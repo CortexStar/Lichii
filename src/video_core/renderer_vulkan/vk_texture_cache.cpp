@@ -3212,7 +3212,8 @@ void Image::UploadMemory(VkBuffer buffer, VkDeviceSize offset,
         image_copies.reserve(copies.size());
         for (const auto& copy : copies) {
             VideoCommon::ImageCopy image_copy{};
-            image_copy.src_offset = {0, 0, 0};
+            // The upload wrote the scratch image at the copy's own offset.
+            image_copy.src_offset = copy.image_offset;
             image_copy.dst_offset = {copy.image_offset.x >> samples_x,
                                      copy.image_offset.y >> samples_y, copy.image_offset.z};
             image_copy.src_subresource = copy.image_subresource;
