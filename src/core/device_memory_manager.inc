@@ -217,8 +217,13 @@ void DeviceMemoryManager<Traits>::HintCold(DAddr address, size_t size) {
     // The hint takes the pages out of the working set at once (VirtualUnlock), whether or not
     // the host needs the RAM, and an image made again over them faults them all back in during
     // its upload (Ocarina of Time: 1% lows). Only when RAM is short.
-    if (!Common::IsLowOnMemory(Common::GetAvailablePhysicalMemory(),
-                               Common::GetMemInfo().TotalPhysicalMemory)) {
+    // EXPERIMENT (do not merge): EDEN_NX2_EXP_COLD_ALWAYS=1 hints whatever the RAM.
+    static const bool cold_always = [] {
+        const char* const value = std::getenv("EDEN_NX2_EXP_COLD_ALWAYS");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!cold_always && !Common::IsLowOnMemory(Common::GetAvailablePhysicalMemory(),
+                                               Common::GetMemInfo().TotalPhysicalMemory)) {
         return;
     }
     struct Run {

@@ -577,7 +577,12 @@ void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
     }
 
     scheduler.RequestOutsideRenderPassOperationContext();
-    if (barrier && from_stream && !vk_copies.empty()) {
+    // EXPERIMENT (do not merge): EDEN_NX2_EXP_NO_UPLOAD_BATCH=1 records each upload alone.
+    static const bool no_upload_batch = [] {
+        const char* const value = std::getenv("EDEN_NX2_EXP_NO_UPLOAD_BATCH");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (barrier && from_stream && !vk_copies.empty() && !no_upload_batch) {
         // An upload in order, with these barriers. Runs of them (Ocarina of Time's inline writes
         // into GPU-written pages: ~600 a frame) go in one command between one pair of them.
         scheduler.RecordUpload(src_buffer, dst_buffer,

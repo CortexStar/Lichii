@@ -1859,8 +1859,13 @@ void RasterizerVulkan::DispatchCompute() {
     // After the caches' locks are released. Only this dispatch's writes count: draws' wait for
     // the next fence.
     (void)buffer_cache.TakeReadPrefetchQueued();
+    // EXPERIMENT (do not merge): EDEN_NX2_EXP_NO_EARLY_READ=1 leaves them to the next fence.
+    static const bool no_early_read = [] {
+        const char* const value = std::getenv("EDEN_NX2_EXP_NO_EARLY_READ");
+        return value != nullptr && value[0] == '1';
+    }();
     SCOPE_EXIT {
-        if (buffer_cache.TakeReadPrefetchQueued()) {
+        if (buffer_cache.TakeReadPrefetchQueued() && !no_early_read) {
             fence_manager.SignalReference();
         }
     };

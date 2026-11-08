@@ -160,6 +160,14 @@ public:
             func();
         }
         fences.push(std::move(new_fence));
+        // EXPERIMENT (do not merge): EDEN_NX2_EXP_FENCE_FLUSH_TWICE=1 flushes again here.
+        static const bool flush_twice = [] {
+            const char* const value = std::getenv("EDEN_NX2_EXP_FENCE_FLUSH_TWICE");
+            return value != nullptr && value[0] == '1';
+        }();
+        if (flush_twice && should_flush) {
+            rasterizer.FlushCommands();
+        }
         if constexpr (can_async_check) {
             guard.unlock();
             cv.notify_all();

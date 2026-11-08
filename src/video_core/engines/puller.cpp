@@ -71,7 +71,12 @@ void DrainBack() {
 // meets ~2,350 unmet acquires a second, each such drain and wait ~120 us of the front.
 void ReleaseFences(DmaPusher& dma_pusher) {
     auto& split = VideoCommon::GpuSplit::Get();
-    if (split.Active()) {
+    // EXPERIMENT (do not merge): EDEN_NX2_EXP_NO_FENCE_QUIET=1 always drains.
+    static const bool no_quiet = [] {
+        const char* const value = std::getenv("EDEN_NX2_EXP_NO_FENCE_QUIET");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (split.Active() && !no_quiet) {
         u64 epoch{};
         if (split.FencesQuietNow(epoch) && dma_pusher.rasterizer->FenceWorkEpoch() == epoch) {
             split.Defer([rasterizer = dma_pusher.rasterizer] { rasterizer->InvalidateGPUCache(); });
