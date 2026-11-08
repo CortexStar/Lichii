@@ -419,6 +419,10 @@ public:
     std::vector<MeshLineTarget> mesh_primitive_targets;
     std::array<Id, 2> mesh_outputs_marker{};
     std::array<Id, 4> mesh_tasks_marker{};
+    /// The program's entry block, captured by DefineMain. EmitMeshPrologue's elected single
+    /// store branches inside it, so its definition is re-pointed to the branch's merge label
+    /// for deferred phi parents to resolve to the real predecessor block.
+    IR::Block* entry_block{};
     /// Mesh emulation (RuntimeInfo::mesh_as_compute): the output storage buffer and the
     /// pointer type to one of its words.
     Id mesh_output_buffer{};
