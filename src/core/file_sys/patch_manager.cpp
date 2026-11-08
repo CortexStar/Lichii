@@ -606,10 +606,16 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         if (patch.title_id != title_id || patch.module != name) {
             continue;
         }
-        if (patch.render_scale &&
-            (!Settings::values.nvidia_dlss.GetValue() ||
-             *patch.render_scale != Settings::values.ocarina_dlss_mode.GetValue())) {
+        if (patch.render_scale) {
+#ifdef EGLANTINE_STREAMLINE
+            if (!Settings::values.nvidia_dlss.GetValue() ||
+                *patch.render_scale != Settings::values.ocarina_dlss_mode.GetValue()) {
+                continue;
+            }
+#else
+            // A shared config can carry the setting into a build without DLSS.
             continue;
+#endif
         }
         if (std::find(disabled.cbegin(), disabled.cend(), patch.name) != disabled.cend()) {
             LOG_INFO(Loader, "    - Skipping \"{}\": disabled in Add-Ons", patch.name);
