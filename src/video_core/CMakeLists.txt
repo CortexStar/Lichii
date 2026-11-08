@@ -142,6 +142,7 @@ add_library(video_core STATIC
     oot_camera.h
     oot_dlss.h
     nx2_list_indirect.h
+    nx2_list_indirect_stats.h
     nx2_profile.h
     nx2_query_fast.h
     nx2_reactive.h
