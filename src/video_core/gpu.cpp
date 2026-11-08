@@ -109,13 +109,22 @@ struct GPU::Impl {
 
     /// Synchronizes CPU writes with Host GPU memory.
     void InvalidateGPUCache() {
+        // Called at every fence (~11,000-18,000 a second in Ocarina), mostly with nothing
+        // collected: one shared flag then skips the cores' managers and their locks.
+        if (!Core::GPUDirtyMemoryManager::AnyWrites()) {
+            return;
+        }
         std::vector<std::pair<DAddr, u64>> writes;
         std::function<void(PAddr, size_t)> callback_writes(
             [&writes](PAddr address, size_t size) { writes.emplace_back(address, size); });
+        // Until EndGather, a concurrent caller finding the flag clear gathers too, so it never
+        // returns before the writes collected before it are applied.
+        Core::GPUDirtyMemoryManager::BeginGather();
         system.GatherGPUDirtyMemory(callback_writes);
         if (!writes.empty()) {
             renderer->ReadRasterizer()->OnCacheInvalidations(writes);
         }
+        Core::GPUDirtyMemoryManager::EndGather();
     }
 
     void ForEachPendingCpuWrite(const std::function<void(DAddr, size_t)>& callback) {
@@ -136,6 +145,7 @@ struct GPU::Impl {
         std::unique_lock lck{sync_request_mutex};
         const u64 fence = ++last_sync_fence;
         sync_requests.emplace_back(std::forward<Func>(action));
+        has_sync_requests.store(true, std::memory_order_release);
         return fence;
     }
 
@@ -157,6 +167,13 @@ struct GPU::Impl {
 
     /// Tick pending requests within the GPU.
     void TickWork() {
+        // Called at each draw, clear and dispatch: skip the lock with nothing queued. A request
+        // queued after this check is run by the next TickWork, as one queued just after the loop
+        // below empties the queue is. Whoever made it and then had this thread tick (WaitForIdle's
+        // TickGPU) is ordered after its store, so that tick sees it.
+        if (!has_sync_requests.load(std::memory_order_acquire)) {
+            return;
+        }
         std::unique_lock lck{sync_request_mutex};
         while (!sync_requests.empty()) {
             auto request = std::move(sync_requests.front());
@@ -167,6 +184,8 @@ struct GPU::Impl {
             sync_request_mutex.lock();
             sync_request_cv.notify_all();
         }
+        // Under the lock with the queue empty: no request can be queued in between.
+        has_sync_requests.store(false, std::memory_order_relaxed);
     }
 
     [[nodiscard]] u64 GetTicks() const {
@@ -384,6 +403,9 @@ struct GPU::Impl {
     std::condition_variable sync_cv;
 
     std::list<std::function<void()>> sync_requests;
+    /// sync_requests is not empty (set and cleared under sync_request_mutex; TickWork reads it
+    /// without the lock to skip the lock when nothing is queued).
+    std::atomic<bool> has_sync_requests{};
     std::atomic<u64> current_sync_fence{};
     std::atomic<AmpereAnchor> ampere_anchor{};
     u64 last_sync_fence{};

@@ -34,7 +34,8 @@ public:
                 if (IsValid(tmp.address)) {
                     std::scoped_lock lk(guard);
                     back_buffer.emplace_back(tmp);
-                    current.exchange(t, std::memory_order_relaxed);
+                    current.exchange(t, std::memory_order_seq_cst);
+                    NoteAnyWrites();
                     return;
                 }
                 tmp.address = t.address;
@@ -44,8 +45,35 @@ public:
                 return;
             }
             tmp.mask |= t.mask;
-        } while (!current.compare_exchange_weak(original, tmp, std::memory_order_release,
+        } while (!current.compare_exchange_weak(original, tmp, std::memory_order_seq_cst,
                                                 std::memory_order_relaxed));
+        // The first write since the last Gather: tell InvalidateGPUCache (AnyWrites). Later
+        // writes to the same transform find the flag set by this one, or a Gather after it.
+        if (!IsValid(original.address)) {
+            NoteAnyWrites();
+        }
+    }
+
+    /// Whether any manager may hold collected writes, in one load instead of three per manager.
+    /// Set after the store that starts a manager's batch of writes (seq_cst, as the Gather's
+    /// exchange of `current`): a reader that clears it (BeginGather) and then gathers every
+    /// manager either finds a batch begun before its clear or leaves the flag set.
+    [[nodiscard]] static bool AnyWrites() {
+        return any_writes.load(std::memory_order_seq_cst) ||
+               any_gatherers.load(std::memory_order_seq_cst) != 0;
+    }
+
+    /// Starts a gather of every manager after AnyWrites: clears the flag. Pair with EndGather
+    /// once the gather has applied its writes; a reader finding the flag clear while another one
+    /// gathers takes the gather path too (Gather serializes them), so it never returns before
+    /// writes collected before it are applied.
+    static void BeginGather() {
+        any_gatherers.fetch_add(1, std::memory_order_seq_cst);
+        any_writes.exchange(false, std::memory_order_seq_cst);
+    }
+
+    static void EndGather() {
+        any_gatherers.fetch_sub(1, std::memory_order_seq_cst);
     }
 
     /// Calls `callback` for each write collected and not yet applied, without consuming them: those
@@ -73,7 +101,7 @@ public:
         std::scoped_lock gather_lk(gather_guard);
         {
             std::scoped_lock lk(guard);
-            TransformAddress t = current.exchange(default_transform, std::memory_order_relaxed);
+            TransformAddress t = current.exchange(default_transform, std::memory_order_seq_cst);
             front_buffer.swap(back_buffer);
             if (IsValid(t.address)) {
                 front_buffer.emplace_back(t);
@@ -82,7 +110,10 @@ public:
         for (auto& transform : front_buffer) {
             ForEachRun(transform, callback);
         }
-        front_buffer.clear();
+        {
+            std::scoped_lock lk(guard);
+            front_buffer.clear();
+        }
     }
 
     /// Returns true when collected writes not yet gathered overlap [address, address + size).
@@ -105,6 +136,12 @@ public:
             return true;
         }
         for (const TransformAddress& t : back_buffer) {
+            if (overlaps(t)) {
+                return true;
+            }
+        }
+        // Writes a Gather is still applying count until their callbacks have run.
+        for (const TransformAddress& t : front_buffer) {
             if (overlaps(t)) {
                 return true;
             }
@@ -146,6 +183,18 @@ private:
     bool IsValid(PAddr address) {
         return address < (1ULL << 39);
     }
+
+    static void NoteAnyWrites() {
+        // Read first: the flag is set nearly always while cores write, and a load keeps the
+        // line shared between them.
+        if (!any_writes.load(std::memory_order_seq_cst)) {
+            any_writes.store(true, std::memory_order_seq_cst);
+        }
+    }
+
+    // Shared by every manager; starts set so the first InvalidateGPUCache gathers.
+    static inline std::atomic<bool> any_writes{true};
+    static inline std::atomic<u32> any_gatherers{};
 
     template <typename T>
     T CreateMask(size_t top_bit, size_t minor_bit) {
