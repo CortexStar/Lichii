@@ -249,16 +249,32 @@ enum class NvidiaArchitecture {
 }
 
 /**
- * Whether pipelines linked from graphics pipeline libraries get link time optimization. Fast
+ * Whether a pipeline linked from graphics pipeline libraries gets link time optimization. Fast
  * links (without it) are used where the driver has fast linking and draws them correctly.
- * TODO(AMD): on AMD's Windows driver fast-linked pipelines draw dotted white fringes around alpha
- * blended effects (RX 7800 XT and RX 7900 XTX, 26.10.1), while optimized links and monolithic
- * pipelines from the same SPIR-V and per-stage sets draw correctly (zortos293/Lichii#579,
- * PantACRO4life/Lichii#1). Every link is optimized there until AMD fixes it.
+ * `fragment_quad_after_demote`: the fragment shader reads the quad (derivatives, implicit-LOD
+ * samples, quad shuffles) after a DemoteToHelperInvocation (Shader::Info::uses_quad_after_demote;
+ * guest discards are emitted as demotes).
+ * TODO(AMD): GPUOpen-Drivers/AMD-Gfx-Drivers#126. On AMD's Windows driver a fast-linked pipeline
+ * whose fragment shader uses derivatives after a demote lets the demoted invocations write their
+ * colour output (dotted fringes around discarded texels: RX 7800 XT, RX 7900 XTX, RX 9070 XT,
+ * 26.10.1-26.10.2); monolithic pipelines and optimized links are correct. Those pipelines are
+ * linked optimized there until AMD fixes it; every other one is fast linked.
  */
-[[nodiscard]] constexpr bool GraphicsLibraryLinksOptimized(VkDriverId driver_id,
+[[nodiscard]] constexpr bool GraphicsLibraryLinksOptimized(VkDriverId driver_id, bool fast_linking,
+                                                           bool fragment_quad_after_demote) {
+    if (!fast_linking) {
+        return true;
+    }
+    return driver_id == VK_DRIVER_ID_AMD_PROPRIETARY && fragment_quad_after_demote;
+}
+
+/// Whether graphics pipeline libraries keep link time optimization info, as every library an
+/// optimized link takes must: where some pipeline may be linked optimized
+/// (GraphicsLibraryLinksOptimized). Shader libraries are shared between pipelines that are and
+/// pipelines that aren't.
+[[nodiscard]] constexpr bool GraphicsLibrariesKeepLinkInfo(VkDriverId driver_id,
                                                            bool fast_linking) {
-    return driver_id == VK_DRIVER_ID_AMD_PROPRIETARY || !fast_linking;
+    return !fast_linking || driver_id == VK_DRIVER_ID_AMD_PROPRIETARY;
 }
 
 /// Handles data specific to a physical device.
@@ -759,9 +775,9 @@ FN_MAX_LIMIT_LIST
         return graphics_pipeline_library_enabled;
     }
 
-    /// Whether pipelines are linked from graphics pipeline libraries with link time optimization
-    /// (GraphicsLibraryLinksOptimized); their libraries then keep link time optimization info.
-    bool LinksGraphicsLibrariesOptimized() const {
+    /// Whether a pipeline is linked from graphics pipeline libraries with link time optimization
+    /// (GraphicsLibraryLinksOptimized).
+    bool LinksGraphicsLibrariesOptimized(bool fragment_quad_after_demote) const {
         // EXPERIMENT, A/B only, never merges: EDEN_NX2_EXP_GPL_FAST_LINK=1 fast links on any
         // driver with fast linking (the AMD fringe repro).
         static const bool fast = std::getenv("EDEN_NX2_EXP_GPL_FAST_LINK") != nullptr;
@@ -769,6 +785,14 @@ FN_MAX_LIMIT_LIST
             return false;
         }
         return GraphicsLibraryLinksOptimized(
+            GetDriverID(), properties.graphics_pipeline_library.graphicsPipelineLibraryFastLinking,
+            fragment_quad_after_demote);
+    }
+
+    /// Whether graphics pipeline libraries keep link time optimization info
+    /// (GraphicsLibrariesKeepLinkInfo).
+    bool KeepsGraphicsLibraryLinkInfo() const {
+        return GraphicsLibrariesKeepLinkInfo(
             GetDriverID(), properties.graphics_pipeline_library.graphicsPipelineLibraryFastLinking);
     }
 
