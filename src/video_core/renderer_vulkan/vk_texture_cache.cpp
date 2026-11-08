@@ -489,6 +489,12 @@ constexpr std::array<VkFormat, 2> Bc7AstcViewFormats{VK_FORMAT_BC7_UNORM_BLOCK,
 
 [[nodiscard]] bool DepthWrittenByShader(const Device& device, const ImageInfo& info,
                                         bool attachable) {
+    // EXPERIMENT (do not merge): EDEN_NX2_EXP_DEPTH_TRANSFER_DST=1 keeps TRANSFER_DST on every
+    // depth image (HiZ/HiS off on AMD) for the A/B.
+    static const bool keep_transfer_dst = std::getenv("EDEN_NX2_EXP_DEPTH_TRANSFER_DST") != nullptr;
+    if (keep_transfer_dst) {
+        return false;
+    }
     const auto type = VideoCore::Surface::GetFormatType(info.format);
     return Vulkan::DepthWrittenByShader(
         device.GetDriverID(), device.IsExtShaderStencilExportSupported(), attachable,
