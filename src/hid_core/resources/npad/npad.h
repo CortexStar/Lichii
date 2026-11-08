@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <span>
 
@@ -65,6 +66,9 @@ public:
 
     // When the controller is requesting an update for the shared memory
     void OnUpdate(Kernel::KernelCore& kernel, const Core::Timing::CoreTiming& core_timing);
+
+    /// Called on the input's thread when a button, stick or trigger changes (empty: none).
+    void SetInputChangedCallback(std::function<void()> callback);
 
     Result SetSupportedNpadStyleSet(Kernel::KernelCore& kernel, u64 aruid, Core::HID::NpadStyleSet supported_style_set);
     Result GetSupportedNpadStyleSet(Kernel::KernelCore& kernel, u64 aruid, Core::HID::NpadStyleSet& out_supported_style_set) const;
@@ -204,6 +208,8 @@ private:
     NpadVibration vibration_handler{};
 
     std::atomic<u64> press_state{};
+    std::mutex input_changed_mutex;
+    std::function<void()> input_changed;
     std::array<std::array<NpadControllerData, MaxSupportedNpadIdTypes>, AruidIndexMax> controller_data{};
 };
 } // namespace Service::HID

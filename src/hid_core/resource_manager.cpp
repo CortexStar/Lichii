@@ -62,6 +62,15 @@ ResourceManager::ResourceManager(Core::System& system_,
                                                       UpdateNpad(ns_late);
                                                       return std::nullopt;
                                                   });
+    // A host input change reaches the shared memory now, not up to 1 ms later.
+    npad_input_event = Core::Timing::CreateEvent(
+        "HID::NpadInputCallback",
+        [this](s64 time,
+               std::chrono::nanoseconds ns_late) -> std::optional<std::chrono::nanoseconds> {
+            npad_input_publish.Begin();
+            UpdateNpad(ns_late);
+            return std::nullopt;
+        });
     default_update_event = Core::Timing::CreateEvent(
         "HID::UpdateDefaultCallback",
         [this](s64 time,
@@ -86,7 +95,11 @@ ResourceManager::ResourceManager(Core::System& system_,
 }
 
 ResourceManager::~ResourceManager() {
+    if (npad) {
+        npad->SetInputChangedCallback({});
+    }
     system.CoreTiming().UnscheduleEvent(npad_update_event);
+    system.CoreTiming().UnscheduleEvent(npad_input_event);
     system.CoreTiming().UnscheduleEvent(default_update_event);
     system.CoreTiming().UnscheduleEvent(mouse_keyboard_update_event);
     system.CoreTiming().UnscheduleEvent(motion_update_event);
@@ -251,6 +264,11 @@ void ResourceManager::InitializeHidCommonSampler() {
     sleep_button->SetAppletResource(applet_resource, &shared_mutex);
     capture_button->SetAppletResource(applet_resource, &shared_mutex);
 
+    npad->SetInputChangedCallback([this] {
+        if (npad_input_publish.Request()) {
+            system.CoreTiming().ScheduleEvent(std::chrono::nanoseconds{0}, npad_input_event);
+        }
+    });
     system.CoreTiming().ScheduleLoopingEvent(npad_update_ns, npad_update_ns, npad_update_event);
     system.CoreTiming().ScheduleLoopingEvent(default_update_ns, default_update_ns,
                                              default_update_event);
