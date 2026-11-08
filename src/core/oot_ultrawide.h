@@ -60,9 +60,19 @@ struct PaneShift {
 /// screen's edges are at +-1920 / squeeze = +-2580, so the anchors move out by 660.
 constexpr f32 GridHalfWidth = 1920.0f;
 constexpr f32 EdgeShift = 660.0f; // 1920 * (43/18) / (16/9) - 1920
+/// The minimap (MapMenu_00, bottom right) has no edge anchor: its frame, floor label, dungeon
+/// capture and capture group sit at fixed x, and they move out as one by the same 660. Each HUD
+/// layout's N_VRS_00 marks its element's screen region (530x530 on the minimap, 240x240 on the item
+/// buttons) and moves with it.
 inline constexpr PaneShift HudEdgeShifts[]{
     {"PlayerStatus_00.buil", "N_ScaleL_00", -GridHalfWidth, -GridHalfWidth - EdgeShift},
     {"PlayerStatus_00.buil", "N_ScaleR_00", GridHalfWidth, GridHalfWidth + EdgeShift},
+    {"PlayerStatus_00.buil", "N_VRS_00", 1626.0f, 1626.0f + EdgeShift},
+    {"MapMenu_00.buil", "N_VRS_00", 1536.0f, 1536.0f + EdgeShift},
+    {"MapMenu_00.buil", "N_MiniMapCap_00", 1470.0f, 1470.0f + EdgeShift},
+    {"MapMenu_00.buil", "P_MiniMapFrame_00", 1536.0f, 1536.0f + EdgeShift},
+    {"MapMenu_00.buil", "S_Floor_00", 1706.0f, 1706.0f + EdgeShift},
+    {"MapMenu_00.buil", "P_CapDungeon_00", 1536.0f, 1536.0f + EdgeShift},
 };
 
 /// A SARC archive's first file named `name`, or nothing.
