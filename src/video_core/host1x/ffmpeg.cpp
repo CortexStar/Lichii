@@ -347,9 +347,12 @@ HardwareContext::~HardwareContext() {
     av_buffer_unref(&m_gpu_decoder);
 }
 
-bool HardwareContext::InitializeForDecoder(DecoderContext& decoder_context, const Decoder& decoder) {
+std::optional<size_t> HardwareContext::InitializeForDecoder(DecoderContext& decoder_context,
+                                                           const Decoder& decoder, size_t first) {
     const auto supported_types = GetSupportedDeviceTypes();
-    for (const auto type : PreferredDevices(decoder.GetCodec())) {
+    const auto preferred = PreferredDevices(decoder.GetCodec());
+    for (size_t index = first; index < preferred.size(); ++index) {
+        const auto type = preferred[index];
         AVPixelFormat hw_pix_fmt;
 
         if (std::ranges::find(supported_types, type) == supported_types.end()) {
@@ -365,12 +368,17 @@ bool HardwareContext::InitializeForDecoder(DecoderContext& decoder_context, cons
         m_gpu_decoder = Devices().Get(type);
         if (m_gpu_decoder) {
             LOG_INFO(HW_GPU, "Using {} GPU decoder", av_hwdevice_get_type_name(type));
+            m_type = type;
             decoder_context.InitializeHardwareDecoder(*this);
-            return true;
+            return index;
         }
     }
 
-    return false;
+    return std::nullopt;
+}
+
+bool HardwareContext::InitializeForDecoder(DecoderContext& decoder_context, const Decoder& decoder) {
+    return InitializeForDecoder(decoder_context, decoder, 0).has_value();
 }
 
 DecoderContext::DecoderContext(const Decoder& decoder) : m_decoder{decoder} {

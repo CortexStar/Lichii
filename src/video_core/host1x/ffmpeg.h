@@ -163,12 +163,22 @@ public:
     /// on. Devices are created once per process.
     bool InitializeForDecoder(DecoderContext& decoder_context, const Decoder& decoder);
 
+    /// The same from the `first`-th device type of the codec's order on; returns the index of
+    /// the type attached.
+    std::optional<size_t> InitializeForDecoder(DecoderContext& decoder_context,
+                                               const Decoder& decoder, size_t first);
+
+    AVHWDeviceType GetType() const {
+        return m_type;
+    }
+
     AVBufferRef* GetBufferRef() const {
         return m_gpu_decoder;
     }
 
 private:
     AVBufferRef* m_gpu_decoder{};
+    AVHWDeviceType m_type{AV_HWDEVICE_TYPE_NONE};
 };
 
 // Wraps an AVCodecContext.
