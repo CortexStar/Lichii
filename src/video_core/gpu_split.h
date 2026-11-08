@@ -220,6 +220,26 @@ public:
             static_cast<u64>(Kind::CbBind) | (u64{stage & 0xff} << 8) | (u64{argument} << 32);
         Commit(1);
     }
+    /// Bits of a run word (Writes): method (bits 0-15) | WriteIsLast | WriteDirect | argument
+    /// << 32.
+    static constexpr u64 WriteIsLast = u64{1} << 16; ///< The call's is_last_call
+    static constexpr u64 WriteDirect = u64{1} << 17; ///< Sent as MacroWrite (no method sink)
+    /// `count` compute writes run in order on the back as the Method and MacroWrite entries they
+    /// stand for (KeplerCompute::BackWrites). `segment`: current_dma_segment of the last of them
+    /// sent with one, stored before the run.
+    void Writes(Tegra::Engines::EngineInterface* engine, const u64* writes, u32 count,
+                const GPUVAddr* segment) {
+        SelectEngine(engine);
+        const size_t head = segment != nullptr ? 2 : 1;
+        u64* const entry = Reserve(head + size_t{count});
+        entry[0] = static_cast<u64>(Kind::Writes) | (segment != nullptr ? HasSegment : 0) |
+                   (u64{count} << 32);
+        if (segment != nullptr) {
+            entry[1] = *segment;
+        }
+        std::memcpy(entry + head, writes, size_t{count} * sizeof(u64));
+        Commit(head + size_t{count});
+    }
     /// Work the front holds back (a register delta, a draw batch): `hook(argument)` sends it
     /// before anything else is sent and before the front waits for the back. Another holder's
     /// work is sent first.
@@ -535,6 +555,8 @@ private:
         DrawBatch,  ///< Bits 8-15 count, 32-63 repeats; then count words (method | arg << 32)
         CbWrite,    ///< Bits 8-10 count (1-4), 12-27 register nibbles, 32-63 word 0; then words
         CbBind,     ///< Bits 8-15 stage, 32-63 argument (Maxwell3D bind group raw_config)
+        Writes,     ///< Bits 32-63 count; flag HasSegment (word 1); then count run words
+                    ///< (KeplerCompute)
     };
     static constexpr u64 IsLast = 1 << 4;
     static constexpr u64 HasSegment = 1 << 5;

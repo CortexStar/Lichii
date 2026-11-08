@@ -268,6 +268,9 @@ public:
     void FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
                               const u32* base_start, u32 amount, u32 methods_pending,
                               const GPUVAddr* segment);
+    /// GpuSplit's back (Kind::Writes): runs a run of writes the front sent as one entry, as the
+    /// Method and MacroWrite entries it stands for.
+    void BackWrites(Core::System& system, const u64* writes, u32 count);
 
 private:
     struct FrontState;
@@ -280,7 +283,39 @@ private:
     /// Narrow drains (GpuSplit::NarrowDrains): notes what the method just sent writes.
     void FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& state, u32 method);
     std::unique_ptr<FrontState> front;
-    bool front_macros{}; ///< The front owns the macro code and bindings (the back skips them)
+    bool front_macros{};
+    /// Writes the front holds back to send as one ring entry (GpuSplit::Writes). Register
+    /// stores and inline upload execs, which write no memory, stay held until something else is
+    /// sent (GpuSplit::SetPendingFlush). Within one macro call the upload data words stay held
+    /// too, with their narrow-drain notes taken at the write (the registers they depend on) and
+    /// recorded once the run is sent. Anything else ends the run.
+    struct FrontWriteRun {
+        static constexpr u32 MaxWrites = 128;
+        static constexpr u32 MaxNotes = 8;
+        static constexpr u32 UploadWords = 14; ///< Upload::Registers, exec_upload and data_upload
+        std::array<u64, MaxWrites> writes{};
+        /// What FrontNoteWrites reads for a held data word: the registers from upload on.
+        struct UploadNote {
+            std::array<u32, UploadWords> registers{};
+            bool linear{};
+            u32 copy_size{};
+        };
+        std::array<UploadNote, MaxNotes> notes{};
+        u32 count{};
+        u32 note_count{};
+        GPUVAddr segment{};
+        bool has_segment{};
+        bool writer{};   ///< Holds a method MayWriteMemory counts (DmaPusher::NoteWriter)
+        bool in_macro{}; ///< FrontRunMacro runs: data words may be held
+        u64 session{};   ///< GpuSplit::Session the held writes belong to
+    };
+    FrontWriteRun front_run;
+    /// Sends the write as part of the held run, then notes it (FrontNoteWrites).
+    void FrontQueueWrite(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 argument,
+                         bool is_last_call, bool direct, const GPUVAddr* segment);
+    /// GpuSplit::SetPendingFlush hook: sends the held run, then records its notes.
+    static void FrontFlushWrites(
+        void* engine); ///< The front owns the macro code and bindings (the back skips them)
 
     bool DispatchNativeCompute(const NativeQmdScheduler::Descriptor& descriptor);
     void ProcessNativeReportSemaphore(u32 argument);

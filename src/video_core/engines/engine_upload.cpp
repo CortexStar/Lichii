@@ -13,6 +13,7 @@
 #include "video_core/engines/engine_upload.h"
 #include "video_core/guest_memory.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/textures/decoders.h"
 
@@ -67,8 +68,8 @@ void State::ProcessData(const u32 data, const bool is_last_call) {
     if (native_partial && is_linear && regs.line_count == 1) {
         const u32 count = write_offset - flushed_offset;
         if (count) {
-            rasterizer->AccelerateInlineToMemory(regs.dest.Address() + flushed_offset, count,
-                std::span<const u8>{inner_buffer.data() + flushed_offset, count});
+            Emit(regs.dest.Address() + flushed_offset,
+                 std::span<const u8>{inner_buffer.data() + flushed_offset, count});
             flushed_offset = write_offset;
         }
         return;
@@ -80,8 +81,8 @@ void State::ProcessData(const u32* data, size_t num_data) {
     if (native_partial && is_linear && regs.line_count == 1) {
         const auto count = std::min<size_t>(num_data * sizeof(u32), copy_size - write_offset);
         if (count) {
-            rasterizer->AccelerateInlineToMemory(regs.dest.Address() + write_offset, count,
-                std::span<const u8>{reinterpret_cast<const u8*>(data), count});
+            Emit(regs.dest.Address() + write_offset,
+                 std::span<const u8>{reinterpret_cast<const u8*>(data), count});
             write_offset += static_cast<u32>(count);
             flushed_offset = write_offset;
         }
@@ -91,7 +92,44 @@ void State::ProcessData(const u32* data, size_t num_data) {
     ProcessData(read_buffer);
 }
 
+void State::Emit(GPUVAddr address, std::span<const u8> bytes) {
+    const size_t size = bytes.size();
+    if (holding) {
+        constexpr GPUVAddr page_mask = HeldPage - 1;
+        if (held_size != 0 && address == held_address + held_size &&
+            (held_address & page_mask) + held_size + size <= HeldPage) {
+            // Continues the held bytes in their page: as one transfer of both.
+            std::memcpy(held_bytes.data() + held_size, bytes.data(), size);
+            held_size += static_cast<u32>(size);
+            if (VideoCommon::Nx2Profile::Enabled()) [[unlikely]] {
+                VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::MergedUploads, 1);
+            }
+            return;
+        }
+        FlushHeld();
+        if ((address & page_mask) + size <= HeldPage) {
+            held_address = address;
+            std::memcpy(held_bytes.data(), bytes.data(), size);
+            held_size = static_cast<u32>(size);
+            return;
+        }
+    }
+    rasterizer->AccelerateInlineToMemory(address, size, bytes);
+}
+
+void State::FlushHeld() {
+    if (held_size == 0) {
+        return;
+    }
+    const u32 size = held_size;
+    held_size = 0;
+    rasterizer->AccelerateInlineToMemory(held_address, size,
+                                         std::span<const u8>{held_bytes.data(), size});
+}
+
 void State::ProcessData(std::span<const u8> read_buffer) {
+    // Held bytes first (a block-linear transfer reads the surface back).
+    FlushHeld();
     const GPUVAddr address{regs.dest.Address()};
     if (is_linear) {
         for (size_t line = 0; line < regs.line_count; ++line) {
