@@ -3,6 +3,7 @@
 
 #include <cstring>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -116,4 +117,125 @@ TEST_CASE("The 3440x1440 heap growth is the shipped heap's share of the extra pi
     STATIC_REQUIRE(TextureHeapExtraKiB == (exact + 1023) / 1024 * 1024);
     STATIC_REQUIRE(MemoryExtraBytes == ((u64{TextureHeapExtraKiB} << 10) + 0x1FFFFF) / 0x200000 *
                                            0x200000);
+}
+
+namespace {
+
+void Put64(std::vector<u8>& out, size_t at, u64 value) {
+    std::memcpy(out.data() + at, &value, sizeof(value));
+}
+
+// A "BFFH" layout like the game's: section header at 0x20, "UIL" data at 0x40, two panes.
+std::vector<u8> Layout(f32 left_x, f32 right_x) {
+    std::vector<u8> out(0x200, 0);
+    std::memcpy(out.data(), "BFFH", 4);
+    const u32 section = 0x20, base = 0x40;
+    std::memcpy(out.data() + 0x10, &section, 4);
+    std::memcpy(out.data() + section, "BFSI", 4);
+    std::memcpy(out.data() + section + 4, &base, 4);
+    std::memcpy(out.data() + base, "UIL", 3);
+    const u64 names = 0x80, records = 0x90, strings = 0x180;
+    Put64(out, base + 0x20, names);
+    Put64(out, base + 0x28, records);
+    const u32 count = 2;
+    std::memcpy(out.data() + base + 0x38, &count, 4);
+    std::memcpy(out.data() + strings, "N_ScaleL_00\0N_ScaleR_00\0", 24);
+    Put64(out, names, strings);
+    Put64(out, names + 8, strings + 12);
+    const u64 left = 0xA0, right = 0xA0 + 68;
+    Put64(out, records, left);
+    Put64(out, records + 8, right);
+    std::memcpy(out.data() + left + 28, &left_x, 4);
+    std::memcpy(out.data() + right + 28, &right_x, 4);
+    return out;
+}
+
+// A SARC holding the layout twice (the game's archives repeat each layout) and one other file.
+std::vector<u8> Sarc(const std::vector<u8>& layout) {
+    const std::vector<std::pair<std::string_view, std::vector<u8>>> files{
+        {"PlayerStatus_00.buil", layout}, {"PlayerStatus_00.buil", layout},
+        {"Other_00.buil", std::vector<u8>(16, 0xAB)}};
+    std::vector<u8> names;
+    std::vector<u32> name_offsets;
+    for (const auto& [name, data] : files) {
+        name_offsets.push_back(static_cast<u32>(names.size()));
+        names.insert(names.end(), name.begin(), name.end());
+        names.push_back(0);
+        while (names.size() % 4 != 0) {
+            names.push_back(0);
+        }
+    }
+    const u32 data_offset = static_cast<u32>(0x20 + 16 * files.size() + 8 + names.size());
+    std::vector<u8> out(data_offset, 0);
+    std::memcpy(out.data(), "SARC", 4);
+    std::memcpy(out.data() + 0x0C, &data_offset, 4);
+    std::memcpy(out.data() + 0x14, "SFAT", 4);
+    const u16 count = static_cast<u16>(files.size());
+    std::memcpy(out.data() + 0x1A, &count, 2);
+    u32 begin = 0;
+    for (size_t i = 0; i < files.size(); ++i) {
+        const u32 attributes = (1u << 24) | (name_offsets[i] / 4);
+        const u32 end = begin + static_cast<u32>(files[i].second.size());
+        std::memcpy(out.data() + 0x20 + 16 * i + 4, &attributes, 4);
+        std::memcpy(out.data() + 0x20 + 16 * i + 8, &begin, 4);
+        std::memcpy(out.data() + 0x20 + 16 * i + 12, &end, 4);
+        begin = end;
+    }
+    const size_t sfnt = 0x20 + 16 * files.size();
+    std::memcpy(out.data() + sfnt, "SFNT", 4);
+    std::memcpy(out.data() + sfnt + 8, names.data(), names.size());
+    for (const auto& [name, data] : files) {
+        out.insert(out.end(), data.begin(), data.end());
+    }
+    return out;
+}
+
+f32 PaneXAt(const std::vector<u8>& sarc, size_t copy, size_t pane) {
+    const u32 data_offset = Get32(sarc, 0x0C);
+    const u32 begin = Get32(sarc, 0x20 + 16 * copy + 8);
+    f32 x;
+    std::memcpy(&x, sarc.data() + data_offset + begin + 0xA0 + 68 * pane + 28, 4);
+    return x;
+}
+
+} // Anonymous namespace
+
+TEST_CASE("The HUD's edge anchors move to the 21:9 screen's edges in every copy",
+          "[oot_ultrawide]") {
+    using namespace Core::OotUltrawide;
+    STATIC_REQUIRE(EdgeShift == 660.0f);
+    auto sarc = Sarc(Layout(-1920.0f, 1920.0f));
+    const auto other = SarcFile(sarc, "Other_00.buil");
+    REQUIRE(other.has_value());
+    REQUIRE(other->size() == 16);
+    REQUIRE(ShiftPanes(sarc, HudEdgeShifts));
+    for (size_t copy = 0; copy < 2; ++copy) {
+        REQUIRE(PaneXAt(sarc, copy, 0) == -2580.0f);
+        REQUIRE(PaneXAt(sarc, copy, 1) == 2580.0f);
+    }
+    // Already moved (or another game version): nothing changes.
+    const auto moved = sarc;
+    REQUIRE_FALSE(ShiftPanes(sarc, HudEdgeShifts));
+    REQUIRE(sarc == moved);
+}
+
+TEST_CASE("The HUD edge move refuses unexpected layouts", "[oot_ultrawide]") {
+    using namespace Core::OotUltrawide;
+    auto sarc = Sarc(Layout(-1900.0f, 1920.0f));
+    const auto original = sarc;
+    REQUIRE_FALSE(ShiftPanes(sarc, HudEdgeShifts));
+    REQUIRE(sarc == original);
+    std::vector<u8> not_sarc(64, 0);
+    REQUIRE_FALSE(ShiftPanes(not_sarc, HudEdgeShifts));
+    // The archive round trip through a dictionary keeps the edit.
+    const std::vector<u8> dictionary(4096, 0x5A);
+    auto clean = Sarc(Layout(-1920.0f, 1920.0f));
+    const auto compressed = Common::Compression::CompressDataZSTDWithDictionary(clean, dictionary);
+    REQUIRE_FALSE(compressed.empty());
+    const auto anchored = AnchorHudToEdges(compressed, dictionary);
+    REQUIRE(anchored.has_value());
+    const auto back =
+        Common::Compression::TryDecompressDataZSTDWithDictionary(*anchored, dictionary, 1 << 20);
+    REQUIRE(back.has_value());
+    REQUIRE(PaneXAt(*back, 1, 1) == 2580.0f);
 }

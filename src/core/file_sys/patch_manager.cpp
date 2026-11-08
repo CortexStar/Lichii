@@ -18,6 +18,7 @@
 #include "common/hex_util.h"
 #include "common/logging.h"
 #include "common/settings.h"
+#include "common/zstd_compression.h"
 #ifndef _WIN32
 #include "common/string_util.h"
 #endif
@@ -223,12 +224,27 @@ constexpr std::array<u8, 528> ULTRAWIDE_CAVE{
     0x41, 0xA9, 0x57, 0x58, 0xFC, 0x17, 0x08, 0x00, 0x88, 0x52, 0x28, 0xA4, 0xA8, 0x72, 0x2A,
     0x17, 0x17, 0x17
 };
+// The other two world-to-HUD sites (main+0x20C99C, main+0x215FB0) take a frame position from the
+// same projection (main+0x20D890, NDC x times 1920 in the 3840-wide layout grid) as Ivan0xFF's
+// speech bubble site main+0x20C2B0; under the squeezed UI canvas they get the same 1920 / squeeze
+// (2580.0f), through two 3-word caves after the cap cave.
+constexpr std::array<u8, 4> ULTRAWIDE_MARKER_ORIGINAL{0x08, 0x9E, 0xA8, 0x52}; // mov w8, 1920.0f
+constexpr std::array<u8, 4> ULTRAWIDE_MARKER_SITE_0{0x61, 0xE7, 0xE8, 0x14};  // b main+0x3C46720
+constexpr std::array<u8, 4> ULTRAWIDE_MARKER_SITE_1{0xDF, 0xC1, 0xE8, 0x14};  // b main+0x3C4672C
+// mov w8, #0x4000 ; movk w8, #0x4521, lsl #16 (2580.0f) ; b back
+constexpr std::array<u8, 24> ULTRAWIDE_MARKER_CAVES{
+    0x08, 0x00, 0x88, 0x52, 0x28, 0xA4, 0xA8, 0x72, 0x9E, 0x18, 0x17, 0x17, // -> main+0x20C9A0
+    0x08, 0x00, 0x88, 0x52, 0x28, 0xA4, 0xA8, 0x72, 0x20, 0x3E, 0x17, 0x17, // -> main+0x215FB4
+};
 constexpr std::array ULTRAWIDE_RECORDS{
     BuiltinPatchRecord{0x3F58568, ULTRAWIDE_SIZE, ULTRAWIDE_SIZE_ORIGINAL},
     BuiltinPatchRecord{0x1087FC0, ULTRAWIDE_NOP, ULTRAWIDE_WIDTH_BRANCH},
     BuiltinPatchRecord{0x1087EE0, ULTRAWIDE_NOP, ULTRAWIDE_WIDTH_BRANCH},
     BuiltinPatchRecord{0x6505EC, ULTRAWIDE_CAP_BRANCH, ULTRAWIDE_CAP_ORIGINAL},
     BuiltinPatchRecord{0x3C46700, ULTRAWIDE_CAP_CAVE, {}, true},
+    BuiltinPatchRecord{0x20C99C, ULTRAWIDE_MARKER_SITE_0, ULTRAWIDE_MARKER_ORIGINAL},
+    BuiltinPatchRecord{0x215FB0, ULTRAWIDE_MARKER_SITE_1, ULTRAWIDE_MARKER_ORIGINAL},
+    BuiltinPatchRecord{0x3C46720, ULTRAWIDE_MARKER_CAVES, {}, true},
     BuiltinPatchRecord{0x1202EE0, ULTRAWIDE_PICTURE, ULTRAWIDE_PICTURE_ORIGINAL},
     BuiltinPatchRecord{0x31F39F4, ULTRAWIDE_PICTURE, ULTRAWIDE_PICTURE_ORIGINAL},
     BuiltinPatchRecord{0x31F3A00, ULTRAWIDE_SCENE, ULTRAWIDE_SCENE_ORIGINAL},
@@ -1045,31 +1061,65 @@ namespace {
 
 /// A layer holding Ocarina's HeapDef table with its render-target heap grown for 3440x1440, or
 /// nullptr when the RomFS has no such table or it is not the expected format.
-VirtualDir UltrawideHeapLayer(const VirtualDir& romfs) {
+// Puts `data` at `path` (relative, '/'-separated) under `root`, creating the directories.
+void PlaceFile(VectorVfsDirectory& root, std::string_view path, std::vector<u8> data) {
+    VectorVfsDirectory* dir = &root;
+    size_t slash;
+    while ((slash = path.find('/')) != std::string_view::npos) {
+        const auto name = path.substr(0, slash);
+        auto sub = dir->GetSubdirectory(name);
+        if (sub == nullptr) {
+            auto created = std::make_shared<VectorVfsDirectory>(
+                std::vector<VirtualFile>{}, std::vector<VirtualDir>{}, std::string{name});
+            dir->AddDirectory(created);
+            sub = std::move(created);
+        }
+        dir = static_cast<VectorVfsDirectory*>(sub.get());
+        path.remove_prefix(slash + 1);
+    }
+    dir->AddFile(std::make_shared<VectorVfsFile>(std::move(data), std::string{path}));
+}
+
+/// Ocarina at 21:9: its render-target heap grown for the 3440x1440 picture and its HUD's edge
+/// anchors moved to the 21:9 screen's edges, as a RomFS layer; nullptr when neither applies.
+VirtualDir UltrawideLayer(const VirtualDir& romfs) {
     namespace Uw = Core::OotUltrawide;
-    const auto file = romfs->GetFileRelative(Uw::HeapDefPath);
-    if (file == nullptr) {
+    auto layer = std::make_shared<VectorVfsDirectory>();
+    bool any = false;
+    if (const auto file = romfs->GetFileRelative(Uw::HeapDefPath)) {
+        if (auto grown = Uw::GrowHeapDef(file->ReadAllBytes(), Uw::TextureHeapExtraKiB)) {
+            LOG_INFO(Loader,
+                     "    RomFS: \"{}\" grows DynamicTextureAllocatorMem and Graphics by {} KiB",
+                     UltrawideAddOn, Uw::TextureHeapExtraKiB);
+            PlaceFile(*layer, Uw::HeapDefPath, std::move(*grown));
+            any = true;
+        } else {
+            LOG_WARNING(Loader, "    RomFS: {} is not the HeapDef table \"{}\" expects",
+                        Uw::HeapDefPath, UltrawideAddOn);
+        }
+    } else {
         LOG_WARNING(Loader, "    RomFS: no {} for \"{}\"", Uw::HeapDefPath, UltrawideAddOn);
-        return nullptr;
     }
-    const auto original = file->ReadAllBytes();
-    auto grown = Uw::GrowHeapDef(original, Uw::TextureHeapExtraKiB);
-    if (!grown) {
-        LOG_WARNING(Loader, "    RomFS: {} is not the HeapDef table \"{}\" expects",
-                    Uw::HeapDefPath, UltrawideAddOn);
-        return nullptr;
+    const auto archive = romfs->GetFileRelative(Uw::LayoutArchivePath);
+    const auto pack = romfs->GetFileRelative(Uw::DictionaryPackPath);
+    const auto pack_data =
+        pack ? Common::Compression::TryDecompressDataZSTD(pack->ReadAllBytes(), 64ULL << 20)
+             : std::nullopt;
+    const auto dictionary =
+        pack_data ? Uw::SarcFile(*pack_data, Uw::LayoutDictionaryName) : std::nullopt;
+    auto anchored = archive && dictionary
+                        ? Uw::AnchorHudToEdges(archive->ReadAllBytes(), *dictionary)
+                        : std::nullopt;
+    if (anchored) {
+        LOG_INFO(Loader, "    RomFS: \"{}\" moves the HUD's edge anchors out by {} units",
+                 UltrawideAddOn, Uw::EdgeShift);
+        PlaceFile(*layer, Uw::LayoutArchivePath, std::move(*anchored));
+        any = true;
+    } else {
+        LOG_WARNING(Loader, "    RomFS: {} is not the layout archive \"{}\" expects",
+                    Uw::LayoutArchivePath, UltrawideAddOn);
     }
-    LOG_INFO(Loader,
-             "    RomFS: \"{}\" grows DynamicTextureAllocatorMem and Graphics by {} KiB",
-             UltrawideAddOn, Uw::TextureHeapExtraKiB);
-    auto heap_dir = std::make_shared<VectorVfsDirectory>(
-        std::vector<VirtualFile>{std::make_shared<VectorVfsFile>(std::move(*grown),
-                                                                 std::string{file->GetName()})},
-        std::vector<VirtualDir>{}, "HeapSize");
-    auto system_dir = std::make_shared<VectorVfsDirectory>(
-        std::vector<VirtualFile>{}, std::vector<VirtualDir>{std::move(heap_dir)}, "System");
-    return std::make_shared<VectorVfsDirectory>(std::vector<VirtualFile>{},
-                                                std::vector<VirtualDir>{std::move(system_dir)});
+    return any ? layer : nullptr;
 }
 
 } // Anonymous namespace
@@ -1141,8 +1191,8 @@ void PatchManager::ApplyLayeredFS(VirtualFile& romfs, ContentRecordType type) co
     }
 
     if (ultrawide_heap) {
-        if (auto heap_layer = UltrawideHeapLayer(extracted)) {
-            layers.emplace_back(std::move(heap_layer));
+        if (auto ultrawide_layer = UltrawideLayer(extracted)) {
+            layers.emplace_back(std::move(ultrawide_layer));
         } else if (layers.empty() && layers_ext.empty()) {
             return;
         }

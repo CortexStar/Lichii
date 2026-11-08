@@ -39,4 +39,44 @@ constexpr u64 MemoryExtraBytes = 106ULL << 20;
 [[nodiscard]] std::optional<std::vector<u8>> GrowHeapDef(std::span<const u8> compressed,
                                                          u32 extra_kib);
 
+/// The UI layouts (SARC of "BFFH" layout files, zstd against the dictionary "zs.zsdic" in the SARC
+/// Pack/ZsDic.pack.zs).
+constexpr std::string_view LayoutArchivePath =
+    "UI/Layout2Archive/Common.Product.100.Nin_Ounce_NVN2.blarc.zs";
+constexpr std::string_view DictionaryPackPath = "Pack/ZsDic.pack.zs";
+constexpr std::string_view LayoutDictionaryName = "zs.zsdic";
+
+/// A pane of a UI layout moved in x (layout units: the 3840x2160 grid, origin in the middle).
+struct PaneShift {
+    std::string_view layout; ///< the layout file in the archive, e.g. "PlayerStatus_00.buil"
+    std::string_view pane;
+    f32 original_x;
+    f32 new_x;
+};
+
+/// The HUD's own edge anchors: PlayerStatus_00's N_ScaleL_00 (hearts, magic, Stone of Agony) and
+/// N_ScaleR_00 (item buttons, shortcut) sit at x = -1920 / +1920, the 16:9 grid's edges. The
+/// Add-On's UI canvas squeeze (16/9 over 43/18) puts the grid into the centred 16:9; the 21:9
+/// screen's edges are at +-1920 / squeeze = +-2580, so the anchors move out by 660.
+constexpr f32 GridHalfWidth = 1920.0f;
+constexpr f32 EdgeShift = 660.0f; // 1920 * (43/18) / (16/9) - 1920
+inline constexpr PaneShift HudEdgeShifts[]{
+    {"PlayerStatus_00.buil", "N_ScaleL_00", -GridHalfWidth, -GridHalfWidth - EdgeShift},
+    {"PlayerStatus_00.buil", "N_ScaleR_00", GridHalfWidth, GridHalfWidth + EdgeShift},
+};
+
+/// A SARC archive's first file named `name`, or nothing.
+[[nodiscard]] std::optional<std::span<const u8>> SarcFile(std::span<const u8> sarc,
+                                                          std::string_view name);
+
+/// Moves the panes in every copy of their layout inside the SARC `sarc`, in place. Each pane must be
+/// found with its original x (layouts repeat in the archive; every copy is moved). False, with
+/// `sarc` unchanged, when one is not.
+[[nodiscard]] bool ShiftPanes(std::vector<u8>& sarc, std::span<const PaneShift> shifts);
+
+/// The layout archive (zstd against `dictionary`) with the HUD's edge anchors moved to the 21:9
+/// screen's edges (HudEdgeShifts), or nothing when it is not the archive this expects.
+[[nodiscard]] std::optional<std::vector<u8>> AnchorHudToEdges(std::span<const u8> compressed,
+                                                              std::span<const u8> dictionary);
+
 } // namespace Core::OotUltrawide

@@ -407,11 +407,12 @@ constexpr size_t UltrawideCapOffset = sizeof(Loader::NSOHeader) + 0x6505EC;
 constexpr size_t UltrawideCaveOffset = sizeof(Loader::NSOHeader) + 0x3C46700;
 constexpr u32 BneInstruction = 0x54000061;
 // The originals at the picture and scene sizes and at Ivan0xFF's eight hook sites.
-constexpr std::array<std::pair<u32, u32>, 11> UltrawideOriginals{{
+constexpr std::array<std::pair<u32, u32>, 13> UltrawideOriginals{{
     {0x1202EE0, 0xD2814008}, {0x31F39F4, 0xD2814008}, {0x31F3A00, 0xD280F008},
     {0x3485CC0, 0x2D558400}, {0x4F1E8, 0x2D558EA0},  {0x23B9A8, 0x2D558C00},
     {0x33B82C, 0x2D558440},  {0x25D76C, 0x1E2202A1}, {0x774368, 0xAD401041},
-    {0x3B5C758, 0xA941A269}, {0x20C2B0, 0x52A89E08},
+    {0x3B5C758, 0xA941A269}, {0x20C2B0, 0x52A89E08}, {0x20C99C, 0x52A89E08},
+    {0x215FB0, 0x52A89E08},
 }};
 
 void PutWord(std::vector<u8>& nso, size_t offset, u32 word) {
@@ -483,6 +484,10 @@ TEST_CASE("Built-in Ultrawide applies only docked with the 21:9 aspect ratio", "
         REQUIRE(WordAt(patched, UltrawideCapOffset) == 0x14D7D845);       // b main+0x3C46700
         REQUIRE(WordAt(patched, UltrawideCaveOffset) == 0x6B0902DF);      // cmp w22, w9
         REQUIRE(WordAt(patched, UltrawideCaveOffset + 24) == 0x172827B9); // b main+0x6505FC
+        // The two other world-to-HUD sites branch to 2580.0f caves.
+        REQUIRE(WordAt(patched, sizeof(Loader::NSOHeader) + 0x20C99C) == 0x14E8E761);
+        REQUIRE(WordAt(patched, sizeof(Loader::NSOHeader) + 0x215FB0) == 0x14E8C1DF);
+        REQUIRE(WordAt(patched, sizeof(Loader::NSOHeader) + 0x3C46724) == 0x72A8A428);
     }
 
     SECTION("16:9 leaves the game alone") {
