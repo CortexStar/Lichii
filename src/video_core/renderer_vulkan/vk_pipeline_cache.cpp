@@ -2374,6 +2374,21 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
 
     auto program{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
     const VkDriverIdKHR driver_id = device.GetDriverID();
+    // Portable caches already contain lowered native code, bypassing the SASS rejection policy.
+    // Cache loading precedes engine binding; use the same device/title policy without an engine.
+    const bool uses_tensor_stand_in =
+        Settings::GetCurrentProgramID() != 0x040074A01BF12000ULL &&
+        (driver_id == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA ||
+         driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS);
+    if (env.IsNativeProgram() && uses_tensor_stand_in) {
+        for (const auto* block : program.blocks) {
+            for (const auto& inst : block->Instructions()) {
+                if (inst.GetOpcode() == Shader::IR::Opcode::TensorMulAdd) {
+                    return {.failure = "Native tensor program uses this host's upscale stand-in"};
+                }
+            }
+        }
+    }
     const bool needs_shared_mem_clamp =
         driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
         driver_id == VK_DRIVER_ID_ARM_PROPRIETARY || driver_id == VK_DRIVER_ID_MOLTENVK;
