@@ -4,7 +4,9 @@
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <string>
+#include <utility>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -116,6 +118,30 @@ void DisableOverwolfLayers() {
 } // namespace
 #endif
 
+#ifdef __APPLE__
+namespace {
+// MoltenVK reads these when the first instance is created. A value already in the environment
+// wins, and EDEN_NX2_MVK_TUNING=0 leaves MoltenVK's own defaults.
+void ApplyMoltenVKDefaults() {
+    if (const char* tuning = std::getenv("EDEN_NX2_MVK_TUNING"); tuning && tuning[0] == '0') {
+        LOG_INFO(Render_Vulkan, "MoltenVK tuning off (EDEN_NX2_MVK_TUNING=0)");
+        return;
+    }
+    static constexpr std::pair<const char*, const char*> defaults[] = {
+        // Compile Metal pipelines on every core rather than a few (macOS 13.3+).
+        {"MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION", "1"},
+        // Encode and commit submissions on MoltenVK's own queue, so the scheduler's submit
+        // thread no longer waits for Metal encoding.
+        {"MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "0"},
+    };
+    for (const auto& [name, value] : defaults) {
+        setenv(name, value, 0);
+        LOG_INFO(Render_Vulkan, "MoltenVK {}={}", name, std::getenv(name));
+    }
+}
+} // Anonymous namespace
+#endif
+
 std::shared_ptr<Common::DynamicLibrary> OpenLibrary(
     [[maybe_unused]] Core::Frontend::GraphicsContext* context) {
 #ifdef _WIN32
@@ -128,6 +154,8 @@ std::shared_ptr<Common::DynamicLibrary> OpenLibrary(
 #else
     auto library = std::make_shared<Common::DynamicLibrary>();
 #ifdef __APPLE__
+    static const bool mvk_defaults_applied = (ApplyMoltenVKDefaults(), true);
+    (void)mvk_defaults_applied;
     const auto libvulkan_filename =
         Common::FS::GetBundleDirectory() / "Contents/Frameworks/libvulkan.1.dylib";
     const auto libmoltenvk_filename =
