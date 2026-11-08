@@ -10,6 +10,7 @@
 #include "dynarmic/backend/x64/a64_emit_x64.h"
 
 #include <algorithm>
+#include <exception>
 #include <bit>
 #include <fmt/format.h>
 #include <fmt/ostream.h>
@@ -96,6 +97,20 @@ A64EmitX64::A64EmitX64(BlockOfCode& code, A64::UserConfig conf, A64::Jit* jit_in
 A64EmitX64::~A64EmitX64() = default;
 
 A64EmitX64::BlockDescriptor A64EmitX64::Emit(IR::Block& block) noexcept {
+    // An Xbyak error (code buffer overrun, a jump out of range, a bad operand) must not end the
+    // process silently through std::terminate: say which block and which error.
+    try {
+        return EmitBlock(block);
+    } catch (const Xbyak::Error& e) {
+        UNREACHABLE_MSG("dynarmic: emitting the A64 block at {:#x} (location {:#x}) failed: Xbyak error {} ({})",
+                        A64::LocationDescriptor{block.Location()}.PC(), block.Location().Value(), int(e), e.what());
+    } catch (const std::exception& e) {
+        UNREACHABLE_MSG("dynarmic: emitting the A64 block at {:#x} (location {:#x}) failed: {}",
+                        A64::LocationDescriptor{block.Location()}.PC(), block.Location().Value(), e.what());
+    }
+}
+
+A64EmitX64::BlockDescriptor A64EmitX64::EmitBlock(IR::Block& block) {
     if (conf.very_verbose_debugging_output) [[unlikely]] {
         std::puts(IR::DumpBlock(block).c_str());
     }
@@ -160,6 +175,8 @@ A64EmitX64::BlockDescriptor A64EmitX64::Emit(IR::Block& block) noexcept {
     code.nzcv_live_pos = nullptr;
     check_bit_in_zf = false;
     call_return_target.reset();
+    block_writes_fpcr = std::any_of(block.instructions.begin(), block.instructions.end(),
+                                    [](const IR::Inst& inst) { return inst.GetOpcode() == IR::Opcode::A64SetFPCR; });
     emitting_block = true;
     pending_exit_stubs.clear();
     if (!conf.omit_block_frame) {
@@ -280,6 +297,7 @@ void A64EmitX64::ClearCache() {
     ClearFastDispatchTable();
     ClearIndirectBranchCache();
     indirect_branch_cache_used = 0;
+    ++indirect_branch_generation;
     fastmem_patch_info.clear();
 }
 
@@ -424,7 +442,7 @@ void A64EmitX64::GenTerminalHandlers() {
         if (indirect_branch_cache) {
             // As above (the site checked for a halt already), then the found code pointer and
             // the PC also go into the site's entry at rbp (callee-saved: it survives LookupBlock).
-            Xbyak::Label fill, miss;
+            Xbyak::Label fill, miss, skip_fill;
             code.align();
             terminal_handler_fast_dispatch_fill = code.getCurr<const void*>();
             calculate_location_descriptor();
@@ -457,8 +475,17 @@ void A64EmitX64::GenTerminalHandlers() {
             if (HostCallReturn(conf)) {
                 code.mov(rsp, qword[code.ABI_JIT_PTR + offsetof(A64JitState, host_stack_base)]);
             }
+            // Compiling may clear the whole cache (space running out): the entry at rbp then
+            // belongs to whichever new site takes its index, and the site it was filled for is
+            // gone. rbx (free here, callee-saved) keeps the clear count across the lookup.
+            // (The counter is in the emitter object, not the code space: no rip-relative access.)
+            code.mov(rbx, std::bit_cast<u64>(&indirect_branch_generation));
+            code.mov(rbx, qword[rbx]);
             code.LookupBlock();
             code.mov(ptr[r12 + offsetof(FastDispatchEntry, code_ptr)], rax);
+            code.mov(rcx, std::bit_cast<u64>(&indirect_branch_generation));
+            code.cmp(rbx, qword[rcx]);
+            code.jne(skip_fill, code.T_NEAR);
             code.L(fill);
             // A site that keeps changing target (a jump table, a polymorphic call) stops being
             // cached: its first instruction becomes a jump to the plain fast dispatcher (only this
@@ -478,6 +505,8 @@ void A64EmitX64::GenTerminalHandlers() {
             code.sub(rdx, 5);
             code.mov(byte[rcx], u8(0xE9));
             code.mov(dword[rcx + 1], edx);
+            code.jmp(rax);
+            code.L(skip_fill);
             code.jmp(rax);
             PerfMapRegister(terminal_handler_fast_dispatch_fill, code.getCurr(), "a64_terminal_handler_fast_dispatch_fill");
         }
@@ -1138,7 +1167,9 @@ bool EmitTerminalImpl(A64EmitX64& e, IR::Term::PopRSBHint, IR::LocationDescripto
 bool EmitTerminalImpl(A64EmitX64& e, IR::Term::FastDispatchHint, IR::LocationDescriptor, bool is_single_step) {
     if (!e.conf.HasOptimization(OptimizationFlag::FastDispatch) || is_single_step) {
         e.code.ReturnFromRunCode();
-    } else if (!e.EmitIndirectBranchCache()) {
+    } else if (e.block_writes_fpcr || !e.EmitIndirectBranchCache()) {
+        // A block that writes FPCR (MSR FPCR ends in a FastDispatchHint) has no cache: the
+        // entries hold the raw PC and rely on the target being looked up with this block's FPCR.
         e.code.jmp(e.terminal_handler_fast_dispatch_hint);
     }
     return true;

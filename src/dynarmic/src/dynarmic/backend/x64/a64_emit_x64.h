@@ -58,6 +58,8 @@ public:
     /// Emit host machine code for a basic block with intermediate representation `block`.
     /// @note block is modified.
     BlockDescriptor Emit(IR::Block& block) noexcept;
+    /// Emit's work; may throw Xbyak::Error, which Emit reports with the block's PC.
+    BlockDescriptor EmitBlock(IR::Block& block);
 
     void ClearCache() override;
 
@@ -214,6 +216,10 @@ public:
     static constexpr size_t indirect_branch_cache_entries = 32768;
     IndirectBranchCacheEntry* indirect_branch_cache = nullptr;  // in the code space, own pages
     size_t indirect_branch_cache_used = 0;
+    /// Incremented by every whole-cache clear (the fill handler checks it around a compile).
+    u64 indirect_branch_generation = 0;
+    /// The block being emitted writes FPCR (A64SetFPCR).
+    bool block_writes_fpcr = false;
     void ClearIndirectBranchCache();
     /// Indirect jump to the guest PC in A64JitState::pc through a new cache entry; false when
     /// none is left (the caller then takes the fast dispatcher).
