@@ -212,6 +212,7 @@ add_executable(tests
     video_core/usage_tracker.cpp
     video_core/shader_invalidation.cpp
     video_core/descriptor_table.cpp
+    video_core/sampler_class_key.cpp
     video_core/pool_page_watch.cpp
     video_core/pool_mirror.cpp
     video_core/descriptor_payload_growth.cpp

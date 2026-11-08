@@ -1807,10 +1807,9 @@ u32 TextureCache<P>::MirrorMeta(ImageViewId view_id) {
     ImageView& image_view = slot_image_views[view_id];
     u64 class_key = 0;
     u32 meta = 0;
-    if constexpr (requires {
-                      image_view.SamplerClassKey();
-                      image_view.PoolMetaBits();
-                  }) {
+    // Backends that mirror the pools must name the view's sampler class and depth rules: a
+    // missing member is a compile error, not class 0 for every view.
+    if constexpr (P::MIRRORS_POOLS) {
         class_key = image_view.SamplerClassKey();
         meta = image_view.PoolMetaBits();
     }
