@@ -4,7 +4,9 @@
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <cstddef>
+#include <cstring>
 #include <future>
 #include <optional>
 #include <span>
@@ -44,7 +46,7 @@ namespace {
     const vk::InstanceDispatch& dld, std::vector<VkExtensionProperties> const& properties,
     Core::Frontend::WindowSystemType window_type, bool enable_validation) {
     std::vector<const char*> extensions;
-    extensions.reserve(6);
+    extensions.reserve(7);
     switch (window_type) {
     case Core::Frontend::WindowSystemType::Headless:
         break;
@@ -83,6 +85,13 @@ namespace {
                                    VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME) == 0;
             })) {
             extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+        }
+        // Surface queries for present ids and present waits (VK_KHR_present_id2/wait2).
+        if (std::ranges::any_of(properties, [](const VkExtensionProperties& property) {
+                return std::strcmp(property.extensionName,
+                                   VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME) == 0;
+            })) {
+            extensions.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
         }
     }
     // Probe optional extensions against the same snapshot the caller verifies against, so the
@@ -185,6 +194,12 @@ vk::Instance CreateInstance(const Common::DynamicLibrary& library, vk::InstanceD
     if (!vk::Load(*instance, dld)) {
         LOG_ERROR(Render_Vulkan, "Failed to load Vulkan instance function pointers");
         throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);
+    }
+    // A loader may return entry points of extensions the instance did not enable.
+    if (std::ranges::none_of(extensions, [](const char* name) {
+            return std::strcmp(name, VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME) == 0;
+        })) {
+        dld.vkGetPhysicalDeviceSurfaceCapabilities2KHR = nullptr;
     }
     return instance;
 }

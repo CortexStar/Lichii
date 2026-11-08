@@ -54,6 +54,21 @@ constexpr std::uint32_t ConsoleVsyncHz = 60;
     return (std::max)(vblank_interval, limited_interval);
 }
 
+/**
+ * Returns the FPS limit the pacer holds: the user's limit, lowered to the host's frame cap that
+ * keeps presents inside a variable refresh display's range.
+ *
+ * @param fps_limit Frames per second the user asked for, or 0 for none.
+ * @param host_cap  The renderer's frame cap (RendererBase::HostFrameCap), or 0 for none.
+ */
+[[nodiscard]] constexpr std::uint32_t EffectiveFpsLimit(std::uint32_t fps_limit,
+                                                        std::uint32_t host_cap) {
+    if (host_cap == 0) {
+        return fps_limit;
+    }
+    return fps_limit == 0 ? host_cap : (std::min)(fps_limit, host_cap);
+}
+
 class Nx2PresentPacer {
 public:
     using Clock = std::chrono::steady_clock;

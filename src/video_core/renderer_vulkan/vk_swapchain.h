@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "video_core/renderer_vulkan/present_mode_policy.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Layout {
@@ -25,8 +26,11 @@ class Swapchain {
 public:
     /// Creates the initial SDR swapchain without probing HDR encodings.
     /// Throws on startup failure rather than constructing an unusable presenter.
+    /// @param window The native window the surface shows in (an HWND on Windows), for the
+    ///               display's refresh rate.
     explicit Swapchain(
         VkSurfaceKHR_T* surface,
+        void* window,
         const Device& device,
         Scheduler& scheduler,
         u32 width,
@@ -137,6 +141,12 @@ public:
         return extent;
     }
 
+    /// Presents per second the game should be held below (VRR frame cap), 0 for none.
+    /// Read from other threads.
+    u32 GetFrameCap() const {
+        return frame_cap.load(std::memory_order_relaxed);
+    }
+
 private:
     void CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities);
     void CreateSemaphores();
@@ -145,8 +155,11 @@ private:
     void Destroy();
 
     bool NeedsPresentModeUpdate() const;
+    PresentModeSupport PresentModes() const;
+    bool SurfaceSupportsPresentWait() const;
 
     VkSurfaceKHR_T* surface;
+    void* window;
 
     const Device& device;
     Scheduler& scheduler;
@@ -175,6 +188,11 @@ private:
     bool has_imm{false};
     bool has_mailbox{false};
     bool has_fifo_relaxed{false};
+    bool has_fifo_latest_ready{false};
+    u32 refresh_hz{};
+    std::atomic<u32> frame_cap{};
+    bool present_wait{}; ///< Presents carry ids (VK_KHR_present_id2) and are waited for.
+    u64 present_id{};    ///< Id of the last present.
 
     bool is_outdated{};
     bool is_suboptimal{};

@@ -59,6 +59,10 @@ public:
         return device.GetDriverName();
     }
 
+    [[nodiscard]] u32 HostFrameCap() const override {
+        return swapchain.GetFrameCap();
+    }
+
     [[nodiscard]] VideoCore::FrameGenStatus GetFrameGenStatus() const override {
 #ifdef HAS_LSFG
         return frame_gen.CurrentStatus();

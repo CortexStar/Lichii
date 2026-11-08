@@ -13,9 +13,11 @@
 #include <android/api-level.h>
 #endif
 
+#include "common/display_refresh.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
+#include "video_core/renderer_vulkan/present_mode_policy.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 #include "video_core/vulkan_common/vk_enum_string_helper.h"
@@ -67,54 +69,19 @@ VkSurfaceFormatKHR ChooseSwapSurfaceFormat(vk::Span<VkSurfaceFormatKHR> formats,
     return sdr != formats.end() ? *sdr : formats[0];
 }
 
-static VkPresentModeKHR ChooseSwapPresentMode(bool has_imm, bool has_mailbox,
-                                              bool has_fifo_relaxed) {
-    // Mailbox doesn't lock the application like FIFO (vsync)
-    // FIFO present mode locks the framerate to the monitor's refresh rate
-    Settings::VSyncMode setting = [has_imm, has_mailbox]() {
-        // Choose Mailbox or Immediate if unlocked and those modes are supported
-        const auto mode = Settings::values.vsync_mode.GetValue();
-        if (Settings::values.frame_gen.GetValue()) {
-            return mode == Settings::VSyncMode::FifoRelaxed ? mode : Settings::VSyncMode::Fifo;
-        }
-        if (Settings::values.use_speed_limit.GetValue() &&
-            Settings::values.current_speed_mode.GetValue() != Settings::SpeedMode::Turbo) {
-            return mode;
-        }
-        switch (mode) {
-        case Settings::VSyncMode::Fifo:
-        case Settings::VSyncMode::FifoRelaxed:
-            if (has_mailbox) {
-                return Settings::VSyncMode::Mailbox;
-            } else if (has_imm) {
-                return Settings::VSyncMode::Immediate;
-            }
-            [[fallthrough]];
-        default:
-            return mode;
-        }
-    }();
-    if (setting == Settings::VSyncMode::Immediate && !has_imm) {
-        setting = Settings::VSyncMode::Mailbox;
-    }
-    if ((setting == Settings::VSyncMode::Mailbox && !has_mailbox) ||
-        (setting == Settings::VSyncMode::FifoRelaxed && !has_fifo_relaxed)) {
-        setting = Settings::VSyncMode::Fifo;
-    }
-
-    switch (setting) {
-    case Settings::VSyncMode::Immediate:
-        return VK_PRESENT_MODE_IMMEDIATE_KHR;
-    case Settings::VSyncMode::Mailbox:
-        return VK_PRESENT_MODE_MAILBOX_KHR;
-    case Settings::VSyncMode::Fifo:
-        return VK_PRESENT_MODE_FIFO_KHR;
-    case Settings::VSyncMode::FifoRelaxed:
-        return VK_PRESENT_MODE_FIFO_RELAXED_KHR;
-    default:
-        return VK_PRESENT_MODE_FIFO_KHR;
-    }
+PresentPolicy ChoosePresentPolicyForSettings(u32 refresh_hz, PresentModeSupport support) {
+    const bool locked = Settings::values.use_speed_limit.GetValue() &&
+                        Settings::values.current_speed_mode.GetValue() != Settings::SpeedMode::Turbo;
+    return ChoosePresentPolicy(Settings::values.vsync_mode.GetValue(), !locked,
+                               Settings::values.frame_gen.GetValue(),
+                               Settings::values.variable_refresh_rate.GetValue(), refresh_hz,
+                               support);
 }
+
+// How long the present thread waits for the previous present to reach the display. Long enough
+// for any refresh rate, short enough that an occluded window that never shows a present does not
+// stall presentation.
+constexpr u64 PresentWaitTimeoutNs = 100'000'000;
 
 VkExtent2D ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities, u32 width, u32 height) {
     constexpr auto undefined_size{(std::numeric_limits<u32>::max)()};
@@ -145,11 +112,13 @@ VkCompositeAlphaFlagBitsKHR ChooseAlphaFlags(const VkSurfaceCapabilitiesKHR& cap
 
 Swapchain::Swapchain(
     VkSurfaceKHR_T* surface_,
+    void* window_,
     const Device& device_,
     Scheduler& scheduler_,
     u32 width_,
     u32 height_)
     : surface(surface_)
+    , window{window_}
     , device{device_}
     , scheduler{scheduler_}
 {
@@ -205,6 +174,31 @@ bool Swapchain::Create(
 }
 
 bool Swapchain::AcquireNextImage(bool may_flush) {
+    // Hold at most one present between the GPU and the display: the frame acquired now waits until
+    // the one before the last present is on screen, so presents never queue up behind the display.
+    if (present_wait && present_id > 1) {
+        const VkResult wait = device.GetLogical().WaitForPresent2KHR(*swapchain, present_id - 1,
+                                                                    PresentWaitTimeoutNs);
+        switch (wait) {
+        case VK_SUCCESS:
+        case VK_TIMEOUT:
+        case VK_SUBOPTIMAL_KHR:
+            break;
+        case VK_ERROR_OUT_OF_DATE_KHR:
+            is_outdated = true;
+            return true;
+        case VK_ERROR_SURFACE_LOST_KHR:
+            vk::Check(wait);
+            break;
+        case VK_ERROR_DEVICE_LOST:
+            device.ReportLoss();
+            vk::Check(wait);
+            break;
+        default:
+            LOG_ERROR(Render_Vulkan, "vkWaitForPresent2KHR returned {}", string_VkResult(wait));
+            break;
+        }
+    }
     const VkResult result = device.GetLogical().AcquireNextImageKHR(
         *swapchain, (std::numeric_limits<u64>::max)(), *present_semaphores[frame_index],
         VK_NULL_HANDLE, &image_index);
@@ -268,9 +262,16 @@ bool Swapchain::AcquireNextImage(bool may_flush) {
 
 void Swapchain::Present(VkSemaphore render_semaphore) {
     const auto present_queue{device.GetPresentQueue()};
+    const u64 next_present_id = present_id + 1;
+    const VkPresentId2KHR present_id_info{
+        .sType = VK_STRUCTURE_TYPE_PRESENT_ID_2_KHR,
+        .pNext = nullptr,
+        .swapchainCount = 1,
+        .pPresentIds = &next_present_id,
+    };
     const VkPresentInfoKHR present_info{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-        .pNext = nullptr,
+        .pNext = present_wait ? &present_id_info : nullptr,
         .waitSemaphoreCount = render_semaphore ? 1U : 0U,
         .pWaitSemaphores = &render_semaphore,
         .swapchainCount = 1,
@@ -279,6 +280,10 @@ void Swapchain::Present(VkSemaphore render_semaphore) {
         .pResults = nullptr,
     };
     std::scoped_lock lock{scheduler.submit_mutex};
+    if (present_wait) {
+        // The id belongs to this present whatever it returns.
+        present_id = next_present_id;
+    }
     switch (const VkResult result = present_queue.Present(present_info)) {
     case VK_SUCCESS:
         break;
@@ -316,10 +321,17 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
                         VK_PRESENT_MODE_IMMEDIATE_KHR) != present_modes.end();
     has_fifo_relaxed = std::find(present_modes.begin(), present_modes.end(),
                                  VK_PRESENT_MODE_FIFO_RELAXED_KHR) != present_modes.end();
+    has_fifo_latest_ready = device.IsKhrPresentModeFifoLatestReadyEnabled() &&
+                            std::find(present_modes.begin(), present_modes.end(),
+                                      VK_PRESENT_MODE_FIFO_LATEST_READY_KHR) != present_modes.end();
+    refresh_hz = Common::QueryDisplayRefreshRate(window).value_or(0);
 
     const VkCompositeAlphaFlagBitsKHR alpha_flags{ChooseAlphaFlags(capabilities)};
     surface_format = ChooseSwapSurfaceFormat(formats, requested_format, requested_color_space);
-    present_mode = ChooseSwapPresentMode(has_imm, has_mailbox, has_fifo_relaxed);
+    const PresentPolicy policy = ChoosePresentPolicyForSettings(refresh_hz, PresentModes());
+    present_mode = policy.mode;
+    frame_cap.store(policy.frame_cap, std::memory_order_relaxed);
+    present_wait = SurfaceSupportsPresentWait();
 
     u32 requested_image_count{capabilities.minImageCount + 1};
     // Ensure Triple buffering if possible.
@@ -388,6 +400,10 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
         format_list.pNext = std::exchange(swapchain_ci.pNext, &format_list);
         swapchain_ci.flags |= VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR;
     }
+    if (present_wait) {
+        swapchain_ci.flags |=
+            VK_SWAPCHAIN_CREATE_PRESENT_ID_2_BIT_KHR | VK_SWAPCHAIN_CREATE_PRESENT_WAIT_2_BIT_KHR;
+    }
     // Request the size again to reduce the possibility of a TOCTOU race condition.
     const auto updated_capabilities = physical_device.GetSurfaceCapabilitiesKHR(VkSurfaceKHR(surface));
     swapchain_ci.imageExtent = ChooseSwapExtent(updated_capabilities, width, height);
@@ -398,6 +414,11 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
 
     images = swapchain.GetImages();
     image_count = static_cast<u32>(images.size());
+    LOG_INFO(Render_Vulkan,
+             "Swapchain {}x{}, {} images, {}, display {} Hz{}, frame cap {}, present wait {}",
+             extent.width, extent.height, image_count, string_VkPresentModeKHR(present_mode),
+             refresh_hz, Settings::values.variable_refresh_rate.GetValue() ? " VRR" : "",
+             policy.frame_cap, present_wait ? "on" : "off");
 #ifdef __ANDROID__
     // Android is already ordered the same as Switch.
     image_view_format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -420,6 +441,7 @@ void Swapchain::CreateSemaphores() {
 
 void Swapchain::Destroy() {
     frame_index = 0;
+    present_id = 0;
     present_semaphores.clear();
     render_semaphores.clear();
     swapchain.reset();
@@ -450,9 +472,40 @@ void Swapchain::SetHdrMetadata(u16 peak_luminance, u16 reference_white) const {
              peak_luminance, reference_white);
 }
 
+PresentModeSupport Swapchain::PresentModes() const {
+    return {
+        .immediate = has_imm,
+        .mailbox = has_mailbox,
+        .fifo_relaxed = has_fifo_relaxed,
+        .fifo_latest_ready = has_fifo_latest_ready,
+    };
+}
+
+bool Swapchain::SurfaceSupportsPresentWait() const {
+    if (!device.IsKhrPresentWait2Enabled()) {
+        return false;
+    }
+    VkSurfaceCapabilitiesPresentWait2KHR wait_capabilities{
+        .sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_WAIT_2_KHR,
+        .pNext = nullptr,
+        .presentWait2Supported = VK_FALSE,
+    };
+    VkSurfaceCapabilitiesPresentId2KHR id_capabilities{
+        .sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_ID_2_KHR,
+        .pNext = &wait_capabilities,
+        .presentId2Supported = VK_FALSE,
+    };
+    VkSurfaceCapabilities2KHR capabilities{
+        .sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR,
+        .pNext = &id_capabilities,
+        .surfaceCapabilities = {},
+    };
+    return device.GetPhysical().GetSurfaceCapabilities2KHR(VkSurfaceKHR(surface), capabilities) &&
+           id_capabilities.presentId2Supported && wait_capabilities.presentWait2Supported;
+}
+
 bool Swapchain::NeedsPresentModeUpdate() const {
-    const auto requested_mode = ChooseSwapPresentMode(has_imm, has_mailbox, has_fifo_relaxed);
-    return present_mode != requested_mode;
+    return present_mode != ChoosePresentPolicyForSettings(refresh_hz, PresentModes()).mode;
 }
 
 } // namespace Vulkan

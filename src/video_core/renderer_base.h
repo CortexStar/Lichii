@@ -78,6 +78,12 @@ public:
         return {};
     }
 
+    /// Presents per second the game should be held below so every frame stays inside the
+    /// display's variable refresh range, 0 for none. Safe to call from any thread.
+    [[nodiscard]] virtual u32 HostFrameCap() const {
+        return 0;
+    }
+
     [[nodiscard]] const RendererDeviceInfo& GetDeviceInfo() const {
         return device_info;
     }

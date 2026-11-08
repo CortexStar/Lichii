@@ -387,6 +387,12 @@ struct Values {
                                            true,
                                            true};
 
+    // Lichii: the display runs with variable refresh (FreeSync, G-SYNC, HDMI VRR). With the speed
+    // limit off, presents go out immediately and the game is held just below the refresh rate so
+    // every frame stays inside the display's range.
+    SwitchableSetting<bool> variable_refresh_rate{linkage, false, "variable_refresh_rate",
+                                                  Category::Renderer};
+
     SwitchableSetting<ScalingFilter> scaling_filter{linkage,
                                                     ScalingFilter::ScaleForce,
                                                     "scaling_filter",

@@ -35,6 +35,15 @@ TEST_CASE("NX2 FPS limit only lengthens a vblank it is below", "[core][nx2_prese
     REQUIRE(PacedInterval(TwoVblanks, 20) == 50'000'000ns);
 }
 
+TEST_CASE("NX2 FPS limit is lowered to the host's VRR cap", "[core][nx2_present_pacer]") {
+    using Service::EffectiveFpsLimit;
+    REQUIRE(EffectiveFpsLimit(0, 0) == 0);
+    REQUIRE(EffectiveFpsLimit(60, 0) == 60);
+    REQUIRE(EffectiveFpsLimit(0, 224) == 224);
+    REQUIRE(EffectiveFpsLimit(240, 224) == 224);
+    REQUIRE(EffectiveFpsLimit(120, 224) == 120);
+}
+
 TEST_CASE("NX2 present word paces only at the console's vsync rate", "[core][nx2_present_pacer]") {
     using Service::PresentWordInterval;
     // At 60 Hz the word's swap interval paces, scaled by the speed limit.

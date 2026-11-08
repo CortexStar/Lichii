@@ -1825,6 +1825,23 @@ void Device::RemoveUnsuitableExtensions() {
     RemoveExtensionFeatureIfUnsuitable(extensions.maintenance4, features.maintenance4,
                                        VK_KHR_MAINTENANCE_4_EXTENSION_NAME);
 
+    // VK_KHR_present_id2, VK_KHR_present_wait2 (pacing on the display's present times)
+    // Both need VK_KHR_get_surface_capabilities2 on the instance.
+    extensions.present_id2 = features.present_id2.presentId2 &&
+                             dld.vkGetPhysicalDeviceSurfaceCapabilities2KHR != nullptr;
+    RemoveExtensionFeatureIfUnsuitable(extensions.present_id2, features.present_id2,
+                                       VK_KHR_PRESENT_ID_2_EXTENSION_NAME);
+    extensions.present_wait2 = features.present_wait2.presentWait2 && extensions.present_id2;
+    RemoveExtensionFeatureIfUnsuitable(extensions.present_wait2, features.present_wait2,
+                                       VK_KHR_PRESENT_WAIT_2_EXTENSION_NAME);
+
+    // VK_KHR_present_mode_fifo_latest_ready
+    extensions.present_mode_fifo_latest_ready =
+        features.present_mode_fifo_latest_ready.presentModeFifoLatestReady;
+    RemoveExtensionFeatureIfUnsuitable(extensions.present_mode_fifo_latest_ready,
+                                       features.present_mode_fifo_latest_ready,
+                                       VK_KHR_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME);
+
     // VK_KHR_maintenance5
     extensions.maintenance5 = features.maintenance5.maintenance5;
     RemoveExtensionFeatureIfUnsuitable(extensions.maintenance5, features.maintenance5,

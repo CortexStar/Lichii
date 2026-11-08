@@ -248,6 +248,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, fps_limit, tr("FPS Limit"),
            tr("Caps how often the game presents, so the game itself runs at this rate. 0 leaves "
               "the frame rate to the game and the display."));
+    INSERT(Settings, variable_refresh_rate, tr("Variable Refresh Rate Display"),
+           tr("Tell Lichii the display runs with variable refresh (FreeSync, G-SYNC, HDMI VRR).\n"
+              "With the speed limit off, frames are presented immediately and the game is held "
+              "just below the refresh rate (224 FPS at 240 Hz), which keeps every frame inside "
+              "the display's range without tearing."));
     INSERT(Settings, vsync_mode, tr("VSync Mode:"),
            tr("FIFO (VSync) does not drop frames or exhibit tearing but is limited by the screen "
               "refresh rate.\nFIFO Relaxed allows tearing as it recovers from a slow down.\n"

@@ -46,6 +46,8 @@ add_library(
     device_power_state.h
     display_hdr.cpp
     display_hdr.h
+    display_refresh.cpp
+    display_refresh.h
     div_ceil.h
     dkb_cpu_trace.cpp
     dkb_cpu_trace.h

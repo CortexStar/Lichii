@@ -153,6 +153,7 @@ try
     , state_tracker()
     , scheduler(device, state_tracker)
     , swapchain(*surface,
+                render_window.GetWindowInfo().render_surface,
                 device,
                 scheduler,
                render_window.GetFramebufferLayout().width,

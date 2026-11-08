@@ -79,6 +79,10 @@ VK_DEFINE_HANDLE(VmaPool)
     FEATURE(KHR, CooperativeMatrix, COOPERATIVE_MATRIX, cooperative_matrix)                        \
     FEATURE(KHR, Maintenance5, MAINTENANCE_5, maintenance5)                                        \
     FEATURE(KHR, Maintenance6, MAINTENANCE_6, maintenance6)                                        \
+    FEATURE(KHR, PresentId2, PRESENT_ID_2, present_id2)                                            \
+    FEATURE(KHR, PresentModeFifoLatestReady, PRESENT_MODE_FIFO_LATEST_READY,                       \
+            present_mode_fifo_latest_ready)                                                        \
+    FEATURE(KHR, PresentWait2, PRESENT_WAIT_2, present_wait2)                                      \
     FEATURE(KHR, PipelineExecutableProperties, PIPELINE_EXECUTABLE_PROPERTIES,                     \
             pipeline_executable_properties)                                                        \
     FEATURE(KHR, ShaderQuadControl, SHADER_QUAD_CONTROL, shader_quad_control)                      \
@@ -671,6 +675,17 @@ FN_MAX_LIMIT_LIST
     /// Returns true if VK_EXT_hdr_metadata is enabled.
     bool IsExtHdrMetadataEnabled() const {
         return extensions.hdr_metadata;
+    }
+
+    /// Returns true if presents can carry an id and be waited for (VK_KHR_present_id2 and
+    /// VK_KHR_present_wait2). The surface still has to support them.
+    bool IsKhrPresentWait2Enabled() const {
+        return extensions.present_id2 && extensions.present_wait2;
+    }
+
+    /// Returns true if VK_PRESENT_MODE_FIFO_LATEST_READY_KHR may be used.
+    bool IsKhrPresentModeFifoLatestReadyEnabled() const {
+        return extensions.present_mode_fifo_latest_ready;
     }
 
     /// Returns true if VK_KHR_shader_float_controls is enabled.

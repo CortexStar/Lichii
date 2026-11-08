@@ -2011,8 +2011,9 @@ private:
             const char* value = std::getenv("EDEN_NX2_FPS_LIMIT");
             return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
         }();
-        const u32 fps_limit =
-            forced_fps_limit != 0 ? forced_fps_limit : Settings::values.fps_limit.GetValue();
+        const u32 fps_limit = EffectiveFpsLimit(
+            forced_fps_limit != 0 ? forced_fps_limit : Settings::values.fps_limit.GetValue(),
+            system.GPU().Renderer().HostFrameCap());
         const u32 speed_limit =
             Settings::values.use_speed_limit.GetValue() ? Settings::SpeedLimit() : 0;
         const auto vblank_interval =
