@@ -761,6 +761,9 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
             if (list.find(",ibc,") != std::string::npos) {
                 config.indirect_branch_cache = false;
             }
+            if (list.find(",cic,") != std::string::npos) {
+                config.core_independent_code = false;
+            }
         }
     }
 #endif
