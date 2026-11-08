@@ -123,6 +123,7 @@ add_library(video_core STATIC
     nx2_drain_check.h
     nx2_entry_check.h
     nx2_list_indirect.h
+    nx2_list_indirect_stats.h
     nx2_list_stats.h
     nx2_profile.h
     nx2_perf.h

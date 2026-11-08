@@ -36,6 +36,7 @@
 #include "video_core/nx2_drain_check.h"
 #include "video_core/nx2_entry_check.h"
 #include "video_core/nx2_list_indirect.h"
+#include "video_core/nx2_list_indirect_stats.h"
 #include "video_core/nx2_list_stats.h"
 #include "video_core/rasterizer_interface.h"
 
@@ -928,8 +929,13 @@ bool DmaPusher::TakeGpuWrittenListWords(const CommandListHeader& header) {
     // copy to come back: the macros run on placeholders the host GPU's copy of the words takes
     // the place of (Nx2ListIndirect, KeplerCompute::FrontTakeListWords).
     auto& split = VideoCommon::GpuSplit::Get();
+    using Kept = Nx2ListIndirect::Stats::Kept; // TEST
+    if (Nx2ListIndirect::Stats::Enabled()) [[unlikely]] {
+        Nx2ListIndirect::Stats::MaybeLog();
+    }
     if (!Nx2ListIndirect::g_enabled || rasterizer == nullptr || command_resume_offset != 0 ||
         !split.Active() || !split.FrontMacros()) {
+        Nx2ListIndirect::Stats::NoteKept(Kept::Off);
         return false;
     }
     const u32 count = static_cast<u32>(header.size);
@@ -938,10 +944,12 @@ bool DmaPusher::TakeGpuWrittenListWords(const CommandListHeader& header) {
         dma_state.method < MacroRegistersStart || (dma_state.method & 1) != 0 ||
         subchannels[dma_state.subchannel] == nullptr ||
         subchannel_type[dma_state.subchannel] != Engines::EngineTypes::KeplerCompute) {
+        Nx2ListIndirect::Stats::NoteKept(Kept::NotCall);
         return false;
     }
     auto* const compute = static_cast<Engines::KeplerCompute*>(subchannels[dma_state.subchannel]);
     if (!compute->FrontRunsMacros() || !rasterizer->Nx2ListSlotsSupported()) {
+        Nx2ListIndirect::Stats::NoteKept(Kept::Off);
         return false;
     }
     // On one device page, as the back finds it: its mappings are the front's once it ran the
@@ -950,20 +958,43 @@ bool DmaPusher::TakeGpuWrittenListWords(const CommandListHeader& header) {
     const auto device = memory_manager.GpuToCpuAddress(dma_state.dma_get);
     const auto last = memory_manager.GpuToCpuAddress(dma_state.dma_get + bytes - 1);
     if (!device || !last || *last != *device + bytes - 1 || !split.Ran(split.LastMappingChange())) {
+        Nx2ListIndirect::Stats::NoteKept(Kept::Placement);
         return false;
     }
     const std::optional<u32> slot = rasterizer->Nx2AcquireListSlot();
     if (!slot) {
+        Nx2ListIndirect::Stats::NoteKept(Kept::NoSlot);
         return false;
     }
     if (!compute->FrontTakeListWords(split, dma_state.method, count, *slot)) {
         rasterizer->Nx2ReleaseListSlot(*slot); // Nothing sent with it
+        Nx2ListIndirect::Stats::NoteKept(Kept::Refused);
         return false;
     }
+    Nx2ListIndirect::Stats::NoteTaken(dma_state.method, count);
+    // TEST (EDEN_NX2_LIST_INDIRECT_CHECK): the words as the old path reads them (waiting for
+    // their writers), for the back to compare what the host GPU uses of the slot with.
+    const bool check = Nx2ListIndirect::Stats::g_check;
+    std::array<u32, Nx2ListIndirect::SlotWords> expected{};
+    if (check) [[unlikely]] {
+        if (ReadGpuWrittenCommands(dma_state.dma_get, count)) {
+            for (u32 k = 0; k < count; ++k) {
+                expected[k] = command_headers[k].argument;
+            }
+        } else {
+            FlushGpuWrittenCommands(dma_state.dma_get, bytes);
+            memory_manager.ReadBlockUnsafe(dma_state.dma_get, expected.data(), bytes);
+        }
+    }
     // At the list's place: after the work sent before it, the GPU fetched the list there.
-    split.Defer([rasterizer_ = rasterizer, device_ = *device, count,
-                 slot_ = *slot] { rasterizer_->Nx2SnapshotListWords(device_, count, slot_); },
-                VideoCommon::GpuSplit::Writes::Noted);
+    split.Defer(
+        [rasterizer_ = rasterizer, device_ = *device, count, slot_ = *slot, check, expected] {
+            rasterizer_->Nx2SnapshotListWords(device_, count, slot_);
+            if (check) {
+                rasterizer_->Nx2CheckListSlot(slot_, std::span{expected}.first(count));
+            }
+        },
+        VideoCommon::GpuSplit::Writes::Noted);
     command_headers.resize_destructive(count);
     for (u32 k = 0; k < count; ++k) {
         command_headers[k].argument = Nx2ListIndirect::Placeholder(*slot, k);

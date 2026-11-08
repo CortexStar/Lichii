@@ -19,6 +19,7 @@
 #include "video_core/nx2_drain_check.h"
 #include "video_core/nx2_entry_check.h"
 #include "video_core/nx2_list_indirect.h"
+#include "video_core/nx2_list_indirect_stats.h"
 #include "video_core/nx2_list_stats.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
@@ -68,6 +69,7 @@ void CreateGPU(std::optional<Tegra::GPU>& gpu, Core::Frontend::EmuWindow& emu_wi
     VideoCommon::Nx2Perf::ReadSwitch();
     Tegra::Nx2EntryCheck::ReadSwitch();
     Tegra::Nx2ListIndirect::ReadSwitch();
+    Tegra::Nx2ListIndirect::Stats::ReadSwitch();
     VideoCommon::ReadUniformStreamReuseSwitch();
 
     const auto nvdec_value = Settings::values.nvdec_emulation.GetValue();
