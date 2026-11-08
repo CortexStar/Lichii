@@ -408,6 +408,9 @@ void Fsr3FrameGen::Process(const Device& device, Scheduler& scheduler, VkImage c
             return;
         }
         LOG_WARNING(Render_Vulkan, "Optical flow hardware unusable, using the flow shader");
+        // The flow shader generates on the graphics queue. The wait above already finished
+        // the last async generation.
+        m_async = false;
         m_nvof.reset();
         m_flow_valid = false;
         return;
