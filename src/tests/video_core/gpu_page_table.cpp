@@ -169,3 +169,29 @@ TEST_CASE("GPU page table maps a range again without walking it while it stands"
     REQUIRE(table.Map(0x1200'0000, 0x1000, 0x8'0200'0000));
     REQUIRE(table.Translate(0x1200'0000) == 0x8'0200'0000);
 }
+
+TEST_CASE("GPU page table keeps host addresses that are not page aligned", "[gpu_page_table]") {
+    // Host buffers are suballocated at their own alignment: a buffer holding a guest page from
+    // its start can begin 0x20 bytes past a host page boundary.
+    GpuPageTable table{8};
+    constexpr u64 null_page = 0x6000'0040; // a suballocated zero buffer, not page aligned
+    table.SetNullPage(null_page);
+    REQUIRE(table.Translate(0x5000'0010) == null_page + 0x10);
+    REQUIRE(table.Map(0x217f'6b8000, 0x2000, 0x2141'e9020));
+    REQUIRE(table.Translate(0x217f'6b8000) == 0x2141'e9020);
+    REQUIRE(table.Translate(0x217f'6b8fff) == 0x2141'ea01f);
+    REQUIRE(table.Translate(0x217f'6b9000) == 0x2141'ea020);
+    REQUIRE(ShaderTranslate(table, 0x217f'6b9300) == 0x2141'ea320);
+    REQUIRE(table.IsMapped(0x217f'6b8fff));
+    REQUIRE_FALSE(table.IsMapped(0x217f'6ba000));
+    // A run that starts inside a page maps its page from the address its first byte has.
+    REQUIRE(table.Map(0x217f'4b9300, 0x100, 0x213f'ea320));
+    REQUIRE(table.Translate(0x217f'4b9300) == 0x213f'ea320);
+    REQUIRE(table.Translate(0x217f'4b9000) == 0x213f'ea020);
+    // The fast path for a standing range keeps the offset too.
+    REQUIRE(table.Map(0x217f'6b8800, 0x10, 0x2141'e9820));
+    REQUIRE(table.Translate(0x217f'6b8800) == 0x2141'e9820);
+    // Dropping the buffer finds its unaligned entries.
+    REQUIRE(table.UnmapDevice(0x2141'e9020, 0x2141'eb020) == 2);
+    REQUIRE(table.Translate(0x217f'6b8fff) == null_page + 0xfff);
+}

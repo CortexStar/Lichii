@@ -35,7 +35,8 @@ void GpuPageTable::MarkBlock(u32 block) {
 
 void GpuPageTable::SetNullPage(u64 device_address) {
     const u64 old_null = null_page;
-    null_page = device_address & ~(PAGE_SIZE - 1);
+    // Exact: the zero buffer is suballocated, and an address rounded down would point before it.
+    null_page = device_address;
     if (old_null == null_page) {
         return;
     }
@@ -107,7 +108,10 @@ bool GpuPageTable::Map(u64 gpu_addr, u64 size, u64 device_address) {
     }
     const u64 begin_address = first << PAGE_BITS;
     const u64 end_address = end << PAGE_BITS;
-    u64 page_address = (device_address & ~(PAGE_SIZE - 1));
+    // The host address of the first guest page's first byte. Host buffers are suballocated at
+    // their own alignment (often 256 bytes or less), so it need not be page aligned: an entry
+    // holds the exact address, and a shader adds the guest page offset to it.
+    u64 page_address = device_address - (gpu_addr & (PAGE_SIZE - 1));
     if (auto it = extents.upper_bound(begin_address); it != extents.begin()) {
         --it;
         if (it->second.end >= end_address &&
@@ -134,8 +138,8 @@ bool GpuPageTable::Map(u64 gpu_addr, u64 size, u64 device_address) {
         entry = page_address;
         MarkBlock(block);
     }
-    extents.emplace(begin_address, Extent{.end = end_address, .device = device_address &
-                                                                         ~(PAGE_SIZE - 1)});
+    extents.emplace(begin_address, Extent{.end = end_address,
+                                          .device = device_address - (gpu_addr & (PAGE_SIZE - 1))});
     return true;
 }
 
@@ -217,7 +221,7 @@ u64 GpuPageTable::Translate(u64 gpu_addr) const {
 }
 
 bool GpuPageTable::IsMapped(u64 gpu_addr) const {
-    return (Translate(gpu_addr) & ~(PAGE_SIZE - 1)) != null_page;
+    return Translate(gpu_addr) - (gpu_addr & (PAGE_SIZE - 1)) != null_page;
 }
 
 void GpuPageTable::MarkAllDirty() {

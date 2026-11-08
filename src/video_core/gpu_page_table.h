@@ -58,9 +58,10 @@ public:
     void SetNullPage(u64 device_address);
 
     /// Maps [gpu_addr, gpu_addr + size) to host device memory starting at `device_address`.
-    /// Both ends are widened to whole pages; `device_address` must sit at the same offset within
-    /// its page as `gpu_addr`. Returns false (nothing changed past the blocks it could get) when
-    /// the L2 blocks ran out.
+    /// Both ends are widened to whole pages: the page holding `gpu_addr` maps to
+    /// `device_address` minus `gpu_addr`'s offset within it, whatever that address's own
+    /// alignment. Returns false (nothing changed past the blocks it could get) when the L2 blocks
+    /// ran out.
     bool Map(u64 gpu_addr, u64 size, u64 device_address);
 
     /// Points [gpu_addr, gpu_addr + size) (widened to whole pages) at the null page.
