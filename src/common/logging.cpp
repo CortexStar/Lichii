@@ -260,6 +260,9 @@ struct FileBackend final : public Backend {
                 mode = FS::FileAccessMode::Append;
         }
         file.emplace(filename, mode, FS::FileType::TextFile);
+        // Count what is already there so the size limit still applies when appending.
+        if (mode == FS::FileAccessMode::Append)
+            bytes_written = file->GetSize();
     }
     ~FileBackend() noexcept override = default;
 
