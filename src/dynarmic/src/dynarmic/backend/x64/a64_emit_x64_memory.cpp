@@ -33,6 +33,7 @@ using namespace Xbyak::util;
 void A64EmitX64::GenMemory128Accessors() {
     code.align();
     memory_read_128 = code.getCurr<void (*)()>();
+    code.EnterHostMxcsr();
 #ifdef _WIN32
     Devirtualize<&A64::UserCallbacks::MemoryRead128>(conf.callbacks).EmitCallWithReturnPointer(code, [&](Xbyak::Reg64 return_value_ptr, [[maybe_unused]] RegList args) {
         code.mov(code.ABI_PARAM3, code.ABI_PARAM2);
@@ -54,11 +55,13 @@ void A64EmitX64::GenMemory128Accessors() {
     }
     code.add(rsp, 8);
 #endif
+    code.LeaveHostMxcsr();
     code.ret();
     PerfMapRegister(memory_read_128, code.getCurr(), "a64_memory_read_128");
 
     code.align();
     memory_write_128 = code.getCurr<void (*)()>();
+    code.EnterHostMxcsr();
 #ifdef _WIN32
     code.lea(rsp, ptr[rsp - (8 + 16 + ABI_SHADOW_SPACE)]);
     code.lea(code.ABI_PARAM3, ptr[rsp + ABI_SHADOW_SPACE]);
@@ -78,11 +81,13 @@ void A64EmitX64::GenMemory128Accessors() {
     Devirtualize<&A64::UserCallbacks::MemoryWrite128>(conf.callbacks).EmitCall(code);
     code.add(rsp, 8);
 #endif
+    code.LeaveHostMxcsr();
     code.ret();
     PerfMapRegister(memory_write_128, code.getCurr(), "a64_memory_write_128");
 
     code.align();
     memory_exclusive_write_128 = code.getCurr<void (*)()>();
+    code.EnterHostMxcsr();
 #ifdef _WIN32
     code.lea(rsp, ptr[rsp - (8 + 32 + ABI_SHADOW_SPACE)]);
     code.lea(code.ABI_PARAM3, ptr[rsp + ABI_SHADOW_SPACE]);
@@ -109,6 +114,7 @@ void A64EmitX64::GenMemory128Accessors() {
     Devirtualize<&A64::UserCallbacks::MemoryWriteExclusive128>(conf.callbacks).EmitCall(code);
     code.add(rsp, 8);
 #endif
+    code.LeaveHostMxcsr();
     code.ret();
     PerfMapRegister(memory_exclusive_write_128, code.getCurr(), "a64_memory_exclusive_write_128");
 }
@@ -211,7 +217,9 @@ void A64EmitX64::GenFastmemFallbacks() {
                     }
                     code.mov(code.ABI_PARAM3, bitsize / CHAR_BIT);
                     if (ordered) code.mfence();
+                    code.EnterHostMxcsr();
                     callback.EmitCall(code);
+                    code.LeaveHostMxcsr();
                     if (value_idx != code.ABI_RETURN.getIdx()) {
                         code.mov(Xbyak::Reg64{value_idx}, code.ABI_RETURN);
                     }
@@ -243,7 +251,9 @@ void A64EmitX64::GenFastmemFallbacks() {
                     }
                     code.ZeroExtendFrom(bitsize, code.ABI_PARAM3);
                     code.mov(code.ABI_PARAM4, bitsize / CHAR_BIT);
+                    code.EnterHostMxcsr();
                     callback.EmitCall(code);
+                    code.LeaveHostMxcsr();
                     if (ordered) code.mfence();
                     ABI_PopCallerSaveRegistersAndAdjustStack(code);
                     code.ret();
@@ -272,7 +282,9 @@ void A64EmitX64::GenFastmemFallbacks() {
                     code.ZeroExtendFrom(bitsize, code.ABI_PARAM3);
                     code.mov(code.ABI_PARAM4, rax);
                     code.ZeroExtendFrom(bitsize, code.ABI_PARAM4);
+                    code.EnterHostMxcsr();
                     callback.EmitCall(code);
+                    code.LeaveHostMxcsr();
                     ABI_PopCallerSaveRegistersAndAdjustStackExcept(code, HostLoc::RAX);
                     code.ret();
                     PerfMapRegister(exclusive_write_fallbacks[std::make_tuple(ordered, bitsize, vaddr_idx, value_idx)], code.getCurr(), fmt::format("a64_exclusive_write_fallback_{}", bitsize));
@@ -456,7 +468,9 @@ void A64EmitX64::EmitAtomicFallbackStub(Xbyak::Reg64 result, std::initializer_li
     if (param4) {
         code.mov(code.ABI_PARAM4.cvt32(), *param4);
     }
+    code.EnterHostMxcsr();
     code.CallFunction(fallback);
+    code.LeaveHostMxcsr();
     if (result.getIdx() != code.ABI_RETURN.getIdx()) {
         code.mov(result, code.ABI_RETURN);
     }
@@ -475,7 +489,9 @@ void A64EmitX64::EmitAtomicRmwMemory(A64EmitContext& ctx, IR::Inst* inst) {
         ctx.reg_alloc.HostCall(code, inst, {}, args[1], args[2]);
         code.mov(code.ABI_PARAM1, std::bit_cast<u64>(&atomic_fallback));
         code.mov(code.ABI_PARAM4.cvt32(), u32(op));
+        code.EnterHostMxcsr();
         code.CallFunction(fallback);
+        code.LeaveHostMxcsr();
         code.ZeroExtendFrom(bitsize, code.ABI_RETURN);
         EmitCheckMemoryAbort(ctx, inst);
         return;
@@ -632,7 +648,9 @@ void A64EmitX64::EmitAtomicCasMemory(A64EmitContext& ctx, IR::Inst* inst) {
     if (!fastmem_marker) {
         ctx.reg_alloc.HostCall(code, inst, {}, args[1], args[2], args[3]);
         code.mov(code.ABI_PARAM1, std::bit_cast<u64>(&atomic_fallback));
+        code.EnterHostMxcsr();
         code.CallFunction(fallback);
+        code.LeaveHostMxcsr();
         code.ZeroExtendFrom(bitsize, code.ABI_RETURN);
         EmitCheckMemoryAbort(ctx, inst);
         return;

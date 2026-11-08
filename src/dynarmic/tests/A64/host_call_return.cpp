@@ -279,3 +279,29 @@ TEST_CASE("A64: exclusive accesses leave FPSR alone", "[a64][exclusive_fpsr]") {
     REQUIRE(env.Rd<u32>(0x1000) == 10);
     REQUIRE(jit.GetFpsr() == 0);
 }
+
+TEST_CASE("A64: host FP in memory callbacks leaves FPSR alone", "[a64][callback_mxcsr]") {
+    // A64TestEnv::MemoryWrite inserts into a hash map: its rehashes do FP arithmetic (load
+    // factors) inside the callback, which ran under the guest's MXCSR and set FPSR.IXC.
+    HaltOnSvcEnv env;
+    oaknut::VectorCodeGenerator code{env.code_mem, nullptr};
+    oaknut::Label loop;
+    code.MOVZ(X20, 0x4000);
+    code.MOVZ(X19, 2000);
+    code.l(loop);
+    code.STRB(W19, X20, POST_INDEXED, 1);
+    code.SUBS(X19, X19, 1);
+    code.B(NE, loop);
+    code.SVC(0);
+
+    A64::UserConfig config{};
+    config.callbacks = &env;
+    config.enable_cycle_counting = false;
+    A64::Jit jit{config};
+    env.jit = &jit;
+    jit.SetPC(0);
+    jit.SetFpsr(0);
+    jit.Run();
+    REQUIRE(env.modified_memory.size() == 2000);
+    REQUIRE(jit.GetFpsr() == 0);
+}
