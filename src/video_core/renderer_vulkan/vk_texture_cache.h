@@ -782,6 +782,13 @@ public:
         return has_identity_swizzle;
     }
 
+    /// The view's part of a host sampler variant (Sampler::MakeKey): views with equal keys get
+    /// the same host sampler from one guest TSC. Sampler classes of the pool-mirroring heap.
+    [[nodiscard]] u64 SamplerClassKey() const noexcept;
+
+    /// PoolMirror::Meta bits for the depth-compare rules of IsUncomparable.
+    [[nodiscard]] u32 PoolMetaBits() const noexcept;
+
     [[nodiscard]] GPUVAddr GpuAddr() const noexcept {
         return gpu_addr;
     }
@@ -859,6 +866,9 @@ public:
     }
 
     [[nodiscard]] VkSampler HandleFor(const ImageView& image_view, bool is_depth);
+
+    /// HandleFor for any view whose SamplerClassKey is view_key.
+    [[nodiscard]] VkSampler HandleForClass(u64 view_key, bool is_depth);
 
     /// The guest descriptor and the host state built from it, for EDEN_NX2_FRAME_DUMP_SAMPLED.
     [[nodiscard]] const Tegra::Texture::TSCEntry& Descriptor() const noexcept {
@@ -938,7 +948,7 @@ private:
 
     static constexpr size_t MAX_VARIANTS = 32;
 
-    [[nodiscard]] VariantKey MakeKey(const ImageView& image_view, bool is_depth) const noexcept;
+    [[nodiscard]] VariantKey MakeKey(u64 view_key, bool is_depth) const noexcept;
     [[nodiscard]] VkSampler Find(const VariantKey& key) const noexcept;
     VkSampler Emplace(VariantKey key);
 
@@ -964,6 +974,8 @@ private:
 
 struct TextureCacheParams {
     static constexpr bool ENABLE_VALIDATION = true;
+    /// The texture cache feeds a descriptor heap mirroring the guest pools.
+    static constexpr bool MIRRORS_POOLS = true;
     static constexpr bool FRAMEBUFFER_BLITS = false;
     static constexpr bool HAS_EMULATED_COPIES = false;
     static constexpr bool HAS_DEVICE_MEMORY_INFO = true;
