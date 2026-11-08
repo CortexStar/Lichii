@@ -381,12 +381,17 @@ void AddRuntimeSpirvTime(size_t thread, std::chrono::steady_clock::time_point be
 }
 
 vk::ShaderModule EmitShaderModule(const Device& device, const Shader::Profile& profile,
-                                 const Shader::RuntimeInfo& runtime_info,
-                                 Shader::IR::Program& program, Shader::Backend::Bindings& binding,
-                                 u64 shader_hash, size_t stage_index,
-                                 std::span<const u32> reference = {}) {
+                                  const Shader::RuntimeInfo& runtime_info,
+                                  Shader::IR::Program& program, Shader::Backend::Bindings& binding,
+                                  u64 shader_hash, size_t stage_index,
+                                  std::span<const u32> reference = {}, u128* spirv_hash = nullptr) {
     const auto code =
         EmitPipelineShader(profile, runtime_info, program, binding, shader_hash, reference);
+    if (spirv_hash) {
+        // Graphics pipeline libraries are keyed by the SPIR-V the stage was emitted to.
+        *spirv_hash = Common::CityHash128(reinterpret_cast<const char*>(code.data()),
+                                          code.size() * sizeof(u32));
+    }
     device.SaveShader(code);
     vk::ShaderModule module{BuildShader(device, code)};
 
@@ -415,6 +420,25 @@ vk::ShaderModule EmitShaderModule(const Device& device, const Shader::Profile& p
         module.SetObjectNameEXT(name.c_str());
     }
     return module;
+}
+
+// Graphics pipeline libraries: each stage's resources go to its own descriptor
+// set (set index = stage index) with bindings from 0, and the fragment stage's rescaling bits
+// start at fixed indices, so a stage's SPIR-V does not depend on the other stages' resources.
+void PrepareStageBindings(Shader::Backend::Bindings& binding, size_t stage_index, bool libraries) {
+    if (!libraries) {
+        return;
+    }
+    binding.unified = 0;
+    binding.uniform_buffer = 0;
+    binding.storage_buffer = 0;
+    binding.texture = 0;
+    binding.image = 0;
+    binding.descriptor_set = static_cast<u32>(stage_index);
+    if (stage_index + 1 == Maxwell::MaxShaderStage) {
+        binding.texture_scaling_index = GPL_FRAGMENT_TEXTURE_SCALING_BASE;
+        binding.image_scaling_index = GPL_FRAGMENT_IMAGE_SCALING_BASE;
+    }
 }
 
 struct DeferredStages {
@@ -1708,6 +1732,9 @@ void PipelineCache::TickFrame() {
     ++frame_count;
     native_wait_budget_us =
         static_cast<s64>(Settings::values.native_pipeline_wait_ms.GetValue()) * 1000;
+    if (device.IsExtGraphicsPipelineLibrarySupported()) {
+        graphics_libraries.Report();
+    }
     while (!evicted_pipelines.empty() && scheduler.IsFree(evicted_pipelines.front().first)) {
         evicted_pipelines.pop_front();
     }
@@ -2183,6 +2210,43 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                 storage_buffers + auxiliary_buffers, auxiliary_buffers, set_limit);
         }
     }
+    // Graphics pipeline libraries, for the pipelines a draw needs during play (build_in_parallel):
+    // a link from libraries the session already has is a few milliseconds where a full build
+    // holds the draw for tens. The boot, the background prebuild and the precache build cached
+    // pipelines whole: nothing waits on them, and a monolithic pipeline needs no per-stage sets.
+    // Left on the monolithic route as well: task and mesh pipelines, transform feedback, a static
+    // rasterizer discard, and stages whose texture or image counts do not fit the split rescaling
+    // bits.
+    const bool use_libraries = [&] {
+        if (!build_in_parallel || !device.IsExtGraphicsPipelineLibrarySupported() ||
+            key.state.xfb_enabled != 0) {
+            return false;
+        }
+        if (key.state.extended_dynamic_state_2 == 0 &&
+            key.state.dynamic_state.rasterize_enable == 0) {
+            return false;
+        }
+        size_t pre_textures{}, pre_images{}, fragment_textures{}, fragment_images{};
+        for (size_t index = 1; index < Maxwell::MaxShaderProgram; ++index) {
+            const bool is_emulated_stage = layer_source_program != nullptr &&
+                                           index == static_cast<u32>(Maxwell::ShaderType::Geometry);
+            if (key.unique_hashes[index] == 0 && !is_emulated_stage) {
+                continue;
+            }
+            const Shader::IR::Program& program{programs[index]};
+            if (program.stage == Shader::Stage::Task || program.stage == Shader::Stage::Mesh) {
+                return false;
+            }
+            const bool fragment = index + 1 == Maxwell::MaxShaderProgram;
+            (fragment ? fragment_textures : pre_textures) +=
+                program.info.texture_descriptors.size();
+            (fragment ? fragment_images : pre_images) += program.info.image_descriptors.size();
+        }
+        return FitsLibraryRescalingBits(pre_textures, pre_images, fragment_textures,
+                                        fragment_images);
+    }();
+    std::array<u128, Maxwell::MaxShaderStage> spirv_hashes{};
+
     std::array<const Shader::Info*, Maxwell::MaxShaderStage> infos{};
     std::array<vk::ShaderModule, Maxwell::MaxShaderStage> modules;
     std::array<std::optional<Shader::RuntimeInfo>, Maxwell::MaxShaderStage> deferred_runtime_infos;
@@ -2234,6 +2298,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                            static_cast<std::streamsize>(code.size() * sizeof(u32)));
             }
         }
+        PrepareStageBindings(binding, stage_index, use_libraries);
         if (emit_pools) {
             deferred_runtime_infos[stage_index] = runtime_info;
             if (VideoCommon::Nx2Perf::Verify()) {
@@ -2241,15 +2306,16 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             }
         } else {
             const auto begin = std::chrono::steady_clock::now();
-            modules[stage_index] = EmitShaderModule(device, profile, runtime_info, program, binding,
-                                                   key.unique_hashes[index], stage_index);
+            modules[stage_index] = EmitShaderModule(
+                device, profile, runtime_info, program, binding, key.unique_hashes[index],
+                stage_index, {}, use_libraries ? &spirv_hashes[stage_index] : nullptr);
             if (build_in_parallel) {
                 AddRuntimeSpirvTime(0, begin);
             }
         }
         previous_stage = &program;
     }
-    std::function<std::array<vk::ShaderModule, Maxwell::MaxShaderStage>()> emit_stages;
+    GraphicsPipeline::EmitStagesFunc emit_stages;
     if (emit_pools) {
         auto job = std::make_shared<DeferredStages>();
         job->reservation = std::move(reservation);
@@ -2262,16 +2328,18 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                 infos[stage] = &job->programs[stage + 1].info;
             }
         }
-        emit_stages = [this, job = std::move(job), hashes = key.unique_hashes]() mutable {
+        emit_stages = [this, job = std::move(job), hashes = key.unique_hashes, use_libraries](
+                          std::array<u128, Maxwell::MaxShaderStage>& stage_hashes) mutable {
             const auto begin = std::chrono::steady_clock::now();
             std::array<vk::ShaderModule, Maxwell::MaxShaderStage> stage_modules;
             Shader::Backend::Bindings stage_binding;
             for (size_t stage = 0; stage < stage_modules.size(); ++stage) {
                 if (job->runtime_infos[stage]) {
-                    stage_modules[stage] =
-                        EmitShaderModule(device, profile, *job->runtime_infos[stage],
-                                         job->programs[stage + 1], stage_binding,
-                                         hashes[stage + 1], stage, job->reference_spirv[stage]);
+                    PrepareStageBindings(stage_binding, stage, use_libraries);
+                    stage_modules[stage] = EmitShaderModule(
+                        device, profile, *job->runtime_infos[stage], job->programs[stage + 1],
+                        stage_binding, hashes[stage + 1], stage, job->reference_spirv[stage],
+                        use_libraries ? &stage_hashes[stage] : nullptr);
                 }
             }
             auto completed_pools = std::move(job->pools);
@@ -2288,11 +2356,15 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         };
     }
     Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};
+    const GraphicsPipeline::LibraryParams library_params{
+        .library_cache = use_libraries && !mesh_emulation ? &graphics_libraries : nullptr,
+        .spirv_hashes = spirv_hashes,
+    };
     return std::make_unique<GraphicsPipeline>(
         scheduler, buffer_cache, texture_cache, vulkan_pipeline_cache, &shader_notify, device,
         descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring, thread_worker, statistics,
         render_pass_cache, key, std::move(modules), infos, std::move(emit_stages),
-        std::move(mesh_emulation));
+        std::move(mesh_emulation), library_params);
 
 } catch (const Shader::Exception& exception) {
     auto hash = key.Hash();

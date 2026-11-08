@@ -248,6 +248,19 @@ enum class NvidiaArchitecture {
     return driver_version < VK_MAKE_API_VERSION(0, 2, 0, 416);
 }
 
+/**
+ * Whether pipelines linked from graphics pipeline libraries get link time optimization. Fast
+ * links (without it) are used where the driver has fast linking and draws them correctly.
+ * TODO(AMD): on AMD's Windows driver fast-linked pipelines draw dotted white fringes around alpha
+ * blended effects (RX 7800 XT and RX 7900 XTX, 26.10.1), while optimized links and monolithic
+ * pipelines from the same SPIR-V and per-stage sets draw correctly (zortos293/Lichii#579,
+ * PantACRO4life/Lichii#1). Every link is optimized there until AMD fixes it.
+ */
+[[nodiscard]] constexpr bool GraphicsLibraryLinksOptimized(VkDriverId driver_id,
+                                                           bool fast_linking) {
+    return driver_id == VK_DRIVER_ID_AMD_PROPRIETARY || !fast_linking;
+}
+
 /// Handles data specific to a physical device.
 class Device {
 public:
@@ -740,7 +753,21 @@ FN_MAX_LIMIT_LIST
         return properties.properties.limits.maxTessellationPatchSize;
     }
 
+    /// The device has VK_EXT_graphics_pipeline_library: graphics pipelines built during play are
+    /// linked from per-stage libraries.
+    bool IsExtGraphicsPipelineLibrarySupported() const {
+        return graphics_pipeline_library_enabled;
+    }
+
+    /// Whether pipelines are linked from graphics pipeline libraries with link time optimization
+    /// (GraphicsLibraryLinksOptimized); their libraries then keep link time optimization info.
+    bool LinksGraphicsLibrariesOptimized() const {
+        return GraphicsLibraryLinksOptimized(
+            GetDriverID(), properties.graphics_pipeline_library.graphicsPipelineLibraryFastLinking);
+    }
+
     /// Returns true if the device supports task and mesh shaders (VK_EXT_mesh_shader).
+
     bool IsExtMeshShaderSupported() const {
         return extensions.mesh_shader && features.mesh_shader.taskShader &&
                features.mesh_shader.meshShader;
@@ -1365,6 +1392,7 @@ private:
         VkPhysicalDeviceSubgroupSizeControlProperties subgroup_size_control{};
         VkPhysicalDeviceTransformFeedbackPropertiesEXT transform_feedback{};
         VkPhysicalDeviceMaintenance5PropertiesKHR maintenance5{};
+        VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT graphics_pipeline_library{};
         VkPhysicalDeviceDepthStencilResolveProperties depth_stencil_resolve{};
         VkPhysicalDeviceCustomBorderColorPropertiesEXT custom_border_color{};
         VkPhysicalDeviceCooperativeMatrixPropertiesKHR cooperative_matrix{};
@@ -1376,6 +1404,11 @@ private:
     Extensions extensions{};
     Features features{};
     Properties properties{};
+
+    /// VK_EXT_graphics_pipeline_library, added to the device with its feature only.
+    bool graphics_pipeline_library_requested{};
+    VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT graphics_pipeline_library_features{};
+    bool graphics_pipeline_library_enabled{};
 
     VkPhysicalDeviceFeatures2 features2{};
     VkPhysicalDeviceFaultFeaturesEXT device_fault_features{};

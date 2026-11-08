@@ -217,6 +217,10 @@ private:
     u64 vertex_attribute_types{}; ///< graphics_key's attribute types before the program's mask
     GraphicsPipeline* current_pipeline{};
 
+    /// Shader libraries shared by the graphics pipelines built during play. Declared before the
+    /// pipelines, so it outlives them.
+    GraphicsPipelineLibraryCache graphics_libraries;
+
     /// Destroys graphics pipelines unused for a while, once the GPU is done with them.
     void EvictUnusedPipelines();
     u64 frame_count{};

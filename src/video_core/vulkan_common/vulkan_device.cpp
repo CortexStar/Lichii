@@ -1224,6 +1224,18 @@ bool Device::GetSuitability(bool requires_swapchain) {
     FOR_EACH_VK_FEATURE_EXT(FEATURE_EXTENSION);
     FOR_EACH_VK_EXTENSION(EXTENSION);
 
+    // Graphics pipelines built during play are linked from per-stage libraries
+    // (vk_pipeline_library). Kept out of the extension tables: it is added only with its feature.
+    graphics_pipeline_library_requested = true;
+    if (graphics_pipeline_library_requested &&
+        supported_extensions.contains(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) &&
+        supported_extensions.contains(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME)) {
+        loaded_extensions.insert(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+        loaded_extensions.insert(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+    } else {
+        graphics_pipeline_library_requested = false;
+    }
+
     extensions.depth_stencil_resolve =
         extensions.depth_stencil_resolve &&
         (instance_version >= VK_API_VERSION_1_2 || extensions.create_renderpass2);
@@ -1349,6 +1361,12 @@ bool Device::GetSuitability(bool requires_swapchain) {
         SetNext(next, device_fault_features);
     }
 
+    if (graphics_pipeline_library_requested) {
+        graphics_pipeline_library_features.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT;
+        SetNext(next, graphics_pipeline_library_features);
+    }
+
     // Perform the feature test.
     physical.GetFeatures2(features2);
 
@@ -1454,6 +1472,12 @@ bool Device::GetSuitability(bool requires_swapchain) {
         properties.integer_dot_product.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES;
         SetNext(next, properties.integer_dot_product);
+    }
+
+    if (graphics_pipeline_library_requested) {
+        properties.graphics_pipeline_library.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT;
+        SetNext(next, properties.graphics_pipeline_library);
     }
 
     // Perform the property fetch.
@@ -1727,6 +1751,26 @@ void Device::RemoveUnsuitableExtensions() {
     }
     RemoveExtensionFeatureIfUnsuitable(extensions.mesh_shader, features.mesh_shader,
                                        VK_EXT_MESH_SHADER_EXTENSION_NAME);
+
+    // VK_EXT_graphics_pipeline_library. Without fast linking every link is optimized
+    // (LinksGraphicsLibrariesOptimized).
+    if (graphics_pipeline_library_requested) {
+        const bool usable = graphics_pipeline_library_features.graphicsPipelineLibrary;
+        if (!usable) {
+            loaded_extensions.erase(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+            loaded_extensions.erase(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+            graphics_pipeline_library_features.graphicsPipelineLibrary = VK_FALSE;
+        }
+        graphics_pipeline_library_enabled = usable;
+        if (usable) {
+            LOG_INFO(Render_Vulkan,
+                     "Nx2Perf gpl: graphics pipeline libraries on ({} links, independent "
+                     "interpolation decoration {})",
+                     LinksGraphicsLibrariesOptimized() ? "optimized" : "fast",
+                     properties.graphics_pipeline_library
+                         .graphicsPipelineLibraryIndependentInterpolationDecoration);
+        }
+    }
 
     // VK_KHR_shader_quad_control
     // Quad control depends on maximal reconvergence; advertise neither unless
