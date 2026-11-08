@@ -576,13 +576,14 @@ private:
         if (window < 5.0) {
             return;
         }
+        const auto rate = [&](u64 count) { return static_cast<double>(count) / window; };
         LOG_INFO(HW_GPU,
                  "Fence decisions/s: {:.0f} made (delayed fences {:.0f}, committed flushes {:.0f}, "
                  "64-skip cap {:.0f}, query cache fence work {:.0f}, uncommitted operations "
                  "{:.0f}), {:.0f} skipped",
-                 (counts[0] + counts[1] + counts[2] + counts[3] + counts[4]) / window,
-                 counts[0] / window, counts[1] / window, counts[2] / window, counts[3] / window,
-                 counts[4] / window, counts[5] / window);
+                 rate(counts[0] + counts[1] + counts[2] + counts[3] + counts[4]), rate(counts[0]),
+                 rate(counts[1]), rate(counts[2]), rate(counts[3]), rate(counts[4]),
+                 rate(counts[5]));
         counts = {};
         since = now;
     }
