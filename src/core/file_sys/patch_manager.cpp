@@ -131,6 +131,9 @@ constexpr std::array FPS_UNLOCK_RECORDS{
 // Ocarina's output size comes from the 7-entry table at main+0x3F58540 (640x480 ... 3840x2160),
 // read only by main+0x112C5E0. Its 1440p entry becomes 3440x1440. main+0x1087F40 and main+0x1087E70
 // turn a size back into the table index; without the width check any 1440-high size stays index 5.
+// main+0x6505EC caps the table size by the dynamic-resolution level's size (16:9, 2560x1440 at the
+// top level), which kept the frame at 2560x1440; a cave at main+0x3C46700 caps only the height and
+// derives the width from the table's aspect: w = table_w * min(level_h, table_h) / table_h.
 // The camera parameters' DefaultAspect (default DefaultNear 0.1, DefaultFar 25000, DefaultFovy 50
 // at main+0x3EF5DC0) becomes 43:18 with the same vertical field of view (Hor+), and so does the
 // value the parameters' constructor stores inline (main+0xEF3834: aspect at +0x38, far 25000,
@@ -146,6 +149,14 @@ constexpr std::array<u8, 4> ULTRAWIDE_CTOR_LOW_ORIGINAL{0x68, 0xC7, 0x91, 0xD2};
 constexpr std::array<u8, 4> ULTRAWIDE_CTOR_LOW{0xC8, 0x71, 0x9C, 0xD2};           // mov x8, #0xe38e
 constexpr std::array<u8, 4> ULTRAWIDE_CTOR_HIGH_ORIGINAL{0x68, 0xFC, 0xA7, 0xF2}; // movk #0x3fe3
 constexpr std::array<u8, 4> ULTRAWIDE_CTOR_HIGH{0x08, 0x03, 0xA8, 0xF2};          // movk #0x4018
+constexpr std::array<u8, 4> ULTRAWIDE_CAP_ORIGINAL{0xBF, 0x02, 0x08, 0x6B}; // cmp w21, w8
+constexpr std::array<u8, 4> ULTRAWIDE_CAP_BRANCH{0x45, 0xD8, 0xD7, 0x14};   // b main+0x3C46700
+// cmp w22, w9 ; csel w9, w22, w9, lt ; ldur w10, [x29, #-4] ; mul w8, w8, w9 ;
+// udiv w8, w8, w10 ; and w8, w8, #~1 ; b main+0x6505FC
+constexpr std::array<u8, 28> ULTRAWIDE_CAP_CAVE{
+    0xDF, 0x02, 0x09, 0x6B, 0xC9, 0xB2, 0x89, 0x1A, 0xAA, 0xC3, 0x5F, 0xB8, 0x08, 0x7D,
+    0x09, 0x1B, 0x08, 0x09, 0xCA, 0x1A, 0x08, 0x79, 0x1F, 0x12, 0xB9, 0x27, 0x28, 0x17,
+};
 constexpr std::array ULTRAWIDE_RECORDS{
     BuiltinPatchRecord{0x3F58568, ULTRAWIDE_SIZE, ULTRAWIDE_SIZE_ORIGINAL},
     BuiltinPatchRecord{0x1087FC0, ULTRAWIDE_NOP, ULTRAWIDE_WIDTH_BRANCH},
@@ -153,6 +164,8 @@ constexpr std::array ULTRAWIDE_RECORDS{
     BuiltinPatchRecord{0x3EF5DCC, ULTRAWIDE_ASPECT, ULTRAWIDE_ASPECT_ORIGINAL},
     BuiltinPatchRecord{0xEF3834, ULTRAWIDE_CTOR_LOW, ULTRAWIDE_CTOR_LOW_ORIGINAL},
     BuiltinPatchRecord{0xEF383C, ULTRAWIDE_CTOR_HIGH, ULTRAWIDE_CTOR_HIGH_ORIGINAL},
+    BuiltinPatchRecord{0x6505EC, ULTRAWIDE_CAP_BRANCH, ULTRAWIDE_CAP_ORIGINAL},
+    BuiltinPatchRecord{0x3C46700, ULTRAWIDE_CAP_CAVE, {}, true},
 };
 
 // The render pipeline's settings are mirrored into nodes (main+0x11ac..., per setting: init, then
