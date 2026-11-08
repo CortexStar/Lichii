@@ -3806,6 +3806,10 @@ u32 RasterizerVulkan::ComputeDynamicState(DynamicStateDelta::Slot slot,
             return 0;
         }
         if (!device.SupportsDynamicState3LineRasterizationMode()) {
+            if (pipeline_cache.UsesShaderObjects()) {
+                // What a pipeline without line state rasterizes with.
+                return one(static_cast<u32>(VK_LINE_RASTERIZATION_MODE_DEFAULT_EXT));
+            }
             static std::once_flag warn_missing_rect;
             std::call_once(warn_missing_rect, [] {
                 LOG_WARNING(Render_Vulkan,
@@ -3831,7 +3835,8 @@ u32 RasterizerVulkan::ComputeDynamicState(DynamicStateDelta::Slot slot,
     }
     case Slot::LineStippleEnable:
         if (!device.SupportsDynamicState3LineStippleEnable()) {
-            return 0;
+            // Shader objects: off, as pipelines without stippled rectangular lines have it.
+            return pipeline_cache.UsesShaderObjects() ? one(0) : 0;
         }
         return one(regs.line_stipple_enable != 0 ? 1U : 0U);
     case Slot::ConservativeRasterizationMode:

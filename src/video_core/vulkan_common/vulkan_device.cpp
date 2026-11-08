@@ -2107,20 +2107,37 @@ void Device::RemoveUnsuitableExtensions() {
     // hold set dynamically. Shader objects draw only in render pass instances begun with
     // vkCmdBeginRendering (VUID-vkCmdDraw-None-08876). Tilers stay on pipelines: their MSAA
     // resolve shadows are render pass resolve attachments.
-    extensions.shader_object =
-        instance_version >= VK_API_VERSION_1_3 && features.shader_object.shaderObject &&
-        features.dynamic_rendering.dynamicRendering && extensions.extended_dynamic_state &&
-        extensions.extended_dynamic_state2 && dynamic_state3_blending &&
-        dynamic_state3_depth_clamp_enable && dynamic_state3_logic_op_enable &&
-        dynamic_state3_alpha_to_coverage &&
-        (!extensions.line_rasterization ||
-         (dynamic_state3_line_raster_mode && dynamic_state3_line_stipple_enable)) &&
-        (!extensions.conservative_rasterization || dynamic_state3_conservative_raster_mode) &&
-        extensions.vertex_input_dynamic_state && !extensions.viewport_swizzle && !IsTiler() &&
-        // The mesh emulation draws with pipelines, whose static
-        // viewport counts don't take the counted viewports.
-        extensions.mesh_shader && features.mesh_shader.meshShader &&
-        features.mesh_shader.taskShader;
+    // Line rasterization mode and stipple enable need no EDS3 feature with shader objects
+    // (shaderObject covers them): the 9070 XT has bresenham but no rectangular lines
+    // (vulkaninfo rectangularLines = false), which the pipelines' dynamic line mode needs.
+    const std::array<std::pair<const char*, bool>, 13> shader_object_needs{{
+        {"Vulkan 1.3", instance_version >= VK_API_VERSION_1_3},
+        {"shaderObject", features.shader_object.shaderObject != VK_FALSE},
+        {"dynamicRendering", features.dynamic_rendering.dynamicRendering != VK_FALSE},
+        {"extended dynamic state", extensions.extended_dynamic_state},
+        {"extended dynamic state 2", extensions.extended_dynamic_state2},
+        {"EDS3 blending", dynamic_state3_blending},
+        {"EDS3 depth clamp", dynamic_state3_depth_clamp_enable},
+        {"EDS3 logic op enable", dynamic_state3_logic_op_enable},
+        {"EDS3 alpha to coverage", dynamic_state3_alpha_to_coverage},
+        {"EDS3 conservative rasterization",
+         !extensions.conservative_rasterization || dynamic_state3_conservative_raster_mode},
+        {"dynamic vertex input", extensions.vertex_input_dynamic_state},
+        {"no viewport swizzle, no tiler", !extensions.viewport_swizzle && !IsTiler()},
+        // The mesh emulation draws with pipelines, whose static viewport counts don't take
+        // the counted viewports.
+        {"task and mesh shaders", extensions.mesh_shader &&
+                                      features.mesh_shader.meshShader != VK_FALSE &&
+                                      features.mesh_shader.taskShader != VK_FALSE},
+    }};
+    bool shader_object_usable = true;
+    for (const auto& [need, met] : shader_object_needs) {
+        if (!met) {
+            LOG_INFO(Render_Vulkan, "VK_EXT_shader_object not used: needs {}", need);
+        }
+        shader_object_usable &= met;
+    }
+    extensions.shader_object = shader_object_usable;
     RemoveExtensionFeatureIfUnsuitable(extensions.shader_object, features.shader_object,
                                        VK_EXT_SHADER_OBJECT_EXTENSION_NAME);
 }
