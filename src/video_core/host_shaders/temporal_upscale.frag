@@ -90,8 +90,10 @@ void main() {
         imageStore(next_history, ivec2(gl_FragCoord.xy), color);
         return;
     }
-    const vec2 render_scale = vec2(render_size) / vec2(textureSize(input_color, 0));
-    const ivec2 motion_size = ivec2(vec2(textureSize(motion_vectors, 0)) * render_scale);
+    // A rendered region sits on the same pixel grid in the colour and the motion targets, whatever
+    // their sizes; without one, the motion vectors cover the whole input at their own scale.
+    const bool has_region = render_size != textureSize(input_color, 0);
+    const ivec2 motion_size = has_region ? render_size : textureSize(motion_vectors, 0);
     // The output pixel's centre in input pixels. Input texel k sampled the scene at k + 0.5 - jitter
     // (the sign measured against consecutive frames).
     const vec2 target = texcoord * vec2(input_size);

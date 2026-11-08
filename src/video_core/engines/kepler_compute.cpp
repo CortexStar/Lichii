@@ -1021,18 +1021,23 @@ void KeplerCompute::RememberDlssMotionVectors() {
         return GetTICEntry(tic_index);
     };
     const auto color = image(0x278), motion = image(0x290);
+    // A game that renders a region of its targets (The Duskbloods) draws it on the same pixel grid
+    // in targets of other sizes: in handheld mode its motion and depth are 1536x864 against a
+    // 1920x1080 colour. The upscale checks the region fits them.
+    const auto same_grid = [&](const Texture::TICEntry& other) {
+        return dlss_chain.render_region ||
+               (other.Width() == color->Width() && other.Height() == color->Height());
+    };
     if (!color || !motion || color->format != Texture::TextureFormat::B10G11R11 ||
         motion->format != Texture::TextureFormat::R16G16 || motion->Address() == 0 ||
-        motion->Width() != color->Width() || motion->Height() != color->Height() ||
-        !motion->IsBlockLinear())
+        !same_grid(*motion) || !motion->IsBlockLinear())
         return;
     dlss_motion_vectors = *motion;
     dlss_motion_color = color->Address();
     const u32 depth_offset = dlss_chain.render_region ? 0x288 : 0x298;
     const auto depth = cbuf.size.Value() >= 0x29c ? image(depth_offset) : std::nullopt;
     if (depth && depth->format == Texture::TextureFormat::Z32 && depth->Address() != 0 &&
-        depth->Width() == color->Width() && depth->Height() == color->Height() &&
-        depth->IsBlockLinear()) {
+        same_grid(*depth) && depth->IsBlockLinear()) {
         dlss_depth = *depth;
     } else {
         dlss_depth.reset();
@@ -1153,7 +1158,8 @@ bool KeplerCompute::ScaleDlssRenderRegion(GPUVAddr constants,
         result.addr_lower = static_cast<u32>(tic.Address());
         return result;
     };
-    if (!jitter || !motion) {
+    if (!jitter || !motion || width > motion->Width() || height > motion->Height() ||
+        (depth && (width > depth->Width() || height > depth->Height()))) {
         return false;
     }
     Fermi2D::Surface motion_surface = surface(*motion);
