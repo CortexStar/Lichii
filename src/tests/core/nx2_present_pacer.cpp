@@ -135,3 +135,19 @@ TEST_CASE("NX2 fixed-period pacing matches the previous algorithm", "[core][nx2_
         }
     }
 }
+
+TEST_CASE("NX2 movie cadence paces at a multiple of the movie rate", "[core][nx2_present_pacer]") {
+    using Service::MovieCadenceRate;
+    // No movie, or no limit: unchanged.
+    REQUIRE(MovieCadenceRate(112, 0) == 112);
+    REQUIRE(MovieCadenceRate(0, 60) == 0);
+    // A 60 fps movie: 112 -> 60, 224 -> 180, 240 -> 240, 120 -> 120.
+    REQUIRE(MovieCadenceRate(112, 60) == 60);
+    REQUIRE(MovieCadenceRate(224, 60) == 180);
+    REQUIRE(MovieCadenceRate(240, 60) == 240);
+    REQUIRE(MovieCadenceRate(120, 60) == 120);
+    // Below the movie's rate the late frames are dropped instead: unchanged.
+    REQUIRE(MovieCadenceRate(50, 60) == 50);
+    // 30 fps movies.
+    REQUIRE(MovieCadenceRate(112, 30) == 90);
+}

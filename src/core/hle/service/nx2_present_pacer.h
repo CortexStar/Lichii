@@ -69,6 +69,23 @@ constexpr std::uint32_t ConsoleVsyncHz = 60;
     return fps_limit == 0 ? host_cap : (std::min)(fps_limit, host_cap);
 }
 
+/**
+ * Returns the rate to pace at while a movie plays: the largest multiple of the movie's frame rate
+ * that is not above @p rate, so every movie frame stays on screen for the same number of presents
+ * (a 60 fps movie at 112 presents a second shows frames for one or two presents: judder).
+ *
+ * @param rate       Presents or vsync events per second otherwise; 0 for no limit.
+ * @param movie_rate Frame rate of the movie playing, or 0 when none plays.
+ * @return @p rate when no movie plays, @p rate is 0, or it is below the movie's rate.
+ */
+[[nodiscard]] constexpr std::uint32_t MovieCadenceRate(std::uint32_t rate,
+                                                       std::uint32_t movie_rate) {
+    if (movie_rate == 0 || rate < movie_rate) {
+        return rate;
+    }
+    return rate / movie_rate * movie_rate;
+}
+
 class Nx2PresentPacer {
 public:
     using Clock = std::chrono::steady_clock;
