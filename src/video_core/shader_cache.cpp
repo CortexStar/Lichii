@@ -300,13 +300,14 @@ const ShaderInfo* ShaderCache::ComputeShader() {
         kepler_compute->TraceComputeHandles(shader->lowered_native->native_program_key,
                                             shader->unique_hash);
         kepler_compute->ObserveOotNetwork(program_id, shader->lowered_native->native_program_key);
-        if (kepler_compute->ReplaceOotNetwork(program_id,
-                                              shader->lowered_native->native_program_key)) {
+        if (kepler_compute->ReplaceOotNetwork(
+                program_id, shader->lowered_native->native_program_key, shader->unique_hash)) {
             throw FireEmblemUpscale::DispatchReplaced{};
         }
     }
     if (kepler_compute->IsNativeMode() && shader->lowered_native &&
-        kepler_compute->BypassOotNetwork(program_id, shader->lowered_native->native_program_key)) {
+        kepler_compute->BypassOotNetwork(program_id, shader->lowered_native->native_program_key,
+                                         shader->unique_hash)) {
         throw FireEmblemUpscale::DispatchReplaced{};
     }
     if (kepler_compute->IsNativeMode() && shader->lowered_native &&

@@ -7,6 +7,7 @@
 #include <mutex>
 
 #include "common/common_types.h"
+#include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/engines/maxwell_3d.h"
 
@@ -26,6 +27,26 @@ constexpr u64 ProgramId = 0x0400486024DEC000ULL;
 constexpr u64 PrepassProgramKey = 0x8475d671e6967428ULL;
 constexpr u64 NetworkProgramKey = 0x42593194bb0b2b32ULL;
 constexpr u64 OutputProgramKey = 0xda6df3e54c716df2ULL;
+
+/// Shader hash (NativeShaderHash, as the DKB GPU trace prints it) of the heavy dispatch the game
+/// runs between the prepass and the network.
+constexpr u64 HeavyDispatchShaderHash = 0xd9ee412f00ce399aULL;
+
+/// The prepass, the heavy dispatch and the network only feed the output pass: none of them runs
+/// while the output pass is replaced (a copy of the tonemapped image, DLSS, FSR).
+constexpr bool FeedsOutputPass(u64 native_key, u64 shader_hash) {
+    return native_key == PrepassProgramKey || native_key == NetworkProgramKey ||
+           shader_hash == HeavyDispatchShaderHash;
+}
+
+/// Logs once that the heavy dispatch is skipped, so a log shows the hash still matches.
+inline void NoteHeavyDispatchSkipped() {
+    static std::atomic<bool> logged{};
+    if (!logged.exchange(true, std::memory_order_relaxed)) {
+        LOG_INFO(HW_GPU, "Ocarina of Time: heavy dispatch {:016x} skipped with the network",
+                 HeavyDispatchShaderHash);
+    }
+}
 
 /// Constant buffer 0 offset of the output pass's texture handle for the B10G11R11 image it writes
 /// (the scene image the rest of the frame uses).

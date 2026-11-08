@@ -1118,7 +1118,7 @@ std::optional<Texture::TICEntry> KeplerCompute::ConstBuffer0Image(u32 offset) co
     return GetTICEntry(tic_index);
 }
 
-bool KeplerCompute::BypassOotNetwork(u64 program_id, u64 native_key) {
+bool KeplerCompute::BypassOotNetwork(u64 program_id, u64 native_key, u64 shader_hash) {
     using namespace VideoCommon::OotNetwork;
     if (!BypassEnabled(program_id)) {
         return false;
@@ -1138,8 +1138,12 @@ bool KeplerCompute::BypassOotNetwork(u64 program_id, u64 native_key) {
     if (tonemapped.Address() == 0) {
         return false;
     }
-    if (native_key == PrepassProgramKey || native_key == NetworkProgramKey) {
-        return bypass->output_replaced.load(std::memory_order_relaxed);
+    if (FeedsOutputPass(native_key, shader_hash)) {
+        const bool skipped = bypass->output_replaced.load(std::memory_order_relaxed);
+        if (skipped && shader_hash == HeavyDispatchShaderHash) {
+            NoteHeavyDispatchSkipped();
+        }
+        return skipped;
     }
     if (native_key != OutputProgramKey) {
         return false;
@@ -1451,16 +1455,17 @@ void KeplerCompute::ObserveOotNetwork(u64 program_id, u64 native_key) {
     }
 }
 
-bool KeplerCompute::ReplaceOotNetwork(u64 program_id, u64 native_key) {
+bool KeplerCompute::ReplaceOotNetwork(u64 program_id, u64 native_key, u64 shader_hash) {
     using namespace VideoCommon::OotDlss;
     if (program_id != ProgramId || !ReplacesNetwork()) {
         return false;
     }
-    constexpr u64 PrepassKey = 0x8475d671e6967428ULL;
-    constexpr u64 NetworkKey = 0x42593194bb0b2b32ULL;
-    constexpr u64 OutputKey = 0xda6df3e54c716df2ULL;
+    constexpr u64 OutputKey = VideoCommon::OotNetwork::OutputProgramKey;
     const u64 tonemapped = Targets().tonemapped_gpu.load(std::memory_order_relaxed);
-    if (native_key == PrepassKey || native_key == NetworkKey) {
+    if (VideoCommon::OotNetwork::FeedsOutputPass(native_key, shader_hash)) {
+        if (tonemapped != 0 && shader_hash == VideoCommon::OotNetwork::HeavyDispatchShaderHash) {
+            VideoCommon::OotNetwork::NoteHeavyDispatchSkipped();
+        }
         return tonemapped != 0;
     }
     if (native_key != OutputKey || tonemapped == 0) {

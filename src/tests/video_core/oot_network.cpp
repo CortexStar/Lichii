@@ -29,3 +29,16 @@ TEST_CASE("Ocarina of Time network bypass follows the setting and the game",
 
     setting.SetValue(previous);
 }
+
+TEST_CASE("Ocarina of Time network passes that only feed the output pass are skipped with it",
+          "[video_core][oot_network]") {
+    constexpr u64 OtherKey = 0x1234;
+    constexpr u64 OtherHash = 0x5678;
+    CHECK(FeedsOutputPass(PrepassProgramKey, OtherHash));
+    CHECK(FeedsOutputPass(NetworkProgramKey, OtherHash));
+    // The heavy dispatch is known by its shader hash.
+    CHECK(FeedsOutputPass(OtherKey, HeavyDispatchShaderHash));
+    // The output pass itself is replaced, not skipped; other passes run.
+    CHECK_FALSE(FeedsOutputPass(OutputProgramKey, OtherHash));
+    CHECK_FALSE(FeedsOutputPass(OtherKey, OtherHash));
+}

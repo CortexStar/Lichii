@@ -256,7 +256,7 @@ public:
     /// Ocarina of Time with anti-aliasing at No sharpening (oot_network.h): true when this
     /// dispatch of the game's network is skipped, or its output pass replaced by a copy of the
     /// tonemapped image.
-    bool BypassOotNetwork(u64 program_id, u64 native_key);
+    bool BypassOotNetwork(u64 program_id, u64 native_key, u64 shader_hash);
     void TraceDlssContract(u64 native_key, bool warn_unvalidated = true);
     /// EDEN_NX2_COMPUTE_HANDLE_TRACE=1: logs a compute program's launch and the texture handles
     /// in its constant buffer 0, at its 1st, 61st and 62nd dispatch.
@@ -266,7 +266,7 @@ public:
     void ObserveOotNetwork(u64 program_id, u64 native_key);
     /// Ocarina of Time DLSS / no-sharpen modes: true when this network dispatch is replaced (the
     /// output pass is replaced by DLSS or a copy of the tonemapped image).
-    bool ReplaceOotNetwork(u64 program_id, u64 native_key);
+    bool ReplaceOotNetwork(u64 program_id, u64 native_key, u64 shader_hash);
     /// GPU address of the image a cb0 texture handle at `offset` points to, or 0.
     u64 HandleImageAddress(u32 offset);
 
