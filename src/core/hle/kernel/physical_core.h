@@ -13,6 +13,7 @@
 #include <mutex>
 
 #include "core/arm/arm_interface.h"
+#include "core/hle/kernel/k_spin_lock.h"
 
 namespace Kernel {
 class KernelCore;
@@ -68,11 +69,13 @@ public:
 
 private:
     const std::size_t m_core_index;
-    std::mutex m_guard;
-    std::condition_variable m_on_interrupt;
+    // A KSpinLock rather than std::mutex, and Idle sleeps on an address wait on m_is_interrupted
+    // rather than a condition variable: through winpthreads every contended lock, every
+    // Interrupt of an idle core and every RunThread entry and exit paid semaphore round trips.
+    KSpinLock m_guard;
     Core::ArmInterface* m_arm_interface{};
     KThread* m_current_thread{};
-    std::atomic<bool> m_is_interrupted{};
+    std::atomic<u32> m_is_interrupted{};
     bool m_is_single_core{};
 };
 
