@@ -126,6 +126,10 @@ private:
 
     void DiscardFrame(Frame* frame);
 
+    /// Whether this present goes to the present thread's own queue (Device::GetPresentThreadQueue):
+    /// on the present thread, with Lichii's own swapchain, when the device has the queue.
+    [[nodiscard]] bool OnPresentThreadQueue() const;
+
     /// Sends the HDR10 metadata of the monitor's current state to an HDR10 swapchain.
     void UpdateHdrMetadata();
 

@@ -296,7 +296,7 @@ bool Swapchain::AcquireNextImage(bool may_flush) {
     return false;
 }
 
-void Swapchain::Present(VkSemaphore render_semaphore, bool new_frame) {
+void Swapchain::Present(VkSemaphore render_semaphore, bool new_frame, const vk::Queue* own_queue) {
     const auto present_queue{device.GetPresentQueue()};
     const u64 next_present_id = present_id + 1;
     const VkPresentId2KHR present_id_info{
@@ -336,6 +336,9 @@ void Swapchain::Present(VkSemaphore render_semaphore, bool new_frame) {
             return result;
         }
 #endif
+        if (own_queue != nullptr) {
+            return own_queue->Present(present_info);
+        }
         std::scoped_lock lock{scheduler.submit_mutex};
         return present_queue.Present(present_info);
     }();

@@ -51,3 +51,26 @@ TEST_CASE("AMD FG swapchain queues need free queues", "[video_core][amd]") {
     CHECK(plan->async_compute.index == 1);
     CHECK(!Vulkan::PlanFrameGenQueues(two, 5, 0));
 }
+
+TEST_CASE("The present thread's queue follows the FG plan in the graphics family",
+          "[video_core][amd]") {
+    const std::array families{
+        Vulkan::QueueFamilyTraits{GRAPHICS, 8, true},
+        Vulkan::QueueFamilyTraits{COMPUTE, 8, true},
+        Vulkan::QueueFamilyTraits{VK_QUEUE_TRANSFER_BIT | VK_QUEUE_SPARSE_BINDING_BIT, 1, false},
+        Vulkan::QueueFamilyTraits{VK_QUEUE_VIDEO_ENCODE_BIT_KHR, 1, false},
+        Vulkan::QueueFamilyTraits{VK_QUEUE_VIDEO_DECODE_BIT_KHR, 1, false},
+    };
+    // RX 9070 XT with AMD's runtime: game 0.0, FG present 0.1, so the present thread takes 0.2.
+    const auto plan = Vulkan::PlanFrameGenQueues(families, 0, 0);
+    REQUIRE(plan);
+    CHECK(Vulkan::PresentThreadQueueIndex(plan, 0, 8) == 2U);
+    // Without AMD's runtime: the queue after the game's.
+    CHECK(Vulkan::PresentThreadQueueIndex(std::nullopt, 0, 8) == 1U);
+    // A family with a single queue has none to spare.
+    CHECK(!Vulkan::PresentThreadQueueIndex(std::nullopt, 0, 1));
+    // The plan used the family's last queue.
+    const std::array two{Vulkan::QueueFamilyTraits{GRAPHICS, 2, true},
+                         Vulkan::QueueFamilyTraits{COMPUTE, 2, false}};
+    CHECK(!Vulkan::PresentThreadQueueIndex(Vulkan::PlanFrameGenQueues(two, 0, 0), 0, 2));
+}

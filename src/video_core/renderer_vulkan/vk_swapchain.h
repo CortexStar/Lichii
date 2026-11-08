@@ -55,7 +55,10 @@ public:
 
     /// Presents the rendered image to the swapchain. `new_frame` is false for a repeat of the
     /// last image (the present cadence): its display starts no guest frame.
-    void Present(VkSemaphore render_semaphore, bool new_frame = true);
+    /// @param own_queue The present thread's own queue to present on (no submit mutex), or null
+    ///                  for the device's present queue.
+    void Present(VkSemaphore render_semaphore, bool new_frame = true,
+                 const vk::Queue* own_queue = nullptr);
 
     /// Returns true when the swapchain needs to be recreated.
     bool NeedsRecreation() const {

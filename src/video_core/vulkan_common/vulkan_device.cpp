@@ -791,6 +791,22 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     if (AmdFfx::Loaded()) {
         SetupAmdFfx(all_queue_cis, amd_queue_priorities, amd_features, first_next);
     }
+    // A queue of its own for the present thread: its copies and flips don't wait behind the
+    // game's work on the graphics queue, so presents reach the display on time.
+    std::optional<u32> present_thread_index;
+    std::vector<float> present_thread_priorities;
+    if (graphics_family == present_family) {
+        const auto families = physical.GetQueueFamilyProperties();
+        present_thread_index = PresentThreadQueueIndex(frame_gen_queues, graphics_family,
+                                                       families[graphics_family].queueCount);
+    }
+    if (present_thread_index) {
+        const auto it = std::ranges::find(all_queue_cis, graphics_family,
+                                          &VkDeviceQueueCreateInfo::queueFamilyIndex);
+        present_thread_priorities.assign(*present_thread_index + 1, 1.0f);
+        it->queueCount = *present_thread_index + 1;
+        it->pQueuePriorities = present_thread_priorities.data();
+    }
     // VK_AMD_anti_lag (Anti-Lag 2 and its frame limiter, used by RendererVulkan).
     if (supported_extensions.contains(VK_AMD_ANTI_LAG_EXTENSION_NAME)) {
         VkPhysicalDeviceFeatures2 query{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
@@ -808,6 +824,11 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 
     graphics_queue = logical.GetQueue(graphics_family);
     present_queue = logical.GetQueue(present_family);
+    if (present_thread_index) {
+        present_thread_queue = logical.GetQueue(graphics_family, *present_thread_index);
+        LOG_INFO(Render_Vulkan, "Present thread queue {}.{}", graphics_family,
+                 *present_thread_index);
+    }
     if (anti_lag_features.antiLag) {
         anti_lag_update = reinterpret_cast<PFN_vkAntiLagUpdateAMD>(
             dld.vkGetDeviceProcAddr(*logical, "vkAntiLagUpdateAMD"));

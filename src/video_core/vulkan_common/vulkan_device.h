@@ -399,6 +399,12 @@ public:
         return present_queue;
     }
 
+    /// The present thread's own queue in the graphics family (PresentThreadQueueIndex), or a null
+    /// queue when the family had none to spare. Only PresentManager's present thread uses it.
+    vk::Queue GetPresentThreadQueue() const {
+        return present_thread_queue;
+    }
+
     /// Returns main graphics queue family index.
     u32 GetGraphicsFamily() const {
         return graphics_family;
@@ -1466,6 +1472,7 @@ private:
     vk::Queue present_queue;     ///< Main present queue.
     std::vector<bool> queue_family_present; ///< Per family: can present to the surface.
     std::optional<FrameGenQueuePlan> frame_gen_queues; ///< AMD FG swapchain queues, when made.
+    vk::Queue present_thread_queue;                    ///< See GetPresentThreadQueue.
     FrameGenQueue frame_gen_present_queue;
     FrameGenQueue frame_gen_compute_queue;
     FrameGenQueue frame_gen_acquire_queue;

@@ -602,8 +602,17 @@ void PresentManager::DiscardFrame(Frame* frame) {
         .pSignalSemaphores = nullptr,
     };
 
+    if (OnPresentThreadQueue()) {
+        void(device.GetPresentThreadQueue().Submit(submit_info, *frame->present_done));
+        return;
+    }
     std::scoped_lock submit_lock{scheduler.submit_mutex};
     void(device.GetGraphicsQueue().Submit(submit_info, *frame->present_done));
+}
+
+bool PresentManager::OnPresentThreadQueue() const {
+    return use_present_thread && swapchain.IsNativeSwapchain() &&
+           *device.GetPresentThreadQueue() != VK_NULL_HANDLE;
 }
 
 void PresentManager::CopyToSwapchain(Frame* frame) {
@@ -811,14 +820,21 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         .pSignalSemaphores = &render_semaphore,
     };
 
+    const bool own_queue = OnPresentThreadQueue();
+    const vk::Queue queue = own_queue ? device.GetPresentThreadQueue() : device.GetGraphicsQueue();
+
     // Submit the image copy/blit to the swapchain
     {
         if (presenting_repeat) {
             frame->present_done.Reset();
         }
-        std::scoped_lock submit_lock{scheduler.submit_mutex};
-        switch (const VkResult result =
-                    device.GetGraphicsQueue().Submit(submit_info, *frame->present_done)) {
+        // The game's queue is shared with the recording thread and AMD's runtime; the present
+        // thread's own queue only with itself.
+        std::unique_lock submit_lock{scheduler.submit_mutex, std::defer_lock};
+        if (!own_queue) {
+            submit_lock.lock();
+        }
+        switch (const VkResult result = queue.Submit(submit_info, *frame->present_done)) {
         case VK_SUCCESS:
             break;
         case VK_ERROR_DEVICE_LOST:
@@ -832,7 +848,7 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
             // Signals once everything submitted to the queue so far, this copy included, has run.
             const vk::Fence& slot_fence = slot_fences[slot];
             slot_fence.Reset();
-            vk::Check(device.GetGraphicsQueue().Submit({}, *slot_fence));
+            vk::Check(queue.Submit({}, *slot_fence));
         }
     }
 
@@ -843,7 +859,7 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         }
         Common::InputLatency::RecordPresent(std::exchange(frame->input_ns, 0));
     }
-    swapchain.Present(render_semaphore, !presenting_repeat);
+    swapchain.Present(render_semaphore, !presenting_repeat, own_queue ? &queue : nullptr);
 }
 
 } // namespace Vulkan

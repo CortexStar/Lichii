@@ -88,4 +88,23 @@ struct FrameGenQueuePlan {
     };
 }
 
+/**
+ * Index of the present thread's own queue in the graphics family (PresentManager presents on it,
+ * so its copies and flips don't wait behind the game's work): the family's next queue after the
+ * game's and, when AMD's frame generation plan exists, after the plan's. The plan exists whenever
+ * AMD's runtime loads, frame generation on or off, so the index doesn't move with it.
+ *
+ * @param plan            PlanFrameGenQueues' result, if it was made.
+ * @param graphics_family The game's graphics queue family (it presents too).
+ * @param family_count    Queues the graphics family has.
+ * @return The index, or none when the family has no queue left.
+ */
+[[nodiscard]] inline std::optional<u32> PresentThreadQueueIndex(
+    const std::optional<FrameGenQueuePlan>& plan, u32 graphics_family, u32 family_count) {
+    const u32 index = plan && graphics_family < plan->counts.size()
+                          ? (std::max)(plan->counts[graphics_family], 1U)
+                          : 1U;
+    return index < family_count ? std::optional<u32>{index} : std::nullopt;
+}
+
 } // namespace Vulkan
