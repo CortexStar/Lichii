@@ -12,7 +12,7 @@
 # Output: <work dir>/ffmpeg-mingw-amd64-<VERSION>.tar.zst and its .sha512sum, for a GitHub release
 # tagged <VERSION> in the repo cpmfile.json's ffmpeg-ci-av1-mingw entry names.
 
-VERSION=9.0.2-av1hw-mingw-1
+VERSION=9.0.2-av1hw-mingw-2
 FFMPEG_COMMIT=946fcce07b6dcd0331c8cc609192aeff5e1924f8
 FFMPEG_PATCH=https://git.eden-emu.dev/eden-emu/eden/raw/commit/ac86f96efadeac4cea0b335cffe3324f95051800/.patch/ffmpeg/0001-steamdeck.patch
 DAV1D_VERSION=1.5.4
@@ -89,6 +89,11 @@ if [ ! -f "$prefix/lib/libavcodec.a" ] || [ -n "$FORCE" ]; then
     rm -rf "$src/ffmpeg" && mkdir "$src/ffmpeg"
     tar -C "$src/ffmpeg" --strip-components=1 -xzf "$src/ffmpeg.tar.gz"
     patch -d "$src/ffmpeg" -Np1 < "$src/ffmpeg.patch"
+    # FFmpeg master fixes for AV1 hardware decoding on AMD (see ffmpeg-patches/: D3D12VA's
+    # reference-only pool, Vulkan Video host transfers probed with the video profile).
+    for p in "$here"/ffmpeg-patches/*.patch; do
+        patch -d "$src/ffmpeg" -Np1 < "$p"
+    done
     hw=""
     for a in d3d11va d3d11va2 d3d12va dxva2 nvdec vulkan; do
         for c in h264 vp9 av1; do hw="$hw --enable-hwaccel=${c}_$a"; done
@@ -125,6 +130,7 @@ printf 'CREATE %s\nADDLIB %s\nADDLIB %s\nSAVE\nEND\n' "$out/lib/libavcodec.a" \
 "$host-ranlib" "$out/lib/libavcodec.a"
 cp "$here/ffmpeg-mingw-package.cmake" "$out/CMakeLists.txt"
 cp "$0" "$out/"
+cp -r "$here/ffmpeg-patches" "$out/"
 cp "$work/sources.sha256" "$out/"
 cp "$src/ffmpeg/COPYING.LGPLv2.1" "$out/LICENSES/"
 cp "$src/dav1d/COPYING" "$out/LICENSES/dav1d-COPYING"
@@ -133,7 +139,8 @@ cp "$src/dav1d/doc/PATENTS" "$out/LICENSES/dav1d-PATENTS"
     echo "# FFmpeg 9.0.2 + dav1d $DAV1D_VERSION, MinGW (UCRT) amd64, with AV1 hardware decoding"
     echo
     echo "Built by build-ffmpeg-mingw.sh (included) with $("$host-clang" --version | head -1)."
-    echo "FFmpeg $FFMPEG_COMMIT with $FFMPEG_PATCH; dav1d $DAV1D_VERSION;"
+    echo "FFmpeg $FFMPEG_COMMIT with $FFMPEG_PATCH and FFmpeg master commits"
+    echo "$(cd "$here/ffmpeg-patches" && ls | cut -d- -f2 | tr '\n' ' ')(ffmpeg-patches/); dav1d $DAV1D_VERSION;"
     echo "nv-codec-headers $NVCODEC_VERSION; Vulkan-Headers $VULKAN_HEADERS_VERSION. Source hashes: sources.sha256."
     echo "License: LGPL 2.1 or later (no --enable-gpl/--enable-nonfree); dav1d BSD-2-Clause."
     echo

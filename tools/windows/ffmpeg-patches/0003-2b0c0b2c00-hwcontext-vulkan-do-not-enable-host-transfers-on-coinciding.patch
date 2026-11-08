@@ -1,0 +1,42 @@
+From 2b0c0b2c000b2ecac8c211cddbd6aeee3d0293b1 Mon Sep 17 00:00:00 2001
+From: Lynne <dev@lynne.ee>
+Date: Sun, 19 Jul 2026 20:53:20 +0800
+Subject: [PATCH] hwcontext_vulkan: do not enable host transfers on coinciding
+ decode output
+
+Decode output which doubles as reference frames (COINCIDE mode)
+remains an active DPB slot for as long as the decoder keeps
+referencing it, and decode submissions bake the image layout into
+their barriers at record time. A host-side layout transition can
+therefore not be synchronized against them, and host transfers of such
+frames were found to corrupt image contents on Intel once frame
+threading varied the submission order.
+
+Do not set VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT on such frames. This
+makes the incompatibility visible through the usage flags, and routes
+our own transfer path through the queue.
+---
+ libavutil/hwcontext_vulkan.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/libavutil/hwcontext_vulkan.c b/libavutil/hwcontext_vulkan.c
+index 90d3d14dbb6ce..40a53cbfafeae 100644
+--- a/libavutil/hwcontext_vulkan.c
++++ b/libavutil/hwcontext_vulkan.c
+@@ -3025,9 +3025,15 @@ static int vulkan_frames_init(AVHWFramesContext *hwfc)
+                                            VK_IMAGE_USAGE_STORAGE_BIT      |
+                                            VK_IMAGE_USAGE_SAMPLED_BIT);
+ 
++        /* Frames which may double as active references (coinciding decode
++         * output) cannot support host transfers: decode submissions bake the
++         * image layout into their barriers at record time, so a host-side
++         * layout transition cannot be synchronized against them, not even
++         * by the frame lock and timeline semaphore. */
+         if (p->vkctx.extensions & FF_VK_EXT_HOST_IMAGE_COPY &&
+             !(p->dprops.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY) &&
+-            !(p->dprops.driverID == VK_DRIVER_ID_MOLTENVK))
++            !(p->dprops.driverID == VK_DRIVER_ID_MOLTENVK) &&
++            !(hwctx->usage & VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR))
+             hwctx->usage |= supported_usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT;
+ 
+         /* Enables encoding of images, if supported by format and extensions */
