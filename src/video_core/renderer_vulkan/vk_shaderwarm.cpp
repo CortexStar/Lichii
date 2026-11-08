@@ -568,19 +568,23 @@ bool HasBoundedWriteExtent(const Descriptor& desc) {
 
 // Whether a cached stage record's environment inputs give the same answers in env (texture
 // queries are asked again with the live handles, i.e. the live descriptors).
-bool RecordMatches(const VideoCommon::Nx2IrCache::Record& record, Shader::Environment& env) {
+// nullptr when a cached stage record's environment inputs give the same answers in env (texture
+// queries are asked again with the live handles, i.e. the live descriptors); else which one differs.
+const char* RecordMismatch(const VideoCommon::Nx2IrCache::Record& record, Shader::Environment& env) {
     if (record.stage != env.ShaderStage()) {
-        return false;
+        return "stage";
     }
-    bool matches = !record.texture_bound_used || env.TextureBoundBuffer() == record.texture_bound;
-    matches = matches && (!record.viewport_used ||
-                          env.ReadViewportTransformState() == record.viewport_transform_state);
-    matches = matches && (!record.local_memory_used ||
-                          env.LocalMemorySize() == record.local_memory_size);
+    if (record.texture_bound_used && env.TextureBoundBuffer() != record.texture_bound) {
+        return "texture bound buffer";
+    }
+    if (record.viewport_used &&
+        env.ReadViewportTransformState() != record.viewport_transform_state) {
+        return "viewport transform";
+    }
+    if (record.local_memory_used && env.LocalMemorySize() != record.local_memory_size) {
+        return "local memory size";
+    }
     for (const auto& [key, mapped] : record.storage_pointers) {
-        if (!matches) {
-            break;
-        }
         // Keys as GenericEnvironment makes them: (bank << 32 | offset), and pointer-table entries
         // with bit 63 set and the table offset in bits 40-61.
         const u32 bank = static_cast<u32>(key >> 32) & 0xff;
@@ -589,21 +593,25 @@ bool RecordMatches(const VideoCommon::Nx2IrCache::Record& record, Shader::Enviro
                               ? LiveIndirectPointer(env, bank, offset,
                                                     static_cast<u32>(key >> 40) & 0x3fffff)
                               : env.IsCbufStorageBufferPointer(static_cast<u32>(key >> 32), offset);
-        matches = live == (mapped != 0);
+        if (live != (mapped != 0)) {
+            return (key >> 63) != 0 ? (live ? "table pointer mapped live, unmapped cached"
+                                            : "table pointer unmapped live, mapped cached")
+                                    : (live ? "storage pointer mapped live, unmapped cached"
+                                            : "storage pointer unmapped live, mapped cached");
+        }
     }
     for (const auto& check : record.texture_checks) {
-        if (!matches) {
-            break;
-        }
         const auto& source = check.source;
         const u32 handle = (env.ReadCbufValue(source[0], source[1]) << source[2]) |
                            (env.ReadCbufValue(source[3], source[4]) << source[5]);
         const u32 live = check.kind == 0
                              ? static_cast<u32>(env.ReadTextureType(handle))
                              : static_cast<u32>(env.IsTexturePixelFormatInteger(handle));
-        matches = live == check.answer;
+        if (live != check.answer) {
+            return check.kind == 0 ? "texture type" : "texture integer format";
+        }
     }
-    return matches;
+    return nullptr;
 }
 
 // Lichii's storage write extents (global_memory_to_storage_buffer_pass, StoreExtentAnalysis) are
@@ -643,8 +651,17 @@ bool PipelineCache::TryCachedTranslation(ShaderPools& pools, u64 unique_hash,
             if (record.stage != env.ShaderStage()) {
                 continue;
             }
-            if (!RecordMatches(record, env)) {
+            if (const char* const why = RecordMismatch(record, env)) {
                 Nx2Stats::Get().ir_env_mismatches.fetch_add(1, std::memory_order_relaxed);
+                // EDEN_NX2_IR_MISMATCH_LOG=1: which precompile default the live state contradicts.
+                static const bool log_mismatch = [] {
+                    const char* value = std::getenv("EDEN_NX2_IR_MISMATCH_LOG");
+                    return value != nullptr && value[0] == '1';
+                }();
+                if (log_mismatch) {
+                    LOG_INFO(Render_Vulkan, "NX2PC mismatch {:016x} (stage {}): {}", unique_hash,
+                             static_cast<int>(record.stage), why);
+                }
                 continue;
             }
             const bool mesh_stage{record.stage == Shader::Stage::Task ||
