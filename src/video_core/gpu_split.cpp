@@ -47,6 +47,19 @@ void Pause() {
 
 [[maybe_unused]] std::atomic<u32> g_back_thread_id{};
 
+/// How far ahead of the entry it runs the back prefetches ring words (16 lines).
+constexpr u64 RingPrefetchWords = 128;
+
+void PrefetchRingLine(const u64* address) {
+#if defined(__clang__) || defined(__GNUC__)
+    __builtin_prefetch(address, 0, 3);
+#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+    _mm_prefetch(reinterpret_cast<const char*>(address), _MM_HINT_T0);
+#else
+    (void)address;
+#endif
+}
+
 } // Anonymous namespace
 
 void GpuSplit::CheckOwner(const char* where) {
@@ -155,6 +168,7 @@ void GpuSplit::Stop() {
     published.store(0, std::memory_order_relaxed);
     consumed.store(0, std::memory_order_relaxed);
     back_waiting.store(false, std::memory_order_relaxed);
+    back_idle.store(false, std::memory_order_relaxed);
     front_waiting.store(false, std::memory_order_relaxed);
 }
 
@@ -198,7 +212,9 @@ void GpuSplit::Publish() {
     published_local = write_position;
     publish_every = std::min<size_t>(publish_every * 2, PublishEvery);
     published.store(write_position, std::memory_order_seq_cst);
-    if (back_waiting.load(std::memory_order_seq_cst)) {
+    // Taken back here: the publishes until the back runs again don't wake it once more each.
+    if (back_waiting.load(std::memory_order_seq_cst) &&
+        back_waiting.exchange(false, std::memory_order_seq_cst)) {
         wake.fetch_add(1, std::memory_order_seq_cst);
         wake.notify_one();
     }
@@ -488,11 +504,14 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     g_back_thread_id.store(GetCurrentThreadId(), std::memory_order_relaxed);
 #endif
     u64 read_position = 0;
+    // Counts across batches, so a stream of short batches still checks hook requests.
+    u32 entries = 0;
     while (!stop_token.stop_requested()) {
         Nx2Profile::Report("GPU back thread");
         u64 available = published.load(std::memory_order_acquire);
         if (available == read_position) {
             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
+            back_idle.store(true, std::memory_order_relaxed);
             // The front usually sends more within microseconds: spin briefly before sleeping.
             for (u32 spins = 0; spins < 8192 && available == read_position &&
                                 !hook_requested.load(std::memory_order_relaxed);
@@ -520,13 +539,28 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 continue;
             }
         }
+        if (back_idle.load(std::memory_order_relaxed)) {
+            back_idle.store(false, std::memory_order_relaxed);
+        }
         u64 last_store = read_position;
+        // Prefetch the ring lines ahead of the entry, up to a line short of what the front
+        // published (a line it may still be writing would only bounce between the two cores). The
+        // front wrote them moments ago: they sit in its core's caches.
+        u64 prefetched = read_position;
         while (read_position != available) {
             const size_t index = read_position & RingMask;
+            const u64 ahead = (std::min)(read_position + RingPrefetchWords,
+                                         available > 8 ? available - 8 : u64{0});
+            prefetched = (std::max)(prefetched, read_position);
+            while (prefetched + 8 <= ahead) {
+                prefetched += 8;
+                PrefetchRingLine(&ring[prefetched & RingMask]);
+            }
             const size_t size =
                 Execute(&ring[index], std::min<u64>(available - read_position, RingWords - index));
             read_position += size != 0 ? size : RingWords - index;
-            if (hook_requested.load(std::memory_order_relaxed) &&
+            // The hook request (another thread's cache line) every 4 entries.
+            if ((++entries & 3) == 0 && hook_requested.load(std::memory_order_relaxed) &&
                 idle_hook != nullptr) [[unlikely]] {
                 hook_requested.store(false, std::memory_order_seq_cst);
                 idle_hook(idle_argument);
