@@ -133,6 +133,11 @@ public:
 
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipeline();
 
+    /// Whether the guest's HMMA runs on the host's cooperative matrices (the self-test passed).
+    [[nodiscard]] bool SupportsCooperativeHmma() const noexcept {
+        return profile.support_cooperative_hmma || profile.support_cooperative_hmma_16x16x16;
+    }
+
     void TickFrame();
 
     [[nodiscard]] ComputePipeline* CurrentComputePipeline();
