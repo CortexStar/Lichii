@@ -353,6 +353,11 @@ private:
     bool mesh_draw{}; ///< the draw being prepared uses a task/mesh pipeline
     /// Fragment output components the dynamic color write mask was last recorded with
     u32 last_color_output_mask{};
+    /// The pipeline alpha to coverage/one were last staged with
+    const GraphicsPipeline* last_dyn_pipeline{};
+    /// Render target formats the blend enables were last staged with
+    std::array<Tegra::RenderTargetFormat, Tegra::Engines::Maxwell3D::Regs::NumRenderTargets>
+        last_rt_formats{};
     VideoCommon::OotNetwork::BypassState oot_network_bypass;
     u32 mesh_emulation_groups{};             ///< mesh workgroups of the emulated draw
     u32 mesh_emulation_vertices_per_group{}; ///< 0 unless the draw is an emulated mesh draw
