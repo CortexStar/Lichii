@@ -726,6 +726,7 @@ void BufferCache<P>::RecordReadDownload(std::span<const std::pair<DAddr, u64>> r
             for (Copy& entry : check_copies) {
                 Buffer& buffer = slot_buffers[entry.buffer_id];
                 entry.copy.dst_offset += check->staging.offset;
+                buffer.MarkUsage(entry.copy.src_offset, entry.copy.size);
                 runtime.CopyBuffer(check->staging.buffer, buffer, std::span{&entry.copy, 1}, true);
                 check->copies.push_back(BufferCopy{
                     .src_offset = buffer.CpuAddr() + entry.copy.src_offset,
