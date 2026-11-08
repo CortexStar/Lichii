@@ -6,7 +6,10 @@
 
 #pragma once
 
+#include <array>
 #include <limits>
+#include <source_location>
+#include <vector>
 
 #include <boost/container/small_vector.hpp>
 
@@ -59,6 +62,10 @@ public:
         return tracker.IsUsed(offset, size);
     }
 
+    /// TEST (EDEN_NX2_GPU_COST): the newest tick that used any 4 KiB page of the range, 0 when
+    /// none did since the trace started.
+    [[nodiscard]] u64 NewestUseTick(u64 offset, u64 size) const noexcept;
+
     void MarkUsage(u64 offset, u64 size) noexcept;
 
     void ResetUsageTracking() noexcept {
@@ -94,6 +101,11 @@ private:
     u64 last_usage_tick{};
     bool is_null{};
     bool sparse_compatible{};
+    /// TEST (EDEN_NX2_GPU_COST): the tick of each 4 KiB page's last use, and the last ranges
+    /// noted with their tick (draws bind the same ranges again and again).
+    std::vector<u64> use_ticks;
+    std::array<std::array<u64, 3>, 4> noted_uses{};
+    u32 noted_cursor{};
 };
 
 class QuadArrayIndexBuffer;
@@ -176,9 +188,11 @@ public:
 
     void PreCopyBarrier();
 
+    /// location: the caller, which the render pass end and the copy are counted at.
     void CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
                     std::span<const VideoCommon::BufferCopy> copies, bool barrier,
-                    bool can_reorder_upload = false);
+                    bool can_reorder_upload = false,
+                    std::source_location location = std::source_location::current());
 
     void PostCopyBarrier();
 
@@ -316,6 +330,10 @@ private:
     }
 
     VkFormat TexelBufferFormat(VideoCore::Surface::PixelFormat format) const;
+
+    /// TEST (EDEN_NX2_GPU_COST): counts an upload by where it ran and why.
+    void TraceUpload(const Buffer& buffer, std::span<const VideoCommon::BufferCopy> copies,
+                     bool reordered);
 
     void ReserveNullBuffer();
     vk::Buffer CreateNullBuffer();

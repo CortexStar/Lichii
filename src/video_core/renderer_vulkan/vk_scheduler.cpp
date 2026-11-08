@@ -15,6 +15,7 @@
 #include <string_view>
 #include <string>
 #include <map>
+#include <tuple>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -31,6 +32,7 @@
 #include "video_core/gpu_wait_stats.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/renderer_vulkan/vk_command_pool.h"
+#include "video_core/renderer_vulkan/vk_gpu_cost.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -48,18 +50,14 @@ std::atomic<u64> g_profile_finishes{};
 std::atomic<u64> g_profile_finish_ns{};
 std::atomic<u64> g_profile_window_start{};
 std::mutex g_profile_end_mutex;
-std::map<std::string, u64> g_profile_ends;
+std::map<std::tuple<const char*, u32, const char*>, u64> g_profile_ends;
 
-void CountRenderPassEnd(const char* file, u32 line) {
+void CountRenderPassEnd(const std::source_location& location) {
     if (!VideoCommon::Nx2Profile::Enabled()) {
         return;
     }
-    std::string_view name{file};
-    if (const auto slash = name.find_last_of('/'); slash != std::string_view::npos) {
-        name.remove_prefix(slash + 1);
-    }
     std::scoped_lock lock{g_profile_end_mutex};
-    ++g_profile_ends[fmt::format("{}:{}", name, line)];
+    ++g_profile_ends[{location.file_name(), location.line(), location.function_name()}];
 }
 
 void ReportSubmitCounts() {
@@ -81,13 +79,18 @@ void ReportSubmitCounts() {
              static_cast<double>(g_profile_renderpasses.exchange(0)) / seconds,
              static_cast<double>(g_profile_finishes.exchange(0)) / seconds,
              static_cast<double>(g_profile_finish_ns.exchange(0)) / 1e6 / seconds);
-    std::vector<std::pair<u64, std::string>> ends;
+    std::map<std::string, u64> named;
     {
         std::scoped_lock lock{g_profile_end_mutex};
         for (const auto& [site, count] : g_profile_ends) {
-            ends.emplace_back(count, site);
+            const auto& [file, line, function] = site;
+            named[GpuCost::SiteName(file, line, function)] += count;
         }
         g_profile_ends.clear();
+    }
+    std::vector<std::pair<u64, std::string>> ends;
+    for (const auto& [site, count] : named) {
+        ends.emplace_back(count, site);
     }
     std::sort(ends.rbegin(), ends.rend());
     for (size_t i = 0; i < ends.size() && i < 16; ++i) {
@@ -98,14 +101,18 @@ void ReportSubmitCounts() {
 }
 
 void Scheduler::CommandChunk::ExecuteAll(vk::CommandBuffer cmdbuf,
-                                         vk::CommandBuffer upload_cmdbuf) {
+                                         vk::CommandBuffer upload_cmdbuf, GpuCost* cost) {
     auto command = first;
-    while (command != nullptr) {
+    for (size_t index = 0; command != nullptr; ++index) {
         auto next = command->GetNext();
+        if (cost != nullptr && index < sites.size()) [[unlikely]] {
+            cost->BeginCommand(sites[index]);
+        }
         command->Execute(cmdbuf, upload_cmdbuf);
         command->~Command();
         command = next;
     }
+    sites.clear();
     submit = false;
     command_offset = 0;
     first = nullptr;
@@ -153,6 +160,9 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
     if (VideoCommon::ReadTrace::Enabled()) {
         CreateReadTrace();
     }
+    gpu_cost = GpuCost::Create(device, trace_timestamp_bits, trace_timestamp_period,
+                               static_cast<bool>(trace_query_pool));
+    record_sites = gpu_cost != nullptr;
 
     AcquireNewChunk();
     AllocateWorkerCommandBuffer();
@@ -394,13 +404,13 @@ VideoCommon::ReadTrace::Timeline Scheduler::PlaceRead(
 u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
                      std::source_location location) {
     if (state.renderpass) {
-        CountRenderPassEnd(location.file_name(), location.line());
+        CountRenderPassEnd(location);
     }
     if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
         VideoCommon::GpuSplit::CheckOwner("Scheduler::Flush");
     }
     // When flushing, we only send data to the worker thread; no waiting is necessary.
-    const u64 signal_value = SubmitExecution(signal_semaphore, wait_semaphore);
+    const u64 signal_value = SubmitExecution(signal_semaphore, wait_semaphore, location);
     AllocateNewContext();
     last_flush = std::chrono::steady_clock::now();
     flush_pending = false;
@@ -467,7 +477,7 @@ bool Scheduler::WaitSubmitted(u64 tick) {
 void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
                        std::source_location location) {
     if (state.renderpass) {
-        CountRenderPassEnd(location.file_name(), location.line());
+        CountRenderPassEnd(location);
     }
     if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
         VideoCommon::GpuSplit::CheckOwner("Scheduler::Finish");
@@ -477,7 +487,7 @@ void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
     const bool profile = VideoCommon::Nx2Profile::Enabled();
     const u64 start = profile ? VideoCommon::Nx2Profile::Now() : 0;
     const u64 wait_start = VideoCommon::GpuWaitStats::Now();
-    SubmitExecution(signal_semaphore, wait_semaphore);
+    SubmitExecution(signal_semaphore, wait_semaphore, location);
     Wait(presubmit_tick);
     AllocateNewContext();
     VideoCommon::GpuWaitStats::AddHostWait(VideoCommon::GpuWaitStats::Now() - wait_start);
@@ -553,8 +563,8 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
         values[i] = clear_values[i];
     }
     const bool after_compute = std::exchange(compute_writes_pending, false);
-    Record([renderpass, framebuffer_handle, render_area, values, clear_value_count,
-            after_compute](vk::CommandBuffer cmdbuf) {
+    RecordAs([renderpass, framebuffer_handle, render_area, values, clear_value_count,
+              after_compute](vk::CommandBuffer cmdbuf, vk::CommandBuffer) {
         const VkRenderPassBeginInfo renderpass_bi{
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
             .pNext = nullptr,
@@ -581,7 +591,7 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
                                    VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, 0, COMPUTE_TO_GRAPHICS);
         }
         cmdbuf.BeginRenderPass(renderpass_bi, VK_SUBPASS_CONTENTS_INLINE);
-    });
+    }, last_pass_end, RecordSite::PassBegin, 0);
     num_renderpass_images = framebuffer->NumImages();
     renderpass_images = framebuffer->Images();
     renderpass_image_ranges = framebuffer->ImageRanges();
@@ -668,18 +678,18 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_lo
         return;
     }
     if (state.renderpass) {
-        CountRenderPassEnd(location.file_name(), location.line());
+        CountRenderPassEnd(location);
     }
     // Ends any active pass and realizes a deferred clear
-    EndRenderPass();
+    EndRenderPass(location);
     BeginRenderPassImpl(framebuffer, renderpass, nullptr, 0);
 }
 
 void Scheduler::RequestOutsideRenderPassOperationContext(std::source_location location) {
     if (state.renderpass) {
-        CountRenderPassEnd(location.file_name(), location.line());
+        CountRenderPassEnd(location);
     }
-    EndRenderPass();
+    EndRenderPass(location);
 }
 
 bool Scheduler::UpdateGraphicsPipeline(GraphicsPipeline* pipeline) {
@@ -771,7 +781,8 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
             // Perform the work, tracking whether the chunk was a submission
             // before executing.
             const bool has_submit = work->HasSubmit();
-            work->ExecuteAll(current_cmdbuf, current_upload_cmdbuf);
+            work->ExecuteAll(current_cmdbuf, current_upload_cmdbuf,
+                             trace_gpu_recording ? gpu_cost.get() : nullptr);
 
             // If the chunk was a submission, reallocate the command buffer.
             if (has_submit) {
@@ -812,6 +823,9 @@ void Scheduler::AllocateWorkerCommandBuffer() {
     }
     if (trace_query_pool && !trace_gpu_failed) {
         TraceGpuSubmission();
+        if (gpu_cost && trace_gpu_recording) {
+            gpu_cost->BeginSubmission(current_cmdbuf, current_upload_cmdbuf, trace_gpu_count == 0);
+        }
     }
 }
 
@@ -1004,6 +1018,9 @@ void Scheduler::TraceGpuSubmission() {
                      work.dispatch_attempts, shaders, work.untracked_uses);
         }
         ReportWorkTimes();
+        if (gpu_cost) {
+            gpu_cost->FrameDone();
+        }
         trace_gpu_tick = 0;
         trace_gpu_count = 0;
         trace_gpu_skipped = 0;
@@ -1023,17 +1040,18 @@ void Scheduler::TraceGpuSubmission() {
     trace_gpu_recording = true;
 }
 
-u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
+u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
+                                std::source_location cause) {
     if (VideoCommon::Nx2Profile::Enabled()) {
         g_profile_submits.fetch_add(1, std::memory_order_relaxed);
         ReportSubmitCounts();
     }
-    EndPendingOperations();
+    EndPendingOperations(cause);
     InvalidateState();
 
     const u64 signal_value = master_semaphore->NextTick();
-    RecordWithUploadBuffer([signal_semaphore, wait_semaphore, signal_value,
-                            this](vk::CommandBuffer cmdbuf, vk::CommandBuffer upload_cmdbuf) {
+    RecordAs([signal_semaphore, wait_semaphore, signal_value,
+              this](vk::CommandBuffer cmdbuf, vk::CommandBuffer upload_cmdbuf) {
         static constexpr VkMemoryBarrier WRITE_BARRIER{
             .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
             .pNext = nullptr,
@@ -1043,6 +1061,9 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
         upload_cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, WRITE_BARRIER);
         upload_cmdbuf.End();
         if (trace_gpu_recording) {
+            if (gpu_cost) {
+                gpu_cost->EndSubmission(cmdbuf);
+            }
             cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *trace_query_pool,
                                  trace_gpu_count * 2 + 1);
             trace_gpu_tick = signal_value;
@@ -1104,7 +1125,7 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
             }
             trace_frame_end = 0;
         }
-    });
+    }, cause, RecordSite::Submit, 0);
     chunk->MarkSubmit();
     DispatchWork();
     return signal_value;
@@ -1122,14 +1143,14 @@ void Scheduler::InvalidateState() {
     state_tracker.InvalidateCommandBufferState();
 }
 
-void Scheduler::EndPendingOperations() {
+void Scheduler::EndPendingOperations(std::source_location cause) {
     // Pause, don't reset: a submission can land between a guest's counter reset and its report,
     // and resetting here would drop the samples counted so far (the report then reads too low).
     query_cache->CounterClose(VideoCommon::QueryType::ZPassPixelCount64);
-    EndRenderPass();
+    EndRenderPass(cause);
 }
 
-void Scheduler::EndRenderPass()
+void Scheduler::EndRenderPass(std::source_location cause)
     {
         RealizeDeferredClear();
         if (!state.renderpass) {
@@ -1137,7 +1158,10 @@ void Scheduler::EndRenderPass()
         }
         ++recording_epoch;
         fragment_barrier.Reset();
+        const u8 site_flags =
+            static_cast<u8>(render_pass_has_stores ? RecordSite::PassHadStores : 0);
         render_pass_has_stores = false;
+        last_pass_end = cause;
 
         query_cache->CounterClose(VideoCommon::QueryType::StreamingByteCount);
 
@@ -1150,11 +1174,11 @@ void Scheduler::EndRenderPass()
         query_cache->CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, false);
         query_cache->NotifySegment(false);
 
-        Record([num_images = num_renderpass_images,
+        RecordAs([num_images = num_renderpass_images,
                        images = renderpass_images,
                        ranges = renderpass_image_ranges,
                        has_transform_feedback = device.IsExtTransformFeedbackSupported()](
-                          vk::CommandBuffer cmdbuf) {
+                          vk::CommandBuffer cmdbuf, vk::CommandBuffer) {
             std::array<VkImageMemoryBarrier, 9> barriers;
             for (size_t i = 0; i < num_images; ++i) {
                 const VkImageSubresourceRange& range = ranges[i];
@@ -1205,7 +1229,7 @@ void Scheduler::EndRenderPass()
                                        VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
                                        0, XFB_OUTPUT_BARRIER);
             }
-        });
+        }, cause, RecordSite::PassEnd, site_flags);
 
         state.renderpass = VkRenderPass{};
         num_renderpass_images = 0;

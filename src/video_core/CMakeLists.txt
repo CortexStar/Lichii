@@ -210,6 +210,8 @@ add_library(video_core STATIC
     renderer_vulkan/vk_fence_manager.h
     renderer_vulkan/vk_frame_dump.cpp
     renderer_vulkan/vk_frame_dump.h
+    renderer_vulkan/vk_gpu_cost.cpp
+    renderer_vulkan/vk_gpu_cost.h
     renderer_vulkan/vk_graphics_pipeline.cpp
     renderer_vulkan/vk_graphics_pipeline.h
     renderer_vulkan/vk_multi_range_buffer.cpp

@@ -40,10 +40,30 @@ namespace Vulkan {
 class CommandPool;
 class Device;
 class Framebuffer;
+class GpuCost;
 class GraphicsPipeline;
 class StateTracker;
 
 struct QueryCacheParams;
+
+/// TEST (EDEN_NX2_GPU_COST, vk_gpu_cost.h): the source line that recorded a command. A render
+/// pass's end carries the line that ended it, its begin the line that ended the pass before.
+struct RecordSite {
+    enum Role : u8 {
+        Own,
+        PassEnd,
+        PassBegin,
+        Submit,
+    };
+    enum Flags : u8 {
+        PassHadStores = 1 << 0, ///< PassEnd: a draw in the pass wrote storage buffers or images
+    };
+    const char* file;
+    const char* function;
+    u32 line;
+    Role role;
+    u8 flags;
+};
 
 /// The scheduler abstracts command buffer and fence management with an interface that's able to do
 /// OpenGL-like operations on Vulkan command buffers.
@@ -193,24 +213,19 @@ public:
     /// Send work to a separate thread.
     template <typename T>
         requires std::is_invocable_v<T, vk::CommandBuffer, vk::CommandBuffer>
-    void RecordWithUploadBuffer(T&& command) {
-        if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
-            VideoCommon::GpuSplit::CheckOwner("Scheduler::Record");
-        }
-        if (chunk->Record(command)) {
-            return;
-        }
-        DispatchWork();
-        (void)chunk->Record(command);
+    void RecordWithUploadBuffer(T&& command,
+                                std::source_location location = std::source_location::current()) {
+        RecordAs(std::forward<T>(command), location, RecordSite::Own, 0);
     }
 
     template <typename T>
         requires std::is_invocable_v<T, vk::CommandBuffer>
-    void Record(T&& c) {
-        this->RecordWithUploadBuffer(
+    void Record(T&& c, std::source_location location = std::source_location::current()) {
+        RecordAs(
             [command = std::move(c)](vk::CommandBuffer cmdbuf, vk::CommandBuffer) {
                 command(cmdbuf);
-            });
+            },
+            location, RecordSite::Own, 0);
     }
 
     /// Whether the recording thread submitted `tick` within 20 ms.
@@ -366,7 +381,13 @@ private:
 
     class CommandChunk final {
     public:
-        void ExecuteAll(vk::CommandBuffer cmdbuf, vk::CommandBuffer upload_cmdbuf);
+        /// cost: the TEST GPU cost trace when this chunk is in a submission it samples.
+        void ExecuteAll(vk::CommandBuffer cmdbuf, vk::CommandBuffer upload_cmdbuf, GpuCost* cost);
+
+        /// TEST (EDEN_NX2_GPU_COST): the site of each command, in order.
+        void NoteSite(const RecordSite& site) {
+            sites.push_back(site);
+        }
 
         template <typename T>
         bool Record(T& command) {
@@ -407,8 +428,24 @@ private:
 
         size_t command_offset = 0;
         bool submit = false;
+        std::vector<RecordSite> sites;
         alignas(std::max_align_t) std::array<u8, 0x8000> data{};
     };
+
+    template <typename T>
+    void RecordAs(T&& command, std::source_location location, RecordSite::Role role, u8 flags) {
+        if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
+            VideoCommon::GpuSplit::CheckOwner("Scheduler::Record");
+        }
+        if (!chunk->Record(command)) {
+            DispatchWork();
+            (void)chunk->Record(command);
+        }
+        if (record_sites) [[unlikely]] {
+            chunk->NoteSite({location.file_name(), location.function_name(), location.line(), role,
+                             flags});
+        }
+    }
 
     struct State {
         VkRenderPass renderpass{};
@@ -451,13 +488,16 @@ private:
     [[nodiscard]] VideoCommon::ReadTrace::Timeline PlaceRead(
         const VideoCommon::ReadTrace::Read& read) const;
 
-    u64 SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore);
+    /// cause: the line that asked for the submission, which ends a render pass still open.
+    u64 SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
+                        std::source_location cause);
 
     void AllocateNewContext();
 
-    void EndPendingOperations();
+    void EndPendingOperations(std::source_location cause);
 
-    void EndRenderPass();
+    /// cause: the line that needs the render pass ended (TEST EDEN_NX2_GPU_COST's site of it).
+    void EndRenderPass(std::source_location cause = std::source_location::current());
 
     void AcquireNewChunk();
 
@@ -513,6 +553,12 @@ private:
     /// TEST: EDEN_NX2_READ_TRACE
     std::unique_ptr<ReadTraceState> read_trace;
     VideoCommon::ReadTrace::Counts trace_counts{};
+
+    /// TEST: EDEN_NX2_GPU_COST. record_sites: every command notes its RecordSite.
+    std::unique_ptr<GpuCost> gpu_cost;
+    bool record_sites{};
+    /// The line that ended the last render pass: the site of the next pass's begin.
+    std::source_location last_pass_end{};
 
     VideoCommon::QueryCacheBase<QueryCacheParams>* query_cache = nullptr;
 
