@@ -291,60 +291,64 @@ TEST_CASE("Mesh fallback leaves native task and mesh programs as mesh shaders",
     REQUIRE(UsesStorageClass(task, spv::StorageClass::TaskPayloadWorkgroupEXT));
 }
 
-TEST_CASE("Mesh fallback native task initializes the mesh workgroup count atomically",
+TEST_CASE("Mesh fallback native task initializes the mesh workgroup count with an elected store",
           "[video_core][spirv][mesh_fallback]") {
     // A task that culls every thread never writes the mesh workgroup count, and the payload
     // starts undefined. Intel's garbage there launches enough workgroups to lose the device, so
-    // the prologue initializes the count to zero. Every invocation writes the same word, hence
-    // an atomic store: concurrent plain stores race even when they write the same value.
+    // the prologue initializes the count to zero. Every invocation writing the same word would
+    // race (the Vulkan memory model has no same-value exception) and #615's reporter bisected
+    // an NVIDIA driver-compiler crash to the atomic-plus-barrier block, so a branch elects one
+    // invocation to store the zero.
     const std::vector<u32> culled{EmitProgram(Stage::Task, false, false, MakeProfile(), false,
                                               true)};
     Dump(culled, "native-task-culled");
     REQUIRE(Model(culled) == spv::ExecutionModel::TaskEXT);
     const ModuleData data{Analyze(culled)};
-    size_t atomic_inits{0};
-    size_t atomic_position{data.ops.size()};
+    size_t atomics{0};
+    size_t elected_stores{0};
+    size_t store_position{data.ops.size()};
     size_t first_barrier{data.ops.size()};
-    size_t guest_stores{0};
+    size_t last_branch_conditional{data.ops.size()};
     for (size_t i = 0; i < data.ops.size(); ++i) {
         const Instruction& inst{data.ops[i]};
-        // OpAtomicStore has no result: pointer, scope, semantics, value.
-        if (inst.op == spv::Op::OpAtomicStore &&
-            PayloadWordIndex(data, inst.operands[0]) == std::optional<u32>{1}) {
-            ++atomic_inits;
-            atomic_position = i;
-            // Workgroup scope, relaxed semantics: the paired control barriers do the ordering.
-            REQUIRE(ConstValue(data, inst.operands[1]) == std::optional<u32>{WORKGROUP});
-            REQUIRE(ConstValue(data, inst.operands[2]) == std::optional<u32>{0});
-            // The initialized value is zero.
-            REQUIRE(ConstValue(data, inst.operands[3]) == std::optional<u32>{0});
+        if (inst.op == spv::Op::OpAtomicStore) {
+            ++atomics;
         }
-        if (IsPayloadBarrier(data, inst) && first_barrier == data.ops.size()) {
-            first_barrier = i;
+        if (inst.op == spv::Op::OpBranchConditional) {
+            last_branch_conditional = i;
         }
         // OpStore: pointer, object.
         if (inst.op == spv::Op::OpStore &&
             PayloadWordIndex(data, inst.operands[0]) == std::optional<u32>{1}) {
-            ++guest_stores;
+            ++elected_stores;
+            store_position = i;
+            // The initialized value is zero.
+            REQUIRE(ConstValue(data, inst.operands[1]) == std::optional<u32>{0});
+        }
+        if (IsPayloadBarrier(data, inst) && first_barrier == data.ops.size()) {
+            first_barrier = i;
         }
     }
-    REQUIRE(atomic_inits == 1);
-    // A culled task never writes the count itself; the atomic init is the only write.
-    REQUIRE(guest_stores == 0);
-    // The init runs in the prologue, before the barrier that orders it against guest writes.
+    REQUIRE(atomics == 0);
+    // A culled task never writes the count itself; the elected init is the only write.
+    REQUIRE(elected_stores == 1);
+    // The single store is guarded by the election branch, and the barrier after the join
+    // orders it for every reader.
+    REQUIRE(last_branch_conditional < store_position);
     REQUIRE(first_barrier < data.ops.size());
-    REQUIRE(atomic_position < first_barrier);
+    REQUIRE(store_position < first_barrier);
 }
 
-TEST_CASE("Mesh fallback native task keeps the guest's count path after the atomic init",
+TEST_CASE("Mesh fallback native task keeps the guest's count path after the elected init",
           "[video_core][spirv][mesh_fallback]") {
     // A task that launches meshes writes the count itself after the prologue, and the epilogue
     // reads word 1 back for OpEmitMeshTasksEXT. Both must survive the init.
     const std::vector<u32> task{EmitProgram(Stage::Task, false, false)};
     Dump(task, "native-task-count");
     const ModuleData data{Analyze(task)};
-    size_t atomic_inits{0};
-    size_t atomic_position{0};
+    size_t atomics{0};
+    size_t init_stores{0};
+    size_t init_position{0};
     size_t guest_stores{0};
     size_t guest_position{0};
     size_t count_reads{0};
@@ -354,20 +358,21 @@ TEST_CASE("Mesh fallback native task keeps the guest's count path after the atom
     std::vector<size_t> barriers;
     for (size_t i = 0; i < data.ops.size(); ++i) {
         const Instruction& inst{data.ops[i]};
-        if (inst.op == spv::Op::OpAtomicStore &&
-            PayloadWordIndex(data, inst.operands[0]) == std::optional<u32>{1}) {
-            ++atomic_inits;
-            atomic_position = i;
-            REQUIRE(ConstValue(data, inst.operands[1]) == std::optional<u32>{WORKGROUP});
-            REQUIRE(ConstValue(data, inst.operands[2]) == std::optional<u32>{0});
-            REQUIRE(ConstValue(data, inst.operands[3]) == std::optional<u32>{0});
+        if (inst.op == spv::Op::OpAtomicStore) {
+            ++atomics;
         }
-        // The guest's own count write must be the only plain store to word 1, storing 1.
+        // The elected zero init and the guest's own count write (storing 1) are the only
+        // plain stores to word 1.
         if (inst.op == spv::Op::OpStore &&
             PayloadWordIndex(data, inst.operands[0]) == std::optional<u32>{1}) {
-            ++guest_stores;
-            guest_position = i;
-            REQUIRE(ConstValue(data, inst.operands[1]) == std::optional<u32>{1});
+            if (ConstValue(data, inst.operands[1]) == std::optional<u32>{0}) {
+                ++init_stores;
+                init_position = i;
+            } else {
+                REQUIRE(ConstValue(data, inst.operands[1]) == std::optional<u32>{1});
+                ++guest_stores;
+                guest_position = i;
+            }
         }
         // OpLoad: result type, result id, pointer.
         if (inst.op == spv::Op::OpLoad &&
@@ -386,13 +391,14 @@ TEST_CASE("Mesh fallback native task keeps the guest's count path after the atom
             barriers.push_back(i);
         }
     }
-    REQUIRE(atomic_inits == 1);
+    REQUIRE(atomics == 0);
+    REQUIRE(init_stores == 1);
     REQUIRE(guest_stores == 1);
     REQUIRE(count_reads == 1);
     REQUIRE(emitted == 1);
     // init, prologue barrier, guest write, epilogue barrier, count read.
     REQUIRE(barriers.size() >= 2);
-    REQUIRE(atomic_position < barriers.front());
+    REQUIRE(init_position < barriers.front());
     REQUIRE(barriers.front() < guest_position);
     REQUIRE(guest_position < barriers.back());
     REQUIRE(barriers.back() < read_position);
