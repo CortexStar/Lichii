@@ -1823,6 +1823,12 @@ struct FrontQmdMemory {
     void ForgetRelease(VideoCommon::GpuSplit& split, GPUVAddr address) const {
         split.ForgetRelease(&memory, address);
     }
+    void NoteWriteAt(VideoCommon::GpuSplit& split, GPUVAddr address, u64 size, u64 position) const {
+        split.NoteWriteAt(&memory, address, size, true, position);
+    }
+    [[nodiscard]] const void* Id() const {
+        return &memory;
+    }
 };
 
 // The QMD methods: PCAS (0xae-0xb0) and the inline QMD's last word (0x107).

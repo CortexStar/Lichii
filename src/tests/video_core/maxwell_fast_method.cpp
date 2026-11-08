@@ -1009,10 +1009,11 @@ using QmdDescriptor = Tegra::NativeQmdScheduler::Descriptor;
 
 // What FrontQmdView told the split about a launch's releases.
 struct QmdNote {
-    enum class Kind { Write, Release, Forget } kind;
+    enum class Kind { Write, Release, Forget, Placed } kind;
     GPUVAddr address;
     u64 value; ///< The size of a write, the value of a release
     bool at_least;
+    u64 position{}; ///< A write placed late: its signal's
     bool operator==(const QmdNote&) const = default;
 };
 
@@ -1059,6 +1060,12 @@ struct QmdTestView {
     }
     void ForgetRelease(VideoCommon::GpuSplit&, GPUVAddr address) const {
         state->notes.push_back({QmdNote::Kind::Forget, address, 0, false});
+    }
+    void NoteWriteAt(VideoCommon::GpuSplit&, GPUVAddr address, u64 size, u64 position) const {
+        state->notes.push_back({QmdNote::Kind::Placed, address, size, false, position});
+    }
+    [[nodiscard]] const void* Id() const {
+        return state;
     }
 };
 
@@ -1185,16 +1192,38 @@ TEST_CASE("The split front's QMD view reads a QMD only as the back will find it"
     memory.notes.clear();
     REQUIRE(view.Signal(split, view_memory, loaded, 7, nullptr));
     REQUIRE(memory.notes[1] == QmdNote{QmdNote::Kind::Release, 0x5000, 9, false});
-    // Another write still queued there: the front can't read it and loses the table.
+    // Another write still queued there: the signal waits for it, and the next one behind it.
     memory.targets[loaded] = 35;
+    memory.notes.clear();
     REQUIRE_FALSE(view.Signal(split, view_memory, loaded, 3, nullptr));
-    REQUIRE_FALSE(view.Synced());
+    REQUIRE(view.Synced());
+    REQUIRE(view.Waiting() == 1);
+    Access::SetBack(split, 50, 10);
+    REQUIRE_FALSE(view.Signal(split, view_memory, loaded, 7, nullptr));
+    REQUIRE(view.Waiting() == 2);
+    // Once the back ran that write, the next signal values both late (their releases placed at
+    // their positions, not predicted), then itself as before.
+    Access::SetBack(split, 60, 35);
+    REQUIRE(view.Signal(split, view_memory, launched, 3, &second));
+    REQUIRE(view.Waiting() == 0);
+    REQUIRE(memory.notes == std::vector<QmdNote>{
+                                {QmdNote::Kind::Placed, 0x5000, 4, false, 50},
+                                {QmdNote::Kind::Write, 0x5000, 4, false},
+                                {QmdNote::Kind::Release, 0x5000, 2, false},
+                            });
+    // A write sent after a waiting signal: the back read what was before it. The table is lost
+    // until the back ran everything sent.
+    memory.targets[loaded] = 65;
+    Access::SetBack(split, 70, 60);
+    REQUIRE_FALSE(view.Signal(split, view_memory, loaded, 3, nullptr));
+    REQUIRE(view.Waiting() == 1);
+    memory.targets[loaded] = 75;
+    Access::SetBack(split, 80, 76);
     REQUIRE_FALSE(view.Signal(split, view_memory, launched, 3, &second));
-    // A write sent after the signal: the back reads what was before it. Lost as well.
-    // Once the back ran everything sent, the view takes the back's table over.
+    REQUIRE_FALSE(view.Synced());
     view.MaybeTakeOver(split);
     REQUIRE_FALSE(view.Synced());
-    Access::SetBack(split, 40, 40);
+    Access::SetBack(split, 80, 80);
     view.MaybeTakeOver(split);
     REQUIRE(view.Synced());
 }

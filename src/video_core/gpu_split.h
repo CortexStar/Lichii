@@ -520,14 +520,21 @@ public:
     /// reads of the words next to it don't wait for it); other writes are tracked by the page.
     void NoteWrite(const void* space, GPUVAddr address, u64 size, bool fine = false) {
         if (front_macros && size != 0) {
-            RecordWrite(space, address, size, fine ? Grain::Word : Grain::Page);
+            RecordWrite(space, address, size, fine ? Grain::Word : Grain::Page, write_position);
+        }
+    }
+    /// NoteWrite for the entry that ended at `position`, placed late: the front's QMD view values
+    /// a launch once the back ran what it waited for (FrontQmdView).
+    void NoteWriteAt(const void* space, GPUVAddr address, u64 size, bool fine, u64 position) {
+        if (front_macros && size != 0) {
+            RecordWrite(space, address, size, fine ? Grain::Word : Grain::Page, position);
         }
     }
     /// NoteWrite for a write of at most 512 bytes that reads of other 256-byte granules of its
     /// page don't wait for (an inline QMD, a small inline upload: QMDs are read by the granule).
     void NoteGranuleWrite(const void* space, GPUVAddr address, u64 size) {
         if (front_macros && size != 0) {
-            RecordWrite(space, address, size, Grain::Granule);
+            RecordWrite(space, address, size, Grain::Granule, write_position);
         }
     }
     /// The work just sent may write guest memory the front can't bound. `writer`: it is compute
@@ -744,12 +751,11 @@ private:
         Granule, ///< By 256-byte granule (granule_slots), up to MaxGranuleBytes
         Word,    ///< By the word (word_slots), up to MaxFineBytes
     };
-    void RecordWrite(const void* space, GPUVAddr address, u64 size, Grain grain);
-    void InsertKeyed(WordSlot* slots, size_t buckets, u64 key);
+    void RecordWrite(const void* space, GPUVAddr address, u64 size, Grain grain, u64 position);
+    void InsertKeyed(WordSlot* slots, size_t buckets, u64 key, u64 position);
     [[nodiscard]] static const WordSlot* FindKeyed(const WordSlot* slots, size_t buckets, u64 key);
     [[nodiscard]] u32 SpaceId(const void* space);
-    void InsertPage(u64 key, bool coarse);
-    void InsertWord(u64 key);
+    void InsertPage(u64 key, bool coarse, u64 position);
     /// A pending slot gives way: reads wait for it from now on.
     void RaiseFloor(u64 position) {
         if (position <= consumed_cache || position <= write_floor) {

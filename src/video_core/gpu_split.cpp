@@ -527,7 +527,7 @@ u32 GpuSplit::SpaceId(const void* space) {
     return MaxSpaces - 1;
 }
 
-void GpuSplit::InsertPage(u64 key, bool coarse) {
+void GpuSplit::InsertPage(u64 key, bool coarse, u64 position) {
     PageSlot* slot = last_page_slot;
     if (slot == nullptr || slot->key != key) {
         PageSlot* const bucket = &page_slots[HashBucket(key, PageBuckets) * 4];
@@ -556,22 +556,19 @@ void GpuSplit::InsertPage(u64 key, bool coarse) {
         }
         last_page_slot = slot;
     }
+    // A write placed late (NoteWriteAt) may be older than the slot's.
     if (coarse) {
-        slot->coarse = write_position;
+        slot->coarse = (std::max)(slot->coarse, position);
     }
-    slot->any = write_position;
+    slot->any = (std::max)(slot->any, position);
 }
 
-void GpuSplit::InsertWord(u64 key) {
-    InsertKeyed(word_slots.get(), WordBuckets, key);
-}
-
-void GpuSplit::InsertKeyed(WordSlot* slots, size_t buckets, u64 key) {
+void GpuSplit::InsertKeyed(WordSlot* slots, size_t buckets, u64 key, u64 position) {
     WordSlot* const bucket = &slots[HashBucket(key, buckets) * 4];
     WordSlot* victim = nullptr;
     for (size_t i = 0; i < 4; ++i) {
         if (bucket[i].key == key) {
-            bucket[i].position = write_position;
+            bucket[i].position = (std::max)(bucket[i].position, position);
             return;
         }
         if (victim == nullptr && bucket[i].position <= consumed_cache) {
@@ -587,7 +584,7 @@ void GpuSplit::InsertKeyed(WordSlot* slots, size_t buckets, u64 key) {
         }
         RaiseFloor(victim->position);
     }
-    *victim = {key, write_position};
+    *victim = {key, position};
 }
 
 const GpuSplit::PageSlot* GpuSplit::FindPage(u64 key) const {
@@ -614,14 +611,15 @@ const GpuSplit::WordSlot* GpuSplit::FindKeyed(const WordSlot* slots, size_t buck
     return nullptr;
 }
 
-void GpuSplit::RecordWrite(const void* space, GPUVAddr address, u64 size, Grain grain) {
+void GpuSplit::RecordWrite(const void* space, GPUVAddr address, u64 size, Grain grain,
+                           u64 position) {
     const bool fine = grain == Grain::Word;
     if (page_slots == nullptr) {
         return;
     }
     const u64 sid = SpaceId(space);
-    space_last[sid] = write_position;
-    last_record = write_position;
+    space_last[sid] = (std::max)(space_last[sid], position);
+    last_record = (std::max)(last_record, position);
     const GPUVAddr end = address + size;
     const GPUVAddr first_page = address >> PageBits;
     const GPUVAddr last_page = (end - 1) >> PageBits;
@@ -630,20 +628,20 @@ void GpuSplit::RecordWrite(const void* space, GPUVAddr address, u64 size, Grain 
     }
     if (fine && size <= MaxFineBytes) {
         for (GPUVAddr word = address >> WordBits; word <= (end - 1) >> WordBits; ++word) {
-            InsertWord((word << 2) | sid);
+            InsertKeyed(word_slots.get(), WordBuckets, (word << 2) | sid, position);
         }
         for (GPUVAddr page = first_page; page <= last_page; ++page) {
-            InsertPage((page << 2) | sid, false);
+            InsertPage((page << 2) | sid, false, position);
         }
         return;
     }
     if (grain == Grain::Granule && size <= MaxGranuleBytes) {
         for (GPUVAddr granule = address >> GranuleBits; granule <= (end - 1) >> GranuleBits;
              ++granule) {
-            InsertKeyed(granule_slots.get(), GranuleBuckets, (granule << 2) | sid);
+            InsertKeyed(granule_slots.get(), GranuleBuckets, (granule << 2) | sid, position);
         }
         for (GPUVAddr page = first_page; page <= last_page; ++page) {
-            InsertPage((page << 2) | sid, false);
+            InsertPage((page << 2) | sid, false, position);
         }
         return;
     }
@@ -651,12 +649,12 @@ void GpuSplit::RecordWrite(const void* space, GPUVAddr address, u64 size, Grain 
         // Round robin replaces the oldest.
         HugeWrite& slot = huge_writes[next_huge];
         RaiseFloor(slot.position);
-        slot = {space, address, end, write_position};
+        slot = {space, address, end, position};
         next_huge = (next_huge + 1) % MaxHugeWrites;
         return;
     }
     for (GPUVAddr page = first_page; page <= last_page; ++page) {
-        InsertPage((page << 2) | sid, true);
+        InsertPage((page << 2) | sid, true, position);
     }
 }
 
