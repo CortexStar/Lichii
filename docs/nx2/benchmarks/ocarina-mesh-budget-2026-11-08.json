@@ -16,7 +16,7 @@
   },
   "method": {
     "baseline": "Existing 512-candidate full warm-up run from ocarina-intro-2026-11-08.json; not rerun, as requested.",
-    "new_runs": "1024 then 2048 requested limits, one new run each. Both generate the identical 970-candidate file, so these are two independent cold-cache repetitions of the same effective configuration.",
+    "new_runs": "1024 then 2048 requested limits, one run each. Both generated the identical 970-candidate file. Cache setup differs from the historical 512 run; see cache audit.",
     "settings": "All three use GPL, no-inline, preload-all, mesh enabled, Always boot warm-up, 8 conventional warm-up workers, one mesh worker, and Wait with no skipped draws.",
     "input_and_endpoint": {
       "sequence": {
@@ -41,10 +41,11 @@
       "measurement": "Continuous guest-present intervals, including gaps between client requests; not display scanout or GPU execution time.",
       "integrity": "Every sample rejects truncated or incomplete timestamp windows; complete interval count matches the endpoint cursor difference."
     },
-    "only_intended_change": "Mesh recipe count; first 512 records match the baseline byte for byte; compute/graphics recipes and runtime seed unchanged.",
-    "initial_state": "Fresh title saves cloned from the original frozen seed, separate empty NVIDIA caches, original game executable and frozen measurement clients.",
+    "only_intended_change": "Mesh recipe count; first 512 records match the baseline byte for byte; compute/graphics recipes and runtime seed unchanged. Cache audit subsequently found an unintended driver-cache setup difference.",
+    "initial_state": "Fresh title saves from the frozen seed, original executable and measurement clients. Separate NVIDIA cache paths were configured, but the 1024/2048 target directories were not created.",
     "candidate_selection": "Unchanged ranking and validation, at most two distinct mesh contexts per archive variation; duplicate and already-known records excluded. The frozen seed yields only 970 eligible predictions.",
     "limitations": [
+      "Cache audit: the 512 intro run used an existing, initially empty NVIDIA cache directory, which the driver populated. The 1024/2048 launchers set __GL_SHADER_DISK_CACHE_PATH to directories that were never created and remain absent. Disk-cache behavior was therefore not matched or verified; these timings cannot isolate candidate-budget effects or attribute the longer startup to additional candidates.",
       "The 1024 and 2048 labels are requested limits, not actual pipeline counts.",
       "One historical 512 run and two 970 runs cannot establish statistical significance or causal attribution for small differences.",
       "Guest-present intervals include all loading/emulation work, not only shader compilation.",
@@ -240,5 +241,13 @@
       "private_raw_result_sha256": "07c00474b3b2fb190aeef4a645e35dbbb91ff4ce21c0e822c269617fdc100ba0"
     }
   ],
-  "interpretation": "These intro measurements do not justify increasing the default above 512. The two 970-candidate runs had 10 and 11 intervals >100 ms versus 12 at 512, but worst intervals straddled the baseline (470.8 and 526.5 ms versus 499.9 ms), p99 was slightly worse in both (32.6 versus 31.9 ms), and mean guest-present rate also straddled it (57.06 and 56.22 versus 56.73 FPS). Mesh preparation rose from 85.4 s to 249.0 and 251.7 s, about 2.9 times as long. There is no consistent overall improvement in this small sample, and the remaining stall cluster persists. A requested limit of 2048 adds no coverage over 1024 with this seed and selection logic because their generated files are identical. Other gameplay routes may exercise different candidates; expanding beyond the available 970 would require a separate prediction-coverage experiment."
+  "interpretation": "The 1024 and 2048 files are byte-identical and contain 970 candidates, so 2048 adds no coverage with this frozen seed and selection logic. Performance and startup-cost conclusions versus 512 are withdrawn because driver-cache setup differed. Keep 512 as the existing default pending a properly controlled comparison.",
+  "cache_audit": {
+    "date": "2026-11-08",
+    "finding": "Cache audit: the 512 intro run used an existing, initially empty NVIDIA cache directory, which the driver populated. The 1024/2048 launchers set __GL_SHADER_DISK_CACHE_PATH to directories that were never created and remain absent. Disk-cache behavior was therefore not matched or verified; these timings cannot isolate candidate-budget effects or attribute the longer startup to additional candidates.",
+    "primary_intro_comparison_affected": false,
+    "original_measurements_preserved": true,
+    "performance_budget_conclusion_withdrawn": true,
+    "future_launcher_fix": "Create the cache directory before launch and verify that the driver populates it."
+  }
 }
