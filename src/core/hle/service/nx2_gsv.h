@@ -60,6 +60,7 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/nx2_video_decoder.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_present_sync.h"
 #include "video_core/textures/decoders.h"
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/ipc_helpers.h"
@@ -1785,6 +1786,8 @@ public:
         for (auto* event : m_events) {
             m_context.CloseEvent(event);
         }
+        // Its UI copy (TakeUiSnapshot) must not outlive the session's syncpoints.
+        Tegra::Nx2ResetUiSnapshot();
     }
 
 private:
@@ -1837,6 +1840,9 @@ private:
         } else if (frames_ahead == -1 && app_program_id == OcarinaOfTimeProgramId) {
             frames_ahead = 1;
         }
+        // Running a frame ahead, Ocarina's UI storage is copied at each present (#286).
+        const bool ui_snapshot = frames_ahead == 1 && app_program_id == OcarinaOfTimeProgramId;
+        Tegra::g_nx2_ui_snapshot_enabled.store(ui_snapshot, std::memory_order_relaxed);
         const auto entered = std::chrono::steady_clock::now();
         if (frames_ahead == 1 || (frames_ahead == -1 && !WaitForFrame(~w[22], w[24], true))) {
             LOG_DEBUG(Service, "nx2:vi2 present #{} fence ({}, {:#x}), waiting for ({}, {:#x}); now {:#x}",
@@ -1848,8 +1854,10 @@ private:
             // were at most a frame behind, rewrote command lists Eden had not read yet (misread
             // commands, then crashes, with a slow GPU). Wait for this frame too then. Not when a
             // suspended channel brought us here: this frame can't finish before the present
-            // returns.
-            const bool gpu_behind = frames_ahead == 1 && m_previous_fence_id < 192 &&
+            // returns. Not for Ocarina of Time with its UI copy either: its GPU thread is the
+            // limit (40-55 ms a frame against the game's ~20), and waiting for this frame too
+            // kept the two from ever overlapping.
+            const bool gpu_behind = frames_ahead == 1 && !ui_snapshot && m_previous_fence_id < 192 &&
                                     !system.Host1x().GetSyncpointManager().IsReadyGuest(
                                         m_previous_fence_id, m_previous_fence_value);
             WaitForFrame(m_previous_fence_id, m_previous_fence_value);
@@ -1862,6 +1870,12 @@ private:
         m_previous_fence_id = ~w[22];
         m_previous_fence_value = w[24];
         const auto waited = std::chrono::steady_clock::now();
+        if (ui_snapshot) {
+            TakeUiSnapshot(~w[22], w[24]);
+            m_stats.snapshot_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - waited)
+                                       .count();
+        }
         Composite(w[5], ~w[22], w[24], w[7]);
         const auto composited = std::chrono::steady_clock::now();
         PaceToVblank(w[12], ctx.GetThread().GetOwnerProcess());
@@ -1925,6 +1939,28 @@ private:
                          m_stats.frame_us / 599, m_stats.max_frame_us, m_stats.hitches,
                          m_stats.fence_us / 600, m_stats.max_fence_us, m_stats.composite_us / 600,
                          m_stats.pace_us / 600, m_stats.ran_ahead);
+                if (ui_snapshot) {
+                    auto& snapshot = Tegra::g_nx2_ui_snapshot;
+                    u64 patched_uploads{}, patched_bytes{}, remarked{}, compared_bytes{};
+                    size_t ranges{};
+                    {
+                        std::scoped_lock lock{snapshot.mutex};
+                        patched_uploads = std::exchange(snapshot.patched_uploads, 0);
+                        patched_bytes = std::exchange(snapshot.patched_bytes, 0);
+                        remarked = std::exchange(snapshot.remarked, 0);
+                        compared_bytes = std::exchange(snapshot.compared_bytes, 0);
+                        ranges = snapshot.ranges.size();
+                    }
+                    LOG_INFO(Service,
+                             "nx2:vi2 UI copy: {} of the last 600 presents copied "
+                             "{} KiB of UI storage on average ({} ranges known) in {} us; {} "
+                             "uploads took {} KiB from the copies (the game had rewritten it, {} "
+                             "KiB compared), {} ranges marked for upload again",
+                             m_stats.snapshots,
+                             m_stats.snapshots ? m_stats.snapshot_bytes / m_stats.snapshots / 1024 : 0,
+                             ranges, m_stats.snapshot_us / 600, patched_uploads,
+                             patched_bytes / 1024, compared_bytes / 1024, remarked);
+                }
                 m_stats = {.last_present = entered};
             }
         }
@@ -1944,9 +1980,77 @@ private:
         long long max_frame_us{}, hitches{};
         u32 presents{}, ran_ahead{};
         std::chrono::steady_clock::time_point last_present{};
+        long long snapshot_us{};
+        u64 snapshots{}, snapshot_bytes{};
     } m_stats{};
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)
     u32 m_previous_fence_value{};
+
+    // Ocarina of Time's UI copy (see Tegra::Nx2UiSnapshotState): copies the storage ranges
+    // UI draws read as this present returns, before the game writes its next frame into them.
+    // The GPU thread uploads from the copy until it reaches this frame's fence. The previous
+    // frame's fence has passed here, so its copy is no longer needed.
+    std::vector<Tegra::Nx2UiRange> m_snapshot_ranges;
+    std::vector<u8> m_snapshot_data;
+
+    void TakeUiSnapshot(u32 fence_id, u32 fence_value) {
+        static constexpr u64 MaxSnapshotBytes = 32ULL << 20;
+        auto& state = Tegra::g_nx2_ui_snapshot;
+        auto& syncpoints = system.Host1x().GetSyncpointManager();
+        const u64 present =
+            Tegra::g_nx2_ui_snapshot_present.fetch_add(1, std::memory_order_relaxed) + 1;
+        const auto retire = [] {
+            auto& snapshot = Tegra::g_nx2_ui_snapshot;
+            std::scoped_lock lock{snapshot.mutex};
+            snapshot.RetireLocked();
+        };
+        if (fence_id >= 192 || syncpoints.IsReadyGuest(fence_id, fence_value)) {
+            // The GPU thread is done with this frame: nothing to protect.
+            retire();
+            return;
+        }
+        {
+            std::scoped_lock lock{state.mutex};
+            std::erase_if(state.ranges, [present](const Tegra::Nx2UiRange& range) {
+                return range.tag + Tegra::Nx2UiRangeMaxAge < present;
+            });
+            m_snapshot_ranges = state.ranges;
+        }
+        u64 total = 0;
+        for (auto& range : m_snapshot_ranges) {
+            range.tag = total;
+            total += range.size;
+        }
+        if (total == 0 || total > MaxSnapshotBytes) {
+            retire();
+            return;
+        }
+        m_snapshot_data.resize(total);
+        auto& memory = system.Host1x().MemoryManager();
+        for (const auto& range : m_snapshot_ranges) {
+            memory.ReadBlockUnsafe(range.address, m_snapshot_data.data() + range.tag, range.size);
+        }
+        {
+            std::scoped_lock lock{state.mutex};
+            // The previous frame's fence has passed: its copy retires here.
+            state.RetireLocked();
+            state.copied.swap(m_snapshot_ranges);
+            state.data.swap(m_snapshot_data);
+            u64 copied_begin = ~0ULL, copied_end = 0;
+            for (const auto& range : state.copied) {
+                copied_begin = (std::min)(copied_begin, range.address);
+                copied_end = (std::max)(copied_end, range.address + range.size);
+            }
+            state.copied_begin.store(copied_begin, std::memory_order_relaxed);
+            state.copied_end.store(copied_end, std::memory_order_relaxed);
+            state.syncpoints.store(&syncpoints, std::memory_order_relaxed);
+            state.fence_id.store(fence_id, std::memory_order_relaxed);
+            state.fence_value.store(fence_value, std::memory_order_relaxed);
+            state.active.store(true, std::memory_order_release);
+        }
+        ++m_stats.snapshots;
+        m_stats.snapshot_bytes += total;
+    }
 
     // The console flips one frame per 60 Hz vblank and keeps the rest queued, so a game can't
     // present faster than that. Every slot is reported free here: hold each present until the
