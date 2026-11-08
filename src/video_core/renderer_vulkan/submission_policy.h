@@ -3,6 +3,7 @@
 #pragma once
 
 #include <charconv>
+#include <limits>
 #include <optional>
 #include <string_view>
 
@@ -39,11 +40,17 @@ inline std::optional<u32> ParseBudget(std::string_view value) {
     return budget;
 }
 
+/// Native desktop titles: a submission at the draw budget would end the render pass and drop
+/// all recorded state (~400 render pass ends a second in Ocarina), so while `render_pass_active`
+/// it waits for a draw that finds the pass ended, for at most four budgets.
 constexpr Action Advance(u32& counter, bool native, bool android,
-                         u32 native_budget = DefaultNativeBudget, u32 legacy_budget = 4096) {
+                         u32 native_budget = DefaultNativeBudget, u32 legacy_budget = 4096,
+                         bool render_pass_active = false) {
     ++counter;
     if (native && !android) {
-        if (counter >= native_budget) {
+        if (counter >= native_budget &&
+            (!render_pass_active || u64{counter} >= u64{native_budget} * 4 ||
+             counter == (std::numeric_limits<u32>::max)())) {
             counter = 0;
             return Action::Flush;
         }

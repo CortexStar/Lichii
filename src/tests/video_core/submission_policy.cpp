@@ -52,6 +52,31 @@ TEST_CASE("AMD's proprietary driver submits native titles every 512 draws",
     REQUIRE(submissions == std::vector<u32>{512, 1024});
 }
 
+TEST_CASE("Native submissions wait for the render pass to end, for at most four budgets",
+          "[video_core][submission_policy]") {
+    u32 counter{};
+    // Pass active throughout: the flush comes at four budgets.
+    std::vector<u32> submissions;
+    for (u32 work = 1; work <= 1024; ++work) {
+        if (Advance(counter, true, false, 128, 4096, true) == Action::Flush) {
+            submissions.push_back(work);
+        }
+    }
+    REQUIRE(submissions == std::vector<u32>{512, 1024});
+    // The pass ends after the budget: the next draw flushes.
+    counter = 0;
+    for (u32 work = 1; work < 200; ++work) {
+        REQUIRE(Advance(counter, true, false, 128, 4096, true) != Action::Flush);
+    }
+    REQUIRE(Advance(counter, true, false, 128, 4096, false) == Action::Flush);
+    REQUIRE(counter == 0);
+    // Before the budget an ended pass changes nothing.
+    for (u32 work = 1; work < 128; ++work) {
+        REQUIRE(Advance(counter, true, false, 128, 4096, false) != Action::Flush);
+    }
+    REQUIRE(Advance(counter, true, false, 128, 4096, false) == Action::Flush);
+}
+
 TEST_CASE("Native submission overrides do not round to a dispatch boundary",
           "[video_core][submission_policy]") {
     for (const u32 budget : {1U, 2U, 31U, 32U, 33U, 127U, 128U, 129U, 4096U}) {

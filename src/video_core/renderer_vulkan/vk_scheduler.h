@@ -189,6 +189,9 @@ public:
         return state.renderpass != VK_NULL_HANDLE;
     }
 
+    /// Whether the active render pass is the one RequestRenderpass(framebuffer) would keep.
+    bool RenderPassMatches(const Framebuffer* framebuffer) const;
+
     /// Update the pipeline to the current execution context.
     bool UpdateGraphicsPipeline(GraphicsPipeline* pipeline);
 
