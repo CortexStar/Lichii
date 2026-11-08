@@ -741,10 +741,15 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         dynamic_features.has_extended_dynamic_state_3_enables &&
         device.SupportsDynamicState3LineStippleEnable();
 
-    // VIDS: Independent toggle (not affected by dyna_state levels)
+    // VIDS: Independent toggle (not affected by dyna_state levels). Not on AMD's driver: dynamic
+    // vertex input makes it compile every vertex shader with its table-driven "uber" fetch
+    // (xgl pipeline_compiler.cpp: enableUberFetchShader whenever VertexInput is dynamic). With
+    // static vertex input, monolithic pipelines and link-time-optimized links of the pipeline
+    // libraries fetch with the pipeline's own formats.
     dynamic_features.has_dynamic_vertex_input =
         device.IsExtVertexInputDynamicStateSupported() &&
-        Settings::values.vertex_input_dynamic_state.GetValue();
+        Settings::values.vertex_input_dynamic_state.GetValue() &&
+        device.GetDriverID() != VK_DRIVER_ID_AMD_PROPRIETARY;
     dynamic_features.has_static_vertex_repack =
         StaticVertexRepackEnabled(device.GetMinVertexInputBindingStrideAlignment());
 
