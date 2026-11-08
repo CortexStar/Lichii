@@ -350,6 +350,23 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             [&](u64 address, NativeQmdScheduler::Descriptor& descriptor) {
                 if (!memory_manager.IsFullyMappedRange(address, sizeof(descriptor))) return false;
                 memory_manager.ReadBlockUnsafe(address, descriptor.data(), sizeof(descriptor));
+                // An all-zero QMD whose words GPU work wrote (a copy) may still be only in the
+                // buffer cache: flush it and read again.
+                if (std::ranges::all_of(descriptor, [](u32 word) { return word == 0; })) {
+                    if (const auto device = memory_manager.GpuToCpuAddress(address);
+                        device &&
+                        rasterizer->MustFlushRegion(*device, sizeof(descriptor),
+                                                    VideoCommon::CacheType::BufferCache)) {
+                        rasterizer->FlushRegion(*device, sizeof(descriptor),
+                                                VideoCommon::CacheType::BufferCache);
+                        memory_manager.ReadBlockUnsafe(address, descriptor.data(),
+                                                       sizeof(descriptor));
+                        LOG_WARNING(HW_GPU,
+                                    "Native QMD {:#x} read zero from guest memory; flushed "
+                                    "the buffer cache",
+                                    address);
+                    }
+                }
                 if (static u32 logged{}; (descriptor[53] & (1U << 23)) && logged < 8) {
                     ++logged;
                     LOG_INFO(HW_GPU, "Native QMD {:#x} releases: {:08x} | {:08x} | {:08x}", address,
@@ -478,11 +495,15 @@ void KeplerCompute::CallMethod(Core::System& system, u32 method, u32 method_argu
 
     switch (method) {
     case KEPLER_COMPUTE_REG_INDEX(exec_upload): {
-        UploadInfo info{.upload_address = upload_address,
-                        .exec_address = upload_state.ExecTargetAddress(),
-                        .copy_size = upload_state.GetUploadSize(),
-                        .was_dirty = upload_dirty};
-        uploads.push_back(info);
+        // Only the launch method of the class before reads the list, and native engines never
+        // run it (ProcessNativeMethod takes 0xaf): it grew by one entry per exec all session.
+        if (!native_mode) {
+            UploadInfo info{.upload_address = upload_address,
+                            .exec_address = upload_state.ExecTargetAddress(),
+                            .copy_size = upload_state.GetUploadSize(),
+                            .was_dirty = upload_dirty};
+            uploads.push_back(info);
+        }
         upload_state.ProcessExec(regs.exec_upload.linear != 0);
         break;
     }
