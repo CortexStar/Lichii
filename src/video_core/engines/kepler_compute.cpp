@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <unordered_set>
 #include "common/assert.h"
 #include "common/dkb_frame_trace.h"
@@ -696,6 +697,26 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
                     .src_y1 = static_cast<s32>(replacement_input->Height()),
                 };
                 const bool done = rasterizer->AccelerateSurfaceCopy(*source, *dest, config);
+                // Which network component the copy stands in for (the game's movie components
+                // differ in input and output size), once per pair of images.
+                const u32 input_format = static_cast<u32>(replacement_input->format.Value());
+                const u32 output_format = static_cast<u32>(replacement_output->format.Value());
+                const u64 geometry = (u64{replacement_input->Width()} << 48) ^
+                                     (u64{replacement_input->Height()} << 32) ^
+                                     (u64{replacement_output->Width()} << 16) ^
+                                     u64{replacement_output->Height()} ^
+                                     (u64{input_format} << 56) ^ (u64{output_format} << 8) ^
+                                     u64{decodes_srgb};
+                if (std::exchange(native_upscale_logged, geometry) != geometry) {
+                    LOG_INFO(HW_GPU,
+                             "Native network pass {:#x} replaced by a {} copy: input {}x{} "
+                             "format {} at {:#x}, output {}x{} format {} at {:#x}: {}",
+                             regs.code_loc.Address(), decodes_srgb ? "sRGB" : "plain",
+                             replacement_input->Width(), replacement_input->Height(),
+                             input_format, replacement_input->Address(), replacement_output->Width(),
+                             replacement_output->Height(),
+                             output_format, replacement_output->Address(), done);
+                }
                 LOG_DEBUG(HW_GPU,
                           "Native network pass {:#x} replaced by input copy {}->{} ({}): {}",
                           regs.code_loc.Address(), replacement_input->Address(),

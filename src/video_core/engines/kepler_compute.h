@@ -333,6 +333,8 @@ private:
     u32 network_skip_remaining{};
     /// Set when the replacement copy fails, so the full network runs from then on.
     bool native_upscale_disabled{};
+    /// Sizes and formats of the last replaced input/output pair, logged when they change.
+    u64 native_upscale_logged{};
 
     /// Motion vectors and depth of Fire Emblem: Fortune's Weave's DLSS evaluation, from its first
     /// pass (run earlier in the frame than the network pass the stand-in replaces), with the input
