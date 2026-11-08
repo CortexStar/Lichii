@@ -481,7 +481,6 @@ private:
                                                         GPUVAddr qmd_address, u64 position,
                                                         Descriptor& descriptor) const {
         using Lost = Nx2AcquireStats::QmdLost;
-        memory.Read(qmd_address, descriptor.data(), sizeof(descriptor));
         const auto device = memory.Device(qmd_address);
         if (!device || memory.GpuWritten(*device, sizeof(descriptor))) {
             return Outcome{false, std::nullopt, Lost::GpuWritten};
@@ -494,6 +493,11 @@ private:
             return Outcome{false, std::nullopt, Lost::WrittenAfter, qmd_address};
         }
         if (split.Ran(target)) {
+            // Read only once Ran saw the back past the write: the back stores its position after
+            // the writes before it. A read before that look may be older than the write. The back
+            // can run a write published shortly before the signal (to an idle back, after a few
+            // words) while the front reads, and store its position before the front looks.
+            memory.Read(qmd_address, descriptor.data(), sizeof(descriptor));
             return std::nullopt;
         }
         if (const InlineWrite* written = QueuedInlineWrite(split, *device);
