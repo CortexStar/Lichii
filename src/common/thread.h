@@ -106,6 +106,17 @@ enum class ThreadPlacement : u32 {
 };
 
 void SetCurrentThreadPriority(ThreadPriority new_priority);
+
+/// A thread whose priority another thread can change.
+struct ThreadPriorityTarget {
+    u64 native{};
+};
+
+[[nodiscard]] ThreadPriorityTarget CurrentThreadPriorityTarget();
+
+/// Sets the priority of another thread of this process. On Linux, raising it needs RLIMIT_NICE
+/// room or CAP_SYS_NICE, as for SetCurrentThreadPriority.
+void SetOtherThreadPriority(ThreadPriorityTarget target, ThreadPriority new_priority);
 void SetCurrentThreadName(const char* name);
 void SetCurrentThreadToPerformanceCores();
 void SetCurrentThreadToEfficiencyCores();

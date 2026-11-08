@@ -339,24 +339,38 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
     build_task = std::move(func);
     if (thread_worker) {
         build_task_done = false;
-        thread_worker->QueueWork([this] {
-            RunBuild();
+        thread_worker->QueueWork([this, low = thread_worker->LowersPriority()] {
+            RunBuild(low);
             // The last access to this pipeline from the worker.
             build_task_done.store(true, std::memory_order::release);
         });
     } else {
-        RunBuild();
+        RunBuild(false);
     }
 }
 
-void ComputePipeline::RunBuild() {
+void ComputePipeline::RunBuild(bool low_priority_thread) {
     // A draw or dispatch that needs the pipeline builds it on the scheduler thread instead of
     // waiting for the worker queue, which can hold hundreds of builds, to reach it.
     if (build_claimed.exchange(true)) {
         return;
     }
+    {
+        std::scoped_lock lock{build_mutex};
+        if (build_priority.Start(low_priority_thread, Common::CurrentThreadPriorityTarget())) {
+            Common::SetCurrentThreadPriority(BuilderPriority::RaisedPriority);
+        }
+    }
     build_task();
     build_task = nullptr;
+    bool lower;
+    {
+        std::scoped_lock lock{build_mutex};
+        lower = build_priority.Finish();
+    }
+    if (lower) {
+        Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+    }
 }
 
 bool ComputePipeline::CanReplaceOcarinaUpscale() const {
@@ -651,8 +665,12 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     if (!is_built.load(std::memory_order::relaxed)) {
         // Wait for the pipeline to be built
         scheduler.Record([this](vk::CommandBuffer) {
-            RunBuild();
+            RunBuild(false);
             std::unique_lock lock{build_mutex};
+            if (!is_built.load(std::memory_order::relaxed) && build_priority.Await()) {
+                Common::SetOtherThreadPriority(build_priority.Target(),
+                                               BuilderPriority::RaisedPriority);
+            }
             build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
         });
     }

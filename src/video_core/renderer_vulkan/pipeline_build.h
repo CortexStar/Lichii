@@ -62,13 +62,71 @@ private:
     std::shared_ptr<std::atomic<size_t>> pending = std::make_shared<std::atomic<size_t>>(0);
 };
 
+/// Priority inheritance for a build on a ThreadPriority::Low builder thread: once a thread waits
+/// for the build, the builder runs at RaisedPriority until the build is done, so threads of
+/// normal priority (other programs) do not preempt the build the renderer is waiting on. Every
+/// call is made under the build's mutex; the caller sets the priorities the calls ask for.
+class BuilderPriority {
+public:
+    static constexpr Common::ThreadPriority RaisedPriority = Common::ThreadPriority::High;
+
+    /// The thread that claimed the build, before it runs it.
+    /// @return True when it has to raise itself: a waiter came first.
+    [[nodiscard]] bool Start(bool low_priority_thread, Common::ThreadPriorityTarget thread) {
+        started = true;
+        low_priority = low_priority_thread;
+        target = thread;
+        return Raise();
+    }
+
+    /// A thread about to wait for the build.
+    /// @return True when it has to raise Target(), the thread running the build.
+    [[nodiscard]] bool Await() {
+        awaited = true;
+        return started && Raise();
+    }
+
+    /// The thread that ran the build, once it is done.
+    /// @return True when it has to go back to ThreadPriority::Low.
+    [[nodiscard]] bool Finish() {
+        finished = true;
+        return std::exchange(raised, false);
+    }
+
+    [[nodiscard]] Common::ThreadPriorityTarget Target() const {
+        return target;
+    }
+
+private:
+    bool Raise() {
+        if (!low_priority || !awaited || raised || finished) {
+            return false;
+        }
+        raised = true;
+        return true;
+    }
+
+    Common::ThreadPriorityTarget target{};
+    bool started{};
+    bool low_priority{};
+    bool awaited{};
+    bool raised{};
+    bool finished{};
+};
+
 class PipelineBuild {
     struct State {
         explicit State(std::function<void()> task_) : task{std::move(task_)} {}
 
-        void Run() noexcept {
+        void Run(bool low_priority_thread = false) noexcept {
             if (claimed.exchange(true)) {
                 return;
+            }
+            {
+                std::scoped_lock lock{mutex};
+                if (priority.Start(low_priority_thread, Common::CurrentThreadPriorityTarget())) {
+                    Common::SetCurrentThreadPriority(BuilderPriority::RaisedPriority);
+                }
             }
             try {
                 task();
@@ -81,9 +139,23 @@ class PipelineBuild {
                           "Graphics pipeline worker failed with an unknown exception");
             }
             task = {};
-            std::scoped_lock lock{mutex};
-            complete.store(true, std::memory_order_release);
-            condition.notify_all();
+            bool lower;
+            {
+                std::scoped_lock lock{mutex};
+                complete.store(true, std::memory_order_release);
+                lower = priority.Finish();
+                condition.notify_all();
+            }
+            if (lower) {
+                Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+            }
+        }
+
+        /// Raises the builder for a waiter; called under the mutex.
+        void Await() {
+            if (!complete.load(std::memory_order_relaxed) && priority.Await()) {
+                Common::SetOtherThreadPriority(priority.Target(), BuilderPriority::RaisedPriority);
+            }
         }
 
         std::function<void()> task;
@@ -92,13 +164,15 @@ class PipelineBuild {
         std::atomic_bool complete{};
         std::mutex mutex;
         std::condition_variable condition;
+        BuilderPriority priority;
     };
 
 public:
     PipelineBuild(Common::ThreadWorker* workers, std::function<void()> task)
         : state{std::make_shared<State>(std::move(task))} {
         if (workers) {
-            workers->QueueWork([state = state] { state->Run(); });
+            workers->QueueWork(
+                [state = state, low = workers->LowersPriority()] { state->Run(low); });
         } else {
             state->Run();
         }
@@ -122,6 +196,7 @@ public:
             shared->Run();
         }
         std::unique_lock lock{shared->mutex};
+        shared->Await();
         shared->condition.wait(lock,
                                [&] { return shared->complete.load(std::memory_order_acquire); });
     }
@@ -132,6 +207,7 @@ public:
     bool WaitFor(std::chrono::microseconds timeout) const {
         const auto shared = state;
         std::unique_lock lock{shared->mutex};
+        shared->Await();
         return shared->condition.wait_for(lock, timeout, [&] {
             return shared->complete.load(std::memory_order_acquire);
         });

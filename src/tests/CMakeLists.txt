@@ -136,6 +136,7 @@ add_executable(tests
     common/range_map.cpp
     common/ring_buffer.cpp
     common/scratch_buffer.cpp
+    common/thread_priority.cpp
     common/slot_vector.cpp
     common/sparse_large_vector.cpp
     common/undefined_fix.cpp

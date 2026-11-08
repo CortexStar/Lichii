@@ -165,6 +165,64 @@ TEST_CASE("A draw claims a queued worker-only build instead of waiting behind th
     REQUIRE_FALSE(build.Failed());
 }
 
+TEST_CASE("A waiter raises a low-priority builder once, until the build ends",
+          "[video_core][async_draw][pipeline_build]") {
+    const Common::ThreadPriorityTarget builder{42};
+    SECTION("Waiter after the builder started") {
+        Vulkan::BuilderPriority priority;
+        REQUIRE_FALSE(priority.Start(true, builder));
+        REQUIRE(priority.Await());
+        REQUIRE(priority.Target().native == 42);
+        REQUIRE_FALSE(priority.Await());
+        REQUIRE(priority.Finish());
+        REQUIRE_FALSE(priority.Await());
+    }
+    SECTION("Waiter before the builder started") {
+        Vulkan::BuilderPriority priority;
+        REQUIRE_FALSE(priority.Await());
+        REQUIRE(priority.Start(true, builder));
+        REQUIRE_FALSE(priority.Await());
+        REQUIRE(priority.Finish());
+    }
+    SECTION("A builder that is not low priority is left alone") {
+        Vulkan::BuilderPriority priority;
+        REQUIRE_FALSE(priority.Await());
+        REQUIRE_FALSE(priority.Start(false, builder));
+        REQUIRE_FALSE(priority.Await());
+        REQUIRE_FALSE(priority.Finish());
+    }
+    SECTION("A build nobody waits for keeps its priority") {
+        Vulkan::BuilderPriority priority;
+        REQUIRE_FALSE(priority.Start(true, builder));
+        REQUIRE_FALSE(priority.Finish());
+        REQUIRE_FALSE(priority.Await());
+    }
+}
+
+TEST_CASE("Waiting on a build a low-priority worker runs still completes",
+          "[video_core][async_draw][pipeline_build]") {
+    Common::ThreadWorker workers{1, "PipelineTest", {}, Common::ThreadPlacement::Background};
+    REQUIRE(workers.LowersPriority());
+    std::promise<void> release, entered;
+    auto gate = release.get_future().share();
+    int output = 0;
+    PipelineBuild build{&workers, [gate, &entered, &output] {
+                            entered.set_value();
+                            gate.wait();
+                            output = 42;
+                        }};
+    entered.get_future().wait();
+    auto draw = std::async(std::launch::async, [&] { build.Wait(true); });
+    const bool held = Pending(draw);
+    const bool bounded = !build.WaitFor(std::chrono::microseconds{1000});
+    release.set_value();
+    draw.get();
+    REQUIRE(held);
+    REQUIRE(bounded);
+    REQUIRE(output == 42);
+    REQUIRE(build.IsBuilt());
+}
+
 TEST_CASE("Pipeline destruction drains queued work before owner resources disappear",
           "[video_core][async_draw][pipeline_build]") {
     Common::ThreadWorker workers{1, "PipelineTest"};

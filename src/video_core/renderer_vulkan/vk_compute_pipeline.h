@@ -17,6 +17,7 @@
 #include "common/common_types.h"
 #include "common/thread_worker.h"
 #include "shader_recompiler/shader_info.h"
+#include "video_core/renderer_vulkan/pipeline_build.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_descriptor_buffer.h"
@@ -98,7 +99,7 @@ public:
 
 private:
     /// Builds the pipeline once, on whichever thread gets here first.
-    void RunBuild();
+    void RunBuild(bool low_priority_thread);
 
     const Device& device;
     vk::PipelineCache& pipeline_cache;
@@ -125,6 +126,7 @@ private:
     std::function<void()> build_task;
     std::atomic_bool build_claimed{false};
     std::atomic_bool build_task_done{true};
+    BuilderPriority build_priority;
     std::condition_variable build_condvar;
     std::mutex build_mutex;
     std::atomic_bool is_built{false};
