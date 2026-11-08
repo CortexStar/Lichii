@@ -31,6 +31,7 @@
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/native_verify.h"
+#include "video_core/renderer_vulkan/vk_gpu_crumbs.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
@@ -155,12 +156,20 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
         }
     }
 
+    crumbs = GpuCrumbTrail::Create(device);
+    if (crumbs) {
+        device.SetLossReporter([trail = crumbs.get()] { trail->Report(); });
+    }
+
     AcquireNewChunk();
     AllocateWorkerCommandBuffer();
     worker_thread = std::jthread([this](std::stop_token token) { WorkerThread(token); });
 }
 
 Scheduler::~Scheduler() {
+    if (crumbs) {
+        device.SetLossReporter({});
+    }
     if (trace_query_pool) {
         WaitWorker();
         worker_thread.request_stop();
@@ -379,7 +388,10 @@ void RecordComputeToGraphicsBarrier(vk::CommandBuffer cmdbuf) {
                            0, COMPUTE_TO_GRAPHICS);
 }
 
-void BeginPassLabel(vk::CommandBuffer cmdbuf, VkExtent2D render_area) {
+void BeginPassLabel(vk::CommandBuffer cmdbuf, VkExtent2D render_area, GpuCrumbTrail* crumbs) {
+    if (crumbs != nullptr) {
+        crumbs->BeginPass(cmdbuf, render_area.width, render_area.height);
+    }
     if (GpuMarkers::Enabled()) {
         std::array<char, 32> label{};
         std::snprintf(label.data(), label.size(), "pass %ux%u", render_area.width,
@@ -389,6 +401,15 @@ void BeginPassLabel(vk::CommandBuffer cmdbuf, VkExtent2D render_area) {
     }
 }
 } // Anonymous namespace
+
+u32 Scheduler::BeginCrumb(vk::CommandBuffer cmdbuf, u64 hash, u64 fragment_hash,
+                          std::array<u32, 3> size) {
+    return crumbs->BeginWork(cmdbuf, hash, fragment_hash, size);
+}
+
+void Scheduler::EndCrumb(vk::CommandBuffer cmdbuf, u32 id) {
+    crumbs->EndWork(cmdbuf, id);
+}
 
 void Scheduler::BeginRenderingImpl(const Framebuffer* framebuffer, const DeferredClear* clear,
                                    bool tracked) {
@@ -424,7 +445,7 @@ void Scheduler::BeginRenderingImpl(const Framebuffer* framebuffer, const Deferre
         .has_stencil = framebuffer->HasAspectStencilBit(),
     };
     const bool after_compute = std::exchange(compute_writes_pending, false);
-    Record([attachments, after_compute](vk::CommandBuffer cmdbuf) {
+    Record([attachments, after_compute, crumbs = crumbs.get()](vk::CommandBuffer cmdbuf) {
         const auto attachment = [](VkImageView view, bool cleared, const VkClearValue& value) {
             return VkRenderingAttachmentInfo{
                 .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
@@ -463,7 +484,7 @@ void Scheduler::BeginRenderingImpl(const Framebuffer* framebuffer, const Deferre
         if (after_compute) {
             RecordComputeToGraphicsBarrier(cmdbuf);
         }
-        BeginPassLabel(cmdbuf, attachments.render_area);
+        BeginPassLabel(cmdbuf, attachments.render_area, crumbs);
         cmdbuf.BeginRendering(rendering_info);
     });
     num_renderpass_images = framebuffer->NumImages();
@@ -484,7 +505,7 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
     }
     const bool after_compute = std::exchange(compute_writes_pending, false);
     Record([renderpass, framebuffer_handle, render_area, values, clear_value_count,
-            after_compute](vk::CommandBuffer cmdbuf) {
+            after_compute, crumbs = crumbs.get()](vk::CommandBuffer cmdbuf) {
         const VkRenderPassBeginInfo renderpass_bi{
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
             .pNext = nullptr,
@@ -501,7 +522,7 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
         if (after_compute) {
             RecordComputeToGraphicsBarrier(cmdbuf);
         }
-        BeginPassLabel(cmdbuf, render_area);
+        BeginPassLabel(cmdbuf, render_area, crumbs);
         cmdbuf.BeginRenderPass(renderpass_bi, VK_SUBPASS_CONTENTS_INLINE);
     });
     num_renderpass_images = framebuffer->NumImages();
@@ -857,6 +878,9 @@ void Scheduler::AllocateWorkerCommandBuffer() {
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         .pInheritanceInfo = nullptr,
     });
+    if (crumbs) {
+        crumbs->BeginSubmit(current_cmdbuf);
+    }
     current_upload_cmdbuf = vk::CommandBuffer(command_pool->Commit(), device.GetDispatchLoader());
     current_upload_cmdbuf.Begin({
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -1175,6 +1199,9 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
         if (trace_details) {
             trace_work = {};
         }
+        if (crumbs) {
+            crumbs->EndSubmit(cmdbuf, signal_value);
+        }
         cmdbuf.End();
 
         if (on_submit) {
@@ -1262,11 +1289,15 @@ void Scheduler::EndRenderPass()
 
         // Only a pass that ran transform feedback has its writes to order before vertex input.
         Record([has_transform_feedback = std::exchange(render_pass_has_xfb, false),
-                dynamic_rendering = state.dynamic_rendering](vk::CommandBuffer cmdbuf) {
+                dynamic_rendering = state.dynamic_rendering,
+                crumbs = crumbs.get()](vk::CommandBuffer cmdbuf) {
             if (dynamic_rendering) {
                 cmdbuf.EndRendering();
             } else {
                 cmdbuf.EndRenderPass();
+            }
+            if (crumbs != nullptr) {
+                crumbs->EndPass(cmdbuf);
             }
             if (GpuMarkers::Enabled()) {
                 cmdbuf.EndDebugUtilsLabelEXT();

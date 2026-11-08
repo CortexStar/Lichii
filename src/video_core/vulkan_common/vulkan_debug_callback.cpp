@@ -4,6 +4,7 @@
 #include <string_view>
 #include "common/logging.h"
 #include "common/settings.h"
+#include "video_core/vulkan_common/address_bindings.h"
 #include "video_core/vulkan_common/vulkan_debug_callback.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 
@@ -25,6 +26,10 @@ VkBool32 DebugUtilCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                            VkDebugUtilsMessageTypeFlagsEXT type,
                            const VkDebugUtilsMessengerCallbackDataEXT* data,
                            [[maybe_unused]] void* user_data) {
+    if (type & VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT) {
+        AddressBindings::OnMessage(*data);
+        return VK_FALSE;
+    }
     // Skip logging known false-positive validation errors
     switch (static_cast<u32>(data->messageIdNumber)) {
 #ifdef __ANDROID__
@@ -101,18 +106,30 @@ VkBool32 DebugUtilCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
 
 } // Anonymous namespace
 
-vk::DebugUtilsMessenger CreateDebugUtilsCallback(const vk::Instance& instance) {
+vk::DebugUtilsMessenger CreateDebugUtilsCallback(const vk::Instance& instance, bool validation,
+                                                 bool address_bindings) {
+    VkDebugUtilsMessageSeverityFlagsEXT severity = 0;
+    VkDebugUtilsMessageTypeFlagsEXT types = 0;
+    if (validation) {
+        severity |= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
+                    VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                    VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT |
+                    VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT;
+        types |= VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                 VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                 VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    }
+    if (address_bindings) {
+        // Binding reports come at info severity.
+        severity |= VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT;
+        types |= VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT;
+    }
     return instance.CreateDebugUtilsMessenger(VkDebugUtilsMessengerCreateInfoEXT{
         .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
         .pNext = nullptr,
         .flags = 0,
-        .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
-                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT |
-                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT,
-        .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-                       VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+        .messageSeverity = severity,
+        .messageType = types,
         .pfnUserCallback = DebugUtilCallback,
         .pUserData = nullptr,
     });

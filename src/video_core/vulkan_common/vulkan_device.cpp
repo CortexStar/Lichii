@@ -6,6 +6,9 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <functional>
+#include <mutex>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -28,6 +31,8 @@
 #include "video_core/vulkan_common/nsight_aftermath_tracker.h"
 #include "video_core/vulkan_common/vma.h"
 #include "video_core/vulkan_common/amd_ffx.h"
+#include "video_core/vulkan_common/address_bindings.h"
+#include "video_core/vulkan_common/gpu_crumbs.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -904,9 +909,15 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 
     // Initialize GPU logging if enabled
     InitializeGPULogging();
+
+    if (surface != VkSurfaceKHR{}) {
+        // Every path a device loss takes ends in a vk::Exception; report it at the first.
+        vk::SetDeviceLostHandler([this] { ReportLoss(); });
+    }
 }
 
 Device::~Device() {
+    vk::SetDeviceLostHandler({});
 #ifdef EGLANTINE_STREAMLINE
     if (streamline_attached) {
         Streamline::Stop();
@@ -1062,11 +1073,36 @@ VkFormat Device::GetSupportedFormat(VkFormat wanted_format, VkFormatFeatureFlags
 }
 
 void Device::ReportLoss() const {
+    static std::atomic_bool reported{};
+    if (reported.exchange(true)) {
+        return;
+    }
     LOG_CRITICAL(Render_Vulkan, "Device loss occurred!");
     ReportDeviceFault();
+    std::function<void()> reporter;
+    {
+        std::scoped_lock lock{loss_reporter_mutex};
+        reporter = loss_reporter;
+    }
+    if (reporter) {
+        reporter();
+    }
+    // The AMD FSR runtime calls in flight and the last ones made (frame generation runs on the GPU
+    // too).
+    std::array<char, 1024> amd_calls;
+    AmdFfx::WriteBreadcrumbs(amd_calls.data(), amd_calls.size());
+    LOG_CRITICAL(Render_Vulkan, "{}", amd_calls.data());
+    Common::Log::Stop();
 
-    // Wait for the log to flush and for Nsight Aftermath to dump the results
-    std::this_thread::sleep_for(std::chrono::seconds{15});
+    if (nsight_aftermath_tracker) {
+        // Give Nsight Aftermath time to dump its results (the log is flushed above).
+        std::this_thread::sleep_for(std::chrono::seconds{15});
+    }
+}
+
+void Device::SetLossReporter(std::function<void()> reporter) const {
+    std::scoped_lock lock{loss_reporter_mutex};
+    loss_reporter = std::move(reporter);
 }
 
 void Device::ReportDeviceFault() const {
@@ -1129,6 +1165,17 @@ void Device::ReportDeviceFault() const {
         const VkDeviceSize lower = address.reportedAddress & ~(precision - 1);
         LOG_CRITICAL(Render_Vulkan, "Device fault address {}: {} at {:#x} (range [{:#x}, {:#x}))",
                      i, type, address.reportedAddress, lower, lower + precision);
+        if (const AddressBindings::History* history = AddressBindings::Global()) {
+            for (const std::string& line :
+                 history->Explain(address.reportedAddress, address.addressPrecision)) {
+                LOG_CRITICAL(Render_Vulkan, "Device fault address {}: {}", i, line);
+            }
+        } else if (i == 0) {
+            LOG_CRITICAL(Render_Vulkan,
+                         "Device fault address {}: set EDEN_NX2_GPU_CRUMBS=1 to name the object "
+                         "at it",
+                         i);
+        }
     }
     for (u32 i = 0; i < counts.vendorInfoCount; ++i) {
         const VkDeviceFaultVendorInfoEXT& vendor = vendor_infos[i];
@@ -1420,6 +1467,25 @@ bool Device::GetSuitability(bool requires_swapchain) {
         SetNext(next, device_fault_features);
     }
 
+    // EDEN_NX2_GPU_CRUMBS: name the object a device fault hit and the GPU command it was in.
+    const bool crumbs = GpuCrumbs::Requested();
+    const bool has_address_binding_report =
+        crumbs &&
+        supported_extensions.contains(VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME);
+    if (has_address_binding_report) {
+        address_binding_features.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ADDRESS_BINDING_REPORT_FEATURES_EXT;
+        SetNext(next, address_binding_features);
+    }
+    const bool has_coherent_memory =
+        crumbs && supported_extensions.contains(VK_AMD_BUFFER_MARKER_EXTENSION_NAME) &&
+        supported_extensions.contains(VK_AMD_DEVICE_COHERENT_MEMORY_EXTENSION_NAME);
+    if (has_coherent_memory) {
+        coherent_memory_features.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COHERENT_MEMORY_FEATURES_AMD;
+        SetNext(next, coherent_memory_features);
+    }
+
     if (graphics_pipeline_library_requested) {
         graphics_pipeline_library_features.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT;
@@ -1432,6 +1498,14 @@ bool Device::GetSuitability(bool requires_swapchain) {
     if (has_device_fault_extension) {
         loaded_extensions.insert(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
         device_fault_features.deviceFaultVendorBinary = VK_FALSE;
+    }
+    if (has_address_binding_report && address_binding_features.reportAddressBinding) {
+        loaded_extensions.insert(VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME);
+    }
+    if (has_coherent_memory && coherent_memory_features.deviceCoherentMemory) {
+        loaded_extensions.insert(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
+        loaded_extensions.insert(VK_AMD_DEVICE_COHERENT_MEMORY_EXTENSION_NAME);
+        buffer_marker_enabled = true;
     }
 
     // Base Vulkan 1.0 features are always valid regardless of instance version.

@@ -300,11 +300,17 @@ add_library(video_core STATIC
     renderer_vulkan/descriptor_payload_growth.h
     vulkan_common/vulkan_debug_callback.cpp
     vulkan_common/vulkan_debug_callback.h
+    renderer_vulkan/gpu_crumb_log.h
+    renderer_vulkan/vk_gpu_crumbs.cpp
+    renderer_vulkan/vk_gpu_crumbs.h
     renderer_vulkan/vk_anti_lag.cpp
     renderer_vulkan/vk_anti_lag.h
     vulkan_common/amd_ffx.cpp
     vulkan_common/amd_ffx.h
     vulkan_common/frame_gen_queues.h
+    vulkan_common/gpu_crumbs.h
+    vulkan_common/address_bindings.cpp
+    vulkan_common/address_bindings.h
     vulkan_common/driver_call.cpp
     vulkan_common/driver_call.h
     vulkan_common/driver_crash.cpp

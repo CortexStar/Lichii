@@ -47,6 +47,7 @@
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 #include "video_core/textures/decoders.h"
+#include "video_core/vulkan_common/gpu_crumbs.h"
 #include "video_core/vulkan_common/vulkan_debug_callback.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_instance.h"
@@ -157,9 +158,13 @@ try
                             VK_API_VERSION_1_1,
                             render_window.GetWindowInfo().type,
                             Settings::values.renderer_debug.GetValue()))
-    // Create debug messenger if debug is enabled
-    , debug_messenger(Settings::values.renderer_debug ? CreateDebugUtilsCallback(instance)
-                                                    : vk::DebugUtilsMessenger{})
+    // Create debug messenger if debug is enabled, or for the GPU crumbs' address binding reports
+    , debug_messenger(Settings::values.renderer_debug ||
+                              (GpuCrumbs::Requested() && dld.vkCreateDebugUtilsMessengerEXT)
+                          ? CreateDebugUtilsCallback(instance,
+                                                     Settings::values.renderer_debug.GetValue(),
+                                                     GpuCrumbs::Requested())
+                          : vk::DebugUtilsMessenger{})
     // Create surface
     , surface(CreateSurface(instance, render_window.GetWindowInfo()))
     , device(CreateDevice(instance, dld, *surface))

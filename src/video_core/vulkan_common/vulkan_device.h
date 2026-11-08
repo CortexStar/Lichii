@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <cstdlib>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -314,8 +315,11 @@ public:
     bool IsFormatSupported(VkFormat wanted_format, VkFormatFeatureFlags wanted_usage,
                            FormatType format_type) const;
 
-    /// Reports a device loss.
+    /// Reports a device loss (once: later calls return at once).
     void ReportLoss() const;
+
+    /// Adds what the renderer knows about a device loss to ReportLoss (the GPU crumbs).
+    void SetLossReporter(std::function<void()> reporter) const;
 
     /// Logs what VK_EXT_device_fault reports about a device loss.
     void ReportDeviceFault() const;
@@ -761,6 +765,16 @@ FN_MAX_LIMIT_LIST
     }
 
     /// Returns true if VK_KHR_pipeline_executable_properties is enabled.
+    /// VK_AMD_buffer_marker with device-coherent memory to write the markers to (GpuCrumbs).
+    bool IsBufferMarkerEnabled() const {
+        return buffer_marker_enabled;
+    }
+
+    /// Whether the driver reports GPU address bindings to the debug messenger (GpuCrumbs).
+    bool IsAddressBindingReportEnabled() const {
+        return address_binding_features.reportAddressBinding == VK_TRUE;
+    }
+
     bool IsKhrPipelineExecutablePropertiesEnabled() const {
         return extensions.pipeline_executable_properties;
     }
@@ -1549,6 +1563,10 @@ private:
 
     VkPhysicalDeviceFeatures2 features2{};
     VkPhysicalDeviceFaultFeaturesEXT device_fault_features{};
+    /// EDEN_NX2_GPU_CRUMBS: address binding reports, buffer markers in device-coherent memory.
+    VkPhysicalDeviceAddressBindingReportFeaturesEXT address_binding_features{};
+    VkPhysicalDeviceCoherentMemoryFeaturesAMD coherent_memory_features{};
+    bool buffer_marker_enabled{};
     VkPhysicalDeviceProperties2 properties2{};
 
     // Misc features
@@ -1603,6 +1621,8 @@ private:
 
     /// Nsight Aftermath GPU crash tracker
     std::unique_ptr<NsightAftermathTracker> nsight_aftermath_tracker;
+    mutable std::mutex loss_reporter_mutex;
+    mutable std::function<void()> loss_reporter;
 };
 
 } // namespace Vulkan

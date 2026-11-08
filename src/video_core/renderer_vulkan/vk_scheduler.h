@@ -46,6 +46,7 @@ namespace Vulkan {
 class CommandPool;
 class Device;
 class Framebuffer;
+class GpuCrumbTrail;
 class GraphicsPipeline;
 class ReorderedUploadBatch;
 class StateTracker;
@@ -101,6 +102,9 @@ public:
         const float ms = gpu_frame_ms.load(std::memory_order_relaxed);
         return ms >= 0.0f ? std::optional{ms} : std::nullopt;
     }
+    /// GPU crumbs around one draw or dispatch (TraceGpuWork); BeginCrumb returns 0 if unmarked.
+    u32 BeginCrumb(vk::CommandBuffer cmdbuf, u64 hash, u64 fragment_hash, std::array<u32, 3> size);
+    void EndCrumb(vk::CommandBuffer cmdbuf, u32 id);
     void TraceGraphicsPipeline(const std::array<u64, 6>& hashes);
     void TraceComputePipeline(u64 hash);
     /// Worker thread, inside a recorded command: timestamps one draw or dispatch of a sampled
@@ -116,7 +120,11 @@ public:
             std::array<float, 4> color{0.2f, 0.6f, 1.0f, 1.0f};
             cmdbuf.BeginDebugUtilsLabelEXT(label.data(), color);
         }
+        const u32 crumb = crumbs ? BeginCrumb(cmdbuf, hash, fragment_hash, size) : 0;
         TraceGpuWorkTimed(cmdbuf, hash, fragment_hash, size, work);
+        if (crumb != 0) {
+            EndCrumb(cmdbuf, crumb);
+        }
         if (GpuMarkers::Enabled()) {
             cmdbuf.EndDebugUtilsLabelEXT();
         }
@@ -596,6 +604,8 @@ private:
     StateTracker& state_tracker;
 
     std::unique_ptr<MasterSemaphore> master_semaphore;
+    /// EDEN_NX2_GPU_CRUMBS buffer markers; null when off. Recorded on the worker thread.
+    std::unique_ptr<GpuCrumbTrail> crumbs;
     FragmentBarrierState fragment_barrier;
     RenderPassBarrierTracker pass_barriers;
     bool pass_reads_known{}; ///< Every draw of the active render pass reported its images.

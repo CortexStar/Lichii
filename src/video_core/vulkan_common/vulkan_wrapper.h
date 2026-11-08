@@ -11,6 +11,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <functional>
 #include <source_location>
 #include <span>
 #include <string>
@@ -137,6 +138,10 @@ private:
     std::string message;
 };
 
+/// Called once, on the first vk::Exception with VK_ERROR_DEVICE_LOST, so every path a device loss
+/// takes (submit, wait, query, present) reports it. Empty clears it.
+void SetDeviceLostHandler(std::function<void()> handler);
+
 /// Throws a Vulkan exception if result is not success.
 inline void Check(VkResult result,
                   std::source_location location = std::source_location::current()) {
@@ -257,6 +262,7 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkCmdPushDescriptorSetWithTemplateKHR vkCmdPushDescriptorSetWithTemplateKHR{};
     PFN_vkCmdResetQueryPool vkCmdResetQueryPool{};
     PFN_vkCmdWriteTimestamp vkCmdWriteTimestamp{};
+    PFN_vkCmdWriteBufferMarkerAMD vkCmdWriteBufferMarkerAMD{};
     PFN_vkCmdResolveImage vkCmdResolveImage{};
     PFN_vkCmdSetBlendConstants vkCmdSetBlendConstants{};
     PFN_vkCmdSetCullModeEXT vkCmdSetCullModeEXT{};
@@ -1383,6 +1389,11 @@ public:
     void WriteTimestamp(VkPipelineStageFlagBits stage, VkQueryPool query_pool,
                         u32 query) const noexcept {
         dld->vkCmdWriteTimestamp(handle, stage, query_pool, query);
+    }
+
+    void WriteBufferMarkerAMD(VkPipelineStageFlagBits stage, VkBuffer buffer, VkDeviceSize offset,
+                              u32 marker) const noexcept {
+        dld->vkCmdWriteBufferMarkerAMD(handle, stage, buffer, offset, marker);
     }
 
     void BindDescriptorSets(VkPipelineBindPoint bind_point, VkPipelineLayout layout, u32 first,

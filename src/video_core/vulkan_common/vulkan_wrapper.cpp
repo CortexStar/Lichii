@@ -5,7 +5,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -184,6 +187,7 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
     X(vkCmdSetColorBlendEquationEXT);
     X(vkCmdResetQueryPool);
     X(vkCmdWriteTimestamp);
+    X(vkCmdWriteBufferMarkerAMD);
     X(vkCmdResolveImage);
     X(vkCreateBuffer);
     X(vkCreateBufferView);
@@ -372,6 +376,17 @@ bool Load(VkInstance instance, InstanceDispatch& dld) noexcept {
 #undef X
 }
 
+namespace {
+std::mutex device_lost_mutex;
+std::function<void()> device_lost_handler;
+std::atomic_bool device_lost_reported{};
+} // Anonymous namespace
+
+void SetDeviceLostHandler(std::function<void()> handler) {
+    std::scoped_lock lock{device_lost_mutex};
+    device_lost_handler = std::move(handler);
+}
+
 Exception::Exception(VkResult result_, std::source_location location) : result{result_} {
     // Named from src/ down, as the log names files.
     std::string_view file{location.file_name()};
@@ -387,6 +402,16 @@ Exception::Exception(VkResult result_, std::source_location location) : result{r
     // The driver call the error came from and the object it was creating, when one is marked.
     if (std::string call = DriverCall::DescribeCurrent(); !call.empty()) {
         message += " in " + call;
+    }
+    if (result == VK_ERROR_DEVICE_LOST && !device_lost_reported.exchange(true)) {
+        std::function<void()> handler;
+        {
+            std::scoped_lock lock{device_lost_mutex};
+            handler = device_lost_handler;
+        }
+        if (handler) {
+            handler();
+        }
     }
 }
 

@@ -18,6 +18,7 @@
 #include <ranges>
 #include <vulkan/vulkan_core.h>
 #include "core/frontend/emu_window.h"
+#include "video_core/vulkan_common/gpu_crumbs.h"
 #include "video_core/vulkan_common/gpu_markers.h"
 #include "video_core/vulkan_common/vulkan_instance.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -101,7 +102,7 @@ namespace {
     if (AreExtensionsSupported(dld, properties, std::array{VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME}))
         extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
 #endif
-    if ((enable_validation || GpuMarkers::Requested()) &&
+    if ((enable_validation || GpuMarkers::Requested() || GpuCrumbs::Requested()) &&
         AreExtensionsSupported(dld, properties, std::array{VK_EXT_DEBUG_UTILS_EXTENSION_NAME})) {
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
         GpuMarkers::enabled.store(GpuMarkers::Requested(), std::memory_order_relaxed);
