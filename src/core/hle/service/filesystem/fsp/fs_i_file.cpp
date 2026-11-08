@@ -34,6 +34,10 @@ Result IFile::Read(
     LOG_DEBUG(Service_FS, "called, option={}, offset={:#x}, length={}", option.value, offset,
               size);
 
+    R_UNLESS(size >= 0, FileSys::ResultInvalidSize);
+    // The read lands in a host buffer the size of the guest's.
+    R_UNLESS(static_cast<u64>(size) <= out_buffer.size(), FileSys::ResultInvalidSize);
+
     // Read the data from the Storage backend
     const auto read_start = Core::LoadTiming::Clock::now();
     const Result result =
