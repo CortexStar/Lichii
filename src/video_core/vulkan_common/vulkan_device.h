@@ -583,7 +583,7 @@ FN_MAX_LIMIT_LIST
 
     /// Native VS+PS pipelines are built from per-stage VK_EXT_graphics_pipeline_library libraries
     /// and drawn with dynamic rendering (EDEN_NX2_GPL=1 and the device supports both, with fast
-    /// linking). See notes/gpl.md in s2-shaderwarm.
+    /// linking).
     bool IsGplEnabled() const {
         return extensions.graphics_pipeline_library;
     }
@@ -592,8 +592,7 @@ FN_MAX_LIMIT_LIST
     /// format's class (int, uint, or a constant attribute): VK_EXT_legacy_vertex_attributes with
     /// dynamic vertex input allows the mismatch. Only on RADV, where the attribute's 32-bit
     /// values reach the shader unchanged (the VS prolog fetches per format), so the result is the
-    /// same as with typed inputs. EDEN_NX2_GPL_ATTRS=0 turns it off. See notes/attrs.md in
-    /// s2-shaderwarm.
+    /// same as with typed inputs. EDEN_NX2_GPL_ATTRS=0 turns it off.
     bool IsGplUntypedAttributes() const {
         return extensions.legacy_vertex_attributes && extensions.graphics_pipeline_library &&
                extensions.vertex_input_dynamic_state;

@@ -104,7 +104,7 @@ bool RuntimePipelineLog() {
 
 // EDEN_NX2_IR_CACHE_TASKMESH=1: task/mesh stages use and fill the IR cache (precompile from pack
 // slots 7/8 and stage-buffer vertex candidates). Off by default: one precompile run with it stalled
-// (cause unknown, notes/mesh.md) and the cached task/mesh IR wasn't checked against live.
+// (cause unknown) and the cached task/mesh IR wasn't checked against live.
 bool TaskMeshIrCacheEnabled() {
     static const bool enabled = [] {
         const char* value = std::getenv("EDEN_NX2_IR_CACHE_TASKMESH");
@@ -807,7 +807,7 @@ struct PrecompileStage {
     std::string source; ///< where the pack says the program is from (file:offset)
 };
 
-// Pack (tools/mkpack.py / mkgenpack.py / mkcspack.py in s2-shaderwarm): "S2PK", u32 version
+// Pack (written by an external scan of the game files, not part of the tree): "S2PK", u32 version
 // (1, 2, 3), u32 count; per entry u32 stage mask (bit 1 VertexB, bit 4 Geometry, bit 5 Pixel,
 // bit 6 Compute, bit 7 task, bit 8 mesh: the BNSH stage record index and Shader::Stage), u32 source
 // length + source text, per set bit: u32 size, blob, and in version >= 2 u32 const_offset, u32
@@ -1062,7 +1062,7 @@ void PipelineCache::RunPrecompile(std::filesystem::path pack_path, std::stop_tok
     // EDEN_NX2_PRECOMPILE_COMPUTE_BUILD=0: no compute pipelines. Otherwise each compute record with a
     // known launch is built as the runtime would (same SPIR-V, layout and flags: ComputePipeline)
     // and dropped, so the driver's disk cache has it. Measured on OoT: the AV1 intro's first compute
-    // pipeline compiles for ~60 s on a cold RADV cache and the game waits for it (notes/lichii.md).
+    // pipeline compiles for ~60 s on a cold RADV cache and the game waits for it.
     const bool cs_build = [] {
         const char* value = std::getenv("EDEN_NX2_PRECOMPILE_COMPUTE_BUILD");
         return value == nullptr || value[0] != '0';
@@ -1252,7 +1252,7 @@ void PipelineCache::RunPrecompile(std::filesystem::path pack_path, std::stop_tok
                 }
                 if (compute && program.local_memory_size == 0 && program.info.uses_local_memory) {
                     // the same for local memory (no control section field gives it): on Lichii
-                    // the SPIR-V backend aborts on such a program (OoT tera_resource 0x16000), and
+                    // the SPIR-V backend aborts on such a program (seen in a game's files), and
                     // its record could never match a real launch (local memory size checked)
                     fail(translation_failed, "compute: local memory used, launch has none");
                     continue;

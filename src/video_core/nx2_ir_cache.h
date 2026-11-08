@@ -24,7 +24,7 @@
 // the stage's unique hash, with the environment answers the translation used. A pipeline whose
 // stages are all in it skips CFG + TranslateProgram and only runs ConvertLegacyToGeneric +
 // EmitSPIRV (which take the pipeline key) before the driver compile. Filled by the precompile pass
-// (EDEN_NX2_PRECOMPILE, from game files alone); see notes/precompile.md in s2-shaderwarm.
+// (EDEN_NX2_PRECOMPILE, from game files alone); see docs/shader-precompile.md.
 namespace VideoCommon::Nx2IrCache {
 
 /// IR::Program <-> bytes. Deserialize throws Shader::LogicError on malformed data and checks every

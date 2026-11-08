@@ -74,20 +74,34 @@ Hooks in existing files are marked `nx2 shaderwarm`.
 
 ## Precompile a game and play it
 
-The tooling lives outside the tree (s2-shaderwarm `tools/s2warm`): it scans the game file into a
-pack and boots the game headless with `EDEN_NX2_PRECOMPILE`.
+Proof of concept: the precompile reads a *pack*, a file listing the program blobs found in the
+game's files (format in `vk_shaderwarm.cpp`, `PackReader`). The pack is made by a generic scan
+outside the tree (every file of the game, zstd undone, NVN2 program headers found by their layout
+and kept when the code ends like a program; compute programs with their launch from NVN control
+sections). It needs no per-game knowledge and no recorded play. In-tree, this step would be
+#781's archive walker (`shader_warm/shader_archives`), which already yields vertex, fragment and
+compute records.
 
-    EMU_DIR=<unpacked build> STEAM_APPID=<shortcut id> tools/s2warm <game.nup> <portable data dir>
+    EDEN_NX2_PRECOMPILE=<pack> [EDEN_NX2_PRECOMPILE_ONLY=1] [EDEN_NX2_GPL=1] <emulator> <game>
 
-- `vulkan_ir.bin` lands in `<data dir>/user/cache/shader/<title id>/`. It applies only to the build
-  and driver that wrote it (tag: format, git rev, Info/Inst sizes, driver id + version, GPU); after
-  a rebuild or a driver update it is ignored and the precompile must run again.
-- The stage libraries and compute pipelines land in the driver's disk cache: the run must use the
-  same `MESA_SHADER_CACHE_DIR` and format as play. A Steam shortcut gets
-  `MESA_SHADER_CACHE_DIR=~/.local/share/Steam/steamapps/shadercache/<appid>`,
-  `MESA_DISK_CACHE_SINGLE_FILE=1`, `MESA_SHADER_CACHE_MAX_SIZE=5G`; `STEAM_APPID` makes s2warm use
-  the same.
+- `vulkan_ir.bin` lands in `<shader dir>/<title id>/`. It is made on the user's machine from the
+  user's own copy of the game and is not meant to be shared: it holds translated game code, and it
+  only applies to the build and driver that wrote it (tag: format, git rev, Info/Inst sizes, driver
+  id + version, GPU). After a rebuild or a driver update it is ignored and the precompile must run
+  again.
+- The stage libraries and compute pipelines land in the driver's disk cache, so the precompile
+  must run with the same driver cache location and size limit as play (on Mesa:
+  `MESA_SHADER_CACHE_DIR`, `MESA_DISK_CACHE_SINGLE_FILE`, `MESA_SHADER_CACHE_MAX_SIZE`; Mesa's
+  default 1 GB limit is smaller than a full precompile's libraries).
 - Play with `EDEN_NX2_GPL=1` to use the libraries; the translation cache needs nothing.
+- `EDEN_NX2_IR_LEARN=1`: a stage translated live (no record, or its record's answers differ) is
+  appended to `vulkan_ir.bin` with the same checks, so it is translated once per build, not once
+  per session.
+- `EDEN_NX2_PRECOMPILE_POINTER_VARIANTS` / `_POINTER_MAX`: a record per mapped/null combination of
+  a stage's storage pointers (up to 6 pointers). Large: about 10x the file size.
+- `EDEN_NX2_IR_CACHE_CHECK=1`: every cache hit is also translated live and the SPIR-V compared
+  ("NX2PC check ... same as live" / "DIFFERS from live"; a difference uses the live result).
+  `EDEN_NX2_IR_MISMATCH_LOG=1` names the answer that rejected a record.
 
 ## Limits
 
@@ -99,18 +113,5 @@ pack and boots the game headless with `EDEN_NX2_PRECOMPILE`.
   pointers) is translated as before.
 - With `EDEN_NX2_GPL=1` render passes are replaced by dynamic rendering for 3D draws; blits keep
   theirs. Tilers with resolve attachments keep render passes.
-- Another graphics-pipeline-library prototype in the same tree (daniel-lynch/Lichii
-  `feat/pipeline-library`, `EDEN_NX2_PIPELINE_LIBRARY=1`) declares the same device members
-  (`graphics_pipeline_library` feature/property, `pipeline_library` extension) and patches
-  `GraphicsPipeline::MakePipeline`: merging both needs one set of device members, the extension
-  enabled when either variable asks, and only one of the two at run time (its parts are made with
-  render passes; this mode draws with dynamic rendering). That line also has its own translation
-  cache; the two caches don't share files.
-
-## Putting it on another build
-
-The stack is four commits (shader_recompiler hooks, vulkan_common, video_core, this doc). New files
-are the same for every base; the hooks exist in two flavors, Lichii-based (`lichii` binary) and
-plain Eglantine (`eglantine`). In s2-shaderwarm, `tools/apply-shaderwarm.sh <branch>` makes a
-worktree on a new branch, cherry-picks the matching flavor, stops with the list of files on a
-conflict (the hooks are marked `nx2 shaderwarm`), builds and smoke-tests it.
+- The graphics pipeline library mode here is a separate implementation from #579's. It is part
+  of the proof of concept only; nx2 should keep one (see the PR).

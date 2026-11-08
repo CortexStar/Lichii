@@ -18,7 +18,7 @@
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 // Per-stage pipelines from VK_EXT_graphics_pipeline_library (EDEN_NX2_GPL=1, native VS+PS
-// pipelines; see notes/gpl.md in s2-shaderwarm). A pipeline is linked from four libraries:
+// pipelines). A pipeline is linked from four libraries:
 //   vertex input (VI) + pre-rasterization (the vertex shader, PR) + fragment shader (FS) +
 //   fragment output (FO).
 // PR and FS hold the driver compile of one stage each. Their SPIR-V depends on that stage only
