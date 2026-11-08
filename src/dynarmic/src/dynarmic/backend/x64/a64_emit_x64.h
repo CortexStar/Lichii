@@ -131,8 +131,8 @@ public:
     void EmitAtomicFallbackStub(Xbyak::Reg64 result, std::initializer_list<Xbyak::Reg64> sources, std::optional<u32> param4, AtomicFallbackFn fallback);
 
     // Terminal instruction emitters
-    bool EmitLeafTerminal(IR::Term::LeafTerminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) noexcept override;
-    bool EmitTerminal(IR::Term::Terminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) noexcept override;
+    bool EmitLeafTerminal(IR::Term::LeafTerminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) override;
+    bool EmitTerminal(IR::Term::Terminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) override;
 
     // Patching
     void Unpatch(const IR::LocationDescriptor& target_desc) override;
