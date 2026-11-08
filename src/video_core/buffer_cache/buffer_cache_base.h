@@ -1000,6 +1000,17 @@ private:
         boost::container::small_vector<typename ReadCheck::Origin, 2> from;
     };
     std::unordered_map<DAddr, EarlyLanded> early_landed;
+    /// TEST (EDEN_NX2_READ_CHECK): an upload sends guest memory's bytes to the buffer. Where they
+    /// are no longer what an early download landed, the guest wrote there since, and landed bytes
+    /// are no longer GPU-modified, so that write may never have reached WriteMemory. The buffer
+    /// then holds it while guest memory may hold the landed value again: no read compares those
+    /// bytes, as a synchronous flush would not download them.
+    void ForgetUploadedEarlyLanded(DAddr device_addr, u64 size) {
+        if (!early_landed.empty()) [[unlikely]] {
+            ForgetRewrittenEarlyLanded(device_addr, size);
+        }
+    }
+    void ForgetRewrittenEarlyLanded(DAddr device_addr, u64 size);
     /// Whether an early download serves this read: in check mode it flushes (and is compared).
     [[nodiscard]] bool EarlyDownloadServes(DAddr device_addr, u64 size) const;
     void NoteEarlyLanded(const ReadDownload& download, const Common::RangeSet<DAddr>& cpu_written);

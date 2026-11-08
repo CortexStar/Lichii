@@ -294,6 +294,10 @@ struct BufferCacheTestAccess {
     static void Upload(Cache& cache, BufferId id, DAddr address, u32 size) {
         (void)cache.SynchronizeBuffer(cache.slot_buffers[id], address, size);
     }
+    /// A guest write the buffer cache doesn't hear of, on a page the tracker counts as written.
+    static void MarkCpuModified(Cache& cache, DAddr address, u64 size) {
+        cache.memory_tracker.MarkRegionAsCpuModified(address, size);
+    }
     static void Uniform(Cache& cache, BufferCacheChannelInfo& channel, BufferId id, DAddr address,
                         u32 size) {
         cache.channel_state = &channel;
@@ -1931,6 +1935,37 @@ TEST_CASE("Read download check leaves out early downloaded bytes a query result 
     REQUIRE(buffer.bytes[0x40] == 0x56);
     REQUIRE(f.bytes[0x10040] == 3);
     REQUIRE(f.bytes[0x10048] == 3);
+    REQUIRE(Access::ReadChecks(*f.cache).compared != 0);
+    REQUIRE(Access::ReadChecks(*f.cache).mismatched == 0);
+    REQUIRE(Access::ReadChecks(*f.cache).uncovered == 0);
+}
+
+TEST_CASE("Read download check leaves out early downloaded bytes an upload replaced",
+          "[buffer_ports]") {
+    Fixture f;
+    const Nx2TitleScope nx2_title;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    auto& buffer = Access::Get(*f.cache, id);
+    Access::CheckEveryRead(*f.cache);
+    for (u8 frame = 1; frame <= 2; ++frame) {
+        WriteByDispatch(f, id, 0x20000, 0x100, frame);
+        ReadWord(f, 0x20010);
+    }
+    WriteByDispatch(f, id, 0x20000, 0x100, 3);
+    f.runtime.Complete(f.runtime.submitted_tick);
+    f.cache->NoteWorkRecorded(true);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 0);
+    // The guest writes 16 of the landed bytes where the buffer cache doesn't hear of it, and a
+    // draw uploads them. Then it writes the landed value back, which no upload has taken yet.
+    std::memset(f.bytes + 0x10040, 0xee, 0x10);
+    Access::MarkCpuModified(*f.cache, 0x20040, 0x10);
+    Access::Upload(*f.cache, id, 0x20000, 0x1000);
+    REQUIRE(buffer.bytes[0x40] == 0xee);
+    std::memset(f.bytes + 0x10040, 3, 0x10);
+    // A synchronous flush at the read leaves them to the guest: they are not GPU-modified.
+    REQUIRE_FALSE(ReadWord(f, 0x20010).preemtive);
+    REQUIRE(f.bytes[0x10040] == 3);
+    REQUIRE(f.bytes[0x10010] == 3);
     REQUIRE(Access::ReadChecks(*f.cache).compared != 0);
     REQUIRE(Access::ReadChecks(*f.cache).mismatched == 0);
     REQUIRE(Access::ReadChecks(*f.cache).uncovered == 0);

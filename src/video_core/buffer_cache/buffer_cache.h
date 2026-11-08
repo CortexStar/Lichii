@@ -1170,6 +1170,42 @@ void BufferCache<P>::TakeEarlyLanded(DAddr device_addr, u64 size, Func&& func) {
 }
 
 template <class P>
+void BufferCache<P>::ForgetRewrittenEarlyLanded(DAddr device_addr, u64 size) {
+    std::array<u8, DEVICE_PAGESIZE> guest;
+    for (DAddr page = Common::AlignDown(device_addr, DEVICE_PAGESIZE); page < device_addr + size;
+         page += DEVICE_PAGESIZE) {
+        const auto it = early_landed.find(page);
+        if (it == early_landed.end()) {
+            continue;
+        }
+        EarlyLanded& entry = it->second;
+        Common::RangeSet<DAddr> rewritten;
+        entry.bytes.ForEachInRange(device_addr, size, [&](DAddr lower, DAddr upper) {
+            const u64 length = upper - lower;
+            device_memory.ReadBlockUnsafe(lower, guest.data(), length);
+            const u8* const landed = entry.as_landed.data() + (lower - page);
+            for (u64 i = 0; i < length;) {
+                if (guest[i] == landed[i]) {
+                    ++i;
+                    continue;
+                }
+                u64 end = i + 1;
+                while (end < length && guest[end] != landed[end]) {
+                    ++end;
+                }
+                rewritten.Add(lower + i, end - i);
+                i = end;
+            }
+        });
+        rewritten.ForEach(
+            [&](DAddr lower, DAddr upper) { entry.bytes.Subtract(lower, upper - lower); });
+        if (entry.bytes.Empty()) {
+            early_landed.erase(it);
+        }
+    }
+}
+
+template <class P>
 void BufferCache<P>::ForgetEarlyLanded(DAddr device_addr, u64 size) {
     for (DAddr page = Common::AlignDown(device_addr, DEVICE_PAGESIZE); page < device_addr + size;
          page += DEVICE_PAGESIZE) {
@@ -3987,6 +4023,7 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
             if (start == end) return;
             const u64 range_size = end - start;
             NoteReadCheckEvent(start, range_size, ReadCheckEvent::Upload); // TEST
+            ForgetUploadedEarlyLanded(start, range_size);                   // TEST
             upload_copies.push_back(BufferCopy{
                 .src_offset = total_size_bytes,
                 .dst_offset = start - buffer_start,
@@ -4022,6 +4059,7 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
         DAddr buffer_start = buffer.CpuAddr();
         for_each_upload_range([&](u64 device_addr_out, u64 range_size) {
             NoteReadCheckEvent(device_addr_out, range_size, ReadCheckEvent::Upload); // TEST
+            ForgetUploadedEarlyLanded(device_addr_out, range_size);                   // TEST
             copies.push_back(BufferCopy{
                 .src_offset = total_size_bytes,
                 .dst_offset = device_addr_out - buffer_start,
