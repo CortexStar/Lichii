@@ -343,8 +343,7 @@ private:
     void FrontQueueWrite(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 argument,
                          bool is_last_call, bool direct, const GPUVAddr* segment);
     /// GpuSplit::SetPendingFlush hook: sends the held run, then records its notes.
-    static void FrontFlushWrites(
-        void* engine); ///< The front owns the macro code and bindings (the back skips them)
+    static void FrontFlushWrites(VideoCommon::GpuSplit& split, void* engine);
 
     bool DispatchNativeCompute(const NativeQmdScheduler::Descriptor& descriptor);
     void ProcessNativeReportSemaphore(u32 argument);

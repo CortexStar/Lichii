@@ -2484,7 +2484,7 @@ void KeplerCompute::FrontQueueWrite(VideoCommon::GpuSplit& split, FrontState& fs
     FrontNoteWrites(split, fs, method);
 }
 
-void KeplerCompute::FrontFlushWrites(void* engine) {
+void KeplerCompute::FrontFlushWrites(VideoCommon::GpuSplit& split, void* engine) {
     // GpuSplit cleared the hook before calling: the entry below doesn't come back here.
     auto* const self = static_cast<KeplerCompute*>(engine);
     FrontWriteRun& run = self->front_run;
@@ -2492,7 +2492,6 @@ void KeplerCompute::FrontFlushWrites(void* engine) {
     if (count == 0) {
         return;
     }
-    auto& split = VideoCommon::GpuSplit::Get();
     run.count = 0;
     const GPUVAddr segment = run.segment;
     split.Writes(self, run.writes.data(), count, run.has_segment ? &segment : nullptr);

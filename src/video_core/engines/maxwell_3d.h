@@ -3492,7 +3492,7 @@ private:
     void FrontEmitCb(VideoCommon::GpuSplit& split, FrontState& state);
     /// GpuSplit::PendingFlush: sends the constant buffer run, the batch, the partial capture and
     /// the delta.
-    static void FrontFlushPending(void* maxwell3d);
+    static void FrontFlushPending(VideoCommon::GpuSplit& split, void* maxwell3d);
     /// Runs Ocarina macro replacement `id` for the call; false: the JIT runs it (nothing done).
     bool FrontRunOotMacro(VideoCommon::GpuSplit& split, FrontState& state, u32 method,
                           OotMacros::Id id);

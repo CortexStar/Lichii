@@ -2806,11 +2806,11 @@ void Maxwell3D::FrontEmitRun(VideoCommon::GpuSplit& split, FrontState& fs) {
     fs.run_note_count = 0;
 }
 
-void Maxwell3D::FrontFlushPending(void* maxwell3d) {
-    // GpuSplit cleared the hook before calling: the entries below don't come back here.
+void Maxwell3D::FrontFlushPending(VideoCommon::GpuSplit& split, void* maxwell3d) {
+    // GpuSplit cleared the hook before calling: the entries below don't come back here. They go
+    // to the split that holds the hook, which is not GpuSplit::Get() in the unit tests.
     auto* const self = static_cast<Maxwell3D*>(maxwell3d);
     FrontState& fs = *self->front;
-    auto& split = VideoCommon::GpuSplit::Get();
     self->FrontEmitRun(split, fs);
     self->FrontEmitCb(split, fs);
     self->FrontEmitBatch(split, fs);

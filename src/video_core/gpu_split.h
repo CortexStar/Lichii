@@ -299,10 +299,10 @@ public:
         std::memcpy(entry + head, writes, size_t{count} * sizeof(u64));
         Commit(head + size_t{count});
     }
-    /// Work the front holds back (a register delta, a draw batch): `hook(argument)` sends it
-    /// before anything else is sent and before the front waits for the back. Another holder's
-    /// work is sent first.
-    using PendingFlush = void (*)(void*);
+    /// Work the front holds back (a register delta, a draw batch): `hook(*this, argument)` sends
+    /// it to this split before anything else is sent and before the front waits for the back.
+    /// Another holder's work is sent first.
+    using PendingFlush = void (*)(GpuSplit&, void*);
     void SetPendingFlush(PendingFlush hook, void* argument) {
         if (pending_flush != hook || pending_flush_argument != argument) {
             RunPendingFlush();
@@ -315,7 +315,7 @@ public:
         if (pending_flush != nullptr) [[unlikely]] {
             const PendingFlush hook = pending_flush;
             pending_flush = nullptr;
-            hook(pending_flush_argument);
+            hook(*this, pending_flush_argument);
         }
     }
     /// The holder sends its work itself (it calls SetPendingFlush again for what it keeps).
