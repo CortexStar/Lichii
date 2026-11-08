@@ -671,7 +671,7 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
             return from_width >= 64 && to_width > from_width && to_width <= from_width * 4 &&
                    (cross_a > cross_b ? cross_a - cross_b : cross_b - cross_a) * 32 <= cross_a;
         };
-        const auto [reads, stores] = NativeImageHandles(regs.code_loc.Address());
+        const auto& [reads, stores] = NativeImageHandles(regs.code_loc.Address());
         std::optional<Texture::TICEntry> replacement_input;
         std::optional<Texture::TICEntry> replacement_output;
         if (native_upscale_input && network_skip_remaining > 0 && !stores.empty()) {
@@ -1214,7 +1214,8 @@ std::atomic<u32> g_nx2_trace_draws_after_upscale{};
 
 // The cbuf0 byte offsets of the texture handles a native program reads (TEX, TLD, TLD4, TXD) and
 // the surface handles it stores to (SUST.P), from its code up to the first unconditional EXIT.
-std::pair<std::vector<u32>, std::vector<u32>> KeplerCompute::NativeImageHandles(GPUVAddr program) {
+const std::pair<std::vector<u32>, std::vector<u32>>& KeplerCompute::NativeImageHandles(
+    GPUVAddr program) {
     static std::unordered_map<GPUVAddr, std::pair<std::vector<u32>, std::vector<u32>>> cache;
     if (const auto it = cache.find(program); it != cache.end()) {
         return it->second;
@@ -1252,7 +1253,7 @@ std::pair<std::vector<u32>, std::vector<u32>> KeplerCompute::NativeImageHandles(
 
 void KeplerCompute::RememberNativeUpscaleInput() {
     native_upscale_input.reset();
-    const auto [reads, stores] = NativeImageHandles(regs.code_loc.Address());
+    const auto& [reads, stores] = NativeImageHandles(regs.code_loc.Address());
     // An image-fed matrix pass writes its intermediate results to buffers. Retain its colour
     // input: the final pass's sampled image is another intermediate that a skipped network never
     // produced (Ocarina's movie network reads its colour at +0x58).
