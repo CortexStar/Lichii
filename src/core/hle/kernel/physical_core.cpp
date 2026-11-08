@@ -4,19 +4,9 @@
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <algorithm>
 #include <chrono>
 #include <cstdlib>
-#include <thread>
-#if defined(_M_X64) || defined(__x86_64__)
-#ifdef _MSC_VER
-#include <intrin.h>
-#else
-#include <x86intrin.h>
-#endif
-#include "common/cpu_features.h"
-#include "common/x64/monitor_wait.h"
-#endif
+#include "common/nx2_address_wait.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/core.h"
@@ -261,53 +251,9 @@ void PhysicalCore::Idle(KernelCore& kernel) {
         spin_us = process != nullptr && process->IsSwitch2() ? 100 : 0;
 #endif
     }
-    const auto spin = std::chrono::microseconds{spin_us};
-    if (spin.count() > 0) {
-#if defined(_M_X64) || defined(__x86_64__)
-        // Poll with PAUSE for the first 2 us (most handoffs land within that, and PAUSE notices
-        // the store ~80 ns sooner than MWAITX wakes up: 90 vs 170 ns p50 on a 9800X3D,
-        // tools/win/idle_wait_probe.cpp), then wait for Interrupt's store with MONITORX/MWAITX:
-        // no instructions issued (the SMT sibling, often a GPU thread, gets the whole core), no
-        // syscall, still ~0.2 us to wake against ~5-10 us for an OS wait. The TSC bounds it.
-        if (Common::g_wall_clock.IsNative() && Common::X64::HasMonitorWait()) {
-            const u64 budget = Common::g_wall_clock.NsToTicks(spin);
-            const u64 poll = Common::g_wall_clock.NsToTicks(std::chrono::microseconds{2});
-            const u64 start = __rdtsc();
-            while (m_is_interrupted.load(std::memory_order_acquire) == 0) {
-                const u64 elapsed = __rdtsc() - start;
-                if (elapsed >= budget) {
-                    break;
-                }
-                if (elapsed < poll) {
-                    _mm_pause();
-                    _mm_pause();
-                    continue;
-                }
-                Common::X64::MonitorWait(&m_is_interrupted, 0, sizeof(u32),
-                                         static_cast<u32>(std::min<u64>(budget - elapsed,
-                                                                        0xFFFF'FFFF)));
-            }
-        } else
-#endif
-        {
-            const auto deadline = std::chrono::steady_clock::now() + spin;
-            while (!m_is_interrupted.load(std::memory_order_acquire) &&
-                   std::chrono::steady_clock::now() < deadline) {
-                // Poll with PAUSE instead of SwitchToThread: no syscall per iteration, and the SMT
-                // sibling keeps most of the core.
-#if defined(_M_X64) || defined(__x86_64__)
-                for (int i = 0; i < 8; ++i) {
-                    _mm_pause();
-                }
-#else
-                std::this_thread::yield();
-#endif
-            }
-        }
-    }
-    while (m_is_interrupted.load(std::memory_order_acquire) == 0) {
-        Nx2Wait::Wait(m_is_interrupted, 0);
-    }
+    // Interrupt stores the flag and wakes the word: stay on the CPU for the spin (PAUSE, then
+    // MWAITX on the flag), then sleep in the OS.
+    Common::Nx2AddressWait::WaitSpinning(m_is_interrupted, 0, std::chrono::microseconds{spin_us});
 }
 
 bool PhysicalCore::IsInterrupted() const {

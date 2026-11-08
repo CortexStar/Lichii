@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 
 #include "common/common_types.h"
 
@@ -18,5 +19,12 @@ namespace Common::Nx2AddressWait {
 void Wait(std::atomic<u32>& word, u32 expected);
 void WakeOne(std::atomic<u32>& word);
 void WakeAll(std::atomic<u32>& word);
+
+/// Returns once word no longer holds expected. For the first `spin` it stays on the CPU: PAUSE
+/// polling for the first 2 us (handoffs that land that soon are seen ~80 ns sooner than an MWAITX
+/// wakes up), then MONITORX/MWAITX (or UMONITOR/UMWAIT) on the word's line, which wakes on the
+/// waker's store in ~0.2 us while the SMT sibling gets the core. After `spin` it sleeps in Wait
+/// (an OS wake costs ~5-10 us). Wakers store the new value, then call WakeOne/WakeAll.
+void WaitSpinning(std::atomic<u32>& word, u32 expected, std::chrono::nanoseconds spin);
 
 } // namespace Common::Nx2AddressWait
