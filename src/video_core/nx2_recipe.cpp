@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <fmt/format.h>
 
@@ -149,9 +150,43 @@ std::optional<std::array<u8, SphSize>> MeshHeader(const X::Program& mesh) {
     return header;
 }
 
-// Fact set flags.
-constexpr u8 HeaderInline = 1;   ///< the program header differs from the code's: it is kept
+// Fact set flags. Bit 0 is not used: a recipe never carries a program header.
 constexpr u8 MeshHeaderFromCode = 2; ///< a mesh environment's geometry header, taken from the code
+constexpr size_t PassthroughMaskSize = 32; // GenericEnvironment gp_passthrough_mask
+constexpr size_t MeshRegistersSize = 12;   // GenericEnvironment mesh_registers
+constexpr size_t ComputeTailSize = 16;     // workgroup size and shared memory size
+constexpr size_t CodeWindow = 32;
+
+bool Dense(Bytes window) {
+    return std::count_if(window.begin(), window.end(), [](u8 b) { return b != 0; }) >=
+           static_cast<std::ptrdiff_t>(window.size() / 2);
+}
+
+u64 WindowHash(const u8* data) {
+    return Common::CityHash64(reinterpret_cast<const char*>(data), CodeWindow);
+}
+
+/// Whether `facts` hold any 32 bytes of `code` (at an 8-byte step of the code, and dense: at least
+/// half its bytes not zero, as instructions are, where mostly zero header fields can match the
+/// facts' small numbers by chance).
+bool HoldsCode(Bytes facts, Bytes code) {
+    std::unordered_set<u64> windows;
+    for (size_t at = 0; at + CodeWindow <= code.size(); at += 8) {
+        if (Dense(code.subspan(at, CodeWindow))) {
+            windows.insert(WindowHash(code.data() + at));
+        }
+    }
+    for (size_t at = 0; at + CodeWindow <= facts.size(); at += 4) {
+        if (windows.contains(WindowHash(facts.data() + at))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool AllZero(Bytes bytes) {
+    return std::all_of(bytes.begin(), bytes.end(), [](u8 b) { return b == 0; });
+}
 
 struct Program {
     const X::Program* source{};
@@ -180,7 +215,40 @@ std::vector<u8> Decompress(Bytes recipe) {
     return body;
 }
 
+std::vector<CodeMatch> FindCodeInBody(Bytes body, const X::Result& extracted, unsigned threads) {
+    std::unordered_map<u64, size_t> windows;
+    for (size_t at = 0; at + CodeWindow <= body.size(); ++at) {
+        if (Dense(body.subspan(at, CodeWindow))) {
+            windows.try_emplace(WindowHash(body.data() + at), at);
+        }
+    }
+    std::vector<std::vector<CodeMatch>> found(extracted.programs.size());
+    ParallelFor(extracted.programs.size(), threads, [&](size_t i) {
+        const auto& p = extracted.programs[i];
+        for (const Bytes part : {Bytes{p.control}, Bytes{p.code}}) {
+            for (size_t at = 0; at + CodeWindow <= part.size(); at += 4) {
+                const auto it = windows.find(WindowHash(part.data() + at));
+                if (it != windows.end() &&
+                    std::memcmp(body.data() + it->second, part.data() + at, CodeWindow) == 0 &&
+                    Dense(part.subspan(at, CodeWindow))) {
+                    found[i].push_back({p.fingerprint, at, it->second});
+                }
+            }
+        }
+    });
+    std::vector<CodeMatch> matches;
+    for (auto& f : found) {
+        matches.insert(matches.end(), f.begin(), f.end());
+    }
+    return matches;
+}
+
 } // Anonymous namespace
+
+std::vector<CodeMatch> FindGameCode(std::span<const u8> recipe, const X::Result& programs,
+                                    unsigned threads) {
+    return FindCodeInBody(Decompress(recipe), programs, threads);
+}
 
 template <typename T>
 static void PutRaw(Writer& w, const T* data, size_t n) {
@@ -336,7 +404,12 @@ std::vector<u8> MakeRecipe(std::span<const u8> precompiled, const X::Result& ext
     std::unordered_map<u64, u32> by_hash;
     for (u32 i = 0; i < programs.size(); ++i) {
         if (programs[i].lowered) {
-            by_hash.try_emplace(programs[i].lowered->hash, i);
+            // Programs lowering to the same code: the lowest fingerprint, so the recipe does not
+            // depend on the order the extraction found them in.
+            const auto [it, added] = by_hash.try_emplace(programs[i].lowered->hash, i);
+            if (!added && programs[i].source->fingerprint < programs[it->second].source->fingerprint) {
+                it->second = i;
+            }
         }
     }
 
@@ -374,27 +447,62 @@ std::vector<u8> MakeRecipe(std::span<const u8> precompiled, const X::Result& ext
             report.errors.push_back(fmt::format("environment {}: same hash, other code", e));
             continue;
         }
-        env.program = found->second;
+        // The facts are the environment without its code and program header. Anything else that
+        // could be the game's (a program header other than the code's, a mesh geometry header not
+        // derivable from the code, a layout this does not know) withholds the environment and the
+        // records using it.
+        const auto withhold = [&](std::string_view why) {
+            ++report.environments_withheld;
+            report.errors.push_back(fmt::format("environment {} ({:016x}) withheld: {}", e,
+                                                env.hash, why));
+        };
+        const auto& source = *programs[found->second].source;
         Writer facts;
         facts.Put(blob.subspan(0, EnvHeaderSize));
         facts.Put(blob.subspan(parts.code_end, parts.tables_end - parts.code_end));
+        auto tail = blob.subspan(parts.tables_end);
+        u8 flags = 0;
         if (parts.stage == Stage::Compute) {
-            facts.Put(blob.subspan(parts.tables_end));
+            if (tail.size() != ComputeTailSize) {
+                withhold("unknown compute layout");
+                continue;
+            }
         } else {
-            const auto sph = blob.subspan(parts.tables_end, SphSize);
-            const bool inline_header = std::memcmp(sph.data(), code.data(), SphSize) != 0;
-            auto tail = blob.subspan(parts.tables_end + (inline_header ? 0 : SphSize));
-            env.flags = inline_header ? HeaderInline : 0;
-            if (parts.stage == Stage::Mesh && tail.size() >= SphSize) {
-                const auto derived = MeshHeader(*programs[env.program].source);
-                const auto recorded = tail.subspan(tail.size() - SphSize);
+            const bool task_mesh = parts.stage == Stage::Task || parts.stage == Stage::Mesh;
+            const size_t extra = parts.stage == Stage::Geometry ? PassthroughMaskSize
+                                 : task_mesh                    ? MeshRegistersSize + SphSize
+                                                                : 0;
+            if (tail.size() != SphSize + extra) {
+                withhold("unknown graphics layout");
+                continue;
+            }
+            if (std::memcmp(tail.data(), code.data(), SphSize) != 0) {
+                withhold("its program header is not the code's");
+                continue;
+            }
+            tail = tail.subspan(SphSize);
+            if (task_mesh) {
+                const auto recorded = tail.last(SphSize);
+                const auto derived =
+                    parts.stage == Stage::Mesh ? MeshHeader(source) : std::nullopt;
                 if (derived && std::memcmp(derived->data(), recorded.data(), SphSize) == 0) {
                     tail = tail.first(tail.size() - SphSize);
-                    env.flags |= MeshHeaderFromCode;
+                    flags |= MeshHeaderFromCode;
+                } else if (!AllZero(recorded)) {
+                    withhold("its mesh geometry header is not derivable from the code");
+                    continue;
                 }
             }
-            facts.Put(tail);
         }
+        facts.Put(tail);
+        if (HoldsCode(facts.bytes, source.code) || HoldsCode(facts.bytes, source.control) ||
+            HoldsCode(facts.bytes, Bytes{reinterpret_cast<const u8*>(code.data()),
+                                         code.size() * sizeof(u64)})) {
+            withhold("its facts hold some of the program's code");
+            continue;
+        }
+        env.program = found->second;
+        env.flags = flags;
         env.facts = std::move(facts.bytes);
     }
 
@@ -521,6 +629,15 @@ std::vector<u8> MakeRecipe(std::span<const u8> precompiled, const X::Result& ext
     report.environments = static_cast<u32>(fact_list.size());
     report.records = static_cast<u32>(records.size());
     report.states = static_cast<u32>(state_list.size());
+
+    // The last gate: no 32 bytes of any of the game's programs anywhere in the recipe.
+    const auto matches = FindCodeInBody(body.bytes, extracted, threads);
+    if (!matches.empty()) {
+        throw std::runtime_error(fmt::format(
+            "the recipe would hold {} pieces of the game's code (program {:016x} +{:#x}); not "
+            "written",
+            matches.size(), matches[0].fingerprint, matches[0].program_offset));
+    }
     return Compress(body.bytes);
 }
 
@@ -580,7 +697,8 @@ std::vector<u8> Assemble(std::span<const u8> recipe, const X::Result& extracted,
         const u8 flags = r.Get<u8>();
         r.Take(3);
         const auto facts = r.Take(r.Get<u32>());
-        if (program >= program_count || !programs[program].lowered) {
+        if (program >= program_count || !programs[program].lowered ||
+            (flags & ~MeshHeaderFromCode) != 0) {
             continue;
         }
         const auto& lowered = *programs[program].lowered;
@@ -594,7 +712,7 @@ std::vector<u8> Assemble(std::span<const u8> recipe, const X::Result& extracted,
         if (parts.stage == Stage::Compute) {
             envs[i].workgroup = Load<std::array<u32, 3>>(tail, 0);
             envs[i].shared = Load<u32>(tail, 12);
-        } else if (!(flags & HeaderInline)) {
+        } else {
             PutRaw(env, lowered.code.data(), SphSize);
         }
         env.Put(tail);

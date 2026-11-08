@@ -1477,10 +1477,11 @@ int Extract(const std::filesystem::path& game_path, const std::filesystem::path&
 }
 
 void PrintReport(const VideoCommon::Nx2Recipe::Report& report) {
-    fmt::print("programs {} (not in the game {}, not lowered {}), environments {}, render states "
-               "{}, records {} (dropped {})\n",
+    fmt::print("programs {} (not in the game {}, not lowered {}), environments {} (withheld as "
+               "game data {}), render states {}, records {} (dropped {})\n",
                report.programs, report.programs_missing, report.programs_failed,
-               report.environments, report.states, report.records, report.records_dropped);
+               report.environments, report.environments_withheld, report.states, report.records,
+               report.records_dropped);
     for (size_t i = 0; i < std::min<size_t>(report.errors.size(), 8); ++i) {
         fmt::print("  {}\n", report.errors[i]);
     }
@@ -1540,6 +1541,29 @@ int Assemble(const std::filesystem::path& recipe_path, const std::filesystem::pa
     return 0;
 }
 
+// audit: whether a recipe holds any of the game's code, every program of every package and
+// version in the game's files counted. Exit 1 if it does.
+int Audit(const std::filesystem::path& recipe_path, const std::filesystem::path& game_path,
+          unsigned threads) {
+    const auto recipe = ReadFile(recipe_path);
+    if (!VideoCommon::Nx2Recipe::ReadHeader(recipe)) {
+        throw std::runtime_error(recipe_path.string() + " is not a precompile recipe");
+    }
+    Game game;
+    auto spill = recipe_path;
+    spill += ".spill";
+    OpenGame(game, game_path, spill, "union");
+    const auto programs = ExtractGame(game, threads);
+    const auto matches = VideoCommon::Nx2Recipe::FindGameCode(recipe, programs, threads);
+    fmt::print("{} programs checked: {} pieces of their code in the recipe\n",
+               programs.programs.size(), matches.size());
+    for (size_t i = 0; i < std::min<size_t>(matches.size(), 8); ++i) {
+        fmt::print("  program {:016x} +{:#x} at recipe body +{:#x}\n", matches[i].fingerprint,
+                   matches[i].program_offset, matches[i].recipe_offset);
+    }
+    return matches.empty() ? 0 : 1;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1581,6 +1605,11 @@ int main(int argc, char** argv) {
             if (recipe.empty() || game.empty() || out.empty())
                 throw std::runtime_error("assemble needs --recipe RECIPE --game GAME --out FILE");
             return Assemble(recipe, game, out, threads);
+        }
+        if (command == "audit") {
+            if (recipe.empty() || game.empty())
+                throw std::runtime_error("audit needs --recipe RECIPE --game GAME");
+            return Audit(recipe, game, threads);
         }
         if (command == "extract") {
             if (game.empty() || out.empty())

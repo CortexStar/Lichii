@@ -59,8 +59,30 @@ nx2-precompile scan     --pkg PREFIX.programs --out PREFIX [--priors FILE] [--th
 nx2-precompile validate --pkg PREFIX.programs --cache CACHE.bin --out PREFIX [--priors FILE]
 nx2-precompile mesh-envs --pkg PREFIX.programs --cache DRAWS.tsv --out PREFIX [--priors FILE]
 nx2-precompile check    --file precompiled.fork-v<N>.nx2prep
+nx2-precompile recipe   --file precompiled.fork-v<N>.nx2prep --game GAME --out GAME.nx2recipe
+nx2-precompile assemble --recipe GAME.nx2recipe --game GAME --out precompiled.fork-v<N>.nx2prep
+nx2-precompile audit    --recipe GAME.nx2recipe --game GAME
 nx2-precompile cache-version
 ```
+
+## Recipes
+
+A precompiled file holds the game's shader code, so it is not something to share. A recipe
+(`video_core/nx2_recipe.h`) is the same file without it: for every pipeline, its render state and,
+for each of its programs, a fingerprint (part of a SHA-256 of the program) and the facts its
+translation asked for. A player turns it back into their own precompiled file with their own copy of
+the game: `assemble`, or in Lichii the game list's "Prepare Precompiled Shaders from Recipe...". The
+Ocarina of Time file of 133,016 pipelines (1.17 GB) is a recipe of 1.3 MB.
+
+A recipe carries no program code or program header. Making one withholds, with its pipelines, any
+environment whose program header is not its code's, whose mesh geometry header is neither derivable
+from the code nor zero, or whose layout is unknown; and it refuses to write a recipe in which any 32
+bytes of any of the game's programs appear (`Report::environments_withheld`, `FindGameCode`).
+`audit` runs that last check on a recipe from elsewhere against every program of every package and
+version in the game's files; run it before sharing one. What a recipe does keep from the game are
+the values the translation read: constant buffer values, texture types and formats, storage buffer
+locations. A recipe is made for one game version and one cache version, and is built again when
+either changes. Making the same recipe twice gives the same file.
 
 `run_pipeline.sh CACHE.bin...` runs the whole chain from the game (`NX2_GAME`, its `.nup`) and the
 disk caches recorded while playing it; see the script's header for the other variables. It needs
