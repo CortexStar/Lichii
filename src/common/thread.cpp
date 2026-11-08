@@ -612,9 +612,10 @@ std::vector<Common::LogicalProcessor> LinuxProcessors() {
     return processors;
 }
 
-// EDEN_GPU_PIN_EXCLUSIVE=1: when the GPU threads are pinned, move every other thread of the
-// process off their cores. Threads started later inherit the mask of the thread that starts them,
-// so they stay off too (except those the pinned threads start). Other processes are not affected.
+// EDEN_GPU_PIN_EXCLUSIVE=1: when the GPU threads are pinned, move the other threads of the process
+// off their cores; a thread allowed only on those cores is left as it is. Threads started later
+// inherit the mask of the thread that starts them, so they stay off too (except those the pinned
+// threads start). Other processes are not affected.
 void KeepOtherThreadsOff(const Common::GpuThreadPinning& plan) {
     cpu_set_t reserved;
     CPU_ZERO(&reserved);
