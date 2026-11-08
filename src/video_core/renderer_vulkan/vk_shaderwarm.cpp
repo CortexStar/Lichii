@@ -148,6 +148,24 @@ namespace Nx2 {
 // A vertex program that loads the position attribute makes SPIR-V with a BuiltIn Position input,
 // which Vulkan doesn't allow in a vertex shader (spirv-val VUID-Position-Position-04319); RADV
 // crashes compiling it (radv_nir_lower_vs_inputs). Generic scans find such programs.
+void LogComputeSpirv(const char* where, u64 unique_hash, const Shader::IR::Program& program,
+                     std::span<const u32> spirv) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_CS_LOG");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    LOG_INFO(Render_Vulkan,
+             "NX2CS {} {:016x}: wg {}x{}x{} shared {} local {} (uses local {}) spirv {:016x} ({} words)",
+             where, unique_hash, program.workgroup_size[0], program.workgroup_size[1],
+             program.workgroup_size[2], program.shared_memory_size, program.local_memory_size,
+             program.info.uses_local_memory,
+             Common::CityHash64(reinterpret_cast<const char*>(spirv.data()), spirv.size_bytes()),
+             spirv.size());
+}
+
 bool VertexReadsPosition(const Shader::Info& info) {
     return info.loads.AnyComponent(Shader::IR::Attribute::PositionX);
 }
@@ -1003,7 +1021,9 @@ void PipelineCache::RunPrecompile(std::filesystem::path pack_path, std::stop_tok
             if (!program.info.uses_local_memory) {
                 program.local_memory_size = launch.local_memory;
             }
-            vk::ShaderModule module{BuildShader(device, EmitSPIRV(profile, program))};
+            const std::vector<u32> code{EmitSPIRV(profile, program)};
+            LogComputeSpirv("precompile", record.unique_hash, program, code);
+            vk::ShaderModule module{BuildShader(device, code)};
             ComputePipeline pipeline{device,
                                      scheduler,
                                      vulkan_pipeline_cache,

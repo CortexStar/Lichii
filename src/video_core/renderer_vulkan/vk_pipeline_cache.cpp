@@ -2514,6 +2514,7 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
         program.shared_memory_size = max_shared_memory;
     }
     std::vector<u32> code{EmitSPIRV(profile, program)};
+    Nx2::LogComputeSpirv(from_ir ? "runtime-ir" : "runtime", key.unique_hash, program, code); // nx2 shaderwarm
     device.SaveShader(code);
     vk::ShaderModule spv_module{BuildShader(device, code)};
 

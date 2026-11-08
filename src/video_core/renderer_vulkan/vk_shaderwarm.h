@@ -29,6 +29,11 @@ namespace Vulkan::Nx2 {
 [[nodiscard]] bool TaskMeshIrCacheEnabled();
 /// EDEN_NX2_IR_CACHE_COMPUTE=0: no compute stages in the translation cache (on by default).
 [[nodiscard]] bool ComputeIrCacheEnabled();
+/// EDEN_NX2_CS_LOG=1: one line per compute pipeline built (precompile and run time) with its launch
+/// inputs and a hash of its SPIR-V, to tell why a precompiled compute pipeline misses the driver
+/// cache at run time.
+void LogComputeSpirv(const char* where, u64 unique_hash, const Shader::IR::Program& program,
+                     std::span<const u32> spirv);
 /// Geometry records only with EDEN_NX2_RELATIVE_LEPC=1.
 [[nodiscard]] bool GeometryIrCacheEnabled();
 /// Translation cache key of a task or mesh stage (the program's own hash, tagged by stage).
