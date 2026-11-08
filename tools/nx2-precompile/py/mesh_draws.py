@@ -18,7 +18,17 @@ for r in inv:
     if r['stage'] == 'Mesh':
         where.setdefault(r['code_hash'], (r['file'], r['index']))
 controls = {}
-for name in sorted(os.listdir(pkg)):
+if os.path.isfile(pkg):
+    # nx2-precompile extract's PREFIX.programs (see main.cpp Packages::LoadExtracted)
+    d = open(pkg, 'rb').read()
+    count, = struct.unpack_from('<I', d, 8)
+    o = 12
+    for idx in range(count):
+        _, _, cl, kl, ol = struct.unpack_from('<BQIII', d, o)
+        c = o + 21 + ol
+        controls[('programs', idx)] = d[c:c + cl]
+        o = c + cl + kl
+for name in sorted(os.listdir(pkg)) if os.path.isdir(pkg) else ():
     if not name.startswith('ms_') or name.startswith('._'):
         continue
     d = open(os.path.join(pkg, name), 'rb').read()

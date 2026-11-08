@@ -18,6 +18,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -36,6 +37,7 @@
 #include <nlohmann/json.hpp>
 
 #include "common/cityhash.h"
+#include "common/fs/path_util.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
@@ -48,6 +50,9 @@
 #include "shader_recompiler/object_pool.h"
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/runtime_info.h"
+#include "core/file_sys/nup_container.h"
+#include "core/file_sys/nx2_shader_extract.h"
+#include "core/file_sys/vfs/vfs_real.h"
 #include "video_core/pipeline_cache_files.h"
 
 namespace {
@@ -126,6 +131,10 @@ struct Packages {
     std::vector<PackageProgram> programs;
 
     explicit Packages(const std::filesystem::path& directory) {
+        if (std::filesystem::is_regular_file(directory)) {
+            LoadExtracted(directory);
+            return;
+        }
         std::vector<std::filesystem::path> files;
         for (const auto& entry : std::filesystem::directory_iterator(directory)) {
             const auto name = entry.path().filename().string();
@@ -156,6 +165,38 @@ struct Packages {
                 offset += 0x38 + code_size + control_size;
                 ++index;
             }
+        }
+    }
+
+    /// `nx2-precompile extract`'s PREFIX.programs: "NXSX0001", u32 count, then per program u8
+    /// stage (FileSys::Nx2ShaderExtract::Stage), u64 fingerprint, u32 control length, u32 code
+    /// length, u32 origin length, the origin, the control section, the code area. Programs are
+    /// numbered in file order ("programs", index).
+    void LoadExtracted(const std::filesystem::path& path) {
+        storage.push_back(ReadFile(path));
+        const std::span<const u8> bytes{storage.back()};
+        if (bytes.size() < 12 || std::memcmp(bytes.data(), "NXSX0001", 8) != 0)
+            throw std::runtime_error(path.string() + " is not an nx2-precompile extract file");
+        const u32 count = Load<u32>(bytes, 8);
+        size_t offset = 12;
+        static constexpr std::array stages{Stage::VertexB,  Stage::TessellationControl,
+                                           Stage::TessellationEval, Stage::Geometry,
+                                           Stage::Fragment, Stage::Compute,
+                                           Stage::Task,     Stage::Mesh};
+        for (u32 index = 0; index < count; ++index) {
+            const u8 stage = Load<u8>(bytes, offset);
+            const u32 control_size = Load<u32>(bytes, offset + 9);
+            const u32 code_size = Load<u32>(bytes, offset + 13);
+            const u32 origin_size = Load<u32>(bytes, offset + 17);
+            const size_t control_at = offset + 21 + origin_size;
+            if (stage >= stages.size() || control_at + control_size + code_size > bytes.size())
+                throw std::runtime_error(fmt::format("{}: bad program {}", path.string(), index));
+            programs.push_back({.file = "programs",
+                                .index = index,
+                                .stage = stages[stage],
+                                .code = bytes.subspan(control_at + control_size, code_size),
+                                .control = bytes.subspan(control_at, control_size)});
+            offset = control_at + control_size + code_size;
         }
     }
 };
@@ -1382,6 +1423,123 @@ int Check(const std::filesystem::path& path, unsigned threads) {
     return failed_envs || bad_records ? 1 : 0;
 }
 
+// ---------------------------------------------------------------------------------------------
+// extract: the game's own shader programs, found by content (core/file_sys/nx2_shader_extract).
+
+int Extract(const std::filesystem::path& game, const std::filesystem::path& prefix,
+            const std::string& packages, unsigned threads) {
+    namespace X = FileSys::Nx2ShaderExtract;
+    FileSys::RealVfsFilesystem filesystem;
+    std::vector<FileSys::VirtualDir> roots;
+    std::unique_ptr<FileSys::NupContainer> container;
+    if (std::filesystem::is_directory(game)) {
+        roots.push_back(filesystem.OpenDirectory(Common::FS::PathToUTF8String(game),
+                                                 FileSys::OpenMode::Read));
+    } else {
+        const auto file =
+            filesystem.OpenFile(Common::FS::PathToUTF8String(game), FileSys::OpenMode::Read);
+        if (!file || !FileSys::NupContainer::IsNupFile(file)) {
+            throw std::runtime_error("--game must be a .nup file or an unpacked RomFS directory");
+        }
+        auto spill = prefix;
+        spill += ".spill";
+        std::filesystem::create_directories(spill);
+        container = std::make_unique<FileSys::NupContainer>(
+            file, FileSys::NupContainer::DefaultCacheCap, spill);
+        if (container->GetStatus() != Loader::ResultStatus::Success) {
+            throw std::runtime_error("cannot read the NUP");
+        }
+        FileSys::VirtualDir merged;
+        for (size_t i = 0; i < container->GetPackages().size(); ++i) {
+            const auto& package = container->GetPackages()[i];
+            const auto romfs = container->GetRomFSDir(i);
+            fmt::print("package {}: {:016X} v{} kind {}{}\n", i, package.title_id, package.version,
+                       static_cast<int>(package.kind), romfs ? "" : " (no RomFS)");
+            if (!romfs) {
+                continue;
+            }
+            if (packages == "union") {
+                roots.push_back(romfs); // every version, as nxnative's shader_split.py reads them
+            } else {
+                // What the game loads: later packages replace the base's files.
+                merged = merged ? FileSys::NupContainer::MergeShadowDirs(merged, romfs) : romfs;
+            }
+        }
+        if (merged) {
+            roots.push_back(merged);
+        }
+    }
+    const auto begin = std::chrono::steady_clock::now();
+    X::Progress progress;
+    std::jthread reporter([&](std::stop_token stop) {
+        while (!stop.stop_requested()) {
+            std::this_thread::sleep_for(std::chrono::seconds(10));
+            if (progress.files_total) {
+                fmt::print(stderr, "progress: {}/{}\n", progress.files_done.load(),
+                           progress.files_total);
+            }
+        }
+    });
+    const auto result = X::Extract(roots, threads, &progress);
+    reporter.request_stop();
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+
+    auto path = [&](const char* suffix) {
+        auto p = prefix;
+        p += suffix;
+        return p;
+    };
+    std::ofstream bin(path(".programs"), std::ios::binary);
+    const auto put = [&](const auto& value) {
+        bin.write(reinterpret_cast<const char*>(&value), sizeof(value));
+    };
+    bin.write("NXSX0001", 8);
+    put(static_cast<u32>(result.programs.size()));
+    std::ofstream tsv(path(".tsv"));
+    tsv << "fingerprint\tstage\tcontrol_size\tcode_size\torigin\n";
+    std::map<std::string, u32> stages;
+    for (const auto& program : result.programs) {
+        put(static_cast<u8>(program.stage));
+        put(program.fingerprint);
+        put(static_cast<u32>(program.control.size()));
+        put(static_cast<u32>(program.code.size()));
+        put(static_cast<u32>(program.origin.size()));
+        bin.write(program.origin.data(), static_cast<std::streamsize>(program.origin.size()));
+        bin.write(reinterpret_cast<const char*>(program.control.data()),
+                  static_cast<std::streamsize>(program.control.size()));
+        bin.write(reinterpret_cast<const char*>(program.code.data()),
+                  static_cast<std::streamsize>(program.code.size()));
+        tsv << fmt::format("{:016x}\t{}\t{}\t{}\t{}\n", program.fingerprint,
+                           X::StageName(program.stage), program.control.size(),
+                           program.code.size(), program.origin);
+        ++stages[X::StageName(program.stage)];
+    }
+    std::ofstream variations(path(".variations.tsv"));
+    for (const auto& variation : result.variations) {
+        variations << variation.label;
+        for (const u32 index : variation.programs) {
+            variations << fmt::format("\t{:016x}", result.programs[index].fingerprint);
+        }
+        variations << '\n';
+    }
+    std::ofstream errors(path(".errors.txt"));
+    for (const auto& error : result.errors) {
+        errors << error << '\n';
+    }
+    const auto& s = result.stats;
+    fmt::print("files {} ({:.1f} GB read), inflated {:.1f} GB, compressed files skipped after a "
+               "look {}, containers {}\n",
+               s.files, s.file_bytes / 1e9, s.inflated_bytes / 1e9, s.peeked_only, s.containers);
+    fmt::print("programs {} from {} occurrences, variations {}, errors {}, in {:.1f} s\n",
+               result.programs.size(), s.occurrences, result.variations.size(),
+               result.errors.size(), seconds);
+    for (const auto& [stage, count] : stages) {
+        fmt::print("  {:8} {}\n", stage, count);
+    }
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1397,7 +1555,8 @@ int main(int argc, char** argv) {
             std::cout << VideoCommon::VulkanPipelineCacheVersion << '\n';
             return 0;
         }
-        std::filesystem::path pkg, cache, out, priors_path, check_file;
+        std::filesystem::path pkg, cache, out, priors_path, check_file, game;
+        std::string packages = "merged";
         unsigned threads = std::max(1U, std::thread::hardware_concurrency() - 2);
         for (int i = 2; i + 1 < argc; i += 2) {
             const std::string arg = argv[i];
@@ -1408,7 +1567,14 @@ int main(int argc, char** argv) {
             else if (arg == "--threads") threads = static_cast<unsigned>(std::stoul(value));
             else if (arg == "--priors") priors_path = value;
             else if (arg == "--file") check_file = value;
+            else if (arg == "--game") game = value;
+            else if (arg == "--packages") packages = value;
             else throw std::runtime_error("Unknown option " + arg);
+        }
+        if (command == "extract") {
+            if (game.empty() || out.empty())
+                throw std::runtime_error("extract needs --game and --out");
+            return Extract(game, out, packages, threads);
         }
         if (command == "check") {
             if (check_file.empty())

@@ -256,8 +256,8 @@ if args.mesh_combos and args.mesh_envs:
 
 for h, blob in sorted(oracle.items()):
     rows = by_hash.get(h, [])
-    if not rows or rows[0]['stage'] != 'Compute':
-        continue
+    if not rows or rows[0]['stage'] != 'Compute' or all(r.get('left_out') for r in rows):
+        continue  # left_out: only in an archive version the game does not load (game_tables.py)
     workgroup, shared = env_tail_compute(blob)
     key = struct.pack('<QI3I', int(h, 16), shared, *workgroup)
     counts['oracle compute'] += w.compute(blob, key)

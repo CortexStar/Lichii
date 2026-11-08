@@ -5,14 +5,23 @@ not stall while the driver compiles them.
 
 ## How it works
 
-1. `nx2-precompile scan` reads every native program from nxnative's shader packages (`BTCD` records),
-   captures and lowers it as `GenericEnvironment::LowerNativeCode` does, and computes the shader hash
+1. `nx2-precompile extract` finds the game's shader programs in its own files, by content
+   (`core/file_sys/nx2_shader_extract`): every RomFS file of the `.nup` (base and update, as the game
+   sees them) is read, zstd (with the game's dictionaries) and Yaz0 are undone, SARC archives are
+   expanded, and BNSH (shader archives, effect bundles, layouts), agl BAHS and NDSR packs, nn::ndve
+   movie files and sead's primitive drawer are parsed. For Ocarina of Time it finds, in about 30
+   seconds, every program nxnative's build of the game holds (42,848 of 42,854; the others are
+   entries nxnative's current `shader_split.py` drops too) and every shader recorded sessions drew,
+   and its variation tables reproduce nxnative's vertex/pixel pair tables. The cutting of programs
+   and the fingerprints follow nxnative's `shader_split.py` (github.com/seedds/nxnative, MIT).
+   `nx2-precompile scan` then captures and lowers each program as `GenericEnvironment::LowerNativeCode` does, and computes the shader hash
    the emulator will compute at runtime. It then translates each program against a static fact oracle
    and writes the facts the translator asked for, in `GenericEnvironment::Serialize` layout.
 2. The Python tools in `py/` predict the render states each shader combination is drawn with, from
    the pipelines the recorded caches hold, and write the game's precompiled file (`NX2PREP1`).
-   Vertex/pixel pairs come from nxnative's pair tables; mesh, task and pixel combinations from the
-   variation tables of the game's BNSH archives (`mesh_variations.py`), with their mesh state
+   Vertex/pixel pairs and mesh, task and pixel combinations come from the variations the extractor
+   found (`game_tables.py`; older versions of a shader archive that the game ships but does not load
+   are left out), with their mesh state
    (`SET_MESH_SHADER_A/B`, `SET_MESH_INIT_SHADER` and the pass-through geometry header) derived from
    the mesh program's control section by `nx2-precompile mesh-envs`.
 3. At boot, after the disk cache is loaded, `PipelineCache::PreparePrecompiled` builds every pipeline
@@ -45,19 +54,22 @@ log shows it as prepared pipelines that still take hundreds of milliseconds to b
 ## Commands
 
 ```
-nx2-precompile scan     --pkg DIR --out PREFIX [--priors FILE] [--threads N]
-nx2-precompile validate --pkg DIR --cache CACHE.bin --out PREFIX [--priors FILE]
-nx2-precompile mesh-envs --pkg DIR --cache DRAWS.tsv --out PREFIX [--priors FILE]
+nx2-precompile extract  --game GAME.nup|ROMFS_DIR --out PREFIX [--packages merged|union] [--threads N]
+nx2-precompile scan     --pkg PREFIX.programs --out PREFIX [--priors FILE] [--threads N]
+nx2-precompile validate --pkg PREFIX.programs --cache CACHE.bin --out PREFIX [--priors FILE]
+nx2-precompile mesh-envs --pkg PREFIX.programs --cache DRAWS.tsv --out PREFIX [--priors FILE]
 nx2-precompile check    --file precompiled.fork-v<N>.nx2prep
 nx2-precompile cache-version
 ```
 
-`run_pipeline.sh CACHE.bin...` runs the whole chain (about 8 minutes) from nxnative's build output of
-the title (`NX2_BUILD`, its shader packages and RomFS image) and profile (`NX2_PROFILE`, its shader
-map and pair tables) and the disk caches recorded while playing it; see the script's header for the
-other variables. Python 3.11 or newer with `zstandard` reads the BNSH archives, which use the title's
-zstd dictionaries. `analyze_session.sh` sorts the pipelines a play session still built at runtime by
-cause: prepared, state not predicted, mesh, shader not in the game files.
+`run_pipeline.sh CACHE.bin...` runs the whole chain from the game (`NX2_GAME`, its `.nup`) and the
+disk caches recorded while playing it; see the script's header for the other variables. It needs
+Python 3.11 or newer and nothing else; no keys are needed for a `.nup`. `extract` writes
+PREFIX.programs (the programs, for the other commands' `--pkg`), PREFIX.tsv (fingerprint, stage and
+origin of each), PREFIX.variations.tsv (the programs each variation draws together) and
+PREFIX.errors.txt. `--pkg` also takes a folder of nxnative's `BTCD` packages.
+
+`analyze_session.sh` sorts the pipelines a play session still built at runtime by cause: prepared, state not predicted, mesh, shader not in the game files.
 
 `py/learn_priors.py` learns the storage-pointer classifications the oracle uses from the recorded
 caches.
