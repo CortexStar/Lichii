@@ -823,9 +823,11 @@ void A64EmitX64::EmitA64CallSupervisor(A64EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     ASSERT(args[0].IsImmediate());
     const u32 imm = args[0].GetImmediateU32();
+    code.EnterHostMxcsr();
     Devirtualize<&A64::UserCallbacks::CallSVC>(conf.callbacks).EmitCall(code, [&](RegList param) {
         code.mov(param[0], imm);
     });
+    code.LeaveHostMxcsr();
     // The kernel would have to execute ERET to get here, which would clear exclusive state.
     code.mov(code.byte[code.ABI_JIT_PTR + offsetof(A64JitState, exclusive_state)], u8(0));
 }
@@ -836,22 +838,28 @@ void A64EmitX64::EmitA64ExceptionRaised(A64EmitContext& ctx, IR::Inst* inst) {
     ASSERT(args[0].IsImmediate() && args[1].IsImmediate());
     const u64 pc = args[0].GetImmediateU64();
     const u64 exception = args[1].GetImmediateU64();
+    code.EnterHostMxcsr();
     Devirtualize<&A64::UserCallbacks::ExceptionRaised>(conf.callbacks).EmitCall(code, [&](RegList param) {
         code.mov(param[0], pc);
         code.mov(param[1], exception);
     });
+    code.LeaveHostMxcsr();
 }
 
 void A64EmitX64::EmitA64DataCacheOperationRaised(A64EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     ctx.reg_alloc.HostCall(code, nullptr, {}, args[1], args[2]);
+    code.EnterHostMxcsr();
     Devirtualize<&A64::UserCallbacks::DataCacheOperationRaised>(conf.callbacks).EmitCall(code);
+    code.LeaveHostMxcsr();
 }
 
 void A64EmitX64::EmitA64InstructionCacheOperationRaised(A64EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     ctx.reg_alloc.HostCall(code, nullptr, {}, args[0], args[1]);
+    code.EnterHostMxcsr();
     Devirtualize<&A64::UserCallbacks::InstructionCacheOperationRaised>(conf.callbacks).EmitCall(code);
+    code.LeaveHostMxcsr();
 }
 
 void A64EmitX64::EmitA64DataSynchronizationBarrier(A64EmitContext&, IR::Inst*) {
@@ -874,7 +882,9 @@ void A64EmitX64::EmitA64InstructionSynchronizationBarrier(A64EmitContext& ctx, I
     }
 
     ctx.reg_alloc.HostCall(code, nullptr);
+    code.EnterHostMxcsr();
     Devirtualize<&A64::UserCallbacks::InstructionSynchronizationBarrierRaised>(conf.callbacks).EmitCall(code);
+    code.LeaveHostMxcsr();
 }
 
 void A64EmitX64::EmitA64GetCNTFRQ(A64EmitContext& ctx, IR::Inst* inst) {
@@ -916,7 +926,9 @@ void A64EmitX64::EmitA64GetCNTPCT(A64EmitContext& ctx, IR::Inst* inst) {
     if (!conf.wall_clock_cntpct) {
         code.UpdateTicks();
     }
+    code.EnterHostMxcsr();
     Devirtualize<&A64::UserCallbacks::GetCNTPCT>(conf.callbacks).EmitCall(code);
+    code.LeaveHostMxcsr();
 }
 
 void A64EmitX64::EmitA64GetCTR(A64EmitContext& ctx, IR::Inst* inst) {

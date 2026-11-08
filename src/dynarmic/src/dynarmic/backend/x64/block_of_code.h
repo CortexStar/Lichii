@@ -75,6 +75,11 @@ public:
     void SwitchMxcsrOnEntry();
     /// Code emitter: Makes saved host MXCSR the current MXCSR
     void SwitchMxcsrOnExit();
+    /// Around a call from guest code into host code (UserCallbacks, host functions): the host
+    /// code runs under the host thread's MXCSR, so its own FP neither sets guest FPSR flags nor
+    /// runs under the guest's rounding and flush-to-zero modes. Flags, memory only.
+    void EnterHostMxcsr();
+    void LeaveHostMxcsr();
     /// Code emitter: Enter standard ASIMD MXCSR region
     void EnterStandardASIMD();
     /// Code emitter: Leave standard ASIMD MXCSR region
