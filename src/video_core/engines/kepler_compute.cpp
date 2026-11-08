@@ -1830,6 +1830,14 @@ struct FrontQmdMemory {
     return method == 0xae || method == 0xaf || method == 0xb0 || method == 0x107;
 }
 
+// Methods whose notes the front takes from guest memory as the back finds it running them: the
+// QMD methods (descriptors, and the words maxima and reductions combine with) and the compute
+// report (reductions). The front holds them unpublished until it noted them
+// (GpuSplit::PublishHold).
+[[nodiscard]] bool ValuedFromMemory(u32 method) {
+    return IsQmdMethod(method) || method == 0x6c3;
+}
+
 // Whether a PCAS method signals the QMD scheduler, as ProcessNativeMethod filters them.
 [[nodiscard]] bool SignalsQmd(u32 method, u32 argument) {
     if (method == 0xaf) {
@@ -2050,6 +2058,7 @@ void KeplerCompute::FrontQueueWrite(VideoCommon::GpuSplit& split, FrontState& fs
         if (IsQmdMethod(method)) {
             VideoCommon::FrontQmdView::Get().MaybeTakeOver(split);
         }
+        const GpuSplit::PublishHold hold{split, ValuedFromMemory(method)};
         if (direct) {
             split.MacroWrite(this, method, argument);
         } else {
@@ -2116,6 +2125,7 @@ void KeplerCompute::FrontQueueWrite(VideoCommon::GpuSplit& split, FrontState& fs
         // The run holds no signal: the back runs the table the view takes over up to here.
         VideoCommon::FrontQmdView::Get().MaybeTakeOver(split);
     }
+    const GpuSplit::PublishHold hold{split, ValuedFromMemory(method)};
     split.RunPendingFlush();
     FrontNoteWrites(split, fs, method);
 }

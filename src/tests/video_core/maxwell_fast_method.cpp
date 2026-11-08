@@ -68,6 +68,13 @@ struct GpuSplitTestAccess {
         split.write_position = written;
         split.consumed_cache = consumed;
     }
+    /// A back that waits for work: Commit publishes each entry at once.
+    static void SetBackIdle(GpuSplit& split, bool idle) {
+        split.back_idle.store(idle, std::memory_order_relaxed);
+    }
+    static u64 Published(const GpuSplit& split) {
+        return split.published.load(std::memory_order_relaxed);
+    }
     /// SetPositions, with the back's own position too (what Ran reads).
     static void SetBack(GpuSplit& split, u64 written, u64 consumed) {
         SetPositions(split, written, consumed);
@@ -1189,4 +1196,35 @@ TEST_CASE("The split front's QMD view reads a QMD only as the back will find it"
     Access::SetBack(split, 40, 40);
     view.MaybeTakeOver(split);
     REQUIRE(view.Synced());
+}
+
+TEST_CASE("GpuSplit holds entries from an idle back while the front notes them",
+          "[video_core][gpu_split][front_qmd]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    Fixture f;
+    VideoCommon::GpuSplit split;
+    Access::Initialize(split, f.system);
+    Access::SetBackIdle(split, true);
+    // An idle back gets each entry at once.
+    split.Defer([] {});
+    REQUIRE(Access::Published(split) == Access::End(split));
+    {
+        const VideoCommon::GpuSplit::PublishHold hold{split, true};
+        split.Defer([] {});
+        {
+            // A nested hold that holds nothing keeps the outer one.
+            const VideoCommon::GpuSplit::PublishHold inner{split, false};
+            split.Defer([] {});
+        }
+        REQUIRE(Access::Published(split) < Access::End(split));
+    }
+    // What Commit would have published goes once the hold ends.
+    REQUIRE(Access::Published(split) == Access::End(split));
+    {
+        // A wait inside a hold still publishes.
+        const VideoCommon::GpuSplit::PublishHold hold{split, true};
+        split.Defer([] {});
+        split.Publish();
+        REQUIRE(Access::Published(split) == Access::End(split));
+    }
 }

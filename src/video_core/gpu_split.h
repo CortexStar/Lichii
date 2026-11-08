@@ -367,6 +367,31 @@ public:
     }
     /// Waits until the back executed everything sent so far.
     void Drain(DrainSite site = DrainSite::Other);
+    /// Keeps the entries the front sends unpublished while it notes what they write from guest
+    /// memory as the back will find it running them (FrontQmdView: descriptors, and the words
+    /// maxima and reductions combine with). An idle back gets each entry at once and may run it
+    /// before the front reads, which would then read what the entry wrote. While held, Commit
+    /// publishes nothing; Publish (waits, a full ring) still does.
+    class PublishHold {
+    public:
+        PublishHold(GpuSplit& split_, bool hold) : split{split_}, was_held{split_.publish_held} {
+            if (hold) {
+                split.publish_held = true;
+            }
+        }
+        ~PublishHold() {
+            if (split.publish_held != was_held) {
+                split.publish_held = was_held;
+                split.PublishIfDue();
+            }
+        }
+        PublishHold(const PublishHold&) = delete;
+        PublishHold& operator=(const PublishHold&) = delete;
+
+    private:
+        GpuSplit& split;
+        bool was_held;
+    };
 
     /// Compute or copy work was just sent: what can write GPU-written command lists.
     void NoteWriter() {
@@ -801,6 +826,11 @@ private:
     u64* ReserveSlow(size_t words);
     void Commit(size_t words) {
         write_position += words;
+        if (!publish_held) {
+            PublishIfDue();
+        }
+    }
+    void PublishIfDue() {
         // A back that ran out of work gets each entry at once.
         if (write_position - published_local >= publish_every ||
             back_idle.load(std::memory_order_relaxed)) {
@@ -855,6 +885,8 @@ private:
     u64 pending_write_count{};
     u64 last_sync_position{};
     u64 published_local{};
+    /// PublishHold: Commit publishes nothing.
+    bool publish_held{};
     u64 consumed_cache{};
     /// Words between publishes: small right after a drain, while the back has nothing to do.
     size_t publish_every{PublishEvery};
