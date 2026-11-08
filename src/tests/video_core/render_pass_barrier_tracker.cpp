@@ -100,3 +100,57 @@ TEST_CASE("Render pass barrier is recorded at once for untracked passes and full
     REQUIRE_FALSE(tracker.EndPass(HudTarget, true));
     REQUIRE_FALSE(tracker.BeginNeedsBarrier(BloomTarget));
 }
+
+TEST_CASE("A draw sampling what the last checked draw sampled skips the check",
+          "[video_core][pass_barrier]") {
+    RenderPassBarrierTracker tracker;
+    const std::array font{Image(10)};
+    const std::array scene_color{Image(1)};
+
+    // Nothing checked yet.
+    REQUIRE_FALSE(tracker.SameAsCheckedDraw(font));
+    tracker.NoteDraw(font);
+    tracker.NoteCheckedDraw(font);
+    REQUIRE(tracker.SameAsCheckedDraw(font));
+    REQUIRE_FALSE(tracker.SameAsCheckedDraw(scene_color));
+
+    // A pass end changes what a draw has to be checked against.
+    REQUIRE_FALSE(tracker.EndPass(SceneTargets, true));
+    REQUIRE_FALSE(tracker.SameAsCheckedDraw(font));
+    REQUIRE_FALSE(tracker.DrawNeedsBarrier(font, false));
+    tracker.NoteDraw(font);
+    tracker.NoteCheckedDraw(font);
+    REQUIRE(tracker.SameAsCheckedDraw(font));
+
+    // Every skipped check gives what the full check gives.
+    REQUIRE_FALSE(tracker.DrawNeedsBarrier(font, false));
+
+    // So does a barrier.
+    REQUIRE(tracker.DrawNeedsBarrier(scene_color, false));
+    tracker.Clear();
+    REQUIRE_FALSE(tracker.SameAsCheckedDraw(font));
+}
+
+TEST_CASE("The same-images memo keeps the writes the next pass begin checks",
+          "[video_core][pass_barrier]") {
+    RenderPassBarrierTracker tracker;
+    const std::array bloom_input{Image(3)};
+    tracker.NoteDraw(bloom_input);
+    tracker.NoteCheckedDraw(bloom_input);
+    REQUIRE_FALSE(tracker.EndPass(SceneTargets, true));
+    // A skipped NoteDraw loses no read: the bloom pass writing what an earlier draw sampled still
+    // needs the barrier.
+    REQUIRE(tracker.BeginNeedsBarrier(BloomTarget));
+}
+
+TEST_CASE("Draws with more images than the memo holds are always checked",
+          "[video_core][pass_barrier]") {
+    RenderPassBarrierTracker tracker;
+    std::vector<VkImage> many;
+    for (u64 i = 0; i < 40; ++i) {
+        many.push_back(Image(100 + i));
+    }
+    tracker.NoteDraw(many);
+    tracker.NoteCheckedDraw(many);
+    REQUIRE_FALSE(tracker.SameAsCheckedDraw(many));
+}
