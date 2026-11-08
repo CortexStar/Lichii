@@ -206,10 +206,9 @@ private:
 
     void QueueVulkanPipelineCacheFlush();
 
-    /// Queues one write of the driver pipeline cache file on the serialization thread, with no
-    /// throttle. For the end of a warm-up stage: its builds never reach the timed flush, which
-    /// counts only pipelines built during play.
-    void QueueVulkanPipelineCacheSave();
+    /// Saves completed warm-up builds on the serialization thread and waits for persistence.
+    /// Native driver caching needs no explicit save; disabled caching cannot complete a marker.
+    bool SaveVulkanPipelineCacheAndWait();
 
     /// The title's warm-compute.bin (ShaderWarm::ComputeWarmPath, EDEN_NX2_COMPUTE_WARM=<file>
     /// overrides): compute programs prepared from the game files are converted (missing reads

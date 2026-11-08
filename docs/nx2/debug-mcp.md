@@ -205,8 +205,8 @@ files preserve the smaller set. Regenerate into separate folders and use indepen
 driver caches for gameplay measurements.
 The [Ocarina budget comparison](benchmarks/ocarina-mesh-budget-2026-11-08.json) reuses the 512
 baseline and measures requested limits of 1,024 and 2,048. Both yield the same 970 candidates;
-the two larger-budget runs show no consistent overall intro improvement, while cold mesh
-preparation increases from 85 seconds to about 250 seconds. The default remains 512.
+the timing comparison is confounded by unmatched NVIDIA disk-cache setup, so performance and
+startup-cost conclusions versus 512 are withdrawn. The default remains 512.
 
 **`screenshot`** `{height?, save?, timeout_s?}`. It requests a 16:9 layout from
 `Layout::DefaultFrameLayout`, and the renderer blits the presented framebuffers into it. The

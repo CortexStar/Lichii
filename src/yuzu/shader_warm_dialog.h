@@ -49,6 +49,10 @@ public:
     u64 TitleId() const {
         return title_id;
     }
+    /// The source game being read by the builder.
+    const std::filesystem::path& GamePath() const {
+        return game_path;
+    }
 
 signals:
     void BuildFinished(bool ok);

@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <map>
 #include <set>
 
 #include "common/cityhash.h"
+#include "common/logging.h"
 #include "video_core/shader_warm/mesh_warm_builder.h"
 
 namespace VideoCommon::ShaderWarm {
@@ -312,19 +314,25 @@ void MeshWarmRecipes::AddVariation(std::span<const ShaderRecord> variation) {
                                                        RecordIdentity(record.constants)}};
         auto [it, inserted] = impl->programs.try_emplace(id);
         if (inserted) {
-            LoweredCode lowered;
-            if (LowerProgram(record.code, true, lowered)) {
+            try {
+                LoweredCode lowered;
+                if (LowerProgram(record.code, true, lowered)) {
+                    ++impl->skipped;
+                    return;
+                }
+                auto env = GraphicsEnv(stage, lowered, record.code, record.constants);
+                if (env.size() > MaxPreparedBytes - impl->bytes) {
+                    ++impl->skipped;
+                    return;
+                }
+                it->second = std::make_shared<MeshWarmStage>(
+                    MeshWarmStage{stage, StageHash(lowered.code), std::move(env)});
+                impl->bytes += it->second->environment.size();
+            } catch (const std::exception& exception) {
+                LOG_DEBUG(Render_Vulkan, "Mesh warm-up: conversion failed: {}", exception.what());
                 ++impl->skipped;
                 return;
             }
-            auto env = GraphicsEnv(stage, lowered, record.code, record.constants);
-            if (env.size() > MaxPreparedBytes - impl->bytes) {
-                ++impl->skipped;
-                return;
-            }
-            impl->bytes += env.size();
-            it->second = std::make_shared<MeshWarmStage>(
-                MeshWarmStage{stage, StageHash(lowered.code), std::move(env)});
         }
         if (!it->second) {
             return;

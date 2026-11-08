@@ -143,6 +143,16 @@ public:
         lock.unlock();
     }
 
+    /// Drain the previous load before reopening admission with fresh budgets. The owner must
+    /// serialize Start(), Stop() and ResetForLoad(); demand may still be finishing during Stop().
+    void ResetForLoad() {
+        Stop();
+        std::scoped_lock lock{mutex};
+        resident = 0;
+        captured_bytes = 0;
+        stopped = false;
+    }
+
 private:
     void ReleaseSlotLocked(Entry& entry) {
         if (std::exchange(entry.slot_reserved, false)) {

@@ -301,8 +301,8 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, shader_warm_at_boot, tr("Prepare shaders before the game starts:"),
            tr("When a game's shader warm-up has not run yet, it can run on the loading screen, on "
               "every CPU thread, and the game starts once it is done (about 10 minutes the first "
-              "time). Never runs it in the background while the game plays, at low priority. Ask "
-              "asks at launch."));
+              "time).\nAlways: run it on the loading screen.\nNever: run it in the background, at "
+              "low priority, while the game plays.\nAsk: ask at each launch."));
     INSERT(Settings, native_async_draws, tr("Switch 2 draws with unbuilt pipelines:"),
            tr("Only applies when asynchronous shader building is on. Decides what a Switch 2 draw "
               "does when its graphics pipeline is still building.\n"

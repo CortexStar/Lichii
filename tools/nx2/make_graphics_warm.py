@@ -118,17 +118,25 @@ def runtime_records(path):
     """Graphics stage occurrences of a v53 cache file: (stage, hash, raw env, key)."""
     data = Path(path).read_bytes()
     cur = 12
-    while cur < len(data):
+    while cur + 4 <= len(data):
         count, = struct.unpack_from('<I', data, cur)
         cur += 4
+        if count == 0:
+            return
         envs = []
         for _ in range(count):
+            if cur + ENV.size > len(data):
+                return
             begin = cur
             f = ENV.unpack_from(data, cur)
             p = cur + ENV.size + f[0] + f[1] * 8 + f[2] * 8 + f[3] * 12 + f[4] * 9 + f[5] * 12
             cur = p + tail_size(f[12])
+            if cur > len(data):
+                return
             envs.append((f[12], data[begin:cur]))
         size = 24 if envs[0][0] == 5 else KEY_SIZE
+        if cur + size > len(data):
+            return
         key = data[cur:cur + size]
         cur += size
         if envs[0][0] == 5:

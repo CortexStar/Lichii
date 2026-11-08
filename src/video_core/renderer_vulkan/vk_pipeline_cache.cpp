@@ -1058,9 +1058,10 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         compute_warm_threads.clear();
         warm_stop_callback.reset();
         compute_warm_done = true;
-        background_pipelines.Stop();
+        background_pipelines.ResetForLoad();
         workers.WaitForRequests();
         serialization_thread.WaitForRequests();
+        disk_pipelines.clear();
         if (use_vulkan_pipeline_cache && !vulkan_pipeline_cache_filename.empty()) {
             SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
                                          CACHE_VERSION);
@@ -1181,6 +1182,13 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         const u64 hash = key.Hash();
         if (!disk_pipelines.insert(hash).second) {
             return;
+        }
+        {
+            std::scoped_lock lock{state.mutex};
+            const auto existing = graphics_cache.find(key);
+            if (existing != graphics_cache.end() && existing->second) {
+                return;
+            }
         }
         if (!PreloadAllPipelines() &&
             (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
@@ -1384,6 +1392,9 @@ struct WarmStamp {
     u32 link_mode{};
 };
 
+// Older conventional warm markers could be written before the driver cache reached disk.
+constexpr std::string_view WarmCacheConfiguration = "persist1";
+
 /// The marker values for `file` on this device, empty when the file's size or time cannot be read.
 std::optional<WarmStamp> CurrentStamp(const std::filesystem::path& file, const Device& device,
                                       u64 entries) {
@@ -1417,7 +1428,8 @@ std::array<std::filesystem::path, 2> MarkerPaths(const std::filesystem::path& fi
 
 /// True when a marker matches the file and the device (the entry count is informative).
 bool WarmAlreadyDone(const std::filesystem::path& file, const std::filesystem::path& title_file,
-                     const Device& device, std::string_view configuration = {}) {
+                     const Device& device,
+                     std::string_view configuration = WarmCacheConfiguration) {
     const auto stamp = CurrentStamp(file, device, 0);
     if (!stamp) {
         return false;
@@ -1445,7 +1457,8 @@ bool WarmAlreadyDone(const std::filesystem::path& file, const std::filesystem::p
 /// Writes the marker for `file` next to it, or in the title's shader folder when that write
 /// fails.
 void WriteWarmMarker(const std::filesystem::path& file, const std::filesystem::path& title_file,
-                     const Device& device, u64 entries, std::string_view configuration = {}) {
+                     const Device& device, u64 entries,
+                     std::string_view configuration = WarmCacheConfiguration) {
     const auto stamp = CurrentStamp(file, device, entries);
     if (!stamp) {
         return;
@@ -1496,7 +1509,8 @@ void PipelineCache::StartComputeWarm(u64 title_id) {
     const std::string file_path = Common::FS::PathToUTF8String(warm_file); // for the log
     const char* const path = file_path.c_str();
     const std::filesystem::path title_file = VideoCommon::ShaderWarm::ComputeWarmPath(title_id);
-    if (WarmAlreadyDone(warm_file, title_file, device)) {
+    if ((DriverCachesPipelines(device) || use_vulkan_pipeline_cache) &&
+        WarmAlreadyDone(warm_file, title_file, device)) {
         LOG_INFO(Render_Vulkan, "Nx2Perf compute_warm: already done for this file and driver");
         return;
     }
@@ -1552,7 +1566,8 @@ void PipelineCache::StartComputeWarm(u64 title_id) {
         LOG_WARNING(Render_Vulkan, "Nx2Perf compute_warm: reading {} failed: {}", path, e.what());
     }
     if (entries->empty()) {
-        if (read_ok && file_entries != 0) {
+        if (read_ok && file_entries != 0 && !warm_cancel &&
+            SaveVulkanPipelineCacheAndWait() && !warm_cancel) {
             WriteWarmMarker(warm_file, title_file, device, file_entries);
         }
         return;
@@ -1610,16 +1625,14 @@ void PipelineCache::StartComputeWarm(u64 title_id) {
             }
             if (progress->running.fetch_sub(1) == 1) {
                 shader_notify.SetWarmProgress(0, 0, 0);
-                if (read_ok && !stop.stop_requested() && !warm_cancel &&
-                    progress->built + progress->failed >= entries->size()) {
+                const bool complete =
+                    read_ok && progress->built + progress->failed >= entries->size();
+                const bool cache_ready = !stop.stop_requested() && !warm_cancel &&
+                                         SaveVulkanPipelineCacheAndWait();
+                if (complete && cache_ready && !stop.stop_requested() && !warm_cancel) {
                     WriteWarmMarker(warm_file, title_file, device, file_entries);
                 }
                 compute_warm_done = true;
-                if (!stop.stop_requested()) {
-                    // Without this, the stage's builds reach the file only at the next boot,
-                    // game change or clean close, and are lost if the app ends otherwise.
-                    QueueVulkanPipelineCacheSave();
-                }
                 LOG_INFO(Render_Vulkan,
                          "Nx2Perf compute_warm: finished, {} built, {} failed, {} not reached, "
                          "{:.0f} s",
@@ -1646,7 +1659,8 @@ void PipelineCache::StartGraphicsWarm(u64 title_id) {
     const std::string file_path = Common::FS::PathToUTF8String(warm_file); // for the log
     const char* const path = file_path.c_str();
     const std::filesystem::path title_file = VideoCommon::ShaderWarm::GraphicsWarmPath(title_id);
-    if (WarmAlreadyDone(warm_file, title_file, device)) {
+    if ((DriverCachesPipelines(device) || use_vulkan_pipeline_cache) &&
+        WarmAlreadyDone(warm_file, title_file, device)) {
         LOG_INFO(Render_Vulkan, "Nx2Perf graphics_warm: already done for this file and driver");
         return;
     }
@@ -1794,11 +1808,10 @@ void PipelineCache::StartGraphicsWarm(u64 title_id) {
                     complete = !reader->failed && reader->end == reader->position &&
                                reader->driver_failures == 0;
                 }
-                if (complete && !stop.stop_requested() && !warm_cancel) {
+                const bool cache_ready = !stop.stop_requested() && !warm_cancel &&
+                                         SaveVulkanPipelineCacheAndWait();
+                if (complete && cache_ready && !stop.stop_requested() && !warm_cancel) {
                     WriteWarmMarker(warm_file, title_file, device, reader->read);
-                }
-                if (!stop.stop_requested()) {
-                    QueueVulkanPipelineCacheSave();
                 }
                 LOG_INFO(Render_Vulkan,
                          "Nx2Perf graphics_warm: finished, {} built, {} failed, {:.0f} s",
@@ -1870,7 +1883,7 @@ void PipelineCache::StartMeshWarm(u64 title_id) {
     const bool before_start = warm_before_start;
     mesh_warm_active.store(true, std::memory_order_release);
     mesh_warm_thread = std::jthread([this, warm_file, title_file, configuration, file_stamp,
-                                     before_start, native_cache](std::stop_token stop) {
+                                     before_start](std::stop_token stop) {
         Common::SetCurrentThreadName("VkMeshWarm");
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
         GraphicsPipelineLibraryCache::SetNoRetainOnThisThread(true);
@@ -2011,28 +2024,7 @@ void PipelineCache::StartMeshWarm(u64 title_id) {
         // NVIDIA/AMD already own disk caching under DriverCachesPipelines. As with the other
         // warm-ups, their completion marker assumes that native cache has not been cleared or
         // evicted; those external changes require removing the warm marker as well.
-        bool cache_ready = native_cache;
-        if (complete && !cancelled() && !cache_ready && use_vulkan_pipeline_cache &&
-            !vulkan_pipeline_cache_filename.empty()) {
-            try {
-                auto saved = std::make_shared<std::promise<bool>>();
-                auto result = saved->get_future();
-                // The same queue owns runtime flushes and their temporary filename. Shutdown
-                // joins this warm-up before draining or destroying that queue and its cache.
-                serialization_thread.QueueWork([this, saved] {
-                    try {
-                        saved->set_value(SerializeVulkanPipelineCache(
-                            vulkan_pipeline_cache_filename, vulkan_pipeline_cache, CACHE_VERSION));
-                    } catch (...) {
-                        saved->set_exception(std::current_exception());
-                    }
-                });
-                cache_ready = result.get();
-            } catch (const std::exception& exception) {
-                LOG_WARNING(Render_Vulkan, "Nx2Perf mesh_warm: cache save failed: {}",
-                            exception.what());
-            }
-        }
+        const bool cache_ready = complete && !cancelled() && SaveVulkanPipelineCacheAndWait();
         const auto final_stamp = CurrentStamp(warm_file, device, 0);
         complete = complete && !cancelled() && file_stamp && final_stamp &&
                    file_stamp->size == final_stamp->size &&
@@ -2078,21 +2070,39 @@ void PipelineCache::QueueVulkanPipelineCacheFlush() {
     });
 }
 
-void PipelineCache::QueueVulkanPipelineCacheSave() {
-    if (!use_vulkan_pipeline_cache || vulkan_pipeline_cache_filename.empty()) {
-        return;
+bool PipelineCache::SaveVulkanPipelineCacheAndWait() {
+    if (DriverCachesPipelines(device)) {
+        return true;
     }
-    // Not skipped when a timed flush is in flight: that one may have read the cache before the
-    // stage's last builds. The serialization thread runs the two one after the other.
-    serialization_thread.QueueWork([this] {
-        SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
-                                     CACHE_VERSION);
-        size_t size = 0;
-        vulkan_pipeline_cache.Read(&size, nullptr);
-        last_cache_size.store(size, std::memory_order_relaxed);
-        LOG_INFO(Render_Vulkan, "Nx2Perf: driver pipeline cache saved after a warm-up, {} bytes",
-                 size);
-    });
+    if (!use_vulkan_pipeline_cache || vulkan_pipeline_cache_filename.empty()) {
+        return false;
+    }
+    try {
+        auto saved = std::make_shared<std::promise<bool>>();
+        auto result = saved->get_future();
+        // Queue after any timed flush: it may have read the cache before this stage finished.
+        // Shutdown/reload joins warm-up threads before draining this queue or replacing the cache.
+        serialization_thread.QueueWork([this, saved] {
+            try {
+                const bool ok = SerializeVulkanPipelineCache(
+                    vulkan_pipeline_cache_filename, vulkan_pipeline_cache, CACHE_VERSION);
+                if (ok) {
+                    size_t size = 0;
+                    vulkan_pipeline_cache.Read(&size, nullptr);
+                    last_cache_size.store(size, std::memory_order_relaxed);
+                    LOG_INFO(Render_Vulkan,
+                             "Nx2Perf: driver pipeline cache saved after a warm-up, {} bytes", size);
+                }
+                saved->set_value(ok);
+            } catch (...) {
+                saved->set_exception(std::current_exception());
+            }
+        });
+        return result.get();
+    } catch (const std::exception& exception) {
+        LOG_WARNING(Render_Vulkan, "Nx2Perf: warm-up cache save failed: {}", exception.what());
+        return false;
+    }
 }
 
 namespace {

@@ -496,7 +496,96 @@ TEST_CASE("Stopping prebuild joins a demanded translation on success and failure
         if (fail) {
             REQUIRE_FALSE(pipeline);
         }
+        cache.ResetForLoad();
+        std::promise<void> restarted;
+        auto restarted_future = restarted.get_future();
+        const bool reused_key = cache.Add(1, 100, [&] {
+            restarted.set_value();
+            return std::make_unique<int>(84);
+        });
+        cache.Start(1);
+        const bool resumed = restarted_future.wait_for(std::chrono::seconds{2}) ==
+                             std::future_status::ready;
+        auto next = cache.Take(1);
+        cache.Stop();
+        REQUIRE(reused_key);
+        REQUIRE(resumed);
+        REQUIRE(next);
+        REQUIRE(*next == 84);
     }
+}
+
+TEST_CASE("Prebuild reload drains unused and queued work before restoring both budgets",
+          "[video_core][pipeline_prebuild]") {
+    Vulkan::PipelinePrebuild<int, int> cache{3, 100, false};
+    std::promise<void> entered, release;
+    auto entered_future = entered.get_future();
+    auto gate = release.get_future().share();
+    std::atomic<int> queued_runs{};
+    auto queued_input = std::make_shared<int>(3);
+    std::weak_ptr<int> queued_reference = queued_input;
+    REQUIRE(cache.Add(1, 50, [] { return std::make_unique<int>(1); }));
+    REQUIRE(cache.Add(2, 50, [&] {
+        entered.set_value();
+        gate.wait();
+        return std::make_unique<int>(2);
+    }));
+    REQUIRE(cache.Add(3, 50, [&, input = std::move(queued_input)] {
+        ++queued_runs;
+        return std::make_unique<int>(*input);
+    }));
+    cache.Start(1);
+    const bool entered_second = entered_future.wait_for(std::chrono::seconds{2}) ==
+                                std::future_status::ready;
+    // With one worker, entering the second callback proves the first is complete but unused.
+    // Its released capture budget has admitted the third callback, queued behind the second.
+    auto reset = std::async(std::launch::async, [&] { cache.ResetForLoad(); });
+    bool admission_closed = false;
+    for (int key = 100; key < 2100; ++key) {
+        if (!cache.Add(key, 1, [] { return std::make_unique<int>(0); })) {
+            admission_closed = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    const bool reset_waited = Pending(reset);
+    release.set_value();
+    reset.get();
+    const bool released_inputs = queued_reference.expired();
+
+    // Each new callback needs the entire capture budget; all three completed pipelines must
+    // fit without adoption. Residual capture or resident reservations prevent this sequence.
+    std::promise<void> third_rebuilt;
+    auto third_future = third_rebuilt.get_future();
+    const bool first_added = cache.Add(1, 100, [] { return std::make_unique<int>(101); });
+    const bool second_added = cache.Add(2, 100, [] { return std::make_unique<int>(102); });
+    const bool third_added = cache.Add(3, 100, [&] {
+        third_rebuilt.set_value();
+        return std::make_unique<int>(103);
+    });
+    cache.Start(1);
+    const bool budgets_restored = third_future.wait_for(std::chrono::seconds{2}) ==
+                                  std::future_status::ready;
+    auto first = cache.Take(1);
+    auto second = cache.Take(2);
+    auto third = cache.Take(3);
+    cache.Stop();
+
+    REQUIRE(entered_second);
+    REQUIRE(admission_closed);
+    REQUIRE(reset_waited);
+    REQUIRE(released_inputs);
+    REQUIRE(queued_runs == 0);
+    REQUIRE(first_added);
+    REQUIRE(second_added);
+    REQUIRE(third_added);
+    REQUIRE(budgets_restored);
+    REQUIRE(first);
+    REQUIRE(second);
+    REQUIRE(third);
+    REQUIRE(*first == 101);
+    REQUIRE(*second == 102);
+    REQUIRE(*third == 103);
 }
 
 namespace {

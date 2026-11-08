@@ -4315,6 +4315,19 @@ void MainWindow::OnGameListConvertToNup(const std::string& game_path) {
     if (!root)
         return;
     const QString convert_title = tr("Convert to NUP");
+    if (shader_warm_dialog && shader_warm_dialog->IsRunning()) {
+        const auto source = std::filesystem::path{std::u8string{game_path.begin(), game_path.end()}};
+        const auto& preparing = shader_warm_dialog->GamePath();
+        std::error_code error;
+        if (source == preparing || std::filesystem::equivalent(source, preparing, error)) {
+            QMessageBox::information(this, convert_title,
+                                     tr("Shaders for this game are being prepared. Try again when "
+                                        "preparation has finished."));
+            shader_warm_dialog->raise();
+            shader_warm_dialog->activateWindow();
+            return;
+        }
+    }
     const auto archive = FileSys::Nup::DefaultArchivePath(*root);
     if (std::filesystem::exists(archive)) {
         QMessageBox::information(this, convert_title,
