@@ -2806,6 +2806,7 @@ private:
             m_codec = std::move(codec);
             m_width = w[5];
             m_height = w[6];
+            m_rate = w[7];
             m_clock.Reset();
             m_stream_start.reset();
         }
@@ -3190,6 +3191,9 @@ private:
                 m_ready->room.store(m_inputs.BelowReadyWatermark(), std::memory_order_relaxed);
             }
             std::string codec = m_codec;
+            const u32 width = m_width;
+            const u32 height = m_height;
+            const u32 rate = m_rate;
             if (codec.empty() && Tegra::Host1x::IsH264Stream(input.data)) {
                 codec = "video/avc";
                 m_codec = codec;
@@ -3206,7 +3210,8 @@ private:
                                               std::min(input.data.size(), size_t{16})),
                                           " "));
                 }
-                decoder = std::make_unique<Tegra::Host1x::Nx2VideoDecoder>(codec);
+                decoder = std::make_unique<Tegra::Host1x::Nx2VideoDecoder>(codec, width, height,
+                                                                           rate);
             }
             pictures.clear();
             decoder->Decode(input.data, input.pts, pictures);
@@ -3435,6 +3440,7 @@ private:
     std::string m_codec;
     u32 m_width{};
     u32 m_height{};
+    u32 m_rate{}; ///< Frames a second (Configure), 0 when not given
     u32 m_handed{}; ///< Output images handed out (registered or released) so far
     u64 m_frames_out{};
     u64 m_decoded_frames{};

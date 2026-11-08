@@ -5,12 +5,14 @@
 #include <cstring>
 #include <optional>
 #include <set>
+#include <thread>
 #include <utility>
 
 #include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/host1x/ffmpeg.h"
 #include "video_core/host1x/h264_packet.h"
+#include "video_core/host1x/nx2_video_decode_policy.h"
 #include "video_core/host1x/nx2_video_decoder.h"
 
 extern "C" {
@@ -140,6 +142,12 @@ struct Nx2VideoDecoder::Impl {
                 return false;
             }
             context->SetThreadCount(1);
+        } else if (codec == NvdecCommon::VideoCodec::AV1) {
+            const u32 threads = Nx2SoftwareDecodeThreads(width, height, rate,
+                                                         std::thread::hardware_concurrency());
+            LOG_INFO(HW_GPU, "nx2 video: AV1 on the CPU with {} threads ({}x{} at {})", threads,
+                     width, height, rate);
+            context->SetThreadCount(static_cast<int>(threads));
         }
         open = context->OpenContext(*decoder);
         on_gpu = open && gpu;
