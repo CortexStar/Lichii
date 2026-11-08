@@ -1111,6 +1111,7 @@ private:
             return;
         }
         has_flushed_end_pending = true;
+        scheduler.NoteRenderPassTransformFeedback();
         // Refresh buffers state before beginning transform feedback so counters are up-to-date
         UpdateBuffers();
         if (!has_started || buffers_count == 0) {
