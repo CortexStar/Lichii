@@ -7,12 +7,15 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <optional>
+
 #include <vulkan/vulkan_core.h>
 #include "common/settings.h"
 #include "video_core/framebuffer_config.h"
 #include "video_core/present.h"
 #include "video_core/renderer_vulkan/present/filters.h"
 #include "video_core/renderer_vulkan/present/layer.h"
+#include "video_core/renderer_vulkan/present/perf_overlay_pass.h"
 #include "video_core/renderer_vulkan/vk_blit_screen.h"
 #include "video_core/renderer_vulkan/vk_present_manager.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -40,6 +43,7 @@ void BlitScreen::WaitIdle(const Device& device) {
 
 void BlitScreen::SetWindowAdaptPass(const Device& device) {
     layers.clear();
+    perf_overlay.reset();
     scaling_filter = filters.get_scaling_filter();
 
     if (swapchain_view_format == VK_FORMAT_R16G16B16A16_SFLOAT ||
@@ -115,7 +119,8 @@ void BlitScreen::DrawToFrame(const Device& device, RasterizerVulkan& rasterizer,
                              std::span<const Tegra::FramebufferConfig> framebuffers,
                              const Layout::FramebufferLayout& layout,
                              size_t current_swapchain_image_count,
-                             VkFormat current_swapchain_view_format, bool hdr_output) {
+                             VkFormat current_swapchain_view_format, bool hdr_output,
+                             const PerfOverlayInput* overlay) {
     bool resource_update_required = false;
     bool presentation_recreate_required = false;
 
@@ -166,8 +171,17 @@ void BlitScreen::DrawToFrame(const Device& device, RasterizerVulkan& rasterizer,
         }
     }
 
-    window_adapt->Draw(device, rasterizer, scheduler, image_index, layers, framebuffers, layout, frame,
-                       hdr_output);
+    std::optional<PerfOverlayDraw> overlay_draw;
+    if (overlay != nullptr) {
+        if (!perf_overlay) {
+            perf_overlay = std::make_unique<PerfOverlayPass>(device, memory_allocator,
+                                                             swapchain_view_format, image_count);
+        }
+        overlay_draw = perf_overlay->Prepare(image_index, *overlay, layout);
+    }
+
+    window_adapt->Draw(device, rasterizer, scheduler, image_index, layers, framebuffers, layout,
+                       frame, hdr_output, overlay_draw ? &*overlay_draw : nullptr);
 
     if (++image_index >= image_count) {
         image_index = 0;

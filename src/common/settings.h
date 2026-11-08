@@ -618,6 +618,10 @@ struct Values {
                                                            "vram_usage_mode",
                                                            Category::RendererAdvanced};
 
+    // Real and displayed frame rates, frame times and GPU thread loads, drawn over the game by
+    // the presenter. EDEN_NX2_PERF_OVERLAY=1 turns it on as well.
+    Setting<bool> perf_overlay{linkage, false, "perf_overlay", Category::RendererAdvanced};
+
     SwitchableSetting<NvdecEmulation> nvdec_emulation{linkage, NvdecEmulation::Cpu,
                                                       "nvdec_emulation", Category::RendererAdvanced};
 

@@ -26,6 +26,7 @@ struct Frame;
 class Layer;
 class Scheduler;
 class RasterizerVulkan;
+struct PerfOverlayDraw;
 
 class WindowAdaptPass final {
 public:
@@ -34,9 +35,11 @@ public:
     ~WindowAdaptPass();
 
     /// Draws the layers to dst, forwarding the selected HDR-output state to each layer.
-    void Draw(const Device& device, RasterizerVulkan& rasterizer, Scheduler& scheduler, size_t image_index,
-              std::list<Layer>& layers, std::span<const Tegra::FramebufferConfig> configs,
-              const Layout::FramebufferLayout& layout, Frame* dst, bool hdr_output);
+    void Draw(const Device& device, RasterizerVulkan& rasterizer, Scheduler& scheduler,
+              size_t image_index, std::list<Layer>& layers,
+              std::span<const Tegra::FramebufferConfig> configs,
+              const Layout::FramebufferLayout& layout, Frame* dst, bool hdr_output,
+              const PerfOverlayDraw* overlay = nullptr);
 
     VkDescriptorSetLayout GetDescriptorSetLayout();
     VkRenderPass GetRenderPass();

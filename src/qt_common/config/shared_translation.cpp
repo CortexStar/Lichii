@@ -288,6 +288,10 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, max_anisotropy, tr("Anisotropic Filtering:"),
            tr("Controls the quality of texture rendering at oblique angles.\nSafe to set at 16x on "
               "most GPUs."));
+    INSERT(Settings, perf_overlay, tr("Show performance overlay in game (Vulkan only)"),
+           tr("Draws the game's frame rate, the displayed frame rate (with generated frames), "
+              "frame times with their 1% low and the GPU threads' and GPU's time per frame over "
+              "the game, in fullscreen as well."));
     INSERT(Settings, gpu_accuracy, tr("GPU Mode:"),
            tr("Controls the GPU emulation mode.\nMost games render fine with Fast, but Accurate is still "
               "required for some.\nParticles tend to only render correctly with Accurate mode."));
