@@ -13,6 +13,7 @@
 #include <memory>
 #include <utility>
 #include <vector>
+#include <QCoreApplication>
 #include <QObject>
 #include <QString>
 #include "common/common_types.h"
@@ -26,6 +27,12 @@ using ComboboxTranslationMap = std::map<u32, ComboboxTranslations>;
 std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent);
 
 std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent);
+
+/// A text from the maps below, in the UI's language. The maps hold the English texts, which
+/// QT_TRANSLATE_NOOP only marks for lupdate, so they are translated where they are shown.
+inline QString TranslateMapText(const QString& text) {
+    return QCoreApplication::translate("MainWindow", text.toUtf8().constData());
+}
 
 static const std::map<Settings::AntiAliasing, QString> anti_aliasing_texts_map = {
     {Settings::AntiAliasing::None, QStringLiteral(QT_TRANSLATE_NOOP("MainWindow", "None"))},
