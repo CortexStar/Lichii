@@ -3074,7 +3074,8 @@ void RasterizerVulkan::FlushWork() {
             }
             return std::nullopt;
         }();
-        budget = configured_budget.value_or(SubmissionPolicy::DefaultNativeBudget);
+        budget = configured_budget.value_or(
+            SubmissionPolicy::NativeBudget(device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY));
     }
     u32 legacy_budget = 4096;
     if (!native && !android) {

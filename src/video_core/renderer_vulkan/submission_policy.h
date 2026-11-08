@@ -11,6 +11,15 @@
 namespace Vulkan::SubmissionPolicy {
 
 inline constexpr u32 DefaultNativeBudget = 128;
+/// AMD's proprietary driver pays much more per submission. Ocarina of Time on an RX 9070 XT:
+/// every 256 draws instead of 128 gave +10-12 FPS where it was already fast, every 512 a further
+/// 35 -> 50 FPS at one spot standing still.
+inline constexpr u32 AmdNativeBudget = 512;
+
+/// Draws per submission of a native title when EDEN_NX2_FLUSH_DRAWS doesn't set it.
+constexpr u32 NativeBudget(bool amd_proprietary) {
+    return amd_proprietary ? AmdNativeBudget : DefaultNativeBudget;
+}
 
 enum class Action {
     None,
