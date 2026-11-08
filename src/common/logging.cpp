@@ -249,11 +249,17 @@ struct FileBackend final : public Backend {
     explicit FileBackend(const std::filesystem::path filename) noexcept {
         auto old_filename = filename;
         old_filename += ".old.txt";
-        // Existence checks are done within the functions themselves.
-        // We don't particularly care if these succeed or not.
-        void(FS::RemoveFile(old_filename));
-        void(FS::RenameFile(filename, old_filename));
-        file.emplace(filename, FS::FileAccessMode::Write, FS::FileType::TextFile);
+        // Replace the old log only if the current one can take its place (rename overwrites the
+        // destination atomically). If it can't (e.g. the file is open elsewhere), append to the
+        // current log so that no previous session is lost.
+        auto mode = FS::FileAccessMode::Write;
+        if (FS::Exists(filename)) {
+            std::error_code ec;
+            std::filesystem::rename(filename, old_filename, ec);
+            if (ec)
+                mode = FS::FileAccessMode::Append;
+        }
+        file.emplace(filename, mode, FS::FileType::TextFile);
     }
     ~FileBackend() noexcept override = default;
 
