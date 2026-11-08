@@ -32,6 +32,7 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/native_verify.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_bindmemo_stats.h"
 #include "video_core/nx2_profile.h"
@@ -492,6 +493,14 @@ void TextureCache<P>::TickFrame() {
     // Skip expensive heap allocation, map construction, and sorting unless debug logging is explicitly enabled.
     static const bool log_tc = std::getenv("EDEN_NX2_TC_LOG") != nullptr;
     static u64 frames{};
+    // Compare modes: every 10 s at 60 fps, 2.5 s at 240.
+    if ((NativeVerify::Textures() || NativeVerify::Bindless()) && frame_tick % 600 == 0) {
+        LOG_INFO(HW_GPU,
+                 "Native verify textures: {} resident hits checked, {} view and {} sampler "
+                 "differences; bindless: {} heap checks, {} differences",
+                 verify_stats.checks, verify_stats.view_mismatches, verify_stats.sampler_mismatches,
+                 verify_stats.mirror_checks, verify_stats.mirror_mismatches);
+    }
     if (log_tc && ++frames % 600 == 0) {
         u64 image_bytes{};
         size_t images{};
@@ -829,6 +838,18 @@ SamplerId TextureCache<P>::GetSamplerId(u32 index, bool compute) {
     }
     if (table.IsResident(index)) {
         ++pool_stats.sampler_hits;
+        if (NativeVerify::Textures()) {
+            const SamplerId resident_id = table.bound_ids[index];
+            table.ClearResident(index);
+            const SamplerId full_id = GetSamplerId(index, compute);
+            ++verify_stats.checks;
+            if (full_id != resident_id && verify_stats.sampler_mismatches++ < 64) {
+                LOG_ERROR(HW_GPU,
+                          "Native verify textures: TSC {} resident sampler {}, full path {}", index,
+                          resident_id.index, full_id.index);
+            }
+            return full_id;
+        }
         return table.bound_ids[index];
     }
     ++pool_stats.sampler_resolves;
@@ -1567,6 +1588,18 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
     }
     if (table.IsResident(index)) {
         ++pool_stats.view_hits;
+        if (NativeVerify::Textures()) {
+            // The full path must find the same view.
+            const ImageViewId resident_id = table.bound_ids[index];
+            table.ClearResident(index);
+            const ImageViewId full_id = VisitImageView(index, compute);
+            ++verify_stats.checks;
+            if (full_id != resident_id && verify_stats.view_mismatches++ < 64) {
+                LOG_ERROR(HW_GPU, "Native verify textures: TIC {} resident view {}, full path {}",
+                          index, resident_id.index, full_id.index);
+            }
+            return full_id;
+        }
         return table.bound_ids[index];
     }
     ++pool_stats.view_resolves;
@@ -1977,6 +2010,47 @@ void TextureCache<P>::TakeMirrorUpdates(bool compute, u64 draw_seq, Func&& func)
     if (mirror.meta_pages.TakeTableChanged()) {
         emit(UpdateKind::Table, Heap::Meta);
     }
+    if (NativeVerify::Bindless() && (++verify_stats.mirror_drains & 63) == 0) {
+        ++verify_stats.mirror_checks;
+        verify_stats.mirror_mismatches += VerifyMirror(mirror, image_table, sampler_table);
+    }
+}
+
+template <class P>
+u64 TextureCache<P>::VerifyMirror(const PoolMirrorState& mirror,
+                                  const DescriptorTable<TICEntry, ImageViewId>& tic,
+                                  const DescriptorTable<TSCEntry, SamplerId>& tsc) {
+    u64 mismatches = tic.MirrorMismatches() + tsc.MirrorMismatches();
+    const auto is_read = [](const auto& table, size_t index) {
+        return !table.invalidated && index <= table.current_limit &&
+               ((table.read_descriptors[index / 64] >> (index % 64)) & 1) != 0;
+    };
+    for (size_t index = 0; index < mirror.meta.size(); ++index) {
+        if (!is_read(tic, index) || tic.mirrored_ids[index] != tic.bound_ids[index]) {
+            continue;
+        }
+        if (mirror.meta[index] != MirrorMeta(tic.bound_ids[index])) {
+            if (mismatches++ < 32) {
+                LOG_ERROR(HW_GPU, "Native verify bindless: TIC {} meta {:#x}, view now {:#x}",
+                          index, mirror.meta[index], MirrorMeta(tic.bound_ids[index]));
+            }
+        }
+    }
+    for (size_t variant = 0; variant < mirror.samplers.size(); ++variant) {
+        for (size_t index = 0; index < mirror.samplers[variant].size(); ++index) {
+            const SamplerId held = mirror.samplers[variant][index];
+            if (held != NULL_SAMPLER_ID && is_read(tsc, index) &&
+                tsc.mirrored_ids[index] == tsc.bound_ids[index] && held != tsc.bound_ids[index]) {
+                if (mismatches++ < 32) {
+                    LOG_ERROR(HW_GPU,
+                              "Native verify bindless: TSC {} class slot {} holds {}, "
+                              "entry {}",
+                              index, variant, held.index, tsc.bound_ids[index].index);
+                }
+            }
+        }
+    }
+    return mismatches;
 }
 
 template <class P>

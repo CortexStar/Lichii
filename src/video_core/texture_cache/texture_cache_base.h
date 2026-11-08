@@ -722,6 +722,11 @@ private:
 
     PoolMirror::SamplerClasses sampler_classes;
 
+    /// Mirror differences against the bound ids (EDEN_NX2_NATIVE_VERIFY=bindless).
+    u64 VerifyMirror(const PoolMirrorState& mirror,
+                     const DescriptorTable<TICEntry, ImageViewId>& tic,
+                     const DescriptorTable<TSCEntry, SamplerId>& tsc);
+
     /// A TIC entry bound to a view of an image (image_pool_refs).
     struct PoolRef {
         u32 channel;
@@ -912,6 +917,15 @@ private:
         u64 image_events;
         u64 forgets;
     } pool_stats{};
+    /// Compare-mode counts since boot (EDEN_NX2_NATIVE_VERIFY).
+    struct VerifyStats {
+        u64 checks; ///< textures: resident hits checked
+        u64 view_mismatches;
+        u64 sampler_mismatches;
+        u64 mirror_drains; ///< bindless
+        u64 mirror_checks;
+        u64 mirror_mismatches;
+    } verify_stats{};
 
     RenderTargets render_targets;
     u64 render_targets_serial = 0;

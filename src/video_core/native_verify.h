@@ -20,12 +20,16 @@ namespace VideoCommon::NativeVerify {
 enum class Layer : u32 {
     Storage,  ///< GPU page table entries vs the buffers storage bindings resolve to
     Uniforms, ///< constant buffer bank bytes the shader reads vs guest memory
+    Textures, ///< resident texture pool entries vs a full resolve of every resident hit
+    Bindless, ///< the pool-mirroring descriptor heap vs the bound pool entries
     Count,
 };
 
 inline constexpr std::array<std::string_view, static_cast<size_t>(Layer::Count)> layer_names{
     "storage",
     "uniforms",
+    "textures",
+    "bindless",
 };
 
 /// The layers EDEN_NX2_NATIVE_VERIFY names, read once.
@@ -59,6 +63,16 @@ void Check(Layer layer, bool same, fmt::format_string<Args...> format, Args&&...
                       fmt::format(format, std::forward<Args>(args)...));
         }
     }
+}
+
+/// Resident texture pool entries against a full resolve of every resident hit.
+[[nodiscard]] inline bool Textures() {
+    return Enabled(Layer::Textures);
+}
+
+/// The pool-mirroring descriptor heap against the bound pool entries.
+[[nodiscard]] inline bool Bindless() {
+    return Enabled(Layer::Bindless);
 }
 
 /// Logs each enabled layer's line once 10 s passed since the last one. Any thread.
