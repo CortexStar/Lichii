@@ -907,6 +907,7 @@ void Maxwell3D::ProcessQueryCondition() {
         execute_on = true;
         return;
     }
+    VideoCommon::Nx2Profile::Scope read_scope{VideoCommon::Nx2Profile::Zone::RenderEnableRead};
     const GPUVAddr condition_address{regs.render_enable.Address()};
     Regs::ReportSemaphore::Compare cmp{};
     bool operands_read = false;

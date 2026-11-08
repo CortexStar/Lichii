@@ -951,6 +951,10 @@ void GpuSplit::DeferFunction(std::function<void()>&& func) {
     });
 }
 
+void GpuSplit::RegisterCallSite(u64 thunk, const std::source_location& location) {
+    Nx2Profile::RegisterCallSite(thunk, location.file_name(), location.line());
+}
+
 size_t GpuSplit::Execute(const u64* entry, size_t words) {
     const u64 head = entry[0];
     switch (static_cast<Kind>(head & 0xf)) {
@@ -1041,6 +1045,7 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
     }
     case Kind::Call: {
         const size_t payload = static_cast<size_t>((head >> 8) & 0xffffff);
+        Nx2Profile::CallScope call_scope{entry[1]};
         reinterpret_cast<void (*)(const u64*)>(entry[1])(entry + 2);
         return 2 + payload;
     }

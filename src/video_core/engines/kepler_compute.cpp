@@ -354,6 +354,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                     qmd_address, fmt::join(descriptor, ","));
             }
         }
+        VideoCommon::Nx2Profile::Scope signal_scope{VideoCommon::Nx2Profile::Zone::QmdSignal};
         const auto error = native_qmd.Signal(qmd_address, argument,
             [&](u64 address, NativeQmdScheduler::Descriptor& descriptor) {
                 if (!memory_manager.IsFullyMappedRange(address, sizeof(descriptor))) return false;
@@ -393,6 +394,8 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                 return true;
             },
             [&](u64 address, u32 payload, u32 flags) {
+                VideoCommon::Nx2Profile::Scope release_scope{
+                    VideoCommon::Nx2Profile::Zone::QmdRelease};
                 const bool four_words = (flags >> 30) == 0;
                 if (!memory_manager.IsFullyMappedRange(address, four_words ? 16 : sizeof(payload))) return false;
                 // The split's front: a page the query cache may hold results for.

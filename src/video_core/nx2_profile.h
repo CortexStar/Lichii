@@ -13,7 +13,10 @@
 #include <chrono>
 #include <cstdlib>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -96,6 +99,14 @@ enum class Zone : u32 {
     BindUniforms,  ///< BufferCache::BindHostGraphicsUniformBuffers, per stage
     BindStorage,   ///< BufferCache::BindHostGraphicsStorageBuffers, per stage with storage
     StoragePointer, ///< BufferCache::BindGraphicsStorageBuffer (pointer read), per graphics binding
+    // Inside the costliest non-draw handlers of the split back (OoT field profile).
+    ClearFlush,         ///< RasterizerVulkan::Clear: FlushWork and FlushCaching
+    ClearTargets,       ///< RasterizerVulkan::Clear: UpdateRenderTargets and GetFramebuffer
+    RenderTargetLookup, ///< TextureCache::RescaleRenderTargets (render target views, draws too)
+    RenderEnableFlush,  ///< Conditional rendering: FlushCaching before the query lookup
+    RenderEnableRead,   ///< Conditional rendering decided on the CPU: the predicate's read
+    QmdSignal,          ///< KeplerCompute: the QMD scheduler (Signal), dispatches excluded
+    QmdRelease,         ///< KeplerCompute: a QMD's semaphore releases (fences, payload queries)
     Count,
 };
 
@@ -113,6 +124,8 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "render enable", "syncpoint", "wait for idle", "cache barrier", "idle hook",
     "method compute", "method DMA", "method 2D", "method inline", "compute writes",
     "update storage", "bind uniforms", "bind storage", "storage pointer",
+    "clear flush", "clear targets", "render target lookup", "render enable flush",
+    "render enable read", "QMD signal", "QMD release",
 };
 static_assert(zone_names[static_cast<size_t>(Zone::Count) - 1] != nullptr,
               "every zone needs a name");
@@ -124,6 +137,7 @@ inline bool g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
 /// nx2_switches.txt, so a switch set only there takes effect from that point on.
 inline void ReadSwitch() {
     g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
+    VideoCommon::GpuSplit::profile_calls = g_enabled;
 }
 
 inline bool Enabled() {
@@ -324,6 +338,93 @@ inline std::string TopMethodTimes(const MethodTimes& times, u64 window, u64 wind
     return text;
 }
 
+/// Kind::Call entries of the split back by thunk: where the front deferred them (GpuSplit::Defer
+/// registers the site while profiling) and their time, inclusive of the zones below them.
+struct CallSites {
+    std::mutex mutex;
+    std::unordered_map<u64, std::string> names;
+};
+inline CallSites& GetCallSites() {
+    static CallSites sites;
+    return sites;
+}
+inline void RegisterCallSite(u64 thunk, const char* file, u32 line) {
+    auto& sites = GetCallSites();
+    std::scoped_lock lock{sites.mutex};
+    if (!sites.names.contains(thunk)) {
+        std::string_view name{file};
+        if (const auto slash = name.find_last_of("/\\"); slash != std::string_view::npos) {
+            name.remove_prefix(slash + 1);
+        }
+        sites.names.emplace(thunk, fmt::format("{}:{}", name, line));
+    }
+}
+struct CallTime {
+    u64 ticks{};
+    u64 count{};
+};
+inline thread_local std::unordered_map<u64, CallTime> t_call_times;
+
+/// Times one Kind::Call entry: the "call" zone (exclusive) and its thunk's inclusive time.
+class CallScope {
+public:
+    explicit CallScope(u64 thunk_) : enabled{Enabled()} {
+        if (!enabled) [[likely]] {
+            return;
+        }
+        thunk = thunk_;
+        parent_child_ns = t_data.child_ns;
+        t_data.child_ns = 0;
+        start = Ticks();
+    }
+
+    ~CallScope() {
+        if (!enabled) [[likely]] {
+            return;
+        }
+        const u64 elapsed = Ticks() - start;
+        auto& data = t_data;
+        const auto index = static_cast<size_t>(Zone::Call);
+        data.exclusive_ns[index] += elapsed - data.child_ns;
+        ++data.count[index];
+        data.child_ns = parent_child_ns + elapsed;
+        CallTime& time = t_call_times[thunk];
+        time.ticks += elapsed;
+        ++time.count;
+    }
+
+    CallScope(const CallScope&) = delete;
+    CallScope& operator=(const CallScope&) = delete;
+
+private:
+    bool enabled;
+    u64 thunk{};
+    u64 start{};
+    u64 parent_child_ns{};
+};
+
+inline std::string TopCallTimes(u64 window, u64 window_ticks) {
+    std::vector<std::pair<u64, CallTime>> order(t_call_times.begin(), t_call_times.end());
+    const size_t top = (std::min<size_t>)(order.size(), 16);
+    std::partial_sort(order.begin(), order.begin() + top, order.end(),
+                      [](const auto& a, const auto& b) { return a.second.ticks > b.second.ticks; });
+    auto& sites = GetCallSites();
+    std::scoped_lock lock{sites.mutex};
+    std::string text;
+    for (size_t i = 0; i < top; ++i) {
+        const auto it = sites.names.find(order[i].first);
+        text += fmt::format(
+            " {} {:.2f} ms ({:.0f}/s),",
+            it != sites.names.end() ? it->second : fmt::format("{:#x}", order[i].first),
+            static_cast<double>(order[i].second.ticks) * 1000.0 / static_cast<double>(window_ticks),
+            static_cast<double>(order[i].second.count) * 1e9 / static_cast<double>(window));
+    }
+    if (!text.empty()) {
+        text.pop_back();
+    }
+    return text;
+}
+
 /// Method calls on this thread by method (3D registers on the back, macros on the front), and
 /// same-value writes among them; MME DMA reads by the macro that made them. The most frequent
 /// are logged with the zones.
@@ -494,6 +595,28 @@ inline bool Report(const char* thread_name = "GPU thread") {
         drains.pop_back();
         line += " | waits for the back by site:" + drains;
     }
+    {
+        // What the zones cost themselves: two time stamps each, most of it charged to the zone
+        // around them ("ring decode" on the back). Two reads of the counter measured once.
+        static const u64 stamp_pair_ticks = [] {
+            constexpr u32 Rounds = 4096;
+            const u64 begin = Ticks();
+            u64 sink = 0;
+            for (u32 i = 0; i < Rounds; ++i) {
+                sink += Ticks();
+            }
+            const u64 end = Ticks();
+            return (end - begin + (sink & 1)) * 2 / Rounds;
+        }();
+        u64 scopes = 0;
+        for (const u64 count : data.count) {
+            scopes += count;
+        }
+        line += fmt::format(" | zone scopes {:.0f}/s, their time stamps ~{:.1f} ms",
+                            static_cast<double>(scopes) * 1e9 / static_cast<double>(window),
+                            static_cast<double>(scopes * stamp_pair_ticks) * 1000.0 /
+                                static_cast<double>(window_ticks));
+    }
     if (cpu_now && data.cpu_start_ns && *cpu_now >= *data.cpu_start_ns) {
         line += fmt::format(" | host_cpu_busy_ms_per_s={:.3f} window_wall_ms={:.3f}",
                             static_cast<double>(*cpu_now - *data.cpu_start_ns) * 1000.0 / window,
@@ -520,6 +643,11 @@ inline bool Report(const char* thread_name = "GPU thread") {
         }
         t_method_times->ticks.fill(0); // not `= {}`: a 576 KiB temporary on the stack
         t_method_times->count.fill(0);
+    }
+    if (!t_call_times.empty()) {
+        LOG_INFO(HW_GPU, "{} calls by time per second (deferred at):{}", thread_name,
+                 TopCallTimes(window, window_ticks));
+        t_call_times.clear();
     }
     t_method_count = {};
     t_method_same = {};

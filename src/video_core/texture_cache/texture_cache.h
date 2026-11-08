@@ -1525,7 +1525,11 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     rt_prepared.valid = false;
 
     const VideoCommon::RenderTargets previous_render_targets = render_targets;
-    const bool rescaled = RescaleRenderTargets();
+    const bool rescaled = [this] {
+        VideoCommon::Nx2Profile::Scope lookup_scope{
+            VideoCommon::Nx2Profile::Zone::RenderTargetLookup};
+        return RescaleRenderTargets();
+    }();
     if (is_rescaling != rescaled) {
         flags[Dirty::RescaleViewports] = true;
         flags[Dirty::RescaleScissors] = true;

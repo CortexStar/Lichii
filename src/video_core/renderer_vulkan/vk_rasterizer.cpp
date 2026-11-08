@@ -1795,8 +1795,11 @@ void RasterizerVulkan::Clear(u32 layer_count) {
                  regs.clear_color[1], regs.clear_color[2], regs.clear_color[3]);
     }
     TraceWindowTarget(*maxwell3d, *gpu_memory, "clear", layer_count);
-    FlushWork();
-    gpu_memory->FlushCaching();
+    {
+        VideoCommon::Nx2Profile::Scope flush_scope{VideoCommon::Nx2Profile::Zone::ClearFlush};
+        FlushWork();
+        gpu_memory->FlushCaching();
+    }
 
     auto& regs = maxwell3d->regs;
     const bool use_color = regs.clear_surface.R || regs.clear_surface.G || regs.clear_surface.B ||
@@ -1808,8 +1811,11 @@ void RasterizerVulkan::Clear(u32 layer_count) {
     }
 
     std::scoped_lock lock{texture_cache.mutex};
-    texture_cache.UpdateRenderTargets(true);
-    const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
+    const Framebuffer* const framebuffer = [this] {
+        VideoCommon::Nx2Profile::Scope targets_scope{VideoCommon::Nx2Profile::Zone::ClearTargets};
+        texture_cache.UpdateRenderTargets(true);
+        return texture_cache.GetFramebuffer();
+    }();
     if (frame_dump.Capturing()) {
         FrameDumpPass(framebuffer);
     }
@@ -3021,7 +3027,11 @@ void RasterizerVulkan::TickFrame() {
 }
 
 bool RasterizerVulkan::AccelerateConditionalRendering() {
-    gpu_memory->FlushCaching();
+    {
+        VideoCommon::Nx2Profile::Scope flush_scope{
+            VideoCommon::Nx2Profile::Zone::RenderEnableFlush};
+        gpu_memory->FlushCaching();
+    }
     return query_cache.AccelerateHostConditionalRendering();
 }
 
@@ -3078,6 +3088,7 @@ Tegra::Engines::AccelerateDMAInterface& RasterizerVulkan::AccessAccelerateDMA() 
 
 void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
                                                 std::span<const u8> memory) {
+    VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::InlineToMemory};
     auto cpu_addr = gpu_memory->GpuToCpuAddress(address);
     if (gpu_memory->UsesNativeTiling()) {
         u32 first_word{};

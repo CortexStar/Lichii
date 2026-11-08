@@ -6,10 +6,12 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <source_location>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
@@ -310,11 +312,23 @@ public:
         }
     }
 
+    /// EDEN_NX2_GPU_PROFILE (Nx2Profile::ReadSwitch): Defer names its call sites for the back's
+    /// per-call times.
+    inline static bool profile_calls = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
+    static void RegisterCallSite(u64 thunk, const std::source_location& location);
+
     /// Runs `func` on the back after everything sent before it. Must be trivially copyable.
     template <typename Func>
-    void Defer(const Func& func) {
+    void Defer(const Func& func,
+               const std::source_location location = std::source_location::current()) {
         static_assert(std::is_trivially_copyable_v<Func> && alignof(Func) <= alignof(u64));
         constexpr size_t payload = (sizeof(Func) + sizeof(u64) - 1) / sizeof(u64);
+        if (profile_calls) [[unlikely]] {
+            // Once per thunk: the first site that defers this callable names it.
+            static const bool registered =
+                (RegisterCallSite(reinterpret_cast<u64>(&CallThunk<Func>), location), true);
+            (void)registered;
+        }
         u64* const entry = Reserve(2 + payload);
         entry[0] = static_cast<u64>(Kind::Call) | (u64{payload} << 8);
         entry[1] = reinterpret_cast<u64>(&CallThunk<Func>);
