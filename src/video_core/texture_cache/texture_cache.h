@@ -47,6 +47,19 @@
 
 namespace VideoCommon {
 
+// EXPERIMENT (do not merge): EDEN_NX2_TEXPOOL=0 keeps the old per-draw path for side-by-side
+// runs: no pool page is watched, so no entry becomes resident, and deleting an image or
+// invalidating its scale invalidates every image table.
+namespace TexturePoolExperiment {
+inline bool Enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_TEXPOOL");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+} // namespace TexturePoolExperiment
+
 /// EDEN_NATIVE_DRAW_DIAGNOSTICS is read once: getenv scans the whole environment block on Windows.
 [[nodiscard]] inline bool NativeDrawDiagnostics() {
     static const bool enabled = std::getenv("EDEN_NATIVE_DRAW_DIAGNOSTICS") != nullptr;
@@ -1699,7 +1712,7 @@ bool TextureCache<P>::ArmPoolEntry(Table& table, u32 table_id, u32 index) {
     if (table.pages[page].armed) {
         return true;
     }
-    if (!table.MayArm(page, frame_tick)) {
+    if (!TexturePoolExperiment::Enabled() || !table.MayArm(page, frame_tick)) {
         return false;
     }
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(table.PageAddress(page));
@@ -2063,6 +2076,14 @@ u64 TextureCache<P>::VerifyMirror(const PoolMirrorState& mirror,
 
 template <class P>
 void TextureCache<P>::ForgetPoolRefs(ImageId image_id) {
+    if (!TexturePoolExperiment::Enabled()) {
+        for (const size_t c : active_channel_ids) {
+            channel_storage[c].graphics_image_table.Invalidate();
+            channel_storage[c].compute_image_table.Invalidate();
+        }
+        image_pool_refs.erase(image_id);
+        return;
+    }
     const auto it = image_pool_refs.find(image_id);
     if (it == image_pool_refs.end()) {
         return;
