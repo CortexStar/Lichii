@@ -1715,12 +1715,9 @@ void PipelineCache::PreparePrecompiled(const std::filesystem::path& base_dir,
             break;
         }
         auto& record = records[index];
-        if (record.compute) {
-            if (compute_cache.find(record.compute_key) != compute_cache.end()) {
-                skip(index);
-                continue;
-            }
-        } else {
+        // A compute record is built even when the disk cache built its key: a key has a record for
+        // each storage pointer state the program can be translated in, and the boot built one.
+        if (!record.compute) {
             auto& key = record.graphics_key;
             // The driver fields only tell cache generations apart; the pipeline does not use them.
             // Records made before a driver update are built for this driver, as draws will key them.

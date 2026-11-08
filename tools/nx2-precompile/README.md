@@ -29,6 +29,19 @@ not stall while the driver compiles them.
    translates the guest program with its real facts and builds its own pipeline; when that pipeline is
    one the file predicted, the driver finds it compiled.
 
+A native compute program's translation leaves out the accesses through a pointer slot that is null
+at the time, and the program is translated again once the game fills that slot
+(`PipelineCache::StaleNullPointerSlot`). Which slots are filled depends on the area: in Ocarina of
+Time, the foliage culling programs. Each such state is SPIR-V the driver compiles while the game
+waits, about 4 seconds for those programs. A state's translation depends only on its storage pointer
+answers, so the precompiled file holds every compute program in each pointer state the recorded
+caches show it in, and in the states a rebuild reaches from those (`build_precompiled.py`,
+`compute_states`): each combination of the slot groups the program left null that the recordings
+show filled elsewhere (slots filled together are one group), and the unions of those states. Learned
+from the original three caches and one more session, the file held all six states (their SPIR-V)
+that a held-out session translated those programs in, three of them rebuilds that had stalled for
+about 4 seconds each, with 20 compute pipelines more.
+
 The oracle never decides what a draw runs: a wrong guess only means the driver compiles that pipeline
 when it is first drawn, as it does without this tool.
 

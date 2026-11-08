@@ -4,13 +4,16 @@ Records, all with canonical keys (statefields.canonical, as FixedPipelineState::
   * every pipeline recorded in the training caches, with its recorded environments;
   * for every vertex/pixel pair (nxnative's tables and the recorded ones), the K most likely
     render states the state model predicts, with the oracle environments of nx2-precompile;
-  * every compute program, with its oracle environment (a compute key holds no render state).
+  * every compute program, with each storage pointer state the training caches recorded it in
+    (else its oracle environment) and the states a rebuild can reach from those (see
+    compute_states; a compute key holds no render state).
 
 usage: python -I build_precompiled.py --inventory inv.json --envs scan.envs --pairs nx_pairs.json
            --train a.bin [--train b.bin ...] --k 3 --cache-version N --out precompiled.fork-vN.nx2prep
 """
 import argparse
 import collections
+import copy
 import hashlib
 import json
 import os
@@ -90,10 +93,12 @@ class Writer:
         return True
 
     def compute(self, blob, key):
+        """A compute record; one key may have several, one per storage pointer state."""
         assert len(key) == 24
-        if key in self.keys:
+        digest = (key, hashlib.sha256(blob).digest())
+        if digest in self.keys:
             return False
-        self.keys.add(key)
+        self.keys.add(digest)
         self.records.append((1, [self.env(blob)], key))
         return True
 
@@ -153,12 +158,19 @@ def shader_info(env, vertex):
     return d
 
 
+# A value no translation reads, which builds since cache version 54 record in each environment
+# (the host properties it was made with): left out, so it does not reach the precompiled file.
+READ_PROPERTIES_KEY = 0xFFFFFFFF << 32
+recorded_compute = collections.defaultdict(list)   # key -> recorded environments, in cache order
+
 for path in args.train:
     _, recs = lc.parse_cache(open(path, 'rb').read(), mesh_fields=True)
     for rec in recs:
+        for e in rec.envs:
+            e.cbuf_values = [(k, v) for k, v in e.cbuf_values if k != READ_PROPERTIES_KEY]
         blobs = [e.serialize(True) for e in rec.envs]
         if rec.is_compute:
-            counts['recorded compute'] += w.compute(blobs[0], rec.key)
+            recorded_compute[rec.key].append(rec.envs[0])
             continue
         if any(e.stage in (7, 8) for e in rec.envs) and any(
                 e.stage == 8 and (e.mesh_registers[0] & 0xF) != 4 for e in rec.envs):
@@ -254,13 +266,148 @@ if args.mesh_combos and args.mesh_envs:
                 key = struct.pack('<6Q', *hs) + sf.canonical(state, 0) + bytes(STATE_TAIL)
                 counts['predicted mesh'] += w.graphics(blobs, key)
 
+
+# Storage pointer states of compute programs. A native compute program's translation leaves out
+# the accesses through a pointer slot that was null (PipelineCache::StaleNullPointerSlot), and
+# which slots the game fills depends on the area. When a slot it left out is filled, the program
+# is translated again, binding every pointer the first translation bound and those filled now:
+# SPIR-V the driver has not seen, compiled while the game waits (seconds for these programs). The
+# translation of a state depends only on its pointer answers (the other values the recorded and the
+# rebuilt environments read differ and give the same SPIR-V), so each state is a recorded
+# environment with other answers to its pointer questions.
+INDIRECT = 1 << 63
+HOLDER_MASK = (1 << 40) - 1     # an indirect classification's key without its table offset
+
+
+def null_slots(env):
+    """Direct pointer slots classified as no pointer because they held 0."""
+    values = dict(env.cbuf_values)
+    return {k for k, v in env.storage_pointer_types
+            if not k & INDIRECT and not v and values.get(k) == 0 and values.get(k + 4, 0) == 0}
+
+
+# Slots seen null in one recorded compute environment and holding a pointer in another: the slots
+# a game fills in some areas only. And for the pointer table entries behind a slot (an indirect
+# classification), how they were answered while the slot held a pointer: some slots point to a
+# table of pointers, others to a buffer.
+seen_pointer, seen_null = set(), set()
+table_answers = collections.defaultdict(collections.Counter)
+for envs in recorded_compute.values():
+    for e in envs:
+        answers = dict(e.storage_pointer_types)
+        seen_pointer |= {k for k, v in answers.items() if v and not k & INDIRECT}
+        seen_null |= null_slots(e)
+        for k, v in answers.items():
+            if k & INDIRECT and answers.get(k & HOLDER_MASK):
+                table_answers[k][v] += 1
+fillable = seen_pointer & seen_null
+
+# Fillable slots the game fills together (one of its lists, say): answered alike in every
+# recorded environment that asks both, and both pointers in one. Each is its own group otherwise.
+together = {a: {b for b in fillable if b != a} for a in fillable}
+both_pointers = collections.defaultdict(bool)
+for envs in recorded_compute.values():
+    for e in envs:
+        answers = {k: v for k, v in e.storage_pointer_types if k in fillable}
+        for a, va in answers.items():
+            for b in list(together[a]):
+                if b in answers:
+                    if answers[b] != va:
+                        together[a].discard(b)
+                    elif va:
+                        both_pointers[(a, b)] = True
+slot_group = {}
+for a in sorted(fillable):
+    if a not in slot_group:
+        group = frozenset([a] + [b for b in together[a]
+                                 if a in together[b] and both_pointers[(a, b)]])
+        for b in group:
+            slot_group.setdefault(b, group)
+MAX_FILLED_GROUPS = 4
+
+
+def filled_answer(key, value, filled):
+    """A pointer answer once the slots `filled` hold pointers: a filled slot is one, a table entry
+    behind it is answered as recorded while its slot held a pointer (no when never recorded)."""
+    if key in filled:
+        return 1
+    if key & INDIRECT and key & HOLDER_MASK in filled:
+        seen = table_answers.get(key)
+        return seen.most_common(1)[0][0] if seen else 0
+    return value
+MAX_COMPUTE_STATES = 32
+
+
+def compute_states(envs):
+    """The environments to prepare for one compute key: the first recorded one of each set of
+    storage pointer questions and answers, then the recorded one asking the most pointer questions
+    (a translator of another build may ask others) with the answers of each other state a rebuild
+    can reach: a recorded state with any of its groups of fillable null slots filled (slot_group,
+    filled_answer), and the unions of states. Returns (environments, how many of them are recorded)."""
+    base = max(reversed(envs), key=lambda e: len(e.storage_pointer_types))
+    questions = [k for k, _ in base.storage_pointer_types]
+    states, out, recorded_answers = [], [], set()
+
+    def state_of(answers):
+        return tuple(answers.get(k, 0) for k in questions)
+
+    for e in envs:
+        answers = tuple(sorted(e.storage_pointer_types))
+        if answers not in recorded_answers:
+            recorded_answers.add(answers)
+            out.append(e.serialize(True))
+            state = state_of(dict(answers))
+            if state not in states:
+                states.append(state)
+    recorded_states, recorded = len(states), len(out)
+    for e in list(envs):
+        nulls = null_slots(e)
+        # The groups all of whose slots this state left null, each filled or not.
+        groups = sorted({slot_group[k] for k in nulls & fillable if slot_group[k] <= nulls},
+                        key=min)
+        if len(groups) > MAX_FILLED_GROUPS:
+            groups = [frozenset().union(*groups)]
+            counts['compute states with more null slot groups than enumerated'] += 1
+        for mask in range(1, 1 << len(groups)):
+            filled = frozenset().union(*(g for i, g in enumerate(groups) if mask >> i & 1))
+            state = state_of({k: filled_answer(k, v, filled) for k, v in e.storage_pointer_types})
+            if state not in states:
+                states.append(state)
+    grown = True
+    while grown and len(states) < MAX_COMPUTE_STATES:
+        grown = False
+        for a in list(states):
+            for b in list(states):
+                union = tuple(max(x, y) for x, y in zip(a, b))
+                if union not in states and len(states) < MAX_COMPUTE_STATES:
+                    states.append(union)
+                    grown = True
+    if grown:
+        counts['compute programs with more pointer states than prepared'] += 1
+    for state in states[recorded_states:]:
+        e = copy.copy(base)
+        e.storage_pointer_types = list(zip(questions, state))
+        out.append(e.serialize(True))
+    return out, recorded
+
+
 for h, blob in sorted(oracle.items()):
     rows = by_hash.get(h, [])
     if not rows or rows[0]['stage'] != 'Compute' or all(r.get('left_out') for r in rows):
         continue  # left_out: only in an archive version the game does not load (game_tables.py)
     workgroup, shared = env_tail_compute(blob)
     key = struct.pack('<QI3I', int(h, 16), shared, *workgroup)
-    counts['oracle compute'] += w.compute(blob, key)
+    if key not in recorded_compute:
+        recorded_compute[key] = [lc.parse_env(memoryview(blob), 0, len(blob), True)]
+        counts['oracle compute'] += 1
+
+for key, envs in recorded_compute.items():
+    blobs, recorded = compute_states(envs)
+    added = [w.compute(blob, key) for blob in blobs]
+    counts['compute (recorded or oracle states)'] += sum(added[:recorded])
+    counts['compute pointer states reached by rebuilds'] += sum(added[recorded:])
+    if len(blobs) > 1:
+        counts['compute programs with several pointer states'] += 1
 
 w.write(args.out)
 size = os.path.getsize(args.out)
