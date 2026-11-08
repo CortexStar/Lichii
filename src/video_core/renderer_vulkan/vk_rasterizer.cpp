@@ -1509,9 +1509,10 @@ void RasterizerVulkan::DrawTexture() {
 }
 
 // A 1-layer depth target bound with a 3D color target limits the framebuffer to one layer, so
-// vkCmdClearAttachments can't reach the target's other slices. Games clear volumes one slice at
-// a time, so the zero clear of the first slice clears the whole image and the rest do nothing.
-bool RasterizerVulkan::ClearVolumeSlice(const Framebuffer* framebuffer, u32 slice) {
+// vkCmdClearAttachments can't reach the target's other slices. Those slices are zeroed by copying
+// zeros into exactly the slices the clear names; the rest of the volume keeps its contents.
+bool RasterizerVulkan::ClearVolumeSlices(const Framebuffer* framebuffer, u32 first_slice,
+                                         u32 slice_count) {
     const auto& regs = maxwell3d->regs;
     const u32 target_index = regs.clear_surface.RT;
     const auto& color_buffer_ids = texture_cache.GetRenderTargets().color_buffer_ids;
@@ -1520,7 +1521,8 @@ bool RasterizerVulkan::ClearVolumeSlice(const Framebuffer* framebuffer, u32 slic
         return false;
     }
     const auto view_id = color_buffer_ids[target_index];
-    if (!view_id || regs.rt[target_index].depth <= framebuffer->Layers()) {
+    const u32 depth = regs.rt[target_index].depth;
+    if (!view_id || depth <= framebuffer->Layers() || first_slice >= depth) {
         return false;
     }
     const auto& view = texture_cache.GetImageView(view_id);
@@ -1533,16 +1535,29 @@ bool RasterizerVulkan::ClearVolumeSlice(const Framebuffer* framebuffer, u32 slic
     if (!is_volume || !clears_all_channels || !clears_to_zero || !clears_whole_slice) {
         return false;
     }
-    if (slice != 0) {
-        return true;
-    }
+    const u32 width = view.size.width;
+    const u32 height = view.size.height;
+    const size_t slice_bytes =
+        size_t{width} * height * VideoCore::Surface::BytesPerBlock(view.format);
+    const auto zeros = staging_pool.Request(slice_bytes, MemoryUsage::Upload);
+    std::memset(zeros.mapped_span.data(), 0, slice_bytes);
+    const u32 count = std::min(slice_count, depth - first_slice);
     const VkImage image = view.ImageHandle();
     const u32 level = view.range.base.level;
     scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([image, level](vk::CommandBuffer cmdbuf) {
-        const VkImageSubresourceRange whole_image{VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1};
-        constexpr VkClearColorValue zero{};
-        cmdbuf.ClearColorImage(image, VK_IMAGE_LAYOUT_GENERAL, zero, whole_image);
+    scheduler.Record([image, level, width, height, first_slice, count, buffer = zeros.buffer,
+                      offset = zeros.offset](vk::CommandBuffer cmdbuf) {
+        for (u32 slice = first_slice; slice < first_slice + count; ++slice) {
+            const VkBufferImageCopy zero_slice{
+                .bufferOffset = offset,
+                .bufferRowLength = 0,
+                .bufferImageHeight = 0,
+                .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1},
+                .imageOffset = {0, 0, static_cast<s32>(slice)},
+                .imageExtent = {width, height, 1},
+            };
+            cmdbuf.CopyBufferToImage(buffer, image, VK_IMAGE_LAYOUT_GENERAL, zero_slice);
+        }
         constexpr VkMemoryBarrier clear_finished{
             .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
             .pNext = nullptr,
@@ -1592,7 +1607,7 @@ void RasterizerVulkan::Clear(u32 layer_count) {
                   "Framebuffer clear layers: base={}, requested={}, clipped={}, framebuffer={}",
                   base_array_layer, layer_count, clear_layers.count, framebuffer->Layers());
     }
-    if (ClearVolumeSlice(framebuffer, base_array_layer)) {
+    if (ClearVolumeSlices(framebuffer, base_array_layer, layer_count)) {
         return;
     }
     if (clear_layers.count == 0) {
