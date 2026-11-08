@@ -8,6 +8,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <optional>
+#include <utility>
 
 #include <vulkan/vulkan_core.h>
 #include "common/settings.h"
@@ -120,7 +121,8 @@ void BlitScreen::DrawToFrame(const Device& device, RasterizerVulkan& rasterizer,
                              const Layout::FramebufferLayout& layout,
                              size_t current_swapchain_image_count,
                              VkFormat current_swapchain_view_format, bool hdr_output,
-                             const PerfOverlayInput* overlay) {
+                             const PerfOverlayInput* overlay,
+                             std::optional<PerfOverlayDraw>* overlay_ui) {
     bool resource_update_required = false;
     bool presentation_recreate_required = false;
 
@@ -178,6 +180,9 @@ void BlitScreen::DrawToFrame(const Device& device, RasterizerVulkan& rasterizer,
                                                              swapchain_view_format, image_count);
         }
         overlay_draw = perf_overlay->Prepare(image_index, *overlay, layout);
+    }
+    if (overlay_ui != nullptr) {
+        *overlay_ui = std::exchange(overlay_draw, std::nullopt);
     }
 
     window_adapt->Draw(device, rasterizer, scheduler, image_index, layers, framebuffers, layout,

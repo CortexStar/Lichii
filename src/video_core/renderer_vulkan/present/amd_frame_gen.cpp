@@ -11,10 +11,13 @@
 #include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/renderer_vulkan/present/amd_frame_gen.h"
+#include "video_core/renderer_vulkan/present/perf_overlay_pass.h"
+#include "video_core/renderer_vulkan/present/util.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/vulkan_common/amd_ffx.h"
 #include "video_core/vulkan_common/amd_ffx_api.h"
 #include "video_core/vulkan_common/vulkan_device.h"
+#include "video_core/vulkan_common/vulkan_memory_allocator.h"
 
 namespace Vulkan {
 
@@ -92,6 +95,67 @@ struct AmdFrameGen::Impl {
     bool generating{};
     bool logged_generation{};
     std::optional<std::chrono::steady_clock::time_point> last_prepare;
+    // The UI resource (ComposeUi): premultiplied alpha at the swapchain's size and view format.
+    vk::Image ui_image;
+    vk::ImageView ui_view;
+    vk::RenderPass ui_render_pass;
+    vk::Framebuffer ui_framebuffer;
+    VkFormat ui_format{};
+    VkExtent2D ui_extent{};
+    bool ui_fresh{};
+    bool ui_registered{};
+
+    void RegisterUi(VkImage image) {
+        ffxConfigureDescFrameGenerationSwapChainRegisterUiResourceVK ui{};
+        ui.header.type = FFX_API_CONFIGURE_DESC_TYPE_FGSWAPCHAIN_REGISTERUIRESOURCE_VK;
+        if (image != VK_NULL_HANDLE) {
+            ui.uiResource = AmdFfx::Image2D(image, ui_format, ui_extent.width, ui_extent.height,
+                                            false, FFX_API_RESOURCE_STATE_GENERIC_READ);
+            // The swapchain copies the UI at present: the next frame may draw it again.
+            ui.flags = FFX_FRAMEGENERATION_UI_COMPOSITION_FLAG_USE_PREMUL_ALPHA |
+                       FFX_FRAMEGENERATION_UI_COMPOSITION_FLAG_ENABLE_INTERNAL_UI_DOUBLE_BUFFERING;
+        }
+        AmdFfx::Scope ffx_scope{"ffxConfigure(UI resource)"};
+        if (const auto result = AmdFfx::Api().configure(&swapchain_context, &ui.header);
+            result != FFX_API_RETURN_OK) {
+            LOG_ERROR(Render_Vulkan, "AMD FSR frame generation: UI resource configure returned {}",
+                      result);
+        }
+        ui_registered = image != VK_NULL_HANDLE;
+    }
+
+    void CreateUiImage(MemoryAllocator& allocator, VkFormat format, VkExtent2D extent) {
+        ui_framebuffer.reset();
+        ui_render_pass.reset();
+        ui_view.reset();
+        ui_image.reset();
+        ui_format = format;
+        ui_extent = extent;
+        ui_image = allocator.CreateImage(VkImageCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = format,
+            .extent = {extent.width, extent.height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        });
+        ui_view = CreateWrappedImageView(device, ui_image, format);
+        // Compatible with the overlay pipeline's render pass (same format and samples); it loads
+        // what the clear wrote.
+        ui_render_pass = CreateWrappedRenderPass(device, format, VK_IMAGE_LAYOUT_GENERAL);
+        ui_framebuffer = CreateWrappedFramebuffer(device, ui_render_pass, ui_view, extent);
+        ui_fresh = true;
+    }
 
     explicit Impl(const Device& device_, Scheduler& scheduler_)
         : device{device_}, scheduler{scheduler_} {}
@@ -345,6 +409,99 @@ VkResult AmdFrameGen::AcquireNextImage(VkSwapchainKHR swapchain, u64 timeout,
     AmdFfx::Scope ffx_scope{"pOutAcquireNextImageKHR"};
     return impl->functions.pOutAcquireNextImageKHR(*impl->device.GetLogical(), swapchain, timeout,
                                                    semaphore, VK_NULL_HANDLE, image_index);
+}
+
+void AmdFrameGen::ComposeUi(MemoryAllocator& allocator, VkFormat format,
+                            const PerfOverlayDraw* draw) {
+    auto& state = *impl;
+    if (state.swapchain_context == nullptr) {
+        return;
+    }
+    if (draw == nullptr) {
+        if (state.ui_registered) {
+            state.RegisterUi(VK_NULL_HANDLE);
+        }
+        return;
+    }
+    if (!state.ui_image || state.ui_format != format ||
+        state.ui_extent.width != state.display_size.width ||
+        state.ui_extent.height != state.display_size.height) {
+        // The swapchain may still copy the old image for a queued present.
+        WaitForPresents();
+        state.scheduler.Finish();
+        state.CreateUiImage(allocator, format, state.display_size);
+    }
+    state.scheduler.RequestOutsideRenderPassOperationContext();
+    state.scheduler.Record([image = *state.ui_image, render_pass = *state.ui_render_pass,
+                            framebuffer = *state.ui_framebuffer, extent = state.ui_extent,
+                            fresh = std::exchange(state.ui_fresh, false),
+                            draw = *draw](vk::CommandBuffer cmdbuf) {
+        constexpr VkImageSubresourceRange range{
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        };
+        // After the swapchain's copy of the last frame's UI (same queue), before the clear.
+        const VkImageMemoryBarrier to_clear{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_MEMORY_READ_BIT,
+            .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .oldLayout = fresh ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = image,
+            .subresourceRange = range,
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               0, {}, {}, to_clear);
+        cmdbuf.ClearColorImage(image, VK_IMAGE_LAYOUT_GENERAL, VkClearColorValue{},
+                               std::array{range});
+        const VkMemoryBarrier to_draw{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask =
+                VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, to_draw);
+        const VkRenderPassBeginInfo begin{
+            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .pNext = nullptr,
+            .renderPass = render_pass,
+            .framebuffer = framebuffer,
+            .renderArea = {.offset = {0, 0}, .extent = extent},
+            .clearValueCount = 0,
+            .pClearValues = nullptr,
+        };
+        cmdbuf.BeginRenderPass(begin, VK_SUBPASS_CONTENTS_INLINE);
+        const VkViewport viewport{
+            .x = 0.0f,
+            .y = 0.0f,
+            .width = static_cast<f32>(extent.width),
+            .height = static_cast<f32>(extent.height),
+            .minDepth = 0.0f,
+            .maxDepth = 1.0f,
+        };
+        cmdbuf.SetViewport(0, viewport);
+        cmdbuf.SetScissor(0, VkRect2D{.offset = {0, 0}, .extent = extent});
+        RecordPerfOverlay(cmdbuf, draw);
+        cmdbuf.EndRenderPass();
+        const VkMemoryBarrier to_compose{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                               VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, to_compose);
+    });
+    state.scheduler.InvalidateState();
+    state.RegisterUi(*state.ui_image);
 }
 
 void AmdFrameGen::WaitForPresents() {

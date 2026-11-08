@@ -8,6 +8,7 @@
 
 #include <list>
 #include <memory>
+#include <optional>
 
 #include "core/frontend/framebuffer_layout.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
@@ -37,6 +38,7 @@ class Scheduler;
 class PresentManager;
 class WindowAdaptPass;
 class PerfOverlayPass;
+struct PerfOverlayDraw;
 struct PerfOverlayInput;
 
 struct Frame;
@@ -60,11 +62,14 @@ public:
     ~BlitScreen();
 
     /// Composites layers into a frame; hdr_output bypasses SDR effects and is false for captures.
+    /// With `overlay_ui`, the overlay is not drawn into the frame but handed out for a UI layer
+    /// drawn over every presented frame (AMD frame generation's UI composition).
     void DrawToFrame(const Device& device, RasterizerVulkan& rasterizer, Frame* frame,
                      std::span<const Tegra::FramebufferConfig> framebuffers,
                      const Layout::FramebufferLayout& layout, size_t current_swapchain_image_count,
                      VkFormat current_swapchain_view_format, bool hdr_output,
-                     const PerfOverlayInput* overlay = nullptr);
+                     const PerfOverlayInput* overlay = nullptr,
+                     std::optional<PerfOverlayDraw>* overlay_ui = nullptr);
 
     void PrepareFrame(const Device& device, Frame* frame, const Layout::FramebufferLayout& layout);
 

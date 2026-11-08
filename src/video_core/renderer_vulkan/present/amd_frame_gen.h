@@ -17,7 +17,9 @@
 namespace Vulkan {
 
 class Device;
+class MemoryAllocator;
 class Scheduler;
+struct PerfOverlayDraw;
 
 /// What Lichii knows of AMD's frame pacing for the FG swapchain. AMD's driver meters the flips
 /// itself (Driver-Assisted Frame Pacing, frame-interpolation-swap-chain.md:206-229) when all of
@@ -97,6 +99,11 @@ public:
     void SetGenerationRect(s32 left, s32 top, s32 width, s32 height);
     /// Whether the window covers its monitor and the present mode is IMMEDIATE (pacing status).
     void SetPresentationState(bool covers_monitor, bool vsync_off);
+
+    /// Draws the presenter's own UI (the performance overlay) into the UI resource AMD's swapchain
+    /// blends over every real and generated frame, so frame generation never interpolates it.
+    /// Without `draw` the swapchain composes no UI.
+    void ComposeUi(MemoryAllocator& allocator, VkFormat format, const PerfOverlayDraw* draw);
 
     /// Configures frame N and records its prepare pass (depth, motion, camera).
     void Prepare(Scheduler& scheduler, const PrepareInputs& inputs);
