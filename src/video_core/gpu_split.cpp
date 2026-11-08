@@ -7,6 +7,8 @@
 
 #ifdef _MSC_VER
 #include <intrin.h>
+#elif defined(__x86_64__)
+#include <x86intrin.h>
 #endif
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -17,7 +19,11 @@
 #include <cstring>
 #include <string>
 
+#include "common/cpu_features.h"
 #include "common/dkb_cpu_trace.h"
+#if defined(__x86_64__) || defined(_M_X64)
+#include "common/x64/rdtsc.h"
+#endif
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/thread.h"
@@ -45,6 +51,52 @@ void Pause() {
     std::this_thread::yield();
 #endif
 }
+
+/// Parks the hardware thread until `word` no longer holds `seen` or `ticks` TSC ticks passed,
+/// with MONITORX/MWAITX (AMD) or UMONITOR/UMWAIT (Intel). Unlike a PAUSE loop, the core's SMT
+/// sibling gets the whole core meanwhile, and a store to the word's line ends the wait at once.
+/// Only when CanPark().
+#if defined(__x86_64__) && (defined(__clang__) || defined(__GNUC__))
+__attribute__((target("mwaitx,waitpkg")))
+#endif
+void Park([[maybe_unused]] const std::atomic<u64>& word, [[maybe_unused]] u64 seen,
+          [[maybe_unused]] u32 ticks) {
+#if defined(__x86_64__) || defined(_M_X64)
+    void* const line = const_cast<std::atomic<u64>*>(&word);
+    if (Common::g_cpu_caps.monitorx) {
+        // Armed before the check, so a store after it ends the MWAITX.
+        _mm_monitorx(line, 0, 0);
+        if (word.load(std::memory_order_acquire) == seen) {
+            _mm_mwaitx(1 << 1, 0, ticks); // bit 1: `ticks` bounds the wait
+        }
+    } else {
+        _umonitor(line);
+        if (word.load(std::memory_order_acquire) == seen) {
+            _umwait(0, Common::X64::FencedRDTSC() + ticks); // C0.2; the deadline is absolute
+        }
+    }
+#endif
+}
+
+bool CanPark() {
+#if defined(__x86_64__) || defined(_M_X64)
+    return Common::g_cpu_caps.monitorx || Common::g_cpu_caps.waitpkg;
+#else
+    return false;
+#endif
+}
+
+/// TSC ticks a split thread parks per Park call, and how many calls before it sleeps in the OS.
+/// About 200 us in all, as long as the PAUSE loops they replace (16,384 PAUSEs on the front,
+/// 8,192 on the back); the back looks at hook requests between calls.
+u32 ParkTicks() {
+    static const u32 ticks =
+        static_cast<u32>(Common::g_wall_clock.NsToTicks(std::chrono::microseconds{2}));
+    return ticks;
+}
+constexpr u32 ParkCalls = 100;
+/// PAUSEs before parking: a front publish or back store usually comes within a few hundred ns.
+constexpr u32 PauseSpins = 64;
 
 [[maybe_unused]] std::atomic<u32> g_back_thread_id{};
 
@@ -227,11 +279,7 @@ void GpuSplit::WaitForSpace(size_t words) {
         if (write_position + words - consumed_cache <= RingWords) {
             return;
         }
-        if (spins < 4096) {
-            Pause();
-        } else {
-            std::this_thread::yield();
-        }
+        Backoff(spins, write_position + words - RingWords);
     }
 }
 
@@ -820,7 +868,19 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
 }
 
 void GpuSplit::Backoff(u32 spins, u64 target) {
-    if (spins < 16384) {
+    if (spins < PauseSpins) {
+        Pause();
+        return;
+    }
+    if (CanPark()) {
+        if (spins < PauseSpins + ParkCalls) {
+            const u64 seen = consumed.load(std::memory_order_acquire);
+            if (seen < target) {
+                Park(consumed, seen, ParkTicks());
+            }
+            return;
+        }
+    } else if (spins < 16384) {
         Pause();
         return;
     }
@@ -1065,11 +1125,18 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         if (available == read_position) {
             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
             back_idle.store(true, std::memory_order_relaxed);
-            // The front usually sends more within microseconds: spin briefly before sleeping.
-            for (u32 spins = 0; spins < 8192 && available == read_position &&
+            // The front usually sends more within microseconds: wait briefly before sleeping,
+            // parked once a short PAUSE spin found nothing.
+            const bool park = CanPark();
+            const u32 waits = park ? PauseSpins + ParkCalls : 8192;
+            for (u32 spins = 0; spins < waits && available == read_position &&
                                 !hook_requested.load(std::memory_order_relaxed);
                  ++spins) {
-                Pause();
+                if (park && spins >= PauseSpins) {
+                    Park(published, available, ParkTicks());
+                } else {
+                    Pause();
+                }
                 available = published.load(std::memory_order_acquire);
             }
             if (available == read_position && idle_hook != nullptr) {
