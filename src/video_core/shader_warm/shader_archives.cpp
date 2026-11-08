@@ -76,6 +76,7 @@ struct Record {
     ProgramStage stage;
     Bytes code;
     Bytes control;
+    u32 variation = ~0U;
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -482,7 +483,7 @@ std::vector<Record> ParseBnsh(Bytes data) {
                     throw ArchiveError("BNSH graphics stage disagrees with native header");
                 }
             }
-            result.push_back({stage, code, control});
+            result.push_back({stage, code, control, variation});
         }
     }
     return result;
@@ -756,11 +757,30 @@ struct Walker {
     const ZstdDictionaries* dictionaries;
     const std::function<void(const ShaderRecord&)>& on_record;
     const std::function<void(const std::string&)>& on_member_error;
+    const std::function<void(std::span<const ShaderRecord>)>& on_variation;
 
     /// Passes every record to the caller's record callback.
     void Emit(const std::vector<Record>& records) const {
         for (const auto& record : records) {
             on_record(ShaderRecord{record.stage, record.code, record.control});
+        }
+        // Only BNSH provides verified variation boundaries. Never pair unrelated members.
+        if (on_variation) {
+            std::vector<ShaderRecord> group;
+            u32 previous = ~0U;
+            for (const auto& record : records) {
+                if (record.variation != previous && !group.empty()) {
+                    on_variation(group);
+                    group.clear();
+                }
+                previous = record.variation;
+                if (previous != ~0U) {
+                    group.push_back({record.stage, record.code, record.control});
+                }
+            }
+            if (!group.empty()) {
+                on_variation(group);
+            }
         }
     }
 
@@ -876,8 +896,9 @@ const ZSTD_DDict_s* ZstdDictionaries::Find(u32 id) const {
 void WalkArchive(std::span<const u8> data, const std::string& name,
                  const ZstdDictionaries* dictionaries,
                  const std::function<void(const ShaderRecord&)>& on_record,
-                 const std::function<void(const std::string&)>& on_member_error) {
-    const Walker walker{dictionaries, on_record, on_member_error};
+                 const std::function<void(const std::string&)>& on_member_error,
+                 const std::function<void(std::span<const ShaderRecord>)>& on_variation) {
+    const Walker walker{dictionaries, on_record, on_member_error, on_variation};
     walker.Walk(data, name, 0);
 }
 

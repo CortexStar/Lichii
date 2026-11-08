@@ -4,12 +4,16 @@
 #include <future>
 #include <memory>
 #include <stdexcept>
+#include <cstring>
+#include <limits>
+#include <sstream>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include "video_core/renderer_vulkan/pipeline_build.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache_prebuild.h"
+#include "video_core/shader_warm/mesh_warm_validation.h"
 
 namespace {
 using Vulkan::EmissionBudget;
@@ -493,4 +497,77 @@ TEST_CASE("Stopping prebuild joins a demanded translation on success and failure
             REQUIRE_FALSE(pipeline);
         }
     }
+}
+
+namespace {
+std::string MeshWarmEnvironment(u32 stage) {
+    const std::array<u64, 6> sizes{96, 0, 0, 0, 0, 0};
+    const std::array<u32, 7> fields{0, 2, 0, 0, 88, 1, stage};
+    std::string bytes(sizeof(sizes) + sizeof(fields) + 96 + 80 + (stage == 4 ? 0 : 92), '\0');
+    std::memcpy(bytes.data(), sizes.data(), sizeof(sizes));
+    std::memcpy(bytes.data() + sizeof(sizes), fields.data(), sizeof(fields));
+    return bytes;
+}
+
+template <typename T>
+void ReplaceMeshWarmField(std::string& bytes, size_t offset, T value) {
+    std::memcpy(bytes.data() + offset, &value, sizeof(value));
+}
+} // namespace
+
+TEST_CASE("Mesh warm preflight accepts only the exact stage slots", "[video_core][mesh_warm]") {
+    using VideoCommon::ShaderWarm::ValidMeshWarmKey;
+    const std::array<u64, 6> mesh{0, 1, 0, 0, 0, 2};
+    const std::array<u64, 6> task_mesh{0, 1, 0, 2, 0, 3};
+    REQUIRE(ValidMeshWarmKey(mesh, 2));
+    REQUIRE(ValidMeshWarmKey(task_mesh, 3));
+    REQUIRE_FALSE(ValidMeshWarmKey(mesh, 3));
+    REQUIRE_FALSE(ValidMeshWarmKey(task_mesh, 2));
+    REQUIRE_FALSE(ValidMeshWarmKey(mesh, 1));
+    REQUIRE_FALSE(ValidMeshWarmKey(task_mesh, 4));
+    for (size_t slot = 0; slot < mesh.size(); ++slot) {
+        auto changed = mesh;
+        changed[slot] = changed[slot] == 0 ? 3 : 0;
+        REQUIRE_FALSE(ValidMeshWarmKey(changed, 2));
+    }
+}
+
+TEST_CASE("Mesh warm environment preflight accounts for trailers and bounded captures",
+          "[video_core][mesh_warm]") {
+    using VideoCommon::ShaderWarm::InspectMeshWarmEnvironment;
+    for (const u32 stage : {4U, 7U, 8U}) {
+        const auto bytes = MeshWarmEnvironment(stage);
+        std::istringstream stream(bytes);
+        REQUIRE(InspectMeshWarmEnvironment(stream, stage, bytes.size()) == bytes.size());
+        REQUIRE(stream.tellg() == static_cast<std::streamoff>(bytes.size()));
+        stream.seekg(0);
+        REQUIRE_THROWS(InspectMeshWarmEnvironment(stream, stage, bytes.size() - 1));
+        stream.clear();
+        stream.seekg(0);
+        REQUIRE_THROWS(InspectMeshWarmEnvironment(stream, stage == 4 ? 8 : 4, bytes.size()));
+    }
+    std::istringstream truncated(std::string(20, '\0'));
+    REQUIRE_THROWS(InspectMeshWarmEnvironment(truncated, 8, 1000));
+}
+
+TEST_CASE("Mesh warm preflight rejects overflowing lengths and invalid instruction windows",
+          "[video_core][mesh_warm]") {
+    using VideoCommon::ShaderWarm::InspectMeshWarmEnvironment;
+    for (size_t field = 0; field < 6; ++field) {
+        auto bytes = MeshWarmEnvironment(8);
+        ReplaceMeshWarmField(bytes, field * 8, std::numeric_limits<u64>::max());
+        std::istringstream stream(bytes);
+        REQUIRE_THROWS(InspectMeshWarmEnvironment(stream, 8, bytes.size()));
+    }
+    for (const auto [field, value] : std::array<std::pair<size_t, u32>, 6>{
+             {{2, 96}, {3, 96}, {3, 1}, {4, 96}, {4, 87}, {4, 72}}}) {
+        auto bytes = MeshWarmEnvironment(8);
+        ReplaceMeshWarmField(bytes, 48 + field * 4, value);
+        std::istringstream stream(bytes);
+        REQUIRE_THROWS(InspectMeshWarmEnvironment(stream, 8, bytes.size()));
+    }
+    auto bytes = MeshWarmEnvironment(8);
+    ReplaceMeshWarmField(bytes, 0, u64{95});
+    std::istringstream stream(bytes);
+    REQUIRE_THROWS(InspectMeshWarmEnvironment(stream, 8, bytes.size()));
 }

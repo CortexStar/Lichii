@@ -20,10 +20,11 @@ class System;
 namespace VideoCommon::ShaderWarm {
 
 /// Where the warm-up files of a title live: next to its pipeline cache
-/// (<shader dir>/<title id>/warm-compute.bin and warm-graphics.bin). The emulator loads them at
-/// boot when they exist; EDEN_NX2_COMPUTE_WARM / EDEN_NX2_GRAPHICS_WARM still override.
+/// (<shader dir>/<title id>/warm-compute.bin, warm-graphics.bin and warm-mesh.bin).
+/// EDEN_NX2_COMPUTE_WARM / EDEN_NX2_GRAPHICS_WARM / EDEN_NX2_MESH_WARM override these paths.
 std::filesystem::path ComputeWarmPath(u64 title_id);
 std::filesystem::path GraphicsWarmPath(u64 title_id);
+std::filesystem::path MeshWarmPath(u64 title_id);
 
 /// "Already warmed" marker of a warm file (same folder, extension .done: warm-compute.done),
 /// written by the emulator after a warm-up ran to the end. It holds the warm file's size and
@@ -67,27 +68,30 @@ struct Result {
     size_t compute_programs{};   ///< Entries written to the compute file
     size_t vertex_programs{};    ///< Vertex entries written to the graphics file
     size_t fragment_programs{};  ///< Fragment entries written to the graphics file
+    size_t mesh_pipelines{};     ///< Speculative paired task/mesh/fragment entries
     size_t skipped{};            ///< Programs that failed to extract or convert
 };
 
-/// Builds both warm-up files for the game at `game_path` (any format the loader opens, Switch 2
+/// Builds warm-up files for the game at `game_path` (any format the loader opens, Switch 2
 /// .nup first), from the user's own copy and keys, with no external tools. Runs on the calling
 /// thread; `progress` is called from it; stops early when `stop` is requested. The game's
 /// existing pipeline cache, when present, is used for the draw state guesses; otherwise built-in
-/// defaults are used.
+/// defaults are used. Mesh predictions require captured templates and verified archive pairing.
 Result BuildWarmFiles(Core::System& system, const std::filesystem::path& game_path, u64 title_id,
                       const std::function<void(const Progress&)>& progress,
                       std::stop_token stop);
 
 /// Overrides for BuildWarmFilesWith (tests and tools).
 struct BuildOptions {
-    /// Folder for warm-compute.bin and warm-graphics.bin; empty: <shader dir>/<title id>.
+    /// Folder for the three warm-up files; empty: <shader dir>/<title id>.
     std::filesystem::path output_dir;
     /// Pipeline caches used for the draw state guesses. Unset: the title's own pipeline cache
     /// when it exists, else the built-in defaults. Set but empty: always the built-in defaults.
     std::optional<std::vector<std::filesystem::path>> runtime_caches;
     /// Conversion threads, 0: a quarter of the CPU threads, 2 to 6.
     size_t threads{};
+    /// Bound speculative mesh combinations; 0 disables generation. Requires runtime templates.
+    size_t mesh_candidates = 512;
 };
 
 /// BuildWarmFiles with explicit output folder and draw state sources.

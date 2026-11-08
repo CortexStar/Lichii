@@ -181,7 +181,8 @@ private:
         std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
         bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools = nullptr,
         std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr,
-        bool libraries_only = false, bool account_runtime_emission = false);
+        bool libraries_only = false, bool account_runtime_emission = false,
+        bool notify_runtime_build = true);
 
     [[nodiscard]] bool StaleNullPointerSlot(const ComputePipelineCacheEntry& entry) const;
 
@@ -197,7 +198,7 @@ private:
                                                      PipelineStatistics* statistics,
                                                      bool build_in_parallel);
 
-    void SerializeVulkanPipelineCache(const std::filesystem::path& filename,
+    bool SerializeVulkanPipelineCache(const std::filesystem::path& filename,
                                       const vk::PipelineCache& pipeline_cache, u32 cache_version);
 
     vk::PipelineCache LoadVulkanPipelineCache(const std::filesystem::path& filename,
@@ -225,6 +226,11 @@ private:
     /// warm-up, then released; the driver's disk cache keeps them, so a later pipeline with those
     /// stages costs a link.
     void StartGraphicsWarm(u64 title_id);
+    /// Detached task/mesh/fragment candidates only warm the driver cache; never serve a draw.
+    void StartMeshWarm(u64 title_id);
+    bool IsGraphicsKeyCompatible(const GraphicsPipelineCacheKey& key) const;
+    std::jthread mesh_warm_thread;
+    std::atomic<bool> mesh_warm_active{false};
     void WaitForWarmUps(std::stop_token stop_loading,
                         const VideoCore::DiskResourceLoadCallback& callback);
     std::vector<std::jthread> graphics_warm_threads;

@@ -32,6 +32,7 @@
 #include "core/loader/loader.h"
 #include "video_core/pipeline_cache_files.h"
 #include "video_core/shader_warm/shader_archives.h"
+#include "video_core/shader_warm/mesh_warm_builder.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
 #include "video_core/shader_warm/warm_records.h"
 
@@ -310,7 +311,8 @@ void WriteHeader(std::ofstream& out) {
 
 bool WarmPending(u64 title_id) {
     std::error_code ec;
-    for (const auto& file : {ComputeWarmPath(title_id), GraphicsWarmPath(title_id)}) {
+    for (const auto& file : {ComputeWarmPath(title_id), GraphicsWarmPath(title_id),
+                             MeshWarmPath(title_id)}) {
         if (fs::exists(file, ec) && !fs::exists(WarmMarkerPath(file), ec)) {
             return true;
         }
@@ -336,6 +338,10 @@ fs::path ComputeWarmPath(u64 title_id) {
 
 fs::path GraphicsWarmPath(u64 title_id) {
     return TitleDir(title_id) / "warm-graphics.bin";
+}
+
+fs::path MeshWarmPath(u64 title_id) {
+    return TitleDir(title_id) / "warm-mesh.bin";
 }
 
 fs::path WarmMarkerPath(const fs::path& warm_file) {
@@ -377,7 +383,8 @@ void WriteWarmCount(const fs::path& warm_file, u64 entries) {
 
 bool DeleteWarmFiles(u64 title_id, std::string* error) {
     bool ok = true;
-    for (const auto& warm : {ComputeWarmPath(title_id), GraphicsWarmPath(title_id)}) {
+    for (const auto& warm : {ComputeWarmPath(title_id), GraphicsWarmPath(title_id),
+                             MeshWarmPath(title_id)}) {
         fs::path tmp = warm;
         tmp += ".tmp";
         for (const auto& path : {warm, WarmMarkerPath(warm), WarmCountPath(warm), tmp}) {
@@ -419,18 +426,24 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
     fs::create_directories(output_dir, ec);
     const fs::path compute_path = output_dir / "warm-compute.bin";
     const fs::path graphics_path = output_dir / "warm-graphics.bin";
+    const fs::path mesh_path = output_dir / "warm-mesh.bin";
+    fs::path mesh_tmp = mesh_path;
+    mesh_tmp += ".tmp";
     fs::path compute_tmp = compute_path;
     compute_tmp += ".tmp";
     fs::path graphics_tmp = graphics_path;
     graphics_tmp += ".tmp";
     std::ofstream compute_out;
     std::ofstream graphics_out;
+    std::ofstream mesh_out;
     const auto fail = [&](std::string error) {
         compute_out.close();
         graphics_out.close();
+        mesh_out.close();
         std::error_code ignored;
         fs::remove(compute_tmp, ignored);
         fs::remove(graphics_tmp, ignored);
+        fs::remove(mesh_tmp, ignored);
         result.ok = false;
         result.error = std::move(error);
         LOG_WARNING(Render_Vulkan, "Shader warm-up build for {:016x} failed: {}", title_id,
@@ -461,6 +474,7 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
         }
     }
     const RuntimeStats stats = ReadRuntimeStats(caches);
+    MeshWarmRecipes mesh_recipes{caches, options.mesh_candidates};
     const bool use_stats = stats.occurrences != 0;
     const GraphicsKey vertex_template = stats.templates[0] ? *stats.templates[0]
                                                            : DefaultTemplate(true);
@@ -517,11 +531,13 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
 
     compute_out.open(compute_tmp, std::ios::binary | std::ios::trunc);
     graphics_out.open(graphics_tmp, std::ios::binary | std::ios::trunc);
-    if (!compute_out || !graphics_out) {
+    mesh_out.open(mesh_tmp, std::ios::binary | std::ios::trunc);
+    if (!compute_out || !graphics_out || !mesh_out) {
         return fail("Cannot write to " + Common::FS::PathToUTF8String(output_dir));
     }
     WriteHeader(compute_out);
     WriteHeader(graphics_out);
+    WriteHeader(mesh_out);
 
     // Bookkeeping in program order (the order the manifest lists programs).
     std::unordered_set<PairHash, PairHasher> compute_identities;
@@ -665,7 +681,12 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
             LOG_DEBUG(Render_Vulkan, "Shader warm-up: {}: {}", archive.path, error);
         };
         try {
-            WalkArchive(data, name, &dictionaries, on_record, on_member_error);
+            WalkArchive(data, name, &dictionaries, on_record, on_member_error,
+                        [&](std::span<const ShaderRecord> variation) {
+                            if (!stop.stop_requested()) {
+                                mesh_recipes.AddVariation(variation);
+                            }
+                        });
         } catch (const ArchiveError& e) {
             ++archive_errors;
             LOG_WARNING(Render_Vulkan, "Shader warm-up: {}: {}", archive.path, e.what());
@@ -782,9 +803,19 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
         held.env = {};
     }
     result.vertex_programs = vertex_keys.size();
+    report("Preparing mesh candidates", 0, mesh_recipes.VariationCount());
+    result.mesh_pipelines = mesh_recipes.Write(mesh_out, stop);
+    result.skipped += mesh_recipes.Skipped();
+    LOG_INFO(Render_Vulkan,
+             "Shader mesh warm-up: {} recorded templates, {} archive variations, {} candidates",
+             mesh_recipes.TemplateCount(), mesh_recipes.VariationCount(), result.mesh_pipelines);
     compute_out.close();
     graphics_out.close();
-    if (!compute_out || !graphics_out) {
+    mesh_out.close();
+    if (stop.stop_requested()) {
+        return fail("Stopped");
+    }
+    if (!compute_out || !graphics_out || !mesh_out) {
         return fail("Writing the warm-up files failed");
     }
     {
@@ -821,6 +852,13 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
     }
     WriteWarmCount(compute_path, result.compute_programs);
     WriteWarmCount(graphics_path, result.vertex_programs + result.fragment_programs);
+    fs::remove(WarmMarkerPath(mesh_path), ignored);
+    fs::remove(WarmCountPath(mesh_path), ignored);
+    fs::rename(mesh_tmp, mesh_path, ec);
+    if (ec) {
+        return fail("Cannot replace " + Common::FS::PathToUTF8String(mesh_path));
+    }
+    WriteWarmCount(mesh_path, result.mesh_pipelines);
     report(StageWriting, patches.size(), patches.size());
     result.ok = true;
     LOG_INFO(Render_Vulkan,

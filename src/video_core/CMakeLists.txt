@@ -281,6 +281,9 @@ add_library(video_core STATIC
     shader_warm/warm_defaults.cpp
     shader_warm/warm_records.cpp
     shader_warm/warm_records.h
+    shader_warm/mesh_warm_builder.cpp
+    shader_warm/mesh_warm_builder.h
+    shader_warm/mesh_warm_validation.h
     spirv_inline_control.cpp
     spirv_inline_control.h
     smaa_area_tex.h

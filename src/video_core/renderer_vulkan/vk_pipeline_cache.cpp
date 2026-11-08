@@ -10,11 +10,14 @@
 #include <cstddef>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
+#include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -58,6 +61,7 @@
 #include "video_core/shader_cache.h"
 #include "video_core/shader_environment.h"
 #include "video_core/shader_notify.h"
+#include "video_core/shader_warm/mesh_warm_validation.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
 #include "video_core/spirv_inline_control.h"
 #include "video_core/surface.h"
@@ -819,6 +823,8 @@ bool PreloadAllPipelines() {
 /// the driver's pipeline cache.
 PipelineCache::~PipelineCache() {
     // Stop the warm-ups first: their builds use the members below.
+    warm_cancel = true;
+    mesh_warm_thread = {};
     graphics_warm_threads.clear();
     compute_warm_threads.clear();
     background_pipelines.Stop();
@@ -1003,6 +1009,35 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
                      kepler_compute->regs.code_loc.Address() + qmd.program_start, key);
 }
 
+bool PipelineCache::IsGraphicsKeyCompatible(const GraphicsPipelineCacheKey& key) const {
+    if ((key.state.extended_dynamic_state != 0) != dynamic_features.has_extended_dynamic_state ||
+        (key.state.extended_dynamic_state_2 != 0) !=
+            dynamic_features.has_extended_dynamic_state_2 ||
+        (key.state.extended_dynamic_state_2_logic_op != 0) !=
+            dynamic_features.has_extended_dynamic_state_2_logic_op ||
+        (key.state.extended_dynamic_state_3_blend != 0) !=
+            dynamic_features.has_extended_dynamic_state_3_blend ||
+        (key.state.extended_dynamic_state_3_enables != 0) !=
+            dynamic_features.has_extended_dynamic_state_3_enables ||
+        (key.state.color_write_enable_dynamic != 0) != dynamic_features.has_color_write_enable ||
+        (key.state.dynamic_vertex_input != 0) != dynamic_features.has_dynamic_vertex_input) {
+        return false;
+    }
+
+    const bool key_requests_provoking_last = key.state.provoking_vertex_last != 0;
+    if (key_requests_provoking_last && !dynamic_features.has_provoking_vertex_last_mode) {
+        return false;
+    }
+
+    const bool key_uses_transform_feedback = key.state.xfb_enabled != 0;
+    if (key_uses_transform_feedback && key_requests_provoking_last &&
+        !dynamic_features.has_provoking_vertex_tf_preserve) {
+        return false;
+    }
+
+    return true;
+}
+
 /// Loads the title's pipeline cache from disk and builds its pipelines, reporting progress through
 /// `callback`, then (unless loading was stopped) starts the background builds and the compute and
 /// graphics warm-ups.
@@ -1016,6 +1051,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         // so StartComputeWarm and StartGraphicsWarm can start this title's and warm_cancel is
         // only cleared once no thread of the earlier load is left.
         warm_cancel = true;
+        mesh_warm_thread = {};
         graphics_warm_threads.clear();
         compute_warm_threads.clear();
         warm_stop_callback.reset();
@@ -1119,31 +1155,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             return;
         }
 
-        if ((key.state.extended_dynamic_state != 0) !=
-                dynamic_features.has_extended_dynamic_state ||
-            (key.state.extended_dynamic_state_2 != 0) !=
-                dynamic_features.has_extended_dynamic_state_2 ||
-            (key.state.extended_dynamic_state_2_logic_op != 0) !=
-                dynamic_features.has_extended_dynamic_state_2_logic_op ||
-            (key.state.extended_dynamic_state_3_blend != 0) !=
-                dynamic_features.has_extended_dynamic_state_3_blend ||
-            (key.state.extended_dynamic_state_3_enables != 0) !=
-                dynamic_features.has_extended_dynamic_state_3_enables ||
-            (key.state.color_write_enable_dynamic != 0) !=
-                dynamic_features.has_color_write_enable ||
-            (key.state.dynamic_vertex_input != 0) !=
-                dynamic_features.has_dynamic_vertex_input) {
-            return;
-        }
-
-        const bool key_requests_provoking_last = key.state.provoking_vertex_last != 0;
-        if (key_requests_provoking_last && !dynamic_features.has_provoking_vertex_last_mode) {
-            return;
-        }
-
-        const bool key_uses_transform_feedback = key.state.xfb_enabled != 0;
-        if (key_uses_transform_feedback && key_requests_provoking_last &&
-            !dynamic_features.has_provoking_vertex_tf_preserve) {
+        if (!IsGraphicsKeyCompatible(key)) {
             return;
         }
 
@@ -1261,6 +1273,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                             (at_boot == Settings::ShaderWarmAtBoot::Ask && asked);
         StartComputeWarm(title_id);
         StartGraphicsWarm(title_id);
+        StartMeshWarm(title_id);
         if (warm_before_start) {
             WaitForWarmUps(stop_loading, callback);
         }
@@ -1274,7 +1287,8 @@ void PipelineCache::WaitForWarmUps(std::stop_token stop_loading,
                                    const VideoCore::DiskResourceLoadCallback& callback) {
     const auto begin = std::chrono::steady_clock::now();
     while (!stop_loading.stop_requested() &&
-           (!compute_warm_done || graphics_warm_active.load(std::memory_order_acquire) != 0)) {
+           (!compute_warm_done || graphics_warm_active.load(std::memory_order_acquire) != 0 ||
+            mesh_warm_active.load(std::memory_order_acquire))) {
         const auto progress = shader_notify.GetWarmProgress();
         if (progress.kind != 0 && callback) {
             callback(VideoCore::LoadCallbackStage::Warm, progress.done,
@@ -1384,7 +1398,7 @@ std::array<std::filesystem::path, 2> MarkerPaths(const std::filesystem::path& fi
 
 /// True when a marker matches the file and the device (the entry count is informative).
 bool WarmAlreadyDone(const std::filesystem::path& file, const std::filesystem::path& title_file,
-                     const Device& device) {
+                     const Device& device, std::string_view configuration = {}) {
     const auto stamp = CurrentStamp(file, device, 0);
     if (!stamp) {
         return false;
@@ -1398,7 +1412,11 @@ bool WarmAlreadyDone(const std::filesystem::path& file, const std::filesystem::p
                 saved.driver == stamp->driver && saved.device_id == stamp->device_id &&
                 saved.cache_version == stamp->cache_version &&
                 saved.no_inline == stamp->no_inline && saved.link_mode == stamp->link_mode) {
-                return true;
+                std::string saved_configuration;
+                if (configuration.empty() ||
+                    (in >> saved_configuration && saved_configuration == configuration)) {
+                    return true;
+                }
             }
         }
     }
@@ -1408,7 +1426,7 @@ bool WarmAlreadyDone(const std::filesystem::path& file, const std::filesystem::p
 /// Writes the marker for `file` next to it, or in the title's shader folder when that write
 /// fails.
 void WriteWarmMarker(const std::filesystem::path& file, const std::filesystem::path& title_file,
-                     const Device& device, u64 entries) {
+                     const Device& device, u64 entries, std::string_view configuration = {}) {
     const auto stamp = CurrentStamp(file, device, entries);
     if (!stamp) {
         return;
@@ -1419,7 +1437,11 @@ void WriteWarmMarker(const std::filesystem::path& file, const std::filesystem::p
         std::ofstream out(marker, std::ios::trunc);
         out << stamp->size << ' ' << stamp->write_time << ' ' << stamp->entries << ' '
             << stamp->driver << ' ' << stamp->device_id << ' ' << stamp->cache_version << ' '
-            << stamp->no_inline << ' ' << stamp->link_mode << '\n';
+            << stamp->no_inline << ' ' << stamp->link_mode;
+        if (!configuration.empty()) {
+            out << ' ' << configuration;
+        }
+        out << '\n';
         out.close();
         if (out) {
             return;
@@ -1763,6 +1785,231 @@ void PipelineCache::StartGraphicsWarm(u64 title_id) {
             graphics_warm_active.fetch_sub(1, std::memory_order_release);
         });
     }
+}
+
+void PipelineCache::StartMeshWarm(u64 title_id) {
+    if (mesh_warm_thread.joinable() || !device.IsExtMeshShaderSupported()) {
+        return;
+    }
+    if (!warm_before_start && device.HasBrokenParallelShaderCompiling()) {
+        LOG_INFO(Render_Vulkan, "Nx2Perf mesh_warm: background builds disabled for this driver");
+        return;
+    }
+    const auto title_file = VideoCommon::ShaderWarm::MeshWarmPath(title_id);
+    const auto warm_file = WarmFile("EDEN_NX2_MESH_WARM", title_file);
+    if (warm_file.empty()) {
+        return;
+    }
+    // File and driver stamps cover the recipes and device capabilities. Include settings which
+    // change the emitted program or pipeline, and a revision for this speculative consumer.
+    u32 dynamic_flags{};
+    const std::array dynamic_capabilities{
+        dynamic_features.has_extended_dynamic_state,
+        dynamic_features.has_extended_dynamic_state_2,
+        dynamic_features.has_extended_dynamic_state_2_logic_op,
+        dynamic_features.has_extended_dynamic_state_3_blend,
+        dynamic_features.has_extended_dynamic_state_3_enables,
+        dynamic_features.has_color_write_enable,
+        dynamic_features.has_dynamic_vertex_input,
+        dynamic_features.has_static_vertex_repack,
+        dynamic_features.has_provoking_vertex_last_mode,
+        dynamic_features.has_provoking_vertex_tf_preserve,
+        dynamic_features.has_dynamic_state3_depth_clamp_enable,
+        dynamic_features.has_dynamic_state3_logic_op_enable,
+        dynamic_features.has_dynamic_state3_line_stipple_enable,
+    };
+    for (size_t i = 0; i < dynamic_capabilities.size(); ++i) {
+        dynamic_flags |= u32{dynamic_capabilities[i]} << i;
+    }
+    const auto configuration =
+        fmt::format("mesh2-{}-{}-{}-{}-{}-{}-{}-{}", dynamic_flags, u32(device.GetDriverID()),
+                    profile.supported_spirv, profile.need_fastmath_off,
+                    profile.ignore_nan_fp_comparisons, profile.support_native_ndc,
+                    profile.support_cooperative_hmma, profile.support_cooperative_hmma_16x16x16);
+    const bool native_cache = DriverCachesPipelines(device);
+    std::error_code cache_error;
+    if ((native_cache || (use_vulkan_pipeline_cache &&
+                          std::filesystem::exists(vulkan_pipeline_cache_filename, cache_error))) &&
+        WarmAlreadyDone(warm_file, title_file, device, configuration)) {
+        LOG_INFO(Render_Vulkan,
+                 "Nx2Perf mesh_warm: already done for this file, configuration and driver");
+        return;
+    }
+    const auto file_stamp = CurrentStamp(warm_file, device, 0);
+    const bool before_start = warm_before_start;
+    mesh_warm_active.store(true, std::memory_order_release);
+    mesh_warm_thread = std::jthread([this, warm_file, title_file, configuration, file_stamp,
+                                     before_start, native_cache](std::stop_token stop) {
+        Common::SetCurrentThreadName("VkMeshWarm");
+        Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+        SCOPE_EXIT {
+            mesh_warm_active.store(false, std::memory_order_release);
+        };
+        const auto cancelled = [&] { return stop.stop_requested() || warm_cancel.load(); };
+        while (!cancelled() && (!compute_warm_done || graphics_warm_active != 0)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        }
+        if (cancelled()) {
+            return;
+        }
+        SCOPE_EXIT {
+            shader_notify.SetWarmProgress(0, 0, 0);
+        };
+        const auto begin = std::chrono::steady_clock::now();
+        size_t built{}, rejected{}, driver_failed{}, read{};
+        double candidate_build_ms{};
+        bool complete{};
+        LOG_INFO(Render_Vulkan,
+                 "Nx2Perf mesh_warm: {} on one low priority worker after other warm-ups; "
+                 "detached candidates only",
+                 Common::FS::PathToUTF8String(warm_file));
+        try {
+            std::ifstream file(warm_file, std::ios::binary | std::ios::ate);
+            file.exceptions(std::ifstream::failbit | std::ifstream::badbit);
+            const std::streamoff end = file.tellg();
+            file.seekg(0);
+            std::array<char, 8> magic{};
+            u32 version{};
+            file.read(magic.data(), magic.size());
+            file.read(reinterpret_cast<char*>(&version), sizeof(version));
+            constexpr std::array<char, 8> ExpectedMagic{'y', 'u', 'z', 'u', 'c', 'a', 'c', 'h'};
+            if (magic != ExpectedMagic || version != CACHE_VERSION) {
+                throw std::runtime_error("Unsupported mesh warm file header");
+            }
+            const size_t total = VideoCommon::ShaderWarm::ReadWarmCount(warm_file);
+            static const GuessMissing guess{};
+            ShaderPools pools;
+            WarmProgressThrottle throttle;
+            while (!cancelled() && file.tellg() < end) {
+                // Pending emission is only a partial pressure signal. It cannot preempt a driver
+                // compile, and other driver jobs may already be running after emission completed.
+                while (!before_start && !cancelled() && emission_budget.Pending() != 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds{25});
+                }
+                if (cancelled()) {
+                    break;
+                }
+                u32 count{};
+                file.read(reinterpret_cast<char*>(&count), sizeof(count));
+                if (count != 2 && count != 3) {
+                    throw std::runtime_error("Mesh warm record must contain two or three stages");
+                }
+                std::array<FileEnvironment, 3> environments;
+                std::array<Shader::Environment*, 3> pointers{};
+                u64 budget = VideoCommon::ShaderWarm::MaxMeshWarmRecordBytes -
+                             sizeof(GraphicsPipelineCacheKey) - sizeof(count);
+                for (u32 i = 0; i < count; ++i) {
+                    const u32 stage = i + 1 == count ? 4 : (count == 3 && i == 0 ? 7 : 8);
+                    const std::streamoff offset = file.tellg();
+                    const u64 available = static_cast<u64>(end - offset);
+                    const u64 bytes = VideoCommon::ShaderWarm::InspectMeshWarmEnvironment(
+                        file, stage, std::min(budget, available));
+                    budget -= bytes;
+                    file.seekg(offset);
+                    environments[i].Deserialize(file);
+                    if (std::streamoff{file.tellg()} !=
+                            offset + static_cast<std::streamoff>(bytes) ||
+                        !environments[i].IsNativeProgram()) {
+                        throw std::runtime_error("Invalid native mesh warm environment");
+                    }
+                    environments[i].SetGuessMissing(&guess);
+                    pointers[i] = &environments[i];
+                }
+                if (count == 3 &&
+                    environments[0].MeshRegisters() != environments[1].MeshRegisters()) {
+                    throw std::runtime_error("Inconsistent task and mesh register context");
+                }
+                GraphicsPipelineCacheKey key{};
+                file.read(reinterpret_cast<char*>(&key), sizeof(key));
+                if (!VideoCommon::ShaderWarm::ValidMeshWarmKey(key.unique_hashes, count)) {
+                    throw std::runtime_error("Invalid mesh warm key stage slots");
+                }
+                ++read;
+                if (cancelled()) {
+                    break;
+                }
+                pools.ReleaseContents();
+                const auto build_begin = std::chrono::steady_clock::now();
+                try {
+                    // Synchronous, monolithic and transient. No runtime cache, used list or
+                    // transferable cache receives speculative metadata or this pipeline.
+                    auto pipeline = IsGraphicsKeyCompatible(key)
+                                        ? CreateGraphicsPipeline(
+                                              pools, key, std::span{pointers.data(), count},
+                                              nullptr, false, nullptr, nullptr, false, false, false)
+                                        : nullptr;
+                    if (!pipeline) {
+                        ++rejected;
+                    } else if (pipeline->Failed()) {
+                        ++driver_failed;
+                    } else {
+                        ++built;
+                    }
+                } catch (const std::bad_alloc&) {
+                    throw;
+                } catch (const vk::Exception& exception) {
+                    ++driver_failed;
+                    LOG_DEBUG(Render_Vulkan, "mesh_warm: {}", exception.what());
+                } catch (const std::exception& exception) {
+                    ++rejected;
+                    LOG_DEBUG(Render_Vulkan, "mesh_warm: {}", exception.what());
+                }
+                candidate_build_ms += std::chrono::duration<double, std::milli>(
+                                          std::chrono::steady_clock::now() - build_begin)
+                                          .count();
+                const size_t done = built + rejected + driver_failed;
+                if (throttle.Due()) {
+                    shader_notify.SetWarmProgress(2, done, std::max(total, done));
+                }
+                if (done % 32 == 0) {
+                    LOG_INFO(Render_Vulkan,
+                             "Nx2Perf mesh_warm: {} done, {} built, {} rejected, {} driver failed",
+                             done, built, rejected, driver_failed);
+                }
+            }
+            complete = file.tellg() == end && !cancelled() && driver_failed == 0;
+        } catch (const std::exception& exception) {
+            LOG_WARNING(Render_Vulkan, "Nx2Perf mesh_warm: stopped: {}", exception.what());
+        }
+        // NVIDIA/AMD already own disk caching under DriverCachesPipelines. As with the other
+        // warm-ups, their completion marker assumes that native cache has not been cleared or
+        // evicted; those external changes require removing the warm marker as well.
+        bool cache_ready = native_cache;
+        if (complete && !cancelled() && !cache_ready && use_vulkan_pipeline_cache &&
+            !vulkan_pipeline_cache_filename.empty()) {
+            try {
+                auto saved = std::make_shared<std::promise<bool>>();
+                auto result = saved->get_future();
+                // The same queue owns runtime flushes and their temporary filename. Shutdown
+                // joins this warm-up before draining or destroying that queue and its cache.
+                serialization_thread.QueueWork([this, saved] {
+                    try {
+                        saved->set_value(SerializeVulkanPipelineCache(
+                            vulkan_pipeline_cache_filename, vulkan_pipeline_cache, CACHE_VERSION));
+                    } catch (...) {
+                        saved->set_exception(std::current_exception());
+                    }
+                });
+                cache_ready = result.get();
+            } catch (const std::exception& exception) {
+                LOG_WARNING(Render_Vulkan, "Nx2Perf mesh_warm: cache save failed: {}",
+                            exception.what());
+            }
+        }
+        const auto final_stamp = CurrentStamp(warm_file, device, 0);
+        complete = complete && !cancelled() && file_stamp && final_stamp &&
+                   file_stamp->size == final_stamp->size &&
+                   file_stamp->write_time == final_stamp->write_time;
+        if (complete && cache_ready) {
+            WriteWarmMarker(warm_file, title_file, device, read, configuration);
+        }
+        LOG_INFO(Render_Vulkan,
+                 "Nx2Perf mesh_warm: finished, {} built, {} rejected, {} driver failed, "
+                 "candidate_build_ms={:.1f}, {:.1f} s, complete={} cache_ready={} cancelled={}",
+                 built, rejected, driver_failed, candidate_build_ms,
+                 std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count(),
+                 complete, cache_ready, cancelled());
+    });
 }
 
 void PipelineCache::QueueVulkanPipelineCacheFlush() {
@@ -2267,7 +2514,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
     bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools,
     std::unique_ptr<EmissionBudget::Reservation> reservation, bool libraries_only,
-    bool account_runtime_emission) try {
+    bool account_runtime_emission, bool notify_runtime_build) try {
     auto hash = key.Hash();
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
     size_t env_index{0};
@@ -2669,7 +2916,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     };
     auto pipeline = std::make_unique<GraphicsPipeline>(
         scheduler, buffer_cache, texture_cache, vulkan_pipeline_cache,
-        libraries_only ? nullptr : &shader_notify, device, descriptor_pool,
+        libraries_only || !notify_runtime_build ? nullptr : &shader_notify, device, descriptor_pool,
         guest_descriptor_queue, descriptor_buffer_ring, thread_worker, statistics,
         render_pass_cache, key, std::move(modules), infos, std::move(emit_stages),
         std::move(mesh_emulation), library_params);
@@ -2966,49 +3213,50 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     return {.failure = exception.what()};
 }
 
-void PipelineCache::SerializeVulkanPipelineCache(const std::filesystem::path& filename,
+bool PipelineCache::SerializeVulkanPipelineCache(const std::filesystem::path& filename,
                                                  const vk::PipelineCache& pipeline_cache,
-                                                 u32 cache_version) try {
-    // Written beside the cache and renamed over it: the emulator stopped mid-write left the cache
-    // empty, and every later boot failed to read it.
+                                                 u32 cache_version) {
     auto temporary = filename;
     temporary += ".tmp";
-    std::ofstream file(temporary, std::ios::binary);
-    file.exceptions(std::ifstream::failbit);
-    if (!file.is_open()) {
-        LOG_ERROR(Common_Filesystem, "Failed to open Vulkan driver pipeline cache file {}",
-                  Common::FS::PathToUTF8String(filename));
-        return;
-    }
-    file.write(VULKAN_CACHE_MAGIC_NUMBER.data(), VULKAN_CACHE_MAGIC_NUMBER.size())
-        .write(reinterpret_cast<const char*>(&cache_version), sizeof(cache_version));
-
-    size_t cache_size = 0;
-    std::vector<char> cache_data;
-    if (pipeline_cache) {
-        pipeline_cache.Read(&cache_size, nullptr);
-        cache_data.resize(cache_size);
-        pipeline_cache.Read(&cache_size, cache_data.data());
-    }
-    file.write(cache_data.data(), cache_size);
-    file.close();
-    std::error_code error;
-    std::filesystem::rename(temporary, filename, error);
-    if (error) {
-        LOG_ERROR(Common_Filesystem, "Failed to replace Vulkan driver pipeline cache file {}: {}",
-                  Common::FS::PathToUTF8String(filename), error.message());
+    try {
+        if (!pipeline_cache) {
+            return false;
+        }
+        std::vector<char> cache_data;
+        size_t cache_size{};
+        VkResult result = VK_INCOMPLETE;
+        // Runtime builds can grow the cache between its size query and the data read.
+        for (size_t attempt = 0; attempt < 3 && result == VK_INCOMPLETE; ++attempt) {
+            result = pipeline_cache.Read(&cache_size, nullptr);
+            if (result != VK_SUCCESS || cache_size == 0) {
+                break;
+            }
+            cache_data.resize(cache_size);
+            result = pipeline_cache.Read(&cache_size, cache_data.data());
+        }
+        if (result != VK_SUCCESS || cache_size == 0 || cache_size > cache_data.size()) {
+            LOG_ERROR(Render_Vulkan, "Failed to read Vulkan driver pipeline cache: {}",
+                      static_cast<int>(result));
+            return false;
+        }
+        // Publish only a complete snapshot. A failed write leaves the previous cache intact.
+        std::ofstream file;
+        file.exceptions(std::ofstream::failbit | std::ofstream::badbit);
+        file.open(temporary, std::ios::binary | std::ios::trunc);
+        file.write(VULKAN_CACHE_MAGIC_NUMBER.data(), VULKAN_CACHE_MAGIC_NUMBER.size())
+            .write(reinterpret_cast<const char*>(&cache_version), sizeof(cache_version))
+            .write(cache_data.data(), cache_size);
+        file.close();
+        std::filesystem::rename(temporary, filename);
+        LOG_INFO(Render_Vulkan, "Vulkan driver pipelines cached at: {}",
+                 Common::FS::PathToUTF8String(filename));
+        return true;
+    } catch (const std::exception& exception) {
+        LOG_ERROR(Common_Filesystem, "Failed to save Vulkan driver pipeline cache {}: {}",
+                  Common::FS::PathToUTF8String(filename), exception.what());
+        std::error_code error;
         std::filesystem::remove(temporary, error);
-        return;
-    }
-
-    LOG_INFO(Render_Vulkan, "Vulkan driver pipelines cached at: {}",
-             Common::FS::PathToUTF8String(filename));
-
-} catch (const std::ios_base::failure& e) {
-    LOG_ERROR(Common_Filesystem, "{}", e.what());
-    if (!Common::FS::RemoveFile(filename)) {
-        LOG_ERROR(Common_Filesystem, "Failed to delete Vulkan driver pipeline cache file {}",
-                  Common::FS::PathToUTF8String(filename));
+        return false;
     }
 }
 

@@ -69,9 +69,12 @@ private:
 /// and calls `on_record` for every shader program found. Errors inside a SARC or BND4 member
 /// go to `on_member_error` and the walk goes on; other errors throw ArchiveError (programs
 /// already reported stay valid, like the Python generator).
+/// When supplied, `on_variation` receives the stages of each validated BNSH variation together.
+/// Its spans expire at callback return; other container formats do not invent stage pairings.
 void WalkArchive(std::span<const u8> data, const std::string& name,
                  const ZstdDictionaries* dictionaries,
                  const std::function<void(const ShaderRecord&)>& on_record,
-                 const std::function<void(const std::string&)>& on_member_error);
+                 const std::function<void(const std::string&)>& on_member_error,
+                 const std::function<void(std::span<const ShaderRecord>)>& on_variation = {});
 
 } // namespace VideoCommon::ShaderWarm
