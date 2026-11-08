@@ -851,6 +851,7 @@ private:
         bool drop_custom_border;
         bool srgb_border;
         bool drop_compare;
+        bool drop_lod_bias; ///< the image was written by the GPU: no Ocarina FSR LOD bias
         std::array<VkComponentSwizzle, 4> swizzle;
 
         bool operator==(const VariantKey&) const noexcept = default;
@@ -885,6 +886,7 @@ private:
     bool has_added_anisotropy{};
     bool has_linear_filtering{};
     bool has_depth_comparison{};
+    f32 added_lod_bias{}; ///< Ocarina FSR part of base_ci.mipLodBias
     bool has_minmax_reduction{};
     bool has_custom_border_colors{};
     bool has_srgb_border_color{};

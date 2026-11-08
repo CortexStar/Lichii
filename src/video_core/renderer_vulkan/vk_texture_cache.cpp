@@ -4694,6 +4694,21 @@ Sampler::Sampler(TextureCacheRuntime& runtime, const Tegra::Texture::TSCEntry& t
             max_lod = 0.25f;
         }
     }
+    // Ocarina with FSR: FSR renders below the output size, so textures would pick the render
+    // size's mips. AMD recommends a mip bias of log2(render / output) - 1, -1.58 for docked
+    // 1440p -> 4K, added to mipmapped samplers so textures keep the output's detail.
+    // EDEN_NX2_OOT_LOD_BIAS=<bias> replaces it (0 turns it off, also applies handheld).
+    f32 lod_bias = tsc.LodBias();
+    if (tsc.mipmap_filter != TextureMipmapFilter::None && Settings::values.ocarina_fsr.GetValue() &&
+        Settings::GetCurrentProgramID() == 0x0400486024DEC000ULL) {
+        static const char* const lod_bias_env = std::getenv("EDEN_NX2_OOT_LOD_BIAS");
+        const f32 fsr_lod_bias = lod_bias_env
+            ? std::clamp(std::strtof(lod_bias_env, nullptr), -4.0f, 0.0f)
+            : Settings::IsDockedMode() ? -1.58f : 0.0f;
+        const f32 biased = std::clamp(lod_bias + fsr_lod_bias, -15.0f, 15.0f);
+        added_lod_bias = biased - lod_bias;
+        lod_bias = biased;
+    }
     base_ci = VkSamplerCreateInfo{
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
         .pNext = nullptr,
@@ -4704,7 +4719,7 @@ Sampler::Sampler(TextureCacheRuntime& runtime, const Tegra::Texture::TSCEntry& t
         .addressModeU = wrap_u,
         .addressModeV = wrap_v,
         .addressModeW = wrap_p,
-        .mipLodBias = tsc.LodBias(),
+        .mipLodBias = lod_bias,
         .anisotropyEnable = static_cast<VkBool32>(max_anisotropy > 1.0f),
         .maxAnisotropy = max_anisotropy,
         .compareEnable = static_cast<VkBool32>(tsc.depth_compare_enabled),
@@ -4729,6 +4744,12 @@ Sampler::VariantKey Sampler::MakeKey(const ImageView& image_view, bool is_depth)
     // Vulkan leaves it undefined and AMD returns the 0/1 compare result (Ocarina forest fog
     // composite read alpha 0 -> black screen). Use a variant without comparison.
     key.drop_compare = has_depth_comparison && !is_depth;
+    // The FSR bias is for the game's textures. Images the GPU wrote (render targets: bloom and
+    // blur chains, reflections, fog) keep the game's own bias, or they'd read a mip too sharp.
+    if (added_lod_bias != 0.0f) {
+        const Image* const image = image_view.BackingImage();
+        key.drop_lod_bias = image != nullptr && True(image->flags & ImageFlagBits::GpuModified);
+    }
     if (needs_swizzle_mapping && !key.drop_custom_border && !image_view.HasIdentitySwizzle()) {
         const VkComponentMapping& mapping = image_view.Swizzle();
         key.swizzle = {mapping.r, mapping.g, mapping.b, mapping.a};
@@ -4792,6 +4813,9 @@ VkSampler Sampler::Emplace(VariantKey key) {
     }
 
     VkSamplerCreateInfo create_info = base_ci;
+    if (key.drop_lod_bias) {
+        create_info.mipLodBias -= added_lod_bias;
+    }
     if (key.drop_compare) {
         create_info.compareEnable = VK_FALSE;
     }
