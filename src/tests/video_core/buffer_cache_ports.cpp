@@ -289,6 +289,11 @@ struct BufferCacheTestAccess {
     static void Download(Cache& cache, std::span<const std::pair<DAddr, u64>> ranges) {
         cache.DownloadRangesMemory(ranges);
     }
+    /// A draw or dispatch binds [address, address + size) of buffer `id`: its CPU-modified bytes
+    /// are uploaded.
+    static void Upload(Cache& cache, BufferId id, DAddr address, u32 size) {
+        (void)cache.SynchronizeBuffer(cache.slot_buffers[id], address, size);
+    }
     static void Uniform(Cache& cache, BufferCacheChannelInfo& channel, BufferId id, DAddr address,
                         u32 size) {
         cache.channel_state = &channel;
@@ -1828,6 +1833,105 @@ TEST_CASE("Guest writes racing read downloads keep their bytes", "[buffer_ports]
         lost += GuestHolds(f, 0x20a20, cpu_value) ? 0 : 1;
     }
     REQUIRE(lost == 0);
+    REQUIRE(Access::ReadChecks(*f.cache).mismatched == 0);
+    REQUIRE(Access::ReadChecks(*f.cache).uncovered == 0);
+}
+
+TEST_CASE("Read download check leaves out early downloaded bytes the guest wrote since",
+          "[buffer_ports]") {
+    Fixture f;
+    const Nx2TitleScope nx2_title;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    auto& buffer = Access::Get(*f.cache, id);
+    Access::CheckEveryRead(*f.cache);
+    for (u8 frame = 1; frame <= 2; ++frame) {
+        WriteByDispatch(f, id, 0x20000, 0x100, frame);
+        ReadWord(f, 0x20010);
+    }
+    WriteByDispatch(f, id, 0x20000, 0x100, 3);
+    f.runtime.Complete(f.runtime.submitted_tick);
+    f.cache->NoteWorkRecorded(true);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 0);
+    // The guest writes 16 of the landed bytes, as GPU::InvalidateGPUCache applies it, and a draw
+    // uploads them. Then it writes the landed value back, which no upload has taken yet.
+    const std::array<std::pair<DAddr, u64>, 1> written{{{0x20040, 0x10}}};
+    const auto guest_write = [&](u8 value) {
+        std::memset(f.bytes + 0x10040, value, 0x10);
+        f.cache->ClaimCpuWrites(written);
+        f.cache->WriteMemory(0x20040, 0x10);
+    };
+    guest_write(0xee);
+    Access::Upload(*f.cache, id, 0x20000, 0x1000);
+    REQUIRE(buffer.bytes[0x40] == 0xee);
+    guest_write(3);
+    // A synchronous flush at the read leaves them to the guest, as the other landed bytes are
+    // what it would bring.
+    REQUIRE_FALSE(ReadWord(f, 0x20010).preemtive);
+    REQUIRE(f.bytes[0x10040] == 3);
+    REQUIRE(f.bytes[0x10010] == 3);
+    REQUIRE(Access::ReadChecks(*f.cache).compared != 0);
+    REQUIRE(Access::ReadChecks(*f.cache).mismatched == 0);
+    REQUIRE(Access::ReadChecks(*f.cache).uncovered == 0);
+}
+
+TEST_CASE("Read download check leaves out a guest write an earlier read's landing kept",
+          "[buffer_ports]") {
+    Fixture f;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    std::ranges::fill(Access::Get(*f.cache, id).bytes, 0x12);
+    Access::CheckEveryRead(*f.cache);
+    GuestCpuWrites writes{*f.cache};
+    // A read's download, then a read whose bytes it brings: that read's check copy comes alone,
+    // in the next submission.
+    Access::MarkWritten(*f.cache, id, 0x20000, 0x100);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 2);
+    REQUIRE(Access::ReadChecks(*f.cache).alone_recorded == 1);
+    // The guest writes into those bytes. The first download lands at a fence and keeps the
+    // write, collected and not yet applied; then the write is applied, before the second lands.
+    writes.Write(f.bytes + 0x10040, 0x20040, NewGuestValue);
+    f.runtime.Complete(f.runtime.submitted_tick - 1);
+    f.cache->PopAsyncFlushes();
+    REQUIRE(Access::ReadDownloads(*f.cache) == 1);
+    writes.Apply();
+    f.cache->WriteMemory(0x20040, 0x40);
+    f.cache->FinishReadDownloads(0x20000, 0x1000);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 0);
+    REQUIRE(GuestHolds(f, 0x20040, NewGuestValue));
+    REQUIRE(f.bytes[0x1003f] == 0x12);
+    REQUIRE(f.bytes[0x10080] == 0x12);
+    REQUIRE(Access::ReadChecks(*f.cache).checked == 2);
+    REQUIRE(Access::ReadChecks(*f.cache).mismatched == 0);
+    REQUIRE(Access::ReadChecks(*f.cache).uncovered == 0);
+}
+
+TEST_CASE("Read download check leaves out early downloaded bytes a query result copy replaced",
+          "[buffer_ports]") {
+    Fixture f;
+    const Nx2TitleScope nx2_title;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    auto& buffer = Access::Get(*f.cache, id);
+    Access::CheckEveryRead(*f.cache);
+    for (u8 frame = 1; frame <= 2; ++frame) {
+        WriteByDispatch(f, id, 0x20000, 0x100, frame);
+        ReadWord(f, 0x20010);
+    }
+    WriteByDispatch(f, id, 0x20000, 0x100, 3);
+    f.runtime.Complete(f.runtime.submitted_tick);
+    f.cache->NoteWorkRecorded(true);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 0);
+    // A query result copied into landed bytes on the GPU (SyncValues), which the buffer cache
+    // hears of only as outdating downloads. The query cache writes guest memory after this read,
+    // and a synchronous flush at the read leaves guest memory as it is.
+    f.runtime.pending.push_back(
+        [&buffer] { std::fill_n(buffer.bytes.begin() + 0x40, 8, u8{0x56}); });
+    f.cache->OutdateReadDownloads(0x20040, 8);
+    REQUIRE_FALSE(ReadWord(f, 0x20010).preemtive);
+    REQUIRE(buffer.bytes[0x40] == 0x56);
+    REQUIRE(f.bytes[0x10040] == 3);
+    REQUIRE(f.bytes[0x10048] == 3);
+    REQUIRE(Access::ReadChecks(*f.cache).compared != 0);
     REQUIRE(Access::ReadChecks(*f.cache).mismatched == 0);
     REQUIRE(Access::ReadChecks(*f.cache).uncovered == 0);
 }

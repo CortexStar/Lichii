@@ -877,8 +877,10 @@ private:
     [[nodiscard]] bool ReadChecks() const {
         return read_check.every != 0 || ReadCheckEvery() != 0;
     }
-    /// A download landed `written`: what guest memory holds now over a later check's `kept`.
-    void NoteLandedBytes(ReadCheck& check, const Common::RangeSet<DAddr>& written);
+    /// A download landed `written`, but for the guest CPU writes collected then (`cpu_written`):
+    /// what guest memory holds now over a later check's `kept`.
+    void NoteLandedBytes(ReadCheck& check, const Common::RangeSet<DAddr>& written,
+                         const Common::RangeSet<DAddr>& cpu_written);
 
     /// A DownloadMemoryForRead: its copies, and what is left of them to do once the host GPU has
     /// run them.
