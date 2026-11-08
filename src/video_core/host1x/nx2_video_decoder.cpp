@@ -91,10 +91,6 @@ bool IsH264Stream(std::span<const u8> data) {
 }
 
 struct Nx2VideoDecoder::Impl {
-    /// Packets a host GPU decoder took before its first picture, sent again to the CPU decoder
-    /// if it fails. Beyond this many without a picture the GPU decoder counts as failed.
-    static constexpr size_t MaxUnconfirmed = 32;
-
     std::string name;
     NvdecCommon::VideoCodec codec{};
     u32 width{};
@@ -105,14 +101,20 @@ struct Nx2VideoDecoder::Impl {
     std::optional<FFmpeg::DecoderContext> context;
     SwsContext* scaler{};
     bool open{};
-    bool on_gpu{};    ///< Decoding on a host GPU
-    bool confirmed{}; ///< The host GPU decoder produced a picture
-    std::vector<std::pair<std::vector<u8>, u64>> unconfirmed;
+    bool on_gpu{};                    ///< Decoding on a host GPU
+    size_t device_index{};            ///< Its place in the codec's device order
+    bool confirmed{};                 ///< The decoder produced a picture
+    size_t packets_without_picture{}; ///< Since it was opened
+    /// Packets to send again to the next decoder if the GPU one fails: AV1 from the last packet
+    /// with a sequence header (a decoder can start there), other codecs until the first picture.
+    std::vector<std::pair<std::vector<u8>, u64>> replay;
     H264PacketConverter h264_packets;
     /// Timestamps of submitted frames not yet output. Frames copied back from a host GPU decoder
     /// lose theirs and take the earliest one instead.
     std::multiset<u64> pending_pts;
     std::vector<u8> packet; ///< FFmpeg reads up to AV_INPUT_BUFFER_PADDING_SIZE past the data
+    std::optional<u64> last_pts_out; ///< Of the last picture returned
+    std::optional<u64> skip_through; ///< While FallBack resends: pictures already returned
 
     ~Impl() {
         sws_freeContext(scaler);
@@ -127,8 +129,11 @@ struct Nx2VideoDecoder::Impl {
         on_gpu = false;
     }
 
-    bool Open(bool gpu) {
+    /// Opens the GPU decoder from the `first_device`-th device type of the codec's order on, or
+    /// the CPU decoder without one.
+    bool Open(std::optional<size_t> first_device) {
         Close();
+        const bool gpu = first_device.has_value();
         decoder.emplace(codec, gpu);
         if (decoder->GetCodec() == nullptr) {
             decoder.reset();
@@ -137,10 +142,12 @@ struct Nx2VideoDecoder::Impl {
         context.emplace(*decoder);
         if (gpu) {
             hardware.emplace();
-            if (!hardware->InitializeForDecoder(*context, *decoder)) {
+            const auto index = hardware->InitializeForDecoder(*context, *decoder, *first_device);
+            if (!index) {
                 Close();
                 return false;
             }
+            device_index = *index;
             context->SetThreadCount(1);
         } else if (codec == NvdecCommon::VideoCodec::AV1) {
             const u32 threads = Nx2SoftwareDecodeThreads(width, height, rate,
@@ -152,7 +159,7 @@ struct Nx2VideoDecoder::Impl {
         open = context->OpenContext(*decoder);
         on_gpu = open && gpu;
         confirmed = false;
-        unconfirmed.clear();
+        packets_without_picture = 0;
         pending_pts.clear();
         h264_packets.Reset();
         return open;
@@ -178,18 +185,67 @@ struct Nx2VideoDecoder::Impl {
         Receive(pictures);
     }
 
-    // The host GPU decoder failed: decode on the CPU from here, starting over from the packets it
-    // took before its first picture.
-    void FallBackToCpu(std::vector<Nx2Picture>& pictures) {
-        LOG_WARNING(HW_GPU, "nx2 video: GPU decoder for \"{}\" failed{}, decoding on the CPU", name,
-                    confirmed ? " mid-stream" : "");
-        auto replay = std::move(unconfirmed);
-        if (!Open(false)) {
-            LOG_ERROR(HW_GPU, "nx2 video: no CPU decoder for \"{}\"", name);
+    // Opens the GPU decoder, falling back to the next device type and then to the CPU.
+    bool OpenFirst(std::optional<size_t> first_device) {
+        if (first_device && Open(first_device)) {
+            return true;
+        }
+        return Open(std::nullopt);
+    }
+
+    // The GPU decoder failed: move on to the next device type, then the CPU, and send the kept
+    // packets again, so the stream never stops at a failed decoder. Pictures the failed decoder
+    // already returned are not returned again.
+    void FallBack(std::vector<Nx2Picture>& pictures, size_t pictures_before) {
+        const auto packets = std::move(replay);
+        replay.clear();
+        pictures.resize(pictures_before);
+        skip_through = last_pts_out;
+        while (on_gpu) {
+            const std::string failed = av_hwdevice_get_type_name(hardware->GetType());
+            const bool mid_stream = confirmed;
+            if (!OpenFirst(device_index + 1)) {
+                LOG_ERROR(HW_GPU, "nx2 video: {} decoder for \"{}\" failed, and no other decoder "
+                          "opens", failed, name);
+                break;
+            }
+            // Error level: it also flushes the log file.
+            LOG_ERROR(HW_GPU,
+                      "nx2 video: {} decoder for \"{}\" failed{}; decoding on {} from {} kept "
+                      "packets",
+                      failed, name, mid_stream ? " mid-stream" : "",
+                      on_gpu ? av_hwdevice_get_type_name(hardware->GetType()) : "the CPU",
+                      packets.size());
+            bool failed_again = false;
+            for (const auto& [data, pts] : packets) {
+                Keep(data, pts);
+                Send(data, pts, pictures);
+                if (on_gpu && context->HardwareFailed()) {
+                    failed_again = true;
+                    break;
+                }
+            }
+            if (!failed_again) {
+                confirmed = pictures.size() > pictures_before;
+                break;
+            }
+            replay.clear();
+            pictures.resize(pictures_before);
+        }
+        skip_through.reset();
+    }
+
+    // Keeps a packet for FallBack while decoding on the GPU.
+    void Keep(std::span<const u8> data, u64 pts) {
+        if (!on_gpu || (codec != NvdecCommon::VideoCodec::AV1 && confirmed)) {
+            replay.clear();
             return;
         }
-        for (const auto& [data, pts] : replay) {
-            Send(data, pts, pictures);
+        if (codec == NvdecCommon::VideoCodec::AV1 && Nx2Av1StartsSequence(data)) {
+            replay.clear();
+        }
+        if (replay.size() < Nx2MaxReplayPackets) {
+            replay.emplace_back(std::vector<u8>{data.begin(), data.end()}, pts);
         }
     }
 
@@ -208,6 +264,10 @@ struct Nx2VideoDecoder::Impl {
                 pts = *pending_pts.begin();
                 pending_pts.erase(pending_pts.begin());
             }
+            if (skip_through && pts <= *skip_through) {
+                continue;
+            }
+            last_pts_out = pts;
             pictures.push_back({static_cast<u32>(f->width), static_cast<u32>(f->height), pts,
                                 std::move(frame)});
         }
@@ -228,7 +288,7 @@ Nx2VideoDecoder::Nx2VideoDecoder(std::string_view mime, u32 width, u32 height, u
     impl->codec = *codec;
     const bool gpu =
         Settings::values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Gpu;
-    if (!(gpu && impl->Open(true)) && !impl->Open(false)) {
+    if (!impl->OpenFirst(gpu ? std::optional<size_t>{0} : std::nullopt)) {
         LOG_ERROR(HW_GPU, "nx2 video: FFmpeg has no decoder for \"{}\"", mime);
     }
     LOG_INFO(HW_GPU, "nx2 video: decoder for \"{}\" {}{}", mime,
@@ -249,22 +309,19 @@ void Nx2VideoDecoder::Decode(std::span<const u8> data, u64 pts, std::vector<Nx2P
     if (!impl->open || data.empty()) {
         return;
     }
-    const bool probing = impl->on_gpu && !impl->confirmed;
-    if (probing) {
-        impl->unconfirmed.emplace_back(std::vector<u8>{data.begin(), data.end()}, pts);
-    }
+    impl->Keep(data, pts);
     const size_t before = pictures.size();
     impl->Send(data, pts, pictures);
-    if (!impl->on_gpu) {
-        return;
-    }
-    if (impl->context->HardwareFailed() ||
-        (probing && pictures.size() == before && impl->unconfirmed.size() > Impl::MaxUnconfirmed)) {
-        pictures.resize(before);
-        impl->FallBackToCpu(pictures);
-    } else if (pictures.size() > before) {
+    if (pictures.size() > before) {
         impl->confirmed = true;
-        impl->unconfirmed.clear();
+        impl->packets_without_picture = 0;
+    } else {
+        ++impl->packets_without_picture;
+    }
+    if (impl->on_gpu &&
+        Nx2GpuDecoderFailed(impl->context->HardwareFailed(), impl->confirmed,
+                            impl->packets_without_picture)) {
+        impl->FallBack(pictures, before);
     }
 }
 
@@ -281,7 +338,8 @@ void Nx2VideoDecoder::Reset() {
     if (impl->open) {
         avcodec_flush_buffers(impl->context->GetCodecContext());
     }
-    impl->unconfirmed.clear();
+    impl->replay.clear();
+    impl->last_pts_out.reset();
     impl->pending_pts.clear();
     impl->h264_packets.Reset();
 }
