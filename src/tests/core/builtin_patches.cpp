@@ -402,6 +402,8 @@ constexpr size_t UltrawideIndexOffset = sizeof(Loader::NSOHeader) + 0x1087FC0;
 constexpr size_t UltrawideListIndexOffset = sizeof(Loader::NSOHeader) + 0x1087EE0;
 constexpr size_t UltrawideAspectOffset = sizeof(Loader::NSOHeader) + 0x3EF5DCC;
 constexpr size_t UltrawideCtorOffset = sizeof(Loader::NSOHeader) + 0xEF3834;
+constexpr size_t UltrawideCapOffset = sizeof(Loader::NSOHeader) + 0x6505EC;
+constexpr size_t UltrawideCaveOffset = sizeof(Loader::NSOHeader) + 0x3C46700;
 constexpr u32 BneInstruction = 0x54000061;
 constexpr u32 AspectSixteenNine = 0x3FE38E3B;
 constexpr u32 AspectFortyThreeEighteen = 0x4018E38E;
@@ -413,6 +415,17 @@ void PutWord(std::vector<u8>& nso, size_t offset, u32 word) {
 std::vector<u8> MakeUltrawideMain() {
     auto nso = MakeMain(OcarinaBuildId, TbzInstruction);
     nso.resize(UltrawideSizeOffset + 8);
+    // The real main's segments, so the cave is checked against its executable padding.
+    Loader::NSOHeader header;
+    std::memcpy(&header, nso.data(), sizeof(header));
+    header.segments[0].size = 63201744;
+    header.segments[1].location = 63205376;
+    header.segments[1].size = 12603520;
+    header.segments[2].location = 75812864;
+    header.segments[2].size = 5217152;
+    header.segments[2].bss_size = 1414272;
+    std::memcpy(nso.data(), &header, sizeof(header));
+    PutWord(nso, UltrawideCapOffset, 0x6B0802BF); // cmp w21, w8
     PutWord(nso, UltrawideSizeOffset, 2560);
     PutWord(nso, UltrawideSizeOffset + 4, 1440);
     PutWord(nso, UltrawideIndexOffset, BneInstruction);
@@ -460,6 +473,9 @@ TEST_CASE("Built-in Ultrawide applies only docked with the 21:9 aspect ratio", "
         REQUIRE(WordAt(patched, UltrawideAspectOffset) == AspectFortyThreeEighteen);
         REQUIRE(WordAt(patched, UltrawideCtorOffset) == 0xD29C71C8);     // mov x8, #0xe38e
         REQUIRE(WordAt(patched, UltrawideCtorOffset + 8) == 0xF2A80308); // movk x8, #0x4018
+        REQUIRE(WordAt(patched, UltrawideCapOffset) == 0x14D7D845);       // b main+0x3C46700
+        REQUIRE(WordAt(patched, UltrawideCaveOffset) == 0x6B0902DF);      // cmp w22, w9
+        REQUIRE(WordAt(patched, UltrawideCaveOffset + 24) == 0x172827B9); // b main+0x6505FC
     }
 
     SECTION("16:9 leaves the game alone") {
@@ -483,6 +499,13 @@ TEST_CASE("Built-in Ultrawide applies only docked with the 21:9 aspect ratio", "
         UltrawideSettings settings{Settings::AspectRatio::R21_9, Settings::ConsoleMode::Docked};
         auto other = nso;
         PutWord(other, UltrawideAspectOffset, 0x3FE38E39);
+        REQUIRE(context.Manager().PatchNSO(other, "main") == other);
+    }
+
+    SECTION("A cave over code that is not padding skips every record") {
+        UltrawideSettings settings{Settings::AspectRatio::R21_9, Settings::ConsoleMode::Docked};
+        auto other = nso;
+        PutWord(other, UltrawideCaveOffset + 8, 1);
         REQUIRE(context.Manager().PatchNSO(other, "main") == other);
     }
 }
