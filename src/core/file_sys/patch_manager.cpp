@@ -39,6 +39,7 @@
 #include "core/loader/loader.h"
 #include "core/loader/nso.h"
 #include "core/memory/cheat_engine.h"
+#include "core/oot_ultrawide.h"
 
 namespace FileSys {
 namespace {
@@ -71,12 +72,9 @@ struct BuiltinPatch {
     bool ultrawide = false;
 };
 
-/// The game renders for the window's 21:9 shape instead of 16:9: the aspect ratio setting asks
-/// for 21:9 and the console is docked (handheld keeps the 1080p panel's 16:9).
-bool UltrawideRendering() {
-    return Settings::values.aspect_ratio.GetValue() == Settings::AspectRatio::R21_9 &&
-           Settings::IsDockedMode();
-}
+using Core::OotUltrawide::UltrawideRendering;
+
+constexpr std::string_view UltrawideAddOn = "Ultrawide 21:9 (built-in)";
 
 constexpr std::array<u8, 4> MAX_RESOLUTION_ORIGINAL{0xE8, 0x41, 0x00, 0x36};
 constexpr std::array<u8, 4> MAX_RESOLUTION_BRANCH{0x0F, 0x02, 0x00, 0x14};
@@ -402,7 +400,7 @@ constexpr std::array BUILTIN_PATCHES{
         .state_size = 16,
     },
     BuiltinPatch{
-        .name = "Ultrawide 21:9 (built-in)",
+        .name = UltrawideAddOn,
         .title_id = 0x0400486024DEC000,
         .module = "main",
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
@@ -1043,16 +1041,55 @@ std::vector<Core::Memory::CheatEntry> PatchManager::CreateCheatList(const BuildI
     return out;
 }
 
+namespace {
+
+/// A layer holding Ocarina's HeapDef table with its render-target heap grown for 3440x1440, or
+/// nullptr when the RomFS has no such table or it is not the expected format.
+VirtualDir UltrawideHeapLayer(const VirtualDir& romfs) {
+    namespace Uw = Core::OotUltrawide;
+    const auto file = romfs->GetFileRelative(Uw::HeapDefPath);
+    if (file == nullptr) {
+        LOG_WARNING(Loader, "    RomFS: no {} for \"{}\"", Uw::HeapDefPath, UltrawideAddOn);
+        return nullptr;
+    }
+    const auto original = file->ReadAllBytes();
+    auto grown = Uw::GrowHeapDef(original, Uw::TextureHeapExtraKiB);
+    if (!grown) {
+        LOG_WARNING(Loader, "    RomFS: {} is not the HeapDef table \"{}\" expects",
+                    Uw::HeapDefPath, UltrawideAddOn);
+        return nullptr;
+    }
+    LOG_INFO(Loader,
+             "    RomFS: \"{}\" grows DynamicTextureAllocatorMem and Graphics by {} KiB",
+             UltrawideAddOn, Uw::TextureHeapExtraKiB);
+    auto heap_dir = std::make_shared<VectorVfsDirectory>(
+        std::vector<VirtualFile>{std::make_shared<VectorVfsFile>(std::move(*grown),
+                                                                 std::string{file->GetName()})},
+        std::vector<VirtualDir>{}, "HeapSize");
+    auto system_dir = std::make_shared<VectorVfsDirectory>(
+        std::vector<VirtualFile>{}, std::vector<VirtualDir>{std::move(heap_dir)}, "System");
+    return std::make_shared<VectorVfsDirectory>(std::vector<VirtualFile>{},
+                                                std::vector<VirtualDir>{std::move(system_dir)});
+}
+
+} // Anonymous namespace
+
 void PatchManager::ApplyLayeredFS(VirtualFile& romfs, ContentRecordType type) const {
     const auto load_dir = GetModificationLoadRoot();
     const auto sdmc_load_dir = GetModificationLoadRoot(true);
+    const auto disabled = GetDisabledAddons();
+    // Ocarina at 21:9 draws a 3440x1440 picture: its render-target heap grows with it
+    // (core/oot_ultrawide.h), as a built-in layer below the user's mods.
+    const bool ultrawide_heap =
+        type == ContentRecordType::Program && title_id == Core::OotUltrawide::ProgramId &&
+        UltrawideRendering() &&
+        std::find(disabled.cbegin(), disabled.cend(), UltrawideAddOn) == disabled.cend();
     if ((type != ContentRecordType::Program && type != ContentRecordType::Data &&
          type != ContentRecordType::HtmlDocument) ||
-        (load_dir == nullptr && sdmc_load_dir == nullptr)) {
+        (load_dir == nullptr && sdmc_load_dir == nullptr && !ultrawide_heap)) {
         return;
     }
 
-    const auto disabled = GetDisabledAddons();
     std::vector<VirtualDir> patch_dirs;
     if (load_dir != nullptr) {
         patch_dirs = load_dir->GetSubdirectories();
@@ -1094,7 +1131,7 @@ void PatchManager::ApplyLayeredFS(VirtualFile& romfs, ContentRecordType type) co
     }
 
     // When there are no layers to apply, return early as there is no need to rebuild the RomFS
-    if (layers.empty() && layers_ext.empty()) {
+    if (layers.empty() && layers_ext.empty() && !ultrawide_heap) {
         return;
     }
 
@@ -1103,6 +1140,13 @@ void PatchManager::ApplyLayeredFS(VirtualFile& romfs, ContentRecordType type) co
         return;
     }
 
+    if (ultrawide_heap) {
+        if (auto heap_layer = UltrawideHeapLayer(extracted)) {
+            layers.emplace_back(std::move(heap_layer));
+        } else if (layers.empty() && layers_ext.empty()) {
+            return;
+        }
+    }
     layers.emplace_back(std::move(extracted));
 
     auto layered = LayeredVfsDirectory::MakeLayeredDirectory(std::move(layers));
