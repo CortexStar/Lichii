@@ -153,7 +153,8 @@ struct GPU::Impl {
     template <typename Func>
     [[nodiscard]] u64 RequestSyncOperation(Func&& action) {
         std::unique_lock lck{sync_request_mutex};
-        const u64 fence = ++last_sync_fence;
+        const u64 fence = last_sync_fence.load(std::memory_order_relaxed) + 1;
+        last_sync_fence.store(fence, std::memory_order_release);
         sync_requests.emplace_back(std::forward<Func>(action));
         return fence;
     }
@@ -179,6 +180,12 @@ struct GPU::Impl {
 
     /// Tick pending requests within the GPU.
     void TickWork() {
+        // After every draw and dispatch, nearly always with nothing to do: every request made
+        // has run. One made meanwhile runs at the next tick, which its maker asks for.
+        if (current_sync_fence.load(std::memory_order_acquire) ==
+            last_sync_fence.load(std::memory_order_acquire)) {
+            return;
+        }
         std::unique_lock lck{sync_request_mutex};
         while (!sync_requests.empty()) {
             auto request = std::move(sync_requests.front());
@@ -463,7 +470,7 @@ struct GPU::Impl {
     std::list<std::function<void()>> sync_requests;
     std::atomic<u64> current_sync_fence{};
     std::atomic<AmpereAnchor> ampere_anchor{};
-    u64 last_sync_fence{};
+    std::atomic<u64> last_sync_fence{}; ///< The last request's fence (written under the mutex)
 
     VideoCommon::PendingMaps pending_maps;
     std::mutex sync_request_mutex;
