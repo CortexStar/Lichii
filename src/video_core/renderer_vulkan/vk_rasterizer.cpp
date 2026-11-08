@@ -69,6 +69,7 @@
 #include "video_core/textures/texture.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
+#include "video_core/draw_debug_switches.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_debug_control.h"
@@ -416,7 +417,9 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
                      gpu.ShaderNotify()),
       accelerate_dma(buffer_cache, texture_cache, scheduler),
       fence_manager(*this, gpu, texture_cache, buffer_cache, query_cache, device, scheduler),
-      frame_dump(device, memory_allocator, scheduler) {
+      frame_dump(device, memory_allocator, scheduler),
+      draw_debug_hooks{
+          VideoCommon::AnyDrawDebugSwitch([](const char* name) { return std::getenv(name); })} {
     scheduler.SetQueryCache(query_cache);
     buffer_cache.SetPendingCpuWrites(
         [this](const std::function<void(DAddr, size_t)>& callback) {
@@ -522,7 +525,7 @@ bool RasterizerVulkan::TryNx2IndirectReset(bool is_indexed, u32 instance_count) 
 template <typename Func>
 void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_indirect) {
 
-    if (Common::DkbFrameTrace::Enabled()) {
+    if (draw_debug_hooks && Common::DkbFrameTrace::Enabled()) {
         ++trace_draws;
     }
 
@@ -772,8 +775,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     TrackOcarinaCamera();
     TrackOcarinaActor(pipeline->ShaderHashes()[1], is_indexed, is_indirect);
 #endif
-    TracePendingCpuWrites(false, pipeline->ShaderHashes());
-    TraceRenderState(is_indexed, "configured", texture_cache.GetFramebuffer());
+    if (draw_debug_hooks) {
+        DrawDebugHooksConfigured(pipeline, is_indexed, is_indirect && !mesh_draw);
+    }
     if (frame_dump.Capturing()) {
         FrameDumpPass(texture_cache.GetFramebuffer());
         frame_dump.NoteDraw(pipeline->ShaderHashes());
@@ -791,22 +795,6 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         }
         if (recorded) {
             scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
-        }
-    }
-    if (VideoCommon::RenderTrace::SampleFrame(render_trace_frame) && render_trace_draws <= 2048) {
-        LOG_DEBUG(Render_Vulkan,
-                  "Render trace pipeline: frame={} draw={} hashes={:016x} dynamic_vertex_input={}",
-                  render_trace_frame, render_trace_draws, fmt::join(pipeline->ShaderHashes(), ","),
-                  pipeline->HasDynamicVertexInput());
-    }
-
-    if (is_indirect && !mesh_draw && Common::DkbFrameTrace::Enabled()) {
-        static const bool readback = [] {
-            const char* value = std::getenv("EDEN_DKB_INDIRECT_READBACK");
-            return value && std::string_view{value} == "1";
-        }();
-        if (readback) {
-            CaptureIndirectTrace();
         }
     }
 
@@ -966,29 +954,32 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 }
 } // Anonymous namespace
 
-void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
-    VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
-    {
-        // A draw's first and count can come from memory a skipped (rejected) compute program
-        // should have written. Past 16M vertices they are garbage: building the quad index
-        // buffer for one threw out of the GPU thread and ended the process (Hyrule Warriors:
-        // Age of Imprisonment, entering a new area), and indexed ones read far out of bounds.
-        const auto& state = maxwell3d->draw_manager.draw_state;
-        const u64 first = is_indexed ? state.index_buffer.first : state.vertex_buffer.first;
-        const u64 count = is_indexed ? state.index_buffer.count : state.vertex_buffer.count;
-        constexpr u64 MaxVertices = u64{1} << 24;
-        if (first + count > MaxVertices) {
-            static std::atomic<u32> skipped{};
-            if (skipped.fetch_add(1, std::memory_order_relaxed) < 16) {
-                LOG_WARNING(HW_GPU, "Draw skipped: {} {} from {} (vertex/index count past {})",
-                            count, is_indexed ? "indices" : "vertices", first, MaxVertices);
-            }
-            return;
+// The per-draw debug switches that look at the configured pipeline (DrawDebugSwitches).
+YUZU_NO_INLINE void RasterizerVulkan::DrawDebugHooksConfigured(GraphicsPipeline* pipeline,
+                                                               bool is_indexed,
+                                                               bool plain_indirect) {
+    TracePendingCpuWrites(false, pipeline->ShaderHashes());
+    TraceRenderState(is_indexed, "configured", texture_cache.GetFramebuffer());
+    if (VideoCommon::RenderTrace::SampleFrame(render_trace_frame) && render_trace_draws <= 2048) {
+        LOG_DEBUG(Render_Vulkan,
+                  "Render trace pipeline: frame={} draw={} hashes={:016x} dynamic_vertex_input={}",
+                  render_trace_frame, render_trace_draws, fmt::join(pipeline->ShaderHashes(), ","),
+                  pipeline->HasDynamicVertexInput());
+    }
+
+    if (plain_indirect && Common::DkbFrameTrace::Enabled()) {
+        static const bool readback = [] {
+            const char* value = std::getenv("EDEN_DKB_INDIRECT_READBACK");
+            return value && std::string_view{value} == "1";
+        }();
+        if (readback) {
+            CaptureIndirectTrace();
         }
     }
-    if (TryNx2IndirectReset(is_indexed, instance_count)) {
-        return;
-    }
+}
+
+// The per-draw debug switches (DrawDebugSwitches), out of the draw path. False: skip the draw.
+YUZU_NO_INLINE bool RasterizerVulkan::DrawDebugHooks(bool is_indexed) {
     TraceWindowTarget(*maxwell3d, *gpu_memory, is_indexed ? "draw-indexed" : "draw",
                       is_indexed ? maxwell3d->draw_manager.draw_state.index_buffer.count
                                  : maxwell3d->draw_manager.draw_state.vertex_buffer.count);
@@ -1082,7 +1073,9 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     if (!skip_list.empty()) {
         const auto& regs = maxwell3d->regs;
         const u64 vs = (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) | regs.pipelines[1].reserved[1];
-        if (std::find(skip_list.begin(), skip_list.end(), vs) != skip_list.end()) return;
+        if (std::find(skip_list.begin(), skip_list.end(), vs) != skip_list.end()) {
+            return false;
+        }
     }
     // EDEN_NX2_RT_TRACE: log the first draw to every distinct colour target (debug aid).
     if (static const bool trace = std::getenv("EDEN_NX2_RT_TRACE") != nullptr; trace) {
@@ -1097,6 +1090,35 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
                      rt.Address(), rt.width, rt.height, static_cast<u32>(rt.format), vs, ps,
                      regs.blend.enable[0], seen.size());
         }
+    }
+    return true;
+}
+
+void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
+    VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
+    {
+        // A draw's first and count can come from memory a skipped (rejected) compute program
+        // should have written. Past 16M vertices they are garbage: building the quad index
+        // buffer for one threw out of the GPU thread and ended the process (Hyrule Warriors:
+        // Age of Imprisonment, entering a new area), and indexed ones read far out of bounds.
+        const auto& state = maxwell3d->draw_manager.draw_state;
+        const u64 first = is_indexed ? state.index_buffer.first : state.vertex_buffer.first;
+        const u64 count = is_indexed ? state.index_buffer.count : state.vertex_buffer.count;
+        constexpr u64 MaxVertices = u64{1} << 24;
+        if (first + count > MaxVertices) {
+            static std::atomic<u32> skipped{};
+            if (skipped.fetch_add(1, std::memory_order_relaxed) < 16) {
+                LOG_WARNING(HW_GPU, "Draw skipped: {} {} from {} (vertex/index count past {})",
+                            count, is_indexed ? "indices" : "vertices", first, MaxVertices);
+            }
+            return;
+        }
+    }
+    if (TryNx2IndirectReset(is_indexed, instance_count)) {
+        return;
+    }
+    if (draw_debug_hooks && !DrawDebugHooks(is_indexed)) {
+        return;
     }
     PrepareDraw(is_indexed, [this, is_indexed, instance_count] {
         const auto& draw_state = maxwell3d->draw_manager.draw_state;

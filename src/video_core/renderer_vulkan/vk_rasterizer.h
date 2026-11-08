@@ -245,6 +245,8 @@ private:
     void FrameDumpPass(const Framebuffer* framebuffer);
     /// EDEN_NX2_PENDING_WRITE_TRACE: logs bound buffer ranges with collected, unapplied CPU writes.
     void TracePendingCpuWrites(bool compute, std::span<const u64> shader_hashes);
+    bool DrawDebugHooks(bool is_indexed);
+    void DrawDebugHooksConfigured(GraphicsPipeline* pipeline, bool is_indexed, bool plain_indirect);
 #ifdef EGLANTINE_STREAMLINE
     bool OcarinaDlssEnabled() const;
     void TrackOcarinaCamera();
@@ -318,6 +320,8 @@ private:
 #endif
     u64 render_trace_frame = 0;
     u32 render_trace_draws = 0;
+    /// Any of VideoCommon::DrawDebugSwitches is set: run the per-draw debug hooks.
+    const bool draw_debug_hooks;
     u32 render_trace_clears = 0;
     bool pending_native_work{};
     bool mesh_draw{}; ///< the draw being prepared uses a task/mesh pipeline
