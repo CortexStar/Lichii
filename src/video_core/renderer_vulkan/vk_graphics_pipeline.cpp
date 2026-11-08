@@ -10,6 +10,7 @@
 #include <iostream>
 #include <span>
 #include "video_core/render_trace.h"
+#include "video_core/batched_handle_reads.h"
 
 #include <boost/container/small_vector.hpp>
 #include <boost/container/static_vector.hpp>
@@ -575,14 +576,20 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             }
         }
         for (const auto& desc : info.texture_descriptors) {
+            VideoCommon::BatchedHandles::Cursor batch{*gpu_memory, desc, cbufs};
             for (u32 index = 0; index < desc.count; ++index) {
-                const auto handle{VideoCommon::HandleIsStoragePointer(info, desc, index)
+                const bool storage_pointer = VideoCommon::HandleIsStoragePointer(info, desc, index);
+                const auto raw = storage_pointer ? std::optional<u32>{} : batch.Read(index);
+                const auto handle{storage_pointer
                                       ? VideoCommon::NULL_TEXTURE_HANDLE
-                                      : read_handle(desc, index)};
+                                      : raw ? TexturePair(*raw, via_header_index) : read_handle(desc, index)};
                 views.push_back({handle.first});
 
                 VideoCommon::SamplerId sampler{texture_cache.GetSamplerId(handle.second, false)};
                 samplers.push_back(sampler);
+            }
+            if (batch.ValidationFailed()) {
+                LOG_ERROR(Render_Vulkan, "Batched handle validation failed; using scalar reads");
             }
         }
         if constexpr (Spec::has_images) {
