@@ -104,6 +104,11 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     if (!scheduler.HasPendingChannels()) {
                         continue;
                     }
+                    // Words sent since the last publish would wait out the sleep below while the
+                    // back runs out of work: hand them over first.
+                    if (split.Active()) {
+                        split.Publish();
+                    }
                     // The CPU usually releases the semaphore soon after: poll for half a
                     // millisecond, then in short sleeps. Ocarina of Time waits here ~330 times a
                     // second and its present waits for the work behind them: with 1 ms sleeps the
