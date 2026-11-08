@@ -57,8 +57,11 @@ public:
     void SetWindowIcon();
 
 protected:
-    /// Called by WaitEvent when a key is pressed or released.
+    /// Called by KeyWatcher when a key is pressed or released, on the thread SDL read it on.
     void OnKeyEvent(int key, u8 state);
+
+    /// SDL event watcher: hands key events to OnKeyEvent as SDL reads them.
+    static bool SDLCALL KeyWatcher(void* userdata, SDL_Event* event);
 
     /// Converts a SDL mouse button into MouseInput mouse button
     InputCommon::MouseButton SDLButtonToMouseButton(u32 button) const;

@@ -32,10 +32,19 @@ EmuWindow_SDL3::EmuWindow_SDL3(InputCommon::InputSubsystem* input_subsystem_, Co
     : input_subsystem{input_subsystem_}, system{system_} {
     UpdateCurrentFramebufferLayout(Layout::ScreenUndocked::Width, Layout::ScreenUndocked::Height);
     input_subsystem->Initialize();
+#ifdef _WIN32
+    // Keys arrive on SDL's raw input thread (WM_INPUT read with GetRawInputBuffer at
+    // time-critical priority) as the OS delivers them, not with the window messages the main
+    // loop pumps every 1 ms.
+    SDL_SetHint(SDL_HINT_WINDOWS_RAW_KEYBOARD, "1");
+#endif
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD)) {
         LOG_CRITICAL(Frontend, "Failed to initialize SDL3: {}, Exiting...", SDL_GetError());
         exit(1);
     }
+    // Event watchers run on the thread that pushes the event; SDL_AppEvent would only see the
+    // key at the next main loop iteration.
+    SDL_AddEventWatch(&EmuWindow_SDL3::KeyWatcher, this);
     titlebar_timer = SDL_AddTimer(2000, [](void *userdata, SDL_TimerID, Uint32) -> Uint32 {
         auto* this_ = (EmuWindow_SDL3*)userdata;
         auto const results = this_->system.GetAndResetPerfStats();
@@ -61,6 +70,7 @@ EmuWindow_SDL3::EmuWindow_SDL3(InputCommon::InputSubsystem* input_subsystem_, Co
 }
 
 EmuWindow_SDL3::~EmuWindow_SDL3() {
+    SDL_RemoveEventWatch(&EmuWindow_SDL3::KeyWatcher, this);
     SDL_RemoveTimer(titlebar_timer);
     SDL_RemoveTimer(mouse_timer);
     delete pending_title.exchange(nullptr);
@@ -159,6 +169,14 @@ void EmuWindow_SDL3::OnKeyEvent(int key, u8 state) {
     }
 }
 
+bool SDLCALL EmuWindow_SDL3::KeyWatcher(void* userdata, SDL_Event* event) {
+    if (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) {
+        static_cast<EmuWindow_SDL3*>(userdata)->OnKeyEvent(int(event->key.scancode),
+                                                           event->key.down ? 1 : 0);
+    }
+    return true;
+}
+
 bool EmuWindow_SDL3::IsOpen() const {
     return is_open;
 }
@@ -245,7 +263,8 @@ void EmuWindow_SDL3::OnEvent(SDL_Event& event) {
         return;
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP:
-        return OnKeyEvent(int(event.key.scancode), event.key.down ? 1 : 0);
+        // KeyWatcher already handled it.
+        return;
     case SDL_EVENT_MOUSE_MOTION:
         // ignore if it came from touch
         if (event.button.which != SDL_TOUCH_MOUSEID)
