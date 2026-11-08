@@ -80,7 +80,10 @@ KeplerCompute::KeplerCompute(MemoryManager& memory_manager_)
     }
 }
 
-KeplerCompute::~KeplerCompute() = default;
+KeplerCompute::~KeplerCompute() {
+    // Held writes point at this engine (FrontQueueWrite).
+    VideoCommon::GpuSplit::Get().DropPendingFlush(this);
+}
 
 void KeplerCompute::BindRasterizer(VideoCore::RasterizerInterface* rasterizer_) {
     rasterizer = rasterizer_;
@@ -1583,8 +1586,7 @@ void KeplerCompute::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit&
         return;
     }
     FrontApply(fs, method, argument);
-    split.Method(this, method, argument, is_last_call, segment);
-    FrontNoteWrites(split, fs, method);
+    FrontQueueWrite(split, fs, method, argument, is_last_call, false, segment);
 }
 
 void KeplerCompute::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit& split,
@@ -1628,10 +1630,11 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
             return false;
         }
         FrontApply(fs, address, value);
-        split.MacroWrite(this, address, value);
-        FrontNoteWrites(split, fs, address);
+        FrontQueueWrite(split, fs, address, value, true, true, nullptr);
         return true;
     };
+    // The macro's upload data words may stay held until it returns.
+    front_run.in_macro = true;
 #ifdef ARCHITECTURE_x86_64
     if (!macro.native_jit) {
         macro.native_jit = std::make_shared<TuringMacroJit>();
@@ -1649,6 +1652,171 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
                   start, result.consumed, result.error);
     }
     fs.parameters.clear();
+    // Held data words go now, with their notes: what the front does next may read what they
+    // write without sending the held work first (a semaphore prediction).
+    front_run.in_macro = false;
+    if (front_run.note_count != 0) {
+        split.RunPendingFlush();
+    }
+}
+
+void KeplerCompute::FrontQueueWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 method,
+                                    u32 argument, bool is_last_call, bool direct,
+                                    const GPUVAddr* segment) {
+    using VideoCommon::GpuSplit;
+    constexpr u32 exec_upload_method = KEPLER_COMPUTE_REG_INDEX(exec_upload);
+    constexpr u32 data_upload_method = KEPLER_COMPUTE_REG_INDEX(data_upload);
+    constexpr u32 upload_method = KEPLER_COMPUTE_REG_INDEX(upload);
+    // With the narrow drains only: without them DmaPusher notes every memory-writing compute
+    // method as an unbounded write at the position after the call, which held work would not
+    // have reached.
+    if (!split.NarrowDrains() || method >= native_plain_methods.size()) {
+        if (direct) {
+            split.MacroWrite(this, method, argument);
+        } else {
+            split.Method(this, method, argument, is_last_call, segment);
+        }
+        FrontNoteWrites(split, fs, method);
+        return;
+    }
+    FrontWriteRun& run = front_run;
+    if (run.session != split.Session()) {
+        // A run left from before the split stopped never reaches the new ring.
+        run.count = 0;
+        run.note_count = 0;
+        run.has_segment = false;
+        run.writer = false;
+        run.session = split.Session();
+    }
+    // Register stores and execs write no memory: nothing reads what they do before the run goes.
+    const bool plain = native_plain_methods[method];
+    const bool exec = method == exec_upload_method;
+    // A data word with a known destination inside a macro call: noted when the run goes.
+    const bool hold_data = method == data_upload_method && run.in_macro && fs.upload_known;
+    if (run.count == FrontWriteRun::MaxWrites ||
+        (hold_data && run.note_count == FrontWriteRun::MaxNotes)) {
+        split.RunPendingFlush();
+    }
+    run.writes[run.count++] = u64{method} | (is_last_call ? GpuSplit::WriteIsLast : 0) |
+                              (direct ? GpuSplit::WriteDirect : 0) | (u64{argument} << 32);
+    if (segment != nullptr) {
+        run.segment = *segment;
+        run.has_segment = true;
+    }
+    run.writer |= !plain;
+    // Another holder's work goes first: it was sent before this write.
+    split.SetPendingFlush(&FrontFlushWrites, this);
+    if (plain || exec) {
+        // FrontNoteWrites only keeps the front's upload state for these.
+        FrontNoteWrites(split, fs, method);
+        return;
+    }
+    if (hold_data) {
+        FrontWriteRun::UploadNote note{};
+        std::memcpy(note.registers.data(), fs.registers.data() + upload_method,
+                    sizeof(note.registers));
+        note.linear = fs.upload_linear;
+        note.copy_size = fs.upload_copy_size;
+        // The words of one transfer note the same range: the last of them is enough. Only the
+        // data word itself, the last register, may differ.
+        if (run.note_count != 0) {
+            auto& last = run.notes[run.note_count - 1];
+            if (last.linear == note.linear && last.copy_size == note.copy_size &&
+                std::memcmp(last.registers.data(), note.registers.data(),
+                            sizeof(note.registers) - sizeof(u32)) == 0) {
+                last = note;
+                return;
+            }
+        }
+        run.notes[run.note_count++] = note;
+        return;
+    }
+    // Launches, releases, inline QMDs, macro loads, data words outside macros: the run goes now,
+    // then the method is noted at the position after it, as when it was its own entry.
+    split.RunPendingFlush();
+    FrontNoteWrites(split, fs, method);
+}
+
+void KeplerCompute::FrontFlushWrites(void* engine) {
+    // GpuSplit cleared the hook before calling: the entry below doesn't come back here.
+    auto* const self = static_cast<KeplerCompute*>(engine);
+    FrontWriteRun& run = self->front_run;
+    const u32 count = run.count;
+    if (count == 0) {
+        return;
+    }
+    auto& split = VideoCommon::GpuSplit::Get();
+    run.count = 0;
+    const GPUVAddr segment = run.segment;
+    split.Writes(self, run.writes.data(), count, run.has_segment ? &segment : nullptr);
+    run.has_segment = false;
+    if (run.writer) {
+        // As DmaPusher after each memory-writing compute method: WaitForWriters covers it.
+        run.writer = false;
+        split.NoteWriter();
+    }
+    const u32 notes = run.note_count;
+    run.note_count = 0;
+    if (notes == 0 || !self->front) {
+        return;
+    }
+    // FrontNoteWrites for each held data word's transfer, against the registers it saw.
+    constexpr u32 upload_method = KEPLER_COMPUTE_REG_INDEX(upload);
+    FrontState& fs = *self->front;
+    FrontWriteRun::UploadNote saved{};
+    std::memcpy(saved.registers.data(), fs.registers.data() + upload_method,
+                sizeof(saved.registers));
+    saved.linear = fs.upload_linear;
+    saved.copy_size = fs.upload_copy_size;
+    const bool saved_known = fs.upload_known;
+    for (u32 i = 0; i < notes; ++i) {
+        const auto& note = run.notes[i];
+        std::memcpy(fs.registers.data() + upload_method, note.registers.data(),
+                    sizeof(note.registers));
+        fs.upload_linear = note.linear;
+        fs.upload_copy_size = note.copy_size;
+        fs.upload_known = true;
+        self->FrontNoteWrites(split, fs, KEPLER_COMPUTE_REG_INDEX(data_upload));
+    }
+    std::memcpy(fs.registers.data() + upload_method, saved.registers.data(),
+                sizeof(saved.registers));
+    fs.upload_linear = saved.linear;
+    fs.upload_copy_size = saved.copy_size;
+    fs.upload_known = saved_known;
+}
+
+void KeplerCompute::BackWrites(Core::System& system, const u64* writes, u32 count) {
+    using VideoCommon::GpuSplit;
+    constexpr u32 exec_upload_method = KEPLER_COMPUTE_REG_INDEX(exec_upload);
+    constexpr u32 data_upload_method = KEPLER_COMPUTE_REG_INDEX(data_upload);
+    // While the run only stores registers and runs inline uploads, which read no memory, a
+    // flush continuing the previous one joins it (Upload::State::HoldWrites); the joined bytes go
+    // before anything else runs and at the end of the run.
+    bool holding = false;
+    for (u32 i = 0; i < count; ++i) {
+        const u64 write = writes[i];
+        const u32 method = static_cast<u32>(write & 0xffff);
+        const u32 argument = static_cast<u32>(write >> 32);
+        // As GpuSplit::Execute for a Method entry (MacroWrite: Direct).
+        if ((write & GpuSplit::WriteDirect) == 0 && !execution_mask[method]) {
+            method_sink.emplace_back(method, argument);
+            continue;
+        }
+        if (native_mode) {
+            const bool upload =
+                method == exec_upload_method || method == data_upload_method ||
+                (method < native_plain_methods.size() && native_plain_methods[method]);
+            if (upload != holding) {
+                holding = upload;
+                upload_state.HoldWrites(holding);
+            }
+        }
+        ConsumeSink(system);
+        CallMethod(system, method, argument, (write & GpuSplit::WriteIsLast) != 0);
+    }
+    if (holding) {
+        upload_state.HoldWrites(false);
+    }
 }
 
 void KeplerCompute::FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& fs, u32 method) {

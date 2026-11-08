@@ -23,6 +23,7 @@
 #include "common/thread.h"
 #include "core/core.h"
 #include "video_core/engines/engine_interface.h"
+#include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
@@ -1013,6 +1014,21 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
             ->BackCbWrite(*system, static_cast<u32>((head >> 12) & 0xffff),
                           static_cast<u32>(head >> 32), entry + 1, count);
         return 1 + size_t{count} / 2;
+    }
+    case Kind::Writes: {
+        // Only KeplerCompute sends these (FrontQueueWrite).
+        const u32 count = static_cast<u32>(head >> 32);
+        const size_t data = (head & HasSegment) != 0 ? 2 : 1;
+        Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+        if ((head & HasSegment) != 0) {
+            back_engine->current_dma_segment = entry[1];
+        }
+        if (Nx2Profile::Enabled()) [[unlikely]] {
+            Nx2Profile::Add(Nx2Profile::Counter::FusedWrites, count);
+        }
+        static_cast<Tegra::Engines::KeplerCompute*>(back_engine)
+            ->BackWrites(*system, entry + data, count);
+        return data + size_t{count};
     }
     case Kind::CbBind: {
         Nx2Profile::Scope bind_scope{Nx2Profile::Zone::CbBind};

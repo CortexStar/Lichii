@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <span>
 #include <utility>
 
@@ -74,6 +75,17 @@ public:
     void ProcessData(u32 data, bool is_last_call);
     void ProcessData(const u32* data, size_t num_data);
 
+    /// KeplerCompute::BackWrites: while held, a partial linear transfer's flush that continues
+    /// the held bytes within their 4 KiB page joins them instead of being written. The held bytes
+    /// are written when holding ends and before any other write. The caller holds only while
+    /// nothing else reads or writes memory.
+    void HoldWrites(bool hold) {
+        if (!hold) {
+            FlushHeld();
+        }
+        holding = hold;
+    }
+
     /// Binds a rasterizer to this engine.
     void BindRasterizer(VideoCore::RasterizerInterface* rasterizer);
 
@@ -87,6 +99,16 @@ public:
 
 private:
     void ProcessData(std::span<const u8> read_buffer);
+
+    /// A partial linear transfer's flush (AccelerateInlineToMemory), joined while holding.
+    void Emit(GPUVAddr address, std::span<const u8> bytes);
+    void FlushHeld();
+
+    static constexpr u32 HeldPage = 0x1000;
+    bool holding{};
+    u32 held_size{};
+    GPUVAddr held_address{};
+    std::array<u8, HeldPage> held_bytes;
 
     bool native_partial{};
     u32 flushed_offset{};
