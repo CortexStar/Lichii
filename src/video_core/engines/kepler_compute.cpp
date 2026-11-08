@@ -575,7 +575,9 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
     // colour image and stores none retains its colour and opens a skip window; the pass that
     // stores an image upscaling it is replaced by a plain copy and closes it. The gameplay
     // network is left alone: its pair (+0xc0 -> +0xd0) carries the tonemap.
-    if (!dlss_chain.active && (launch_description.const_buffer_enable_mask & 1)) {
+    if (!native_upscale_disabled && !dlss_chain.active &&
+        Settings::GetCurrentProgramID() == VideoCommon::OotNetwork::ProgramId &&
+        (launch_description.const_buffer_enable_mask & 1)) {
         const auto& cbuf = launch_description.const_buffer_config[0];
         const GPUVAddr cbuf_address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
         const auto image = [&](u32 offset) -> std::optional<Texture::TICEntry> {
@@ -601,7 +603,7 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
         const auto [reads, stores] = NativeImageHandles(regs.code_loc.Address());
         std::optional<Texture::TICEntry> replacement_input;
         std::optional<Texture::TICEntry> replacement_output;
-        if (native_upscale_input && !stores.empty()) {
+        if (native_upscale_input && network_skip_remaining > 0 && !stores.empty()) {
             if (const auto store = FindNativeUpscaleOutput(native_upscale_input, stores, image,
                                                            upscale_pair)) {
                 replacement_input = native_upscale_input;
@@ -618,7 +620,9 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
                 skipping = true;
             }
         } else if (!replacement_input && network_skip_remaining > 0) {
-            --network_skip_remaining;
+            if (--network_skip_remaining == 0) {
+                native_upscale_input.reset();
+            }
             skipping = true;
         }
         if (replacement_input && replacement_output) {
@@ -698,7 +702,12 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
                           replacement_output->Address(), decodes_srgb ? "sRGB" : "plain", done);
                 native_upscale_input.reset();
                 network_skip_remaining = 0;
-                return true;
+                if (done) {
+                    return true;
+                }
+                // Run the real pass, and the whole network on later frames.
+                native_upscale_disabled = true;
+                skipping = false;
             }
         }
         if (skipping) {
@@ -1171,6 +1180,7 @@ std::pair<std::vector<u32>, std::vector<u32>> KeplerCompute::NativeImageHandles(
 }
 
 void KeplerCompute::RememberNativeUpscaleInput() {
+    native_upscale_input.reset();
     const auto [reads, stores] = NativeImageHandles(regs.code_loc.Address());
     // An image-fed matrix pass writes its intermediate results to buffers. Retain its colour
     // input: the final pass's sampled image is another intermediate that a skipped network never
