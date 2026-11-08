@@ -6,6 +6,11 @@
  * SPDX-License-Identifier: 0BSD
  */
 
+#include <ios>
+#include <span>
+#include <utility>
+#include <vector>
+
 #include <catch2/catch_test_macros.hpp>
 #include <oaknut/oaknut.hpp>
 
@@ -2928,5 +2933,79 @@ TEST_CASE("A64: DMB and DSB keep program results and flags", "[a64]") {
         CHECK(jit.GetRegister(9) == 1);
         CHECK((jit.GetPstate() >> 28) == 0b0010);  // CMP X0, #1: C
         CHECK(jit.GetPC() == 22 * 4);
+    }
+}
+
+TEST_CASE("A64: FCMP, FCMPE and FCCMP NZCV", "[a64]") {
+    // ARM NZCV: less 1000, equal 0110, greater 0010, unordered 0011.
+    constexpr u32 lt = 0b1000, eq = 0b0110, gt = 0b0010, un = 0b0011;
+    struct Case {
+        u64 a, b;
+        u32 nzcv;
+    };
+    const Case cases32[] = {
+        {0x3f800000, 0x40000000, lt},  // 1 < 2
+        {0x40000000, 0x40000000, eq},  // 2 = 2
+        {0x40000000, 0x3f800000, gt},  // 2 > 1
+        {0x00000000, 0x80000000, eq},  // +0 = -0
+        {0x80000000, 0x00000000, eq},  // -0 = +0
+        {0xbf800000, 0x00000000, lt},  // -1 < +0
+        {0xff800000, 0x3f800000, lt},  // -inf < 1
+        {0x7f800000, 0x7f800000, eq},  // inf = inf
+        {0x7fc00000, 0x3f800000, un},  // qNaN, 1
+        {0x3f800000, 0x7fc00000, un},  // 1, qNaN
+        {0x7fc00000, 0x7fc00000, un},  // qNaN, qNaN
+        {0x7f800001, 0x3f800000, un},  // sNaN, 1
+        {0xffc00000, 0x80000000, un},  // -qNaN, -0
+    };
+    const Case cases64[] = {
+        {0x3ff0000000000000, 0x4000000000000000, lt},
+        {0x4000000000000000, 0x4000000000000000, eq},
+        {0x4000000000000000, 0x3ff0000000000000, gt},
+        {0x0000000000000000, 0x8000000000000000, eq},
+        {0x8000000000000000, 0x0000000000000000, eq},
+        {0xbff0000000000000, 0x0000000000000000, lt},
+        {0xfff0000000000000, 0x3ff0000000000000, lt},
+        {0x7ff0000000000000, 0x7ff0000000000000, eq},
+        {0x7ff8000000000000, 0x3ff0000000000000, un},
+        {0x3ff0000000000000, 0x7ff8000000000000, un},
+        {0x7ff8000000000000, 0x7ff8000000000000, un},
+        {0x7ff0000000000001, 0x3ff0000000000000, un},
+        {0xfff8000000000000, 0x8000000000000000, un},
+    };
+
+    const auto run = [](bool lichii_codegen, std::vector<u32> program, u64 a, u64 b) {
+        A64HaltOnSvcTestEnv env;
+        A64::UserConfig conf{};
+        conf.callbacks = &env;
+        if (lichii_codegen) {
+            UseLichiiCodegen(conf);
+        }
+        A64::Jit jit{conf};
+        env.jit = &jit;
+        env.code_mem = std::move(program);
+        env.code_mem.push_back(0xd4000001);  // SVC #0
+        jit.SetVector(0, {a, 0});
+        jit.SetVector(1, {b, 0});
+        jit.SetRegister(0, 0);
+        jit.SetPC(0);
+        env.ticks_left = 1000;
+        CheckedRun([&]() { jit.Run(); });
+        return jit.GetPstate() >> 28;
+    };
+
+    for (const bool lichii_codegen : {false, true}) {
+        for (const bool is_double : {false, true}) {
+            const u32 sz = is_double ? 0x00400000 : 0;
+            for (const Case& c : is_double ? std::span<const Case>{cases64} : std::span<const Case>{cases32}) {
+                INFO("lichii_codegen " << lichii_codegen << " double " << is_double << " a " << std::hex << c.a << " b " << c.b);
+                CHECK(run(lichii_codegen, {0x1e212000 | sz}, c.a, c.b) == c.nzcv);  // FCMP s0/d0, s1/d1
+                CHECK(run(lichii_codegen, {0x1e212010 | sz}, c.a, c.b) == c.nzcv);  // FCMPE s0/d0, s1/d1
+                // CMP X0, X0; FCCMP s0/d0, s1/d1, #0, EQ: the condition holds, so the compare decides.
+                CHECK(run(lichii_codegen, {0xeb00001f, 0x1e210400 | sz}, c.a, c.b) == c.nzcv);
+                // CMP X0, #1; FCCMP s0/d0, s1/d1, #0b1111, EQ: the condition fails, so #nzcv decides.
+                CHECK(run(lichii_codegen, {0xf100041f, 0x1e21040f | sz}, c.a, c.b) == 0b1111);
+            }
+        }
     }
 }
