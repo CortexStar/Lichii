@@ -952,7 +952,8 @@ void Scheduler::EndRenderPass()
         query_cache->CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, false);
         query_cache->NotifySegment(false);
 
-        Record([has_transform_feedback = device.IsExtTransformFeedbackSupported()](
+        // Only a pass that ran transform feedback has its writes to order before vertex input.
+        Record([has_transform_feedback = std::exchange(render_pass_has_xfb, false)](
                    vk::CommandBuffer cmdbuf) {
             cmdbuf.EndRenderPass();
             if (has_transform_feedback) {

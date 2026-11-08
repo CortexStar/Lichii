@@ -153,6 +153,12 @@ public:
         return render_pass_has_stores;
     }
 
+    /// Transform feedback began in the active render pass: its end orders the writes before
+    /// vertex input and transfers.
+    void NoteRenderPassTransformFeedback() {
+        render_pass_has_xfb = true;
+    }
+
     /// A dispatch was recorded: the next render pass must see what it wrote.
     void NoteComputeWrites() {
         compute_writes_pending = true;
@@ -480,6 +486,7 @@ private:
     RenderPassBarrierTracker pass_barriers;
     bool pass_reads_known{}; ///< Every draw of the active render pass reported its images.
     bool render_pass_has_stores{};
+    bool render_pass_has_xfb{};
     bool compute_writes_pending{};
     bool graphics_pipeline_missing{};
     std::unique_ptr<CommandPool> command_pool;
