@@ -23,6 +23,7 @@
 #include "common/fs/fs_util.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
+#include "common/settings.h"
 #include "common/thread.h"
 #include "core/core.h"
 #include "core/file_sys/nup_container.h"
@@ -313,6 +314,10 @@ bool WarmPending(u64 title_id) {
     std::error_code ec;
     for (const auto& file : {ComputeWarmPath(title_id), GraphicsWarmPath(title_id),
                              MeshWarmPath(title_id)}) {
+        if (file == MeshWarmPath(title_id) &&
+            !Settings::values.use_mesh_shader_warmup.GetValue()) {
+            continue;
+        }
         // A header-only file has no jobs (including titles with no mesh recipes).
         if (fs::exists(file, ec) && fs::file_size(file, ec) > 12 && !ec &&
             !fs::exists(WarmMarkerPath(file), ec)) {

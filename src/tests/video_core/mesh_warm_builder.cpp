@@ -9,6 +9,8 @@
 
 #include "common/cityhash.h"
 #include "common/fs/path_util.h"
+#include "common/scope_exit.h"
+#include "common/settings.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
 #include "video_core/shader_warm/mesh_warm_builder.h"
 
@@ -289,7 +291,21 @@ TEST_CASE("Mesh warm variants preserve allocation-tail constant specialization",
     REQUIRE(recipes.Write(out, {}) == 2);
 }
 
-TEST_CASE("Empty mesh warm files do not leave the preparation prompt pending", "[mesh_warm]") {
+TEST_CASE("Mesh warm prompts respect empty files and the per-game opt-in", "[mesh_warm]") {
+    auto& enabled = Settings::values.use_mesh_shader_warmup;
+    const bool was_global = enabled.UsingGlobal();
+    const bool global_value = enabled.GetValue(true);
+    enabled.SetGlobal(false);
+    const bool custom_value = enabled.GetValue();
+    SCOPE_EXIT {
+        enabled.SetGlobal(false);
+        enabled.SetValue(custom_value);
+        enabled.SetGlobal(true);
+        enabled.SetValue(global_value);
+        enabled.SetGlobal(was_global);
+    };
+    enabled.SetGlobal(true);
+    enabled.SetValue(true);
     CacheFile fixture{std::span<const u8>{}};
     const auto directory = std::filesystem::path{fixture.path.string() + ".dir"};
     std::filesystem::create_directories(directory);
@@ -310,6 +326,18 @@ TEST_CASE("Empty mesh warm files do not leave the preparation prompt pending", "
         std::ofstream append(mesh, std::ios::app | std::ios::binary);
         append.put('x');
     }
+    REQUIRE(WarmPending(Title));
+    // A game can opt out while the global checkbox remains enabled.
+    enabled.SetGlobal(false);
+    enabled.SetValue(false);
+    REQUIRE_FALSE(WarmPending(Title));
+    REQUIRE(std::filesystem::exists(mesh));
+    // Other warm-up stages still prompt when mesh prediction is disabled.
+    const auto compute = ComputeWarmPath(Title);
+    std::filesystem::copy_file(mesh, compute);
+    REQUIRE(WarmPending(Title));
+    std::filesystem::remove(compute);
+    enabled.SetGlobal(true);
     REQUIRE(WarmPending(Title));
     {
         std::ofstream marker(WarmMarkerPath(mesh));

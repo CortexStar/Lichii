@@ -326,6 +326,14 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "instead of copying them into every place. Driver compiles of such shaders get "
               "several times faster (compute warm-up about 3x); the game may run slightly "
               "slower.\nApplies to shaders built after the change."));
+    INSERT(Settings, use_mesh_shader_warmup,
+           tr("Prewarm predicted mesh shaders (experimental)"),
+           tr("Prepares predicted mesh shaders to reduce first-visit stutters. Benefits vary by "
+              "game and GPU; it can add startup time or background CPU work.\n"
+              "Uses the 'Prepare shaders before the game starts' timing setting and requires "
+              "prepared shader data. Does not skip draws or effects.\n"
+              "Takes effect after restarting the game. Turning it off stops future mesh "
+              "prewarming; existing caches are kept."));
     INSERT(Settings, shader_warm_threads, tr("Shader warm-up threads:"),
            tr("CPU threads the shader warm-up uses (low priority). More threads finish the "
               "warm-up sooner but leave less CPU to the game while it runs.\nTakes "

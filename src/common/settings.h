@@ -654,6 +654,9 @@ struct Values {
     SwitchableSetting<bool> shader_calls_not_inlined{linkage, true, "shader_calls_not_inlined",
                                                      Category::RendererAdvanced};
 
+    SwitchableSetting<bool> use_mesh_shader_warmup{
+        linkage, false, "use_mesh_shader_warmup", Category::RendererAdvanced};
+
     // Threads of the shader warm-up (compute and graphics, each). EDEN_NX2_WARM_THREADS overrides.
     SwitchableSetting<u32, true> shader_warm_threads{linkage,
                                                      4,
