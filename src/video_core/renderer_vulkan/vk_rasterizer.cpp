@@ -3582,6 +3582,12 @@ void RasterizerVulkan::BuildDynamicStateMask() {
         slots |= SHADER_OBJECT_SLOTS;
     }
     dyn_state_slots = slots;
+    // EXPERIMENT (do not merge): EDEN_NX2_DYNSTATE_BATCH=0 records each changed state as its own
+    // command, the recording before the per-draw packet, for the A/B.
+    const char* const batch = std::getenv("EDEN_NX2_DYNSTATE_BATCH");
+    dyn_state_batch = batch == nullptr || std::string_view{batch} != "0";
+    LOG_INFO(Render_Vulkan, "Dynamic state: {} (EDEN_NX2_DYNSTATE_BATCH)",
+             dyn_state_batch ? "one packet per draw" : "one command per changed state");
     dyn_apply_options = {
         .with_count = pipeline_cache.UsesShaderObjects(),
         .depth_bias_force_unorm = device.IsExtDepthBiasControlSupported(),
