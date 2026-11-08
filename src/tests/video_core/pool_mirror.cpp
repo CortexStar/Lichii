@@ -58,8 +58,14 @@ TEST_CASE("Heap page versions never write a page a pending draw read", "[pool_mi
         case 1: {
             const u64 value = random();
             const auto target = versions.Write(logical, draw_seq, tick, is_free);
-            if (target.copy_from != PoolMirror::HeapPageVersions::NO_PAGE) {
-                contents[target.physical] = contents[target.copy_from];
+            // A fresh page holds whatever its last use left until it is filled.
+            if (target.fresh) {
+                contents[target.physical] =
+                    target.copy_from != PoolMirror::HeapPageVersions::NO_PAGE
+                        ? contents[target.copy_from]
+                        : 0;
+            } else {
+                REQUIRE(target.copy_from == PoolMirror::HeapPageVersions::NO_PAGE);
             }
             contents[target.physical] = value;
             logical_values[logical] = value;
@@ -113,14 +119,17 @@ TEST_CASE("Heap page versions write in place until a draw is recorded", "[pool_m
     const auto never = [](u64) { return false; };
     const auto first = versions.Write(3, 0, 1, never);
     CHECK(first.copy_from == PoolMirror::HeapPageVersions::NO_PAGE);
+    CHECK(first.fresh);
     CHECK(versions.TakeTableChanged());
     const auto again = versions.Write(3, 0, 1, never);
     CHECK(again.physical == first.physical);
     CHECK(again.copy_from == PoolMirror::HeapPageVersions::NO_PAGE);
+    CHECK_FALSE(again.fresh);
     CHECK_FALSE(versions.TakeTableChanged());
     const auto after_draw = versions.Write(3, 1, 1, never);
     CHECK(after_draw.physical != first.physical);
     CHECK(after_draw.copy_from == first.physical);
+    CHECK(after_draw.fresh);
     CHECK(versions.TakeTableChanged());
     CHECK(versions.IsRetired(first.physical));
     // Recycled once its tick is free.

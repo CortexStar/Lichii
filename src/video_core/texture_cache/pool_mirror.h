@@ -126,6 +126,9 @@ public:
     struct Target {
         u32 physical;  ///< Page to write into
         u32 copy_from; ///< Page to copy whole into it first, NO_PAGE when none
+        /// physical was just mapped: it holds whatever its last use left, so it is filled from
+        /// copy_from, or with null descriptors when copy_from is NO_PAGE, before the write.
+        bool fresh;
     };
 
     /// Logical pages [0, count): grows the table, new pages unmapped (NO_PAGE).
@@ -159,7 +162,7 @@ public:
         const u32 current = table[logical];
         if (current != NO_PAGE && pages[current].mapped_after_draw == draw_seq) {
             // No draw was recorded since this page was mapped: nobody has read it.
-            return {current, NO_PAGE};
+            return {current, NO_PAGE, false};
         }
         const u32 fresh = Allocate(is_free);
         pages[fresh].mapped_after_draw = draw_seq;
@@ -168,7 +171,7 @@ public:
         if (current != NO_PAGE) {
             Retire(current, tick);
         }
-        return {fresh, current};
+        return {fresh, current, true};
     }
 
     /// The table changed since the last call: the backend makes a new table version.
@@ -262,6 +265,9 @@ struct Update {
     u32 slot{};                               ///< Logical slot in its heap (Meta: the TIC)
     u32 physical{};                           ///< Physical page the slot is written in
     u32 copy_from{HeapPageVersions::NO_PAGE}; ///< Copy this physical page into it first
+    /// `physical` was just mapped: fill it from copy_from (null descriptors when NO_PAGE)
+    /// before the write. Not set for writes into a page mapped earlier.
+    bool fresh{};
     ViewId view{};
     SamplerId sampler{};
     u32 meta{};
