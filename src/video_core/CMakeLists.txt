@@ -241,6 +241,7 @@ add_library(video_core STATIC
     renderer_vulkan/vk_pipeline_binary.h
     renderer_vulkan/vk_pipeline_library.cpp
     renderer_vulkan/vk_pipeline_library.h
+    renderer_vulkan/gpl_build_once.h
     renderer_vulkan/vk_multi_range_buffer.cpp
     renderer_vulkan/vk_multi_range_buffer.h
     renderer_vulkan/vk_master_semaphore.cpp

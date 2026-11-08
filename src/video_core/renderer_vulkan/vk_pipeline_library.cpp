@@ -28,29 +28,41 @@ std::shared_ptr<const GplLibrary> GraphicsPipelineLibraryCache::GetOrCreate(GplP
                                                                             const Builder& build,
                                                                             u64 name) {
     const size_t index = static_cast<size_t>(part);
-    std::shared_ptr<Entry> entry;
-    bool owner = false;
-    {
-        std::scoped_lock lock{mutex};
-        auto [it, inserted] = entries.try_emplace(key);
-        if (inserted) {
-            it->second = std::make_shared<Entry>();
-            owner = true;
-        }
-        entry = it->second;
-    }
-    if (!owner) {
-        std::unique_lock lock{entry->mutex};
-        if (!entry->done) {
-            // Another worker is building the same library: wait for it instead of building it
-            // twice.
-            waited[index].fetch_add(1, std::memory_order_relaxed);
-            entry->condition.wait(lock, [&] { return entry->done; });
-        }
+    BuildOnceMap<GplLibrary>::Outcome outcome{};
+    auto library = entries.Get(key, [&] { return Build(part, build, name); }, &outcome);
+    switch (outcome) {
+    case BuildOnceMap<GplLibrary>::Outcome::Waited:
+        // A compile thread or another pipeline's build had it: waited instead of building it
+        // twice.
+        waited[index].fetch_add(1, std::memory_order_relaxed);
         hits[index].fetch_add(1, std::memory_order_relaxed);
-        return entry->library;
+        break;
+    case BuildOnceMap<GplLibrary>::Outcome::Hit:
+        hits[index].fetch_add(1, std::memory_order_relaxed);
+        break;
+    default:
+        break;
     }
-    // Built outside the map lock: other libraries are built at the same time on other workers.
+    return library;
+}
+
+void GraphicsPipelineLibraryCache::Prefetch(GplPart part, std::string key, Builder build,
+                                            u64 name) {
+    if (entries.Ready(key)) {
+        return;
+    }
+    compile_workers.QueueWork([this, part, key = std::move(key), build = std::move(build), name] {
+        if (entries.BuildIfAbsent(key, [&] { return Build(part, build, name); }) ==
+            BuildOnceMap<GplLibrary>::Outcome::Built) {
+            prefetched[static_cast<size_t>(part)].fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+}
+
+std::shared_ptr<const GplLibrary> GraphicsPipelineLibraryCache::Build(GplPart part,
+                                                                      const Builder& build,
+                                                                      u64 name) {
+    const size_t index = static_cast<size_t>(part);
     const auto begin = std::chrono::steady_clock::now();
     std::shared_ptr<const GplLibrary> library;
     try {
@@ -81,12 +93,6 @@ std::shared_ptr<const GplLibrary> GraphicsPipelineLibraryCache::GetOrCreate(GplP
     } else {
         failed[index].fetch_add(1, std::memory_order_relaxed);
     }
-    {
-        std::scoped_lock lock{entry->mutex};
-        entry->library = library;
-        entry->done = true;
-    }
-    entry->condition.notify_all();
     return library;
 }
 
@@ -125,6 +131,7 @@ void GraphicsPipelineLibraryCache::Report() {
         return;
     }
     const u32 pre_waited = take(waited[0]), frag_waited = take(waited[1]);
+    const u32 pre_prefetched = take(prefetched[0]), frag_prefetched = take(prefetched[1]);
     const u64 pre_ns = take(build_ns[0]), frag_ns = take(build_ns[1]);
     const u64 pre_max = take(build_max_ns[0]), frag_max = take(build_max_ns[1]);
     const u64 fast_ns = take(link_ns[0]), optimized_ns = take(link_ns[1]);
@@ -134,15 +141,16 @@ void GraphicsPipelineLibraryCache::Report() {
     };
     LOG_INFO(Render_Vulkan,
              "Nx2Perf gpl in the last 10 s: libraries built pre-rasterization {} ({:.0f} ms, max "
-             "{:.1f} ms), fragment {} ({:.0f} ms, max {:.1f} ms); cache hits pre-rasterization {} "
+             "{:.1f} ms, {} on a compile thread), fragment {} ({:.0f} ms, max {:.1f} ms, {} on a "
+             "compile thread); cache hits pre-rasterization {} "
              "(waited on a build {}), fragment {} (waited {}); failed {}/{}; fast links {} (mean "
              "{:.3f} ms, max {:.3f} ms), optimized links {} (mean {:.1f} ms, max {:.1f} ms); "
              "monolithic fallbacks {}; draws held {:.1f} ms; {} libraries cached",
-             pre_built, Ms(pre_ns), Ms(pre_max), frag_built, Ms(frag_ns), Ms(frag_max), pre_hits,
-             pre_waited, frag_hits, frag_waited, pre_failed, frag_failed, fast_links,
-             mean(fast_ns, fast_links), Ms(fast_max), optimized_links,
-             mean(optimized_ns, optimized_links), Ms(optimized_max), fallback_count, Ms(held),
-             total_libraries.load(std::memory_order_relaxed));
+             pre_built, Ms(pre_ns), Ms(pre_max), pre_prefetched, frag_built, Ms(frag_ns),
+             Ms(frag_max), frag_prefetched, pre_hits, pre_waited, frag_hits, frag_waited,
+             pre_failed, frag_failed, fast_links, mean(fast_ns, fast_links), Ms(fast_max),
+             optimized_links, mean(optimized_ns, optimized_links), Ms(optimized_max),
+             fallback_count, Ms(held), total_libraries.load(std::memory_order_relaxed));
 }
 
 } // namespace Vulkan
