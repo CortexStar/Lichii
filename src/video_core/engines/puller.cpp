@@ -27,6 +27,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_fast_draw.h"
+#include "video_core/nx2_perf.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace Tegra::Engines {
@@ -65,6 +66,38 @@ void DrainBack() {
     VideoCommon::GpuSplit::Get().Drain(VideoCommon::DrainSite::Acquire);
 }
 
+/// With the GPU thread split: whether the semaphore word at `address`, as the back will see it
+/// once it ran what is queued, is known without draining it and meets `met`. Most acquires are
+/// met already; the drained path decides the others. EDEN_NX2_PERF_VERIFY drains anyway and
+/// reports an acquire the drained read doesn't meet.
+template <typename Met>
+bool AcquireMetQueued(DmaPusher& dma_pusher, GPUVAddr address, const Met& met) {
+    auto& split = VideoCommon::GpuSplit::Get();
+    if (!split.Active()) {
+        return false;
+    }
+    u32 word{};
+    if (!ReadReportWordsQueued(dma_pusher.memory_manager, split, address, &word, 1,
+                               VideoCommon::DrainSite::Acquire) ||
+        !met(word)) {
+        return false;
+    }
+    if (VideoCommon::Nx2Perf::Verify()) {
+        DrainBack();
+        if (const u32 drained = ReadSemaphoreWord(dma_pusher, address); !met(drained)) {
+            static std::atomic<u32> reports{};
+            if (reports.fetch_add(1, std::memory_order_relaxed) < 16) {
+                LOG_ERROR(HW_GPU,
+                          "Nx2Perf acquire: semaphore {:#x} read {:#x} without draining, {:#x} "
+                          "drained",
+                          address, word, drained);
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
 // The fence manager records into the scheduler and downloads the CPU's writes over GPU data:
 // the back's state, which a drained back still uses from its idle hook (it submits).
 void ReleaseFences(DmaPusher& dma_pusher) {
@@ -90,6 +123,10 @@ bool Puller::PendingAcquire::Matches(u32 current) const {
 
 bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     if (!pending_acquire) {
+        return true;
+    }
+    if (AcquireMetQueued(dma_pusher, pending_acquire->address,
+                         [&](u32 word) { return pending_acquire->Matches(word); })) {
         return true;
     }
     // The release may still be queued for the split GPU thread's back half (and the caches
@@ -276,6 +313,10 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             return;
         }
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireChecks, 1);
+        if (AcquireMetQueued(dma_pusher, acquire.address,
+                             [&](u32 word) { return acquire.Matches(word); })) {
+            return;
+        }
         DrainBack();
         if (acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
             return;
