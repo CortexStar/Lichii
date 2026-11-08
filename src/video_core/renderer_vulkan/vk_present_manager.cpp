@@ -550,6 +550,23 @@ void PresentManager::SetImageCount() {
 #endif
     swapchain_image_count = swapchain.GetImageCount();
     swapchain_image_format = swapchain.GetImageFormat();
+    if (use_present_thread && slot_fences.size() != swapchain.GetImageCount()) {
+        // A recreated swapchain waited for the device first: no copy is pending.
+        slot_fences.resize(swapchain.GetImageCount());
+        for (auto& fence : slot_fences) {
+            fence = device.GetLogical().CreateFence({
+                .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+            });
+        }
+    }
+}
+
+void PresentManager::WaitForSlot() {
+    if (use_present_thread && swapchain.IsNativeSwapchain()) {
+        void(slot_fences[swapchain.GetFrameIndex()].Wait());
+    }
 }
 
 void PresentManager::DiscardFrame(Frame* frame) {
@@ -637,11 +654,15 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         return;
     }
 
+    // The acquire semaphore of this slot is free again once the copy that waited on it has run.
+    WaitForSlot();
     while (swapchain.AcquireNextImage(!use_present_thread)) {
         if (!RecreateSwapchain(frame)) {
             return;
         }
+        WaitForSlot();
     }
+    const std::size_t slot = swapchain.GetFrameIndex();
 
     if (presenting_repeat) {
         // The previous present of this frame still owns its command buffer and fence.
@@ -792,6 +813,12 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         default:
             vk::Check(result);
             break;
+        }
+        if (use_present_thread && swapchain.IsNativeSwapchain()) {
+            // Signals once everything submitted to the queue so far, this copy included, has run.
+            const vk::Fence& slot_fence = slot_fences[slot];
+            slot_fence.Reset();
+            vk::Check(device.GetGraphicsQueue().Submit({}, *slot_fence));
         }
     }
 

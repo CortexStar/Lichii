@@ -121,6 +121,10 @@ private:
 
     void SetImageCount();
 
+    /// Waits until the copy that last waited on the current swapchain slot's acquire semaphore has
+    /// run (present thread only).
+    void WaitForSlot();
+
 private:
     const vk::Instance& instance;
     Core::Frontend::EmuWindow& render_window;
@@ -147,6 +151,10 @@ private:
     std::atomic<std::size_t> image_count{};
     std::atomic<std::size_t> swapchain_image_count{};
     std::atomic<VkFormat> swapchain_image_format{};
+
+    /// Per swapchain slot (Swapchain::GetFrameIndex): signaled once the present thread's copy
+    /// that waited on that slot's acquire semaphore has run.
+    std::vector<vk::Fence> slot_fences;
 
     std::atomic<u32> guest_present_rate{};
     PresentCadence cadence;

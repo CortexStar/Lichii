@@ -226,7 +226,12 @@ bool Swapchain::AcquireNextImage(bool may_flush) {
     const auto wait_with_frame_pacing = [this, may_flush] {
     switch (Settings::values.frame_pacing_mode.GetValue()) {
     case Settings::FramePacingMode::Target_Auto:
-        scheduler.Wait(resource_ticks[image_index], 0.0, may_flush);
+        // The present thread (may_flush = false) submits its copies itself and fences each slot
+        // (PresentManager::WaitForSlot); waiting for the recording thread to submit its next tick
+        // here held a present up to 20 ms whenever the game submitted nothing (loads).
+        if (may_flush || !IsNativeSwapchain()) {
+            scheduler.Wait(resource_ticks[image_index], 0.0, may_flush);
+        }
         break;
     case Settings::FramePacingMode::Target_30:
         scheduler.Wait(resource_ticks[image_index], 30.0, may_flush);
@@ -245,7 +250,9 @@ bool Swapchain::AcquireNextImage(bool may_flush) {
 
 #ifdef __ANDROID__
     if (android_get_device_api_level() >= 30) {
-        scheduler.Wait(resource_ticks[image_index], 0.0, may_flush);
+        if (may_flush) {
+            scheduler.Wait(resource_ticks[image_index], 0.0, may_flush);
+        }
     } else {
         wait_with_frame_pacing();
     }
