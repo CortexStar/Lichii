@@ -2,7 +2,9 @@
 
 #pragma once
 
-#include "video_core/vulkan_common/vulkan.h"
+// vulkan_core.h only: video_core/vulkan_common/vulkan.h pulls in Xlib on Linux, whose
+// `#define Success 0` breaks headers included after this one (nvdata.h's NvResult::Success).
+#include <vulkan/vulkan_core.h>
 
 namespace Vulkan {
 
