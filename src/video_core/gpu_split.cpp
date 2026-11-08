@@ -137,6 +137,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     if (front_macros) {
         page_slots = std::make_unique<PageSlot[]>(PageBuckets * 4);
         word_slots = std::make_unique<WordSlot[]>(WordBuckets * 4);
+        queued_releases = std::make_unique<QueuedRelease[]>(ReleaseBuckets * 4);
     }
     ++session;
     LOG_INFO(HW_GPU, "GPU thread split: engine methods run on a second thread{}",
@@ -182,6 +183,8 @@ void GpuSplit::Stop() {
     acquire_position = 0;
     write_floor = 0;
     guest_write_position = 0;
+    release_barrier = 0;
+    queued_releases.reset();
     page_slots.reset();
     word_slots.reset();
     huge_writes = {};
@@ -425,6 +428,13 @@ void GpuSplit::NoteGpuSemaphore(GPUVAddr address) {
     gpu_semaphore_saturated.store(true, std::memory_order_release);
 }
 
+bool GpuSplit::AcquireSyncs(GPUVAddr address) const {
+    if (gpu_semaphore_saturated.load(std::memory_order_acquire)) {
+        return true;
+    }
+    return GpuSemaphorePage(gpu_semaphore_pages.data(), GpuSemaphoreSlots, address >> PageBits);
+}
+
 bool GpuSplit::MayHoldReports(GPUVAddr address, u64 size) {
     if (size == 0) {
         return false;
@@ -624,6 +634,142 @@ u64 GpuSplit::PendingWriteTarget(const void* space, GPUVAddr address, u64 size, 
         }
     }
     return target;
+}
+
+bool GpuSplit::WrittenSince(const void* space, GPUVAddr address, u64 position) const {
+    if (page_slots == nullptr || write_floor > position) {
+        return true;
+    }
+    u64 sid = MaxSpaces;
+    for (u32 i = 0; i < used_spaces; ++i) {
+        if (spaces[i] == space) {
+            sid = i;
+            break;
+        }
+    }
+    if (sid == MaxSpaces) {
+        return true;
+    }
+    for (u64 i = 0; i < MaxSpaces; ++i) {
+        if ((i != sid || i == MaxSpaces - 1) && space_last[i] > position) {
+            return true;
+        }
+    }
+    for (const HugeWrite& write : huge_writes) {
+        if (write.position > position && write.begin <= address && address < write.end) {
+            return true;
+        }
+    }
+    // A slot replaced since no longer tells: count it as written.
+    const PageSlot* const page = FindPage(((address >> PageBits) << 2) | sid);
+    if (page == nullptr || page->coarse > position) {
+        return true;
+    }
+    const WordSlot* const word = FindWord(((address >> WordBits) << 2) | sid);
+    return word == nullptr || word->position > position;
+}
+
+GpuSplit::QueuedRelease* GpuSplit::FindRelease(const void* space, GPUVAddr address) {
+    QueuedRelease* const bucket =
+        &queued_releases[HashBucket(address >> WordBits, ReleaseBuckets) * 4];
+    for (size_t i = 0; i < 4; ++i) {
+        if (bucket[i].used && bucket[i].address == address && bucket[i].space == space) {
+            return &bucket[i];
+        }
+    }
+    return nullptr;
+}
+
+void GpuSplit::NoteRelease(const void* space, GPUVAddr address, u32 value, bool at_least) {
+    if (queued_releases == nullptr) {
+        return;
+    }
+    const auto* const memory = static_cast<const Tegra::MemoryManager*>(space);
+    const auto device = memory->GpuToCpuAddress(address);
+    // Unmapped (Ocarina releases to address 0 at boot): the read would return 0 anyway, and log
+    // an error for each release.
+    const u32 before = device ? memory->Read<u32>(address) : 0;
+    QueuedRelease* release = FindRelease(space, address);
+    if (release == nullptr) {
+        // A free slot, else the oldest.
+        QueuedRelease* const bucket =
+            &queued_releases[HashBucket(address >> WordBits, ReleaseBuckets) * 4];
+        release = &bucket[0];
+        for (size_t i = 0; i < 4; ++i) {
+            if (!bucket[i].used) {
+                release = &bucket[i];
+                break;
+            }
+            if (bucket[i].position < release->position) {
+                release = &bucket[i];
+            }
+        }
+        release->used = false;
+    }
+    const u32 slot = device ? static_cast<u32>(Tegra::Nx2LandedSlot(*device)) : 0;
+    const u32 landed = Tegra::g_nx2_semaphore_landed[slot].load(std::memory_order_acquire);
+    if (!release->used || release->landed_slot != slot ||
+        landed - release->landed_base >= release->sent) {
+        // The releases before it landed: count from here.
+        release->landed_base = landed;
+        release->sent = 0;
+    }
+    release->space = space;
+    release->address = address;
+    release->position = write_position;
+    release->value = value;
+    release->before = before;
+    release->landed_slot = slot;
+    release->sent += device ? 1 : 0;
+    release->used = true;
+    release->at_least = at_least;
+}
+
+std::optional<SemaphorePrediction> GpuSplit::PredictedRelease(const void* space, GPUVAddr address) {
+    if (queued_releases == nullptr) {
+        return std::nullopt;
+    }
+    consumed_cache = consumed.load(std::memory_order_acquire);
+    const QueuedRelease* const release = FindRelease(space, address);
+    // A write sent after the release (a copy, a compute report) may change the word; so may
+    // work the front lost track of (NoteReleaseBarrier).
+    if (release == nullptr || release->position < release_barrier ||
+        WrittenSince(space, address, release->position)) {
+        return std::nullopt;
+    }
+    const SemaphorePrediction prediction{
+        .value = release->value,
+        .at_least = release->at_least,
+        .position = release->position,
+    };
+    if (release->position > consumed_cache) {
+        return prediction;
+    }
+    if (release->sent == 0) {
+        return std::nullopt;
+    }
+    // The back ran it. A fence may still hold the write back (one-word releases land when the
+    // fence after them signals): while it hasn't landed and guest memory still holds the word
+    // from before it, the word is the release's.
+    const u32 landed =
+        Tegra::g_nx2_semaphore_landed[release->landed_slot].load(std::memory_order_acquire);
+    if (landed - release->landed_base >= release->sent) {
+        return std::nullopt;
+    }
+    const u32 now = static_cast<const Tegra::MemoryManager*>(space)->Read<u32>(address);
+    if (now != release->before && now != release->value) {
+        return std::nullopt;
+    }
+    return prediction;
+}
+
+void GpuSplit::ForgetRelease(const void* space, GPUVAddr address) {
+    if (queued_releases == nullptr) {
+        return;
+    }
+    if (QueuedRelease* const release = FindRelease(space, address)) {
+        release->used = false;
+    }
 }
 
 bool GpuSplit::WaitForQueuedWritesTo(const void* space, GPUVAddr address, u64 size, DrainSite site,
