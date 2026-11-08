@@ -42,13 +42,45 @@ enum class DrainSite : u32 {
     Map,            ///< GPU memory maps before later command reads
     FrontStart,     ///< The front takes an engine's macros over
     FrontVerify,    ///< EDEN_NX2_FRONT_VERIFY
+    NarrowMacroDmaRead, ///< MacroDmaRead narrowed (WaitForQueuedWritesTo)
+    NarrowAcquire,      ///< Acquire narrowed: the queued writes over the word
+    NarrowListWriters,  ///< ListWriters narrowed (WaitForWritersTo)
     Count,
 };
 
 inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> drain_site_names{
     "other",       "fetch drain",     "acquire",    "semaphore flush", "fence release",
     "list writers", "list sync",      "list flush", "macro dma read",  "macro dma flush",
-    "gp sync fence", "map",           "front start", "front verify",
+    "gp sync fence", "map",           "front start", "front verify",   "macro dma read (narrow)",
+    "acquire (narrow)", "list writers (narrow)",
+};
+
+/// What made the front note an unbounded write (BarrierOnly tells the kinds apart).
+enum class UnboundedCause : u8 {
+    Unknown,
+    Wfi3D,            ///< 3D wait_for_idle
+    TexInvalidate,    ///< 3D invalidate_texture_data_cache
+    Inline3D,         ///< 3D inline upload without a known destination
+    Maxwell3DBack,    ///< 3D methods with the macros on the back
+    ComputeMacro,     ///< A compute macro call (per parameter word)
+    ComputeLaunch,    ///< A compute dispatch (QMD launch, inline QMD)
+    ComputeUpload,    ///< Compute inline upload (exec/data upload)
+    ComputeReport,    ///< Compute report semaphore
+    ComputeOther,     ///< Other compute methods MayWriteMemory counts
+    BlockLinearDma,   ///< Copy engine launch with writes the front can't bound
+    OtherEngine,      ///< Fermi2D blits, KeplerMemory uploads
+    PullerWfi,        ///< Puller WaitForIdle
+    SyncpointAcquire, ///< Puller fence action acquire (forced fence release)
+    MemOpB,
+    GpSync,           ///< A GP entry's sync bit
+    GpuThreadCommand, ///< GPU thread commands (maps, flushes, syncs)
+};
+
+/// Which unbounded position a narrowed front read waits for (GpuSplit::WaitForQueuedWritesTo).
+enum class NarrowBase : u8 {
+    Read,     ///< Every unbounded write
+    Acquire,  ///< Every unbounded write and dispatch (semaphore acquires)
+    Recorded, ///< Only the recorded writes (and the write floor)
 };
 
 // Splits the GPU thread in two (NX2_GPU_THREAD_SPLIT.md). The GPU thread (the front) takes the
@@ -346,6 +378,87 @@ public:
     /// of it was still queued.
     bool WaitForSync();
 
+    // Narrow drains (with the macros on the front, whose register copies give the destinations):
+    // a front read of guest memory waits only for the queued work that may write what it reads,
+    // not for everything queued. The front records each queued write whose destination it knows
+    // (NoteWrite: 3D constant buffer data, inline uploads and reports, semaphore releases, copy
+    // engine launches) and the position of the latest work that may write memory it can't bound
+    // (NoteUnboundedWrite: dispatches, blits, copies into images, forced fence releases, host
+    // waits, GPU thread commands). Draws only write storage buffers (and transform feedback),
+    // whose ranges the front can't know either; the guest orders them before a read from the
+    // command stream with a host wait (WFI, GP entry sync, syncpoint acquire), which counts as an
+    // unbounded write. Readers still drain fully for memory GPU work wrote through the buffer
+    // cache (newer words may be in its caches): MemoryManager::Nx2ReadNeedsDrain.
+    // This index is by GPU address and address space; the report-memory reads of
+    // Maxwell3D::FrontDmaReadQueued keep their own device-address list of known words
+    // (NoteMemoryWrite), fed from the same call sites.
+    [[nodiscard]] bool NarrowDrains() const {
+        return front_macros;
+    }
+    /// EDEN_NX2_NARROW_VERIFY=1 (diagnostic): narrowed reads are compared with a full drain.
+    [[nodiscard]] static bool NarrowVerify();
+    /// EDEN_NX2_NARROW_VERIFY: logs, now and then, narrowed reads that differed from a full drain
+    /// (`mismatches`: words that differed; `macro`: the macro that read, 0 if none).
+    static void ReportNarrowCheck(DrainSite site, u32 mismatches, u32 macro, GPUVAddr address);
+    /// Counts starts of the split: engines keeping front copies of their registers rebuild them.
+    [[nodiscard]] u64 Session() const {
+        return session;
+    }
+    /// The work just sent writes [address, address + size) of the GPU address space `space` (its
+    /// MemoryManager) when the back runs it. `fine`: a release or report (tracked by the word, so
+    /// reads of the words next to it don't wait for it); other writes are tracked by the page.
+    void NoteWrite(const void* space, GPUVAddr address, u64 size, bool fine = false) {
+        if (front_macros && size != 0) {
+            RecordWrite(space, address, size, fine);
+        }
+    }
+    /// The work just sent may write guest memory the front can't bound. `writer`: it is compute
+    /// or copy work (what WaitForWriters waits for).
+    void NoteUnboundedWrite(bool writer = false, UnboundedCause cause = UnboundedCause::Unknown) {
+        if (!front_macros) {
+            return;
+        }
+        unbounded_position = write_position;
+        if (!BarrierOnly(cause)) {
+            guest_write_position = write_position;
+        }
+        acquire_position = write_position;
+        if (writer) {
+            unbounded_writer_position = write_position;
+        }
+    }
+    /// Unbounded writes that write no guest memory themselves on the back: barriers, and
+    /// dispatches, whose shader stores go to the host GPU's copies.
+    [[nodiscard]] static constexpr bool BarrierOnly(UnboundedCause cause) {
+        switch (cause) {
+        case UnboundedCause::Wfi3D:
+        case UnboundedCause::TexInvalidate:
+        case UnboundedCause::PullerWfi:
+        case UnboundedCause::MemOpB:
+        case UnboundedCause::GpSync:
+        case UnboundedCause::ComputeLaunch:
+            return true;
+        default:
+            return false;
+        }
+    }
+    /// Any thread: GPU work releases or reports to the page of `address` (sticky until Stop):
+    /// semaphore releases, reports and QMD releases.
+    static void NoteGpuSemaphore(GPUVAddr address);
+    /// Whether GPU work may have released or reported to a page of [address, address + size)
+    /// (NoteGpuSemaphore), so the back's query cache may hold results for it not yet written.
+    [[nodiscard]] static bool MayHoldReports(GPUVAddr address, u64 size);
+    /// Waits until the back executed the queued work that may write [address, address + size) of
+    /// `space`: the unbounded writes (per `base`) and the overlapping ones NoteWrite recorded.
+    /// Returns whether any of it was still queued.
+    bool WaitForQueuedWritesTo(const void* space, GPUVAddr address, u64 size, DrainSite site,
+                               NarrowBase base = NarrowBase::Read);
+    /// WaitForWriters for a command list at [address, address + size): the work before the last
+    /// host-level wait (the pushbuffer fetch sees what a dispatch or copy wrote only after one)
+    /// and the queued writes overlapping the list; `all_writers`: every dispatch and copy instead
+    /// of the work before the last host-level wait.
+    bool WaitForWritersTo(const void* space, GPUVAddr address, u64 size, bool all_writers);
+
 private:
     friend struct GpuSplitTestAccess;
 
@@ -378,7 +491,83 @@ private:
         }
         return newest;
     }
-    std::unordered_set<u64> report_pages; ///< Front: 4 KiB pages reports and releases wrote
+    std::unordered_set<u64> report_pages;
+
+    // Narrow drains: the queued writes with a known destination, indexed by where they write.
+    // Each slot holds the position of the end of the latest work writing its page (4 KiB) or word
+    // (4 bytes, releases and reports); it is done once `consumed` reaches it. Slots are found by
+    // a hash in buckets of four; a slot still pending that has to make room raises write_floor,
+    // which every read waits for. Writes over more than 64 pages go to a short list.
+    struct PageSlot {
+        u64 key;
+        u64 coarse; ///< Page-granular writes
+        u64 any;    ///< Any write (word writes too)
+    };
+    struct WordSlot {
+        u64 key;
+        u64 position;
+    };
+    struct HugeWrite {
+        const void* space;
+        GPUVAddr begin;
+        GPUVAddr end;
+        u64 position;
+    };
+    static constexpr size_t PageBuckets = 2048; ///< 4 slots each
+    static constexpr size_t WordBuckets = 2048; ///< 4 slots each
+    static constexpr size_t MaxHugeWrites = 16;
+    static constexpr size_t MaxFineBytes = 64; ///< Larger releases go by the page
+    static constexpr size_t MaxSpaces = 4;     ///< Address spaces told apart (the last: the rest)
+    static constexpr GPUVAddr PageBits = 12;
+    static constexpr GPUVAddr WordBits = 2;
+    void RecordWrite(const void* space, GPUVAddr address, u64 size, bool fine);
+    [[nodiscard]] u32 SpaceId(const void* space);
+    void InsertPage(u64 key, bool coarse);
+    void InsertWord(u64 key);
+    /// A pending slot gives way: reads wait for it from now on.
+    void RaiseFloor(u64 position) {
+        if (position <= consumed_cache || position <= write_floor) {
+            return;
+        }
+        consumed_cache = consumed.load(std::memory_order_acquire);
+        if (position > consumed_cache) {
+            write_floor = position;
+        }
+    }
+    [[nodiscard]] const PageSlot* FindPage(u64 key) const;
+    [[nodiscard]] const WordSlot* FindWord(u64 key) const;
+    /// The position to wait for before reading [address, address + size) of `space`: at least
+    /// `base`, and past the latest recorded write that may overlap it.
+    [[nodiscard]] u64 PendingWriteTarget(const void* space, GPUVAddr address, u64 size,
+                                         u64 base) const;
+    /// NoteGpuSemaphore's pages (page + 1, open addressing); saturated: every page counts.
+    static constexpr size_t GpuSemaphoreSlots = 1024;
+    static inline std::array<std::atomic<u64>, GpuSemaphoreSlots> gpu_semaphore_pages{};
+    static inline std::atomic<u32> gpu_semaphore_count{};
+    static inline std::atomic<bool> gpu_semaphore_saturated{};
+    u64 session{};
+    /// The end of the latest work with unbounded writes (of compute or copy work).
+    u64 unbounded_position{};
+    u64 unbounded_writer_position{};
+    /// Unbounded writes and dispatches (semaphore acquires wait for those).
+    u64 acquire_position{};
+    /// The latest pending write slot that gave way (every narrowed read waits for it).
+    u64 write_floor{};
+    /// Unbounded writes that may write guest memory themselves (not BarrierOnly).
+    u64 guest_write_position{};
+    /// The pending write index (RecordWrite).
+    std::unique_ptr<PageSlot[]> page_slots;
+    std::unique_ptr<WordSlot[]> word_slots;
+    std::array<HugeWrite, MaxHugeWrites> huge_writes{};
+    size_t next_huge{};
+    std::array<const void*, MaxSpaces> spaces{};
+    /// Per address space id: the latest recorded write (reads in another space wait for it).
+    std::array<u64, MaxSpaces> space_last{};
+    u32 used_spaces{};
+    /// The latest recorded write anywhere.
+    u64 last_record{};
+    /// The page slot the last page write went to (runs of writes to one page).
+    PageSlot* last_page_slot{}; ///< Front: 4 KiB pages reports and releases wrote
 
     static constexpr size_t RingWords = size_t{1} << 20; // 8 MiB
     static constexpr size_t RingMask = RingWords - 1;

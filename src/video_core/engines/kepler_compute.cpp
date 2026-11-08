@@ -114,6 +114,8 @@ void KeplerCompute::ProcessNativeReportSemaphore(u32 argument) {
         LOG_WARNING(HW_GPU, "Native compute report semaphore operation {} not supported", operation);
         return;
     }
+    // A report the query cache may hold until it flushes (GpuSplit::MayHoldReports).
+    VideoCommon::GpuSplit::NoteGpuSemaphore(address);
     if ((argument >> 3) & 1) {
         const u32 reduction = (argument >> 9) & 7;
         rasterizer->SignalFence([this, address, payload, reduction] {
@@ -387,6 +389,8 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             [&](u64 address, u32 payload, u32 flags) {
                 const bool four_words = (flags >> 30) == 0;
                 if (!memory_manager.IsFullyMappedRange(address, four_words ? 16 : sizeof(payload))) return false;
+                // The split's front: a page the query cache may hold results for.
+                VideoCommon::GpuSplit::NoteGpuSemaphore(address);
                 if (flags & (1U << 26)) {
                     rasterizer->SignalFence([this, address, payload, flags] {
                         const u32 value = ReduceSemaphore((flags >> 20) & 7, (flags >> 24) & 1,

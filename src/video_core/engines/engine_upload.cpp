@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <bit>
 #include <cstring>
 
 #include "common/algorithm.h"
@@ -15,6 +17,28 @@
 #include "video_core/textures/decoders.h"
 
 namespace Tegra::Engines::Upload {
+
+std::pair<GPUVAddr, GPUVAddr> WriteRange(const Registers& regs, bool is_linear, u32 copy_size) {
+    const GPUVAddr address{regs.dest.Address()};
+    if (is_linear) {
+        // ProcessData writes line_count lines of line_length_in, pitch apart; partial transfers
+        // (one line) write within copy_size.
+        u64 size = copy_size;
+        if (regs.line_count != 0) {
+            size =
+                (std::max)(size, u64{regs.line_count - 1} * regs.dest.pitch + regs.line_length_in);
+        }
+        return {address, address + size};
+    }
+    // As ProcessData: it writes the whole block-linear surface back.
+    const u32 bpp_shift = Common::FoldRight(
+        4U, [](u32 x, u32 y) { return (std::min)(x, static_cast<u32>(std::countr_zero(y))); },
+        regs.dest.width, regs.line_length_in, regs.dest.x, static_cast<u32>(address));
+    const std::size_t dst_size = Tegra::Texture::CalculateSize(
+        true, 1U << bpp_shift, regs.dest.width >> bpp_shift, regs.dest.height, regs.dest.depth,
+        regs.dest.BlockHeight(), regs.dest.BlockDepth());
+    return {address, address + dst_size};
+}
 
 State::State(MemoryManager& memory_manager_, Registers& regs_)
     : regs{regs_}, memory_manager{memory_manager_} {}
