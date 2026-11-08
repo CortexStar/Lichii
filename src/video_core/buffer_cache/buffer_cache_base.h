@@ -46,6 +46,7 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2.h"
 #include "video_core/nx2_download_trace.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/types.h"
@@ -721,6 +722,13 @@ private:
             const char* value = std::getenv("EDEN_NX2_EXACT_PREFLUSH");
             return value == nullptr || value[0] != '0';
         }();
+        // Native titles: until this write's download lands, a guest read of a Preflushable page
+        // must reach GetFlushArea, which waits for the download or flushes it. Arming its read
+        // trap again also drops the cores' cached read areas (reactive flushing).
+        if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed) &&
+            memory_tracker.IsRegionPreflushable(device_addr, size)) {
+            ArmReadTraps(device_addr, size);
+        }
         if (AsyncBufferDownloads()) {
             uncommitted_gpu_modified_ranges.Add(device_addr, size);
             return;
@@ -753,6 +761,7 @@ private:
 
     /// GPU writes that are not downloaded at fences: trap the guest CPU's next read of their
     /// pages, which flushes them on demand (or marks them Preflushable with preflushing enabled).
+    /// Native titles also arm it for Preflushable pages until their download lands.
     void ArmReadTraps(DAddr device_addr, u64 size) {
         const DAddr begin = Common::AlignDown(device_addr, Core::DEVICE_PAGESIZE);
         const DAddr end = Common::AlignUp(device_addr + size, Core::DEVICE_PAGESIZE);

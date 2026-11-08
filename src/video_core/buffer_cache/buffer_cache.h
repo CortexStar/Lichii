@@ -283,6 +283,11 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
         // a fence waits for that fence (on the reading thread, not the GPU thread), and a read of
         // GPU writes not committed to a fence yet flushes them. Other titles read guest memory
         // as it is, like upstream yuzu.
+        // The core consumed this read's trap before asking: forget it, so the next GPU write
+        // arms it again instead of being skipped as still armed.
+        if (native) {
+            read_trapped_ranges.Subtract(device_addr_start_aligned, aligned_size);
+        }
         if (native && IsRegionGpuModified(device_addr_start_aligned, aligned_size)) {
             const auto queued = [&](const Common::RangeSet<DAddr>& ranges) {
                 return ranges.Intersects(device_addr_start_aligned, aligned_size);

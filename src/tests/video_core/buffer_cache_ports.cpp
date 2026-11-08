@@ -247,6 +247,9 @@ struct BufferCacheTestAccess {
     static void GpuWrite(Cache& cache, BufferId id, DAddr address, u32 size) {
         cache.MarkWrittenBuffer(id, address, size);
     }
+    static bool TrapArmed(Cache& cache, DAddr address, u64 size) {
+        return cache.read_trapped_ranges.IsArmed(address, size);
+    }
 };
 
 } // namespace VideoCommon
@@ -749,4 +752,33 @@ TEST_CASE("Readers waiting for downloads wake when a fence's downloads land", "[
     const auto idle = std::chrono::steady_clock::now() - idle_start;
     REQUIRE(idle >= std::chrono::milliseconds{15});
     REQUIRE(idle < std::chrono::seconds{5});
+}
+
+TEST_CASE("Native GPU writes to a preflushable page arm its read trap until a read consumes it",
+          "[buffer_ports]") {
+    Fixture f;
+    NativeTitle native;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    Access::Preflushable(*f.cache, 0x20000, 0x1000);
+    REQUIRE_FALSE(Access::TrapArmed(*f.cache, 0x20000, 0x1000));
+    // A read before the download lands must reach GetFlushArea.
+    Access::GpuWrite(*f.cache, id, 0x20000, 0x100);
+    REQUIRE(Access::TrapArmed(*f.cache, 0x20000, 0x1000));
+    // The read consumed the core's trap: the next write arms it again.
+    (void)f.cache->GetFlushArea(0x20010, 4);
+    REQUIRE_FALSE(Access::TrapArmed(*f.cache, 0x20000, 0x1000));
+    Access::GpuWrite(*f.cache, id, 0x20000, 0x100);
+    REQUIRE(Access::TrapArmed(*f.cache, 0x20000, 0x1000));
+    // Pages that are not Preflushable keep their own handling.
+    REQUIRE_FALSE(Access::TrapArmed(*f.cache, 0x21000, 0x1000));
+}
+
+TEST_CASE("Other titles' GPU writes to preflushable pages arm no read traps", "[buffer_ports]") {
+    Fixture f;
+    const bool was_native = Tegra::g_nx2_ampere.exchange(false);
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    Access::Preflushable(*f.cache, 0x20000, 0x1000);
+    Access::GpuWrite(*f.cache, id, 0x20000, 0x100);
+    REQUIRE_FALSE(Access::TrapArmed(*f.cache, 0x20000, 0x1000));
+    Tegra::g_nx2_ampere.store(was_native);
 }
