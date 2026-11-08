@@ -9,6 +9,7 @@
 #include <string_view>
 
 #include "common/logging.h"
+#include "common/settings.h"
 #include "video_core/dlss_evaluation.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_streamline_dlss.h"
@@ -60,7 +61,18 @@ unsigned int Preset() {
     if (value && std::string_view{value} == "default") {
         return NVSDK_NGX_DLSS_Hint_Render_Preset_Default;
     }
-    return NVSDK_NGX_DLSS_Hint_Render_Preset_K;
+    switch (Settings::values.nvidia_dlss_preset.GetValue()) {
+    case Settings::DlssPreset::Auto:
+        return NVSDK_NGX_DLSS_Hint_Render_Preset_Default;
+    case Settings::DlssPreset::J:
+        return NVSDK_NGX_DLSS_Hint_Render_Preset_J;
+    case Settings::DlssPreset::L:
+        return NVSDK_NGX_DLSS_Hint_Render_Preset_L;
+    case Settings::DlssPreset::M:
+        return NVSDK_NGX_DLSS_Hint_Render_Preset_M;
+    default:
+        return NVSDK_NGX_DLSS_Hint_Render_Preset_K;
+    }
 }
 
 VkImageMemoryBarrier Barrier(const StreamlineDlssUpscaler::Image& image, VkAccessFlags src_access,

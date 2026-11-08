@@ -65,6 +65,7 @@ SETTING(u16, false);
 SWITCHABLE(AnisotropyMode, true);
 SWITCHABLE(AntiAliasing, false);
 SWITCHABLE(OotAntiAliasing, false);
+SWITCHABLE(DlssPreset, false);
 SWITCHABLE(AspectRatio, true);
 SWITCHABLE(AstcDecodeMode, true);
 SWITCHABLE(AstcRecompression, true);
@@ -411,6 +412,9 @@ struct Values {
                                                   false};
     // NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS.
     SwitchableSetting<bool> nvidia_dlss{linkage, false, "nvidia_dlss", Category::Renderer};
+    // The DLSS model for every mode; EDEN_NX2_DLSS_PRESET still overrides it.
+    SwitchableSetting<DlssPreset> nvidia_dlss_preset{linkage, DlssPreset::K, "nvidia_dlss_preset",
+                                                     Category::Renderer};
     SwitchableSetting<AspectRatio, true> aspect_ratio{linkage,
                                                       AspectRatio::R16_9,
                                                       "aspect_ratio",
