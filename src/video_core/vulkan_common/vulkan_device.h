@@ -1124,6 +1124,30 @@ FN_MAX_LIMIT_LIST
         return dynamic_state3_alpha_to_one;
     }
 
+    /// Polygon mode set with vkCmdSetPolygonModeEXT instead of held by the pipeline.
+    bool SupportsDynamicState3PolygonMode() const {
+        return extensions.extended_dynamic_state3 &&
+               features.extended_dynamic_state3.extendedDynamicState3PolygonMode;
+    }
+
+    /// Provoking vertex mode set with vkCmdSetProvokingVertexModeEXT.
+    bool SupportsDynamicState3ProvokingVertexMode() const {
+        return extensions.extended_dynamic_state3 && extensions.provoking_vertex &&
+               features.extended_dynamic_state3.extendedDynamicState3ProvokingVertexMode;
+    }
+
+    /// Patch control points set with vkCmdSetPatchControlPointsEXT.
+    bool SupportsDynamicState2PatchControlPoints() const {
+        return extensions.extended_dynamic_state2 &&
+               features.extended_dynamic_state2.extendedDynamicState2PatchControlPoints;
+    }
+
+    /// Line stipple factor and pattern set with vkCmdSetLineStippleEXT.
+    bool SupportsDynamicLineStipple() const {
+        return extensions.line_rasterization &&
+               features.line_rasterization.stippledRectangularLines;
+    }
+
     /// Returns true if the device supports VK_EXT_vertex_input_dynamic_state.
     bool IsExtVertexInputDynamicStateSupported() const {
         return extensions.vertex_input_dynamic_state;

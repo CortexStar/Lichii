@@ -71,8 +71,11 @@ enum : u8 {
     ColorMask,
     ViewportSwizzles,
 
-    PipelineState, ///< a register FixedPipelineState::Refresh reads was written
-                   ///< (PipelineStateWatch)
+    PolygonMode,        ///< polygon_mode_front (dynamic polygon mode)
+    ProvokingVertex,    ///< provoking_vertex (dynamic provoking vertex mode)
+    PatchControlPoints, ///< patch_vertices (dynamic patch control points)
+    PipelineState,      ///< a register FixedPipelineState::Refresh reads was written
+                        ///< (PipelineStateWatch)
 
     Last,
 };
@@ -265,6 +268,15 @@ public:
 
     bool TouchLineRasterizationMode() {
         return Exchange(Dirty::LineRasterizationMode, false);
+    }
+    bool TouchPolygonMode() {
+        return Exchange(Dirty::PolygonMode, false);
+    }
+    bool TouchProvokingVertex() {
+        return Exchange(Dirty::ProvokingVertex, false);
+    }
+    bool TouchPatchControlPoints() {
+        return Exchange(Dirty::PatchControlPoints, false);
     }
 
     bool ChangePrimitiveTopology(Maxwell::PrimitiveTopology new_topology) {

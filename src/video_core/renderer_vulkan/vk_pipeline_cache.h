@@ -133,6 +133,11 @@ public:
 
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipeline();
 
+    /// The dynamic state the graphics pipelines take (their keys hold zero for it).
+    [[nodiscard]] const DynamicFeatures& Features() const noexcept {
+        return dynamic_features;
+    }
+
     /// Graphics pipelines draw with shader objects, in dynamic rendering instances.
     [[nodiscard]] bool UsesShaderObjects() const noexcept {
         return use_shader_objects;

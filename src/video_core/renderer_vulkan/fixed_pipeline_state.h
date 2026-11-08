@@ -28,6 +28,17 @@ struct DynamicFeatures {
     bool has_extended_dynamic_state_2;
     bool has_extended_dynamic_state_2_logic_op;
     bool has_extended_dynamic_state_2_patch_control_points;
+    /// Polygon mode, provoking vertex, line stipple and patch control points are set
+    /// dynamically where the device can (the key's dynamic_raster_state).
+    bool has_dynamic_raster_state;
+    bool has_dynamic_polygon_mode;
+    bool has_dynamic_provoking_vertex;
+    bool has_dynamic_line_stipple;
+    /// EDS3 enables the pipelines hold dynamically (their key fields stay zero).
+    bool has_dynamic_state3_alpha_to_coverage;
+    bool has_dynamic_state3_alpha_to_one;
+    bool has_dynamic_state3_conservative_raster;
+    bool has_dynamic_state3_line_raster_mode;
     bool has_extended_dynamic_state_3_blend;
     bool has_extended_dynamic_state_3_enables;
     bool has_dynamic_state3_depth_clamp_enable;
@@ -56,6 +67,10 @@ struct FixedPipelineState {
     static Maxwell::FrontFace UnpackFrontFace(u32 packed) noexcept;
 
     static u32 PackPolygonMode(Maxwell::PolygonMode mode) noexcept;
+
+    /// Whether the last vertex provokes, as the device and the transform feedback state allow.
+    static bool UseLastProvokingVertex(const Maxwell& regs,
+                                       const DynamicFeatures& features) noexcept;
     static Maxwell::PolygonMode UnpackPolygonMode(u32 packed) noexcept;
 
     static u32 PackLogicOp(Maxwell::LogicOp::Op op) noexcept;
@@ -216,6 +231,7 @@ struct FixedPipelineState {
         BitField<20, 1, u32> color_write_enable_dynamic;
 
         BitField<21, 1, u32> attachment0_dual_source_blend;
+        BitField<22, 1, u32> dynamic_raster_state;
 
         BitField<24, 4, Maxwell::PrimitiveTopology> topology;
         BitField<28, 4, Tegra::Texture::MsaaMode> msaa_mode;

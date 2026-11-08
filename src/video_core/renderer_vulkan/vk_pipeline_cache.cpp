@@ -754,7 +754,6 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         device.IsExtExtendedDynamicState2Supported();
     dynamic_features.has_extended_dynamic_state_2_logic_op =
         device.IsExtExtendedDynamicState2ExtrasSupported();
-    dynamic_features.has_extended_dynamic_state_2_patch_control_points = false;
 
     dynamic_features.has_extended_dynamic_state_3_blend =
         device.IsExtExtendedDynamicState3BlendingSupported();
@@ -771,6 +770,30 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     dynamic_features.has_dynamic_state3_line_stipple_enable =
         dynamic_features.has_extended_dynamic_state_3_enables &&
         device.SupportsDynamicState3LineStippleEnable();
+    // As GraphicsPipeline::FillStates makes them dynamic: their key fields stay zero.
+    dynamic_features.has_dynamic_state3_alpha_to_coverage =
+        dynamic_features.has_extended_dynamic_state_3_enables &&
+        device.SupportsDynamicState3AlphaToCoverageEnable();
+    dynamic_features.has_dynamic_state3_alpha_to_one =
+        dynamic_features.has_extended_dynamic_state_3_enables &&
+        device.SupportsDynamicState3AlphaToOneEnable();
+    dynamic_features.has_dynamic_state3_conservative_raster =
+        dynamic_features.has_extended_dynamic_state_3_enables &&
+        device.SupportsDynamicState3ConservativeRasterizationMode();
+    dynamic_features.has_dynamic_state3_line_raster_mode =
+        dynamic_features.has_extended_dynamic_state_3_enables &&
+        device.SupportsDynamicState3LineRasterizationMode();
+    // Polygon mode, provoking vertex, line stipple and patch control points: dynamic where the
+    // device has them (the 9070 XT has all four), recorded through the dynamic-state packet.
+    dynamic_features.has_dynamic_raster_state =
+        dynamic_features.has_extended_dynamic_state_3_enables;
+    dynamic_features.has_dynamic_polygon_mode =
+        dynamic_features.has_dynamic_raster_state && device.SupportsDynamicState3PolygonMode();
+    dynamic_features.has_dynamic_provoking_vertex =
+        dynamic_features.has_dynamic_raster_state &&
+        device.SupportsDynamicState3ProvokingVertexMode();
+    dynamic_features.has_dynamic_line_stipple =
+        dynamic_features.has_dynamic_raster_state && device.SupportsDynamicLineStipple();
 
     // VIDS: Independent toggle (not affected by dyna_state levels). Not on AMD's driver: dynamic
     // vertex input makes it compile every vertex shader with its table-driven "uber" fetch
@@ -793,6 +816,9 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         device.SupportsProvokingVertexLastMode();
     dynamic_features.has_provoking_vertex_tf_preserve =
         device.SupportsTransformFeedbackProvokingVertexPreservation();
+    dynamic_features.has_extended_dynamic_state_2_patch_control_points =
+        dynamic_features.has_dynamic_raster_state &&
+        device.SupportsDynamicState2PatchControlPoints();
 }
 
 namespace {

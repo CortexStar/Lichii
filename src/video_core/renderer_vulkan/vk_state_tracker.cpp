@@ -64,6 +64,9 @@ Maxwell3D::DirtyState::Flags MakeInvalidationFlags() {
         ConservativeRasterizationMode,
         LineStippleEnable,
         LineStippleParams,
+        PolygonMode,
+        ProvokingVertex,
+        PatchControlPoints,
     };
     Maxwell3D::DirtyState::Flags flags{};
     for (const int flag : INVALIDATION_FLAGS) {
@@ -231,6 +234,9 @@ void SetupRasterModes(Maxwell3D::DirtyState::Tables &tables) {
     table[OFF(line_stipple_params)] = LineStippleParams;
     table[OFF(conservative_raster_enable)] = ConservativeRasterizationMode;
     table[OFF(line_anti_alias_enable)] = LineRasterizationMode;
+    table[OFF(polygon_mode_front)] = PolygonMode;
+    table[OFF(provoking_vertex)] = ProvokingVertex;
+    table[OFF(patch_vertices)] = PatchControlPoints;
 }
 } // Anonymous namespace
 

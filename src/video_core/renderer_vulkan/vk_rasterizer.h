@@ -387,6 +387,15 @@ private:
     u32 last_color_output_mask{};
     /// The pipeline alpha to coverage/one were last staged with
     const GraphicsPipeline* last_dyn_pipeline{};
+    /// Polygon mode, provoking vertex, line stipple and patch control points are recorded from
+    /// the registers (dynamic in the pipelines, or shader objects).
+    bool dyn_polygon_mode{};
+    bool dyn_provoking_vertex{};
+    bool dyn_line_stipple{};
+    bool dyn_patch_control_points{};
+    /// transform_feedback_enabled the provoking vertex was last staged with (HLE macros write it
+    /// without a dirty flag).
+    u32 last_xfb_enabled{};
     /// Shader objects: the pipeline whose key state was last staged
     const GraphicsPipeline* last_so_pipeline{};
     /// Shader objects: the state slots a pipeline holds statically, staged from its key.
@@ -394,10 +403,9 @@ private:
         using DynamicStateDelta::Bit;
         using DynamicStateDelta::Slot;
         return Bit(Slot::PolygonMode) | Bit(Slot::RasterizationSamples) | Bit(Slot::SampleMask) |
-               Bit(Slot::TessellationDomainOrigin) | Bit(Slot::PatchControlPoints) |
-               Bit(Slot::DepthClipNegativeOneToOne) | Bit(Slot::ProvokingVertexMode) |
-               Bit(Slot::LineStipple) | Bit(Slot::ExtraPrimitiveOverestimationSize) |
-               Bit(Slot::RasterizationStream) | Bit(Slot::ColorWriteEnable);
+               Bit(Slot::TessellationDomainOrigin) | Bit(Slot::DepthClipNegativeOneToOne) |
+               Bit(Slot::ExtraPrimitiveOverestimationSize) | Bit(Slot::RasterizationStream) |
+               Bit(Slot::ColorWriteEnable);
     }();
     /// Render target formats the blend enables were last staged with
     std::array<Tegra::RenderTargetFormat, Tegra::Engines::Maxwell3D::Regs::NumRenderTargets>

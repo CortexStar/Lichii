@@ -1626,7 +1626,7 @@ struct GraphicsPipeline::PipelineStates {
     VkPipelineDepthStencilStateCreateInfo depth_stencil_ci{};
     static_vector<VkPipelineColorBlendAttachmentState, Maxwell::NumRenderTargets> cb_attachments;
     VkPipelineColorBlendStateCreateInfo color_blend_ci{};
-    static_vector<VkDynamicState, 34> dynamic_states;
+    static_vector<VkDynamicState, 48> dynamic_states;
     VkPipelineDynamicStateCreateInfo dynamic_state_ci{};
     bool is_mesh{};
     bool has_tess_stages{};
@@ -2007,6 +2007,22 @@ void GraphicsPipeline::FillStates(PipelineStates& s) const {
         }
         if (device.SupportsDynamicState3AlphaToOneEnable()) {
             dynamic_states.push_back(VK_DYNAMIC_STATE_ALPHA_TO_ONE_ENABLE_EXT);
+        }
+    }
+
+    // The same predicates as the pipeline cache's DynamicFeatures (the key holds zero there).
+    if (key.state.dynamic_raster_state) {
+        if (device.SupportsDynamicState3PolygonMode()) {
+            dynamic_states.push_back(VK_DYNAMIC_STATE_POLYGON_MODE_EXT);
+        }
+        if (device.SupportsDynamicState3ProvokingVertexMode()) {
+            dynamic_states.push_back(VK_DYNAMIC_STATE_PROVOKING_VERTEX_MODE_EXT);
+        }
+        if (device.SupportsDynamicLineStipple()) {
+            dynamic_states.push_back(VK_DYNAMIC_STATE_LINE_STIPPLE_EXT);
+        }
+        if (device.SupportsDynamicState2PatchControlPoints()) {
+            dynamic_states.push_back(VK_DYNAMIC_STATE_PATCH_CONTROL_POINTS_EXT);
         }
     }
 
