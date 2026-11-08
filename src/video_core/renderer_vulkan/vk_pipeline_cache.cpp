@@ -1932,7 +1932,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             Shader::Maxwell::Flow::CFG cfg(env, pools.flow_block, cfg_offset, index == 0);
             programs[index] = TranslateProgram(pools.inst, pools.block, env, cfg, host_info);
             if (learn) {
-                Nx2LearnTranslation(key.unique_hashes[index], env, programs[index]);
+                Nx2LearnTranslation(Nx2StageRecordHash(key, index, env), env, programs[index]);
             }
             if (cacheable_stage) {
                 ++times.translated_stages;

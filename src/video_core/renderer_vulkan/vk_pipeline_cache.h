@@ -210,6 +210,9 @@ private:
     /// EDEN_NX2_IR_LEARN=1: whether live translations are stored as per-stage cache records, and
     /// arming env's query log before such a translation (no-op when off or env can't be stored).
     [[nodiscard]] bool Nx2LearnArm(Shader::Environment& env) const;
+    /// The per-stage cache key of a graphics pipeline's stage (task/mesh: the program's own hash).
+    [[nodiscard]] u64 Nx2StageRecordHash(const GraphicsPipelineCacheKey& key, size_t index,
+                                         Shader::Environment& env) const;
     /// Stores a live translation (made with the query log armed, right after TranslateProgram) as
     /// a record under record_hash, so the next session uses it instead of translating again.
     void Nx2LearnTranslation(u64 record_hash, Shader::Environment& env,

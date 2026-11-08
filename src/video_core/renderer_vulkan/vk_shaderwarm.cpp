@@ -387,20 +387,23 @@ bool PipelineCache::Nx2CacheableStage(size_t index, Shader::Environment& env,
            ir_cache.IsOpen() && env.IsNativeProgram() && (!mesh_stage || TaskMeshIrCacheEnabled());
 }
 
-bool PipelineCache::Nx2TryCachedStage(ShaderPools& pools, const GraphicsPipelineCacheKey& key,
-                                      size_t index, Shader::Environment& env,
-                                      Shader::IR::Program& out) {
+u64 PipelineCache::Nx2StageRecordHash(const GraphicsPipelineCacheKey& key, size_t index,
+                                      Shader::Environment& env) const {
     // A task/mesh stage's hash in the key has the mesh state XORed in; its records are under the
     // program's own hash (TaskMeshRecordHash) and get the live mesh state put in (ApplyMeshState).
     const bool mesh_stage{env.ShaderStage() == Shader::Stage::Task ||
                           env.ShaderStage() == Shader::Stage::Mesh};
-    const u64 record_hash{
-        mesh_stage ? TaskMeshRecordHash(key.unique_hashes[index] ^
-                                            VideoCommon::MeshStateHash(env.MeshRegisters(),
-                                                                       env.MeshPrimitiveHeader()),
-                                        env.ShaderStage())
-                   : key.unique_hashes[index]};
-    return TryCachedTranslation(pools, record_hash, env, out);
+    return mesh_stage ? TaskMeshRecordHash(key.unique_hashes[index] ^
+                                               VideoCommon::MeshStateHash(env.MeshRegisters(),
+                                                                          env.MeshPrimitiveHeader()),
+                                           env.ShaderStage())
+                      : key.unique_hashes[index];
+}
+
+bool PipelineCache::Nx2TryCachedStage(ShaderPools& pools, const GraphicsPipelineCacheKey& key,
+                                      size_t index, Shader::Environment& env,
+                                      Shader::IR::Program& out) {
+    return TryCachedTranslation(pools, Nx2StageRecordHash(key, index, env), env, out);
 }
 
 void PipelineCache::Nx2CountMonolithic(const GraphicsPipelineCacheKey& key,
@@ -1449,7 +1452,7 @@ void PipelineCache::RunPrecompile(std::filesystem::path pack_path, std::stop_tok
 }
 
 namespace {
-// EDEN_NX2_IR_LEARN=1: live translations of native vertex, pixel and compute stages are stored as
+// EDEN_NX2_IR_LEARN=1: live translations of native vertex, pixel, task/mesh and compute stages are stored as
 // per-stage cache records (with the answers and checks the precompile's records carry), so a stage
 // the precompile missed or guessed wrong is translated once, not in every session.
 bool IrLearnEnabled() {
@@ -1466,11 +1469,12 @@ bool PipelineCache::Nx2LearnArm(Shader::Environment& env) const {
         env.HasHLEMacroState()) {
         return false;
     }
-    // Task/mesh records hold the program before the live mesh state is applied; a live
-    // translation has it applied, so those aren't stored (yet).
+    // Task/mesh: the mesh state the translation put in is replaced by the live one when the
+    // record is used (ApplyMeshState), as for precompiled task/mesh records.
     const Shader::Stage stage{env.ShaderStage()};
+    const bool mesh_stage{stage == Shader::Stage::Task || stage == Shader::Stage::Mesh};
     if (stage != Shader::Stage::VertexB && stage != Shader::Stage::Fragment &&
-        stage != Shader::Stage::Compute) {
+        stage != Shader::Stage::Compute && !(mesh_stage && TaskMeshIrCacheEnabled())) {
         return false;
     }
     auto* const generic{dynamic_cast<VideoCommon::GenericEnvironment*>(&env)};
