@@ -857,6 +857,11 @@ private:
         u64 logged{};     ///< Error lines so far (at most 16)
         u64 logged_rewrites{}; ///< Lines about rewritten bytes so far (at most 16)
         u64 last_log{};
+        u64 reads_recorded{}; ///< Read downloads recorded with a check
+        u64 alone_recorded{}; ///< Checks recorded alone (their read's bytes on their way)
+        u64 early_recorded{}; ///< Early downloads recorded with a check
+        u64 early_left_out{}; ///< Early downloads not recorded: past their bounds
+        u64 early_served{};   ///< Reads an early download served, made to flush for the check
     };
     ReadCheckTotals read_check{};
     static u64 ReadCheckEvery() {
@@ -869,7 +874,6 @@ private:
         }();
         return every;
     }
-    void CheckReadDownload(const ReadCheck& check, const Common::RangeSet<DAddr>& cpu_written);
     [[nodiscard]] bool ReadChecks() const {
         return read_check.every != 0 || ReadCheckEvery() != 0;
     }
@@ -895,6 +899,13 @@ private:
         bool early{};
         ReadTrace::Copy trace{}; ///< TEST: EDEN_NX2_READ_TRACE
     };
+    /// TEST (EDEN_NX2_READ_CHECK): compares guest memory with `download`'s check copy, right after
+    /// the download landed.
+    void CheckReadDownload(const ReadDownload& download,
+                           const Common::RangeSet<DAddr>& cpu_written);
+    /// TEST (EDEN_NX2_READ_CHECK): where a difference the check found comes from.
+    void ExplainReadCheckDifference(const ReadDownload& download, DAddr address, u64 size, u8 found,
+                                    u8 wanted);
     /// Oldest first, and written to guest memory in that order: none lands over newer bytes.
     std::deque<ReadDownload> read_downloads;
     /// All the read downloads' clean_ranges (they don't overlap): GPU-modified bytes already on

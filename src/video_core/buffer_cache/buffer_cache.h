@@ -347,6 +347,7 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
     }
     if (check_early) [[unlikely]] {
         area->preemtive = false;
+        ++read_check.early_served;
     }
     // A preflushable mark persists and downloads later GPU writes at every fence. Native titles
     // instead keep read traps and flush on demand.
@@ -762,6 +763,8 @@ void BufferCache<P>::RecordReadDownload(std::span<const std::pair<DAddr, u64>> r
             for (const LandedCopy& landed : landed_copies) {
                 std::ranges::copy(landed.as_landed, check->landed_bytes.data() + landed.offset);
             }
+            ++(early ? read_check.early_recorded
+                     : (check_only ? read_check.alone_recorded : read_check.reads_recorded));
             download.check = std::move(check);
         }
         // A read waits for its copies; an early download's go with the next submission.
@@ -976,6 +979,7 @@ void BufferCache<P>::RecordEarlyDownloads() {
         // Bounded: past it, the reads of these pages flush on demand.
         if (pending_early_downloads >= MaxPendingEarlyDownloads ||
             early_bytes_this_frame >= EarlyBytesPerFrame) {
+            ++read_check.early_left_out; // TEST
             return;
         }
         RecordReadDownload(pages, pages, true);
@@ -1195,7 +1199,7 @@ void BufferCache<P>::WriteReadDownloads(u64 tick) {
                 }
             }
             if (download.check) [[unlikely]] {
-                CheckReadDownload(*download.check, cpu_written);
+                CheckReadDownload(download, cpu_written);
                 async_buffers_death_ring.push_back(download.check->staging);
             }
             download.clean_ranges.ForEach([&](DAddr start, DAddr end) {
@@ -1250,8 +1254,9 @@ bool BufferCache<P>::ReadDownloadsCover(DAddr device_addr, u64 size) const {
 }
 
 template <class P>
-void BufferCache<P>::CheckReadDownload(const ReadCheck& check,
+void BufferCache<P>::CheckReadDownload(const ReadDownload& download,
                                        const Common::RangeSet<DAddr>& cpu_written) {
+    const ReadCheck& check = *download.check;
     // Guest memory now holds this download and the earlier ones: compare it with the synchronous
     // copy, except where a newer value replaced it since (CPU writes, ClearDownload). Writes
     // collected since the download was written count as newer too. Where an earlier download
@@ -1272,7 +1277,8 @@ void BufferCache<P>::CheckReadDownload(const ReadCheck& check,
         Outdated,  ///< An earlier download's bytes differ: the GPU wrote them since
         NotLanded, ///< No earlier download wrote it
     };
-    const auto report = [this](Result result, DAddr address, u64 size, u8 found, u8 wanted) {
+    const auto report = [this, &download](Result result, DAddr address, u64 size, u8 found,
+                                          u8 wanted) {
         if (result == Result::Rewritten) {
             read_check.rewritten += size;
             if (read_check.logged_rewrites++ < 16) {
@@ -1297,6 +1303,9 @@ void BufferCache<P>::CheckReadDownload(const ReadCheck& check,
                   "Read download check: guest memory {:#x}+{:#x} differs from a synchronous "
                   "flush ({:#04x} for {:#04x} at its start){}",
                   address, size, found, wanted, why);
+        if (result == Result::Differs) {
+            ExplainReadCheckDifference(download, address, size, found, wanted);
+        }
     };
     std::vector<u8> guest;
     std::vector<Source> sources;
@@ -1371,9 +1380,58 @@ void BufferCache<P>::CheckReadDownload(const ReadCheck& check,
                  "Read download check (EDEN_NX2_READ_CHECK): {} downloads compared with a "
                  "synchronous flush, {} KiB; {} bytes differ, {} GPU-modified bytes no download "
                  "brought (both must stay 0); {} bytes got newer values after an earlier read's "
-                 "download brought them (not compared)",
+                 "download brought them (not compared); {} guest CPU writes waited for a "
+                 "download landing under them, {:.3f} ms; recorded: {} read downloads, {} check "
+                 "copies alone, {} early downloads ({} left out at their bounds); {} reads an "
+                 "early download served flushed for the check",
                  read_check.checked, read_check.compared / 1024, read_check.mismatched,
-                 read_check.uncovered, read_check.rewritten);
+                 read_check.uncovered, read_check.rewritten, VideoCore::DownloadLanding::Waits(),
+                 static_cast<double>(VideoCore::DownloadLanding::WaitNs()) / 1e6,
+                 read_check.reads_recorded, read_check.alone_recorded, read_check.early_recorded,
+                 read_check.early_left_out, read_check.early_served);
+    }
+}
+
+template <class P>
+void BufferCache<P>::ExplainReadCheckDifference(const ReadDownload& download, DAddr address,
+                                                u64 size, u8 found, u8 wanted) {
+    if constexpr (!IS_OPENGL) {
+        // What the download's own copy holds there: the check's copy was recorded right after it,
+        // so they differ only if the GPU wrote between the two. Equal, guest memory changed after
+        // the download wrote it.
+        std::optional<u8> brought;
+        for (const BufferCopy& copy : download.copies) {
+            if (address >= copy.src_offset && address < copy.src_offset + copy.size) {
+                brought = download.staging.mapped_span[copy.dst_offset - download.staging.offset +
+                                                       (address - copy.src_offset)];
+            }
+        }
+        std::string source = "the download has no copy there";
+        if (brought) {
+            source = fmt::format(
+                "the download brought {:#04x}{}", *brought,
+                *brought == wanted ? ", as the check copy: guest memory changed after it landed"
+                : *brought == found
+                    ? ", as guest memory holds: the GPU wrote between the download's copy and the "
+                      "check's"
+                    : ", neither");
+        }
+        DAddr buffer_addr = 0;
+        u64 buffer_size = 0;
+        ForEachBufferInRange(address, 1, [&](BufferId, Buffer& buffer) {
+            buffer_addr = buffer.CpuAddr();
+            buffer_size = buffer.SizeBytes();
+        });
+        const bool collected = PendingCpuWriteRanges().Intersects(address, size);
+        LOG_ERROR(HW_GPU,
+                  "Read download check: {:#x}+{:#x} is in {} download of tick {} (now {}), buffer "
+                  "{:#x}+{:#x} at offset {:#x}: {}; {}; newest GPU-side guest memory write noted "
+                  "there: {}",
+                  address, size, download.early ? "an early" : "a read's", download.tick,
+                  runtime.CurrentTick(), buffer_addr, buffer_size, address - buffer_addr, source,
+                  collected ? "a guest CPU write is collected there now"
+                            : "no guest CPU write is collected there",
+                  VideoCore::ReadCheckWrites::Find(address, size));
     }
 }
 
