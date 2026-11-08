@@ -1615,7 +1615,13 @@ void Device::RemoveUnsuitableExtensions() {
                                        VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME);
 
     // VK_EXT_descriptor_heap
-    extensions.descriptor_heap = features.descriptor_heap.descriptorHeap;
+    // EXPERIMENT (do not merge): off until heap pipelines use it; EDEN_NX2_DESCRIPTOR_HEAP=1
+    // enables it.
+    static const bool heap_wanted = [] {
+        const char* const value = std::getenv("EDEN_NX2_DESCRIPTOR_HEAP");
+        return value != nullptr && value[0] == '1';
+    }();
+    extensions.descriptor_heap = features.descriptor_heap.descriptorHeap && heap_wanted;
     RemoveExtensionFeatureIfUnsuitable(extensions.descriptor_heap, features.descriptor_heap,
                                        VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME);
 
