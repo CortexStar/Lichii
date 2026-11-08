@@ -208,6 +208,7 @@ void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu
     if (!early_landed.empty()) [[unlikely]] {
         ForgetEarlyLanded(device_addr, size);
     }
+    NoteReadCheckEvent(device_addr, size, ReadCheckEvent::GuestWrite); // TEST
     // The written range lies within its pages: when they hold no GPU-written data, both lookups
     // below find nothing, so one lookup answers them.
     if (keep_page_gpu_data) {
@@ -559,6 +560,7 @@ void BufferCache<P>::RecordReadDownload(std::span<const std::pair<DAddr, u64>> r
         boost::container::small_vector<Copy, 16> copies;
         ReadDownload download;
         download.early = early;
+        download.events_before = read_check_event_count; // TEST
         u64 total_size_bytes = 0;
         const auto add_copy = [&](BufferId buffer_id, DAddr buffer_addr, DAddr begin, DAddr end) {
             copies.push_back({buffer_id, BufferCopy{
@@ -683,7 +685,16 @@ void BufferCache<P>::RecordReadDownload(std::span<const std::pair<DAddr, u64>> r
         };
         boost::container::small_vector<LandedCopy, 4> landed_copies;
         if (check && !early && !early_landed.empty()) [[unlikely]] {
-            const auto add_landed = [&](DAddr lower, DAddr upper, const u8* as_landed) {
+            const auto add_landed = [&](DAddr lower, DAddr upper, const u8* as_landed,
+                                        const EarlyLanded& entry) {
+                for (const auto& from : entry.from) {
+                    if (from.begin < upper && lower < from.end) {
+                        auto origin = from;
+                        origin.begin = (std::max)(from.begin, lower);
+                        origin.end = (std::min)(from.end, upper);
+                        check->origins.push_back(origin);
+                    }
+                }
                 ForEachBufferInRange(lower, upper - lower, [&](BufferId buffer_id, Buffer& buffer) {
                     const DAddr buffer_addr = buffer.CpuAddr();
                     const DAddr begin = (std::max)(lower, buffer_addr);
@@ -859,6 +870,7 @@ void BufferCache<P>::FinishReadDownloads(DAddr device_addr, u64 size) {
 
 template <class P>
 void BufferCache<P>::OutdateReadDownloads(DAddr device_addr, u64 size) {
+    NoteReadCheckEvent(device_addr, size, ReadCheckEvent::Unrecorded); // TEST
     // TEST (EDEN_NX2_READ_CHECK): the GPU's copy gets newer bytes where an early download landed,
     // which no read compares. A query result copy (SyncValues) is no GPU write the cache records:
     // a synchronous flush doesn't download it, and guest memory gets the result once the query
@@ -1097,6 +1109,7 @@ void BufferCache<P>::NoteEarlyLanded(const ReadDownload& download,
     if (early_landed.size() >= 4 * MaxReadBackPages) {
         early_landed.clear();
     }
+    const u64 landed_at = read_check_event_count;
     download.clean_ranges.ForEach([&](DAddr start, DAddr end) {
         Common::RangeSet<DAddr> landed;
         landed.Add(start, end - start);
@@ -1113,6 +1126,18 @@ void BufferCache<P>::NoteEarlyLanded(const ReadDownload& download,
                 device_memory.ReadBlockUnsafe(from, entry.as_landed.data() + (from - page),
                                               to - from);
                 entry.bytes.Add(from, to - from);
+                if (entry.from.size() >= 8) {
+                    entry.from.erase(entry.from.begin());
+                }
+                entry.from.push_back({
+                    .begin = from,
+                    .end = to,
+                    .tick = download.tick,
+                    .copied = download.events_before,
+                    .landed = landed_at,
+                    .early = true,
+                    .before_read = true,
+                });
             }
         });
     });
@@ -1135,7 +1160,7 @@ void BufferCache<P>::TakeEarlyLanded(DAddr device_addr, u64 size, Func&& func) {
             taken.Subtract(lower, upper - lower);
         });
         taken.ForEach([&](DAddr lower, DAddr upper) {
-            func(lower, upper, it->second.as_landed.data() + (lower - page));
+            func(lower, upper, it->second.as_landed.data() + (lower - page), it->second);
             it->second.bytes.Subtract(lower, upper - lower);
         });
         if (it->second.bytes.Empty()) {
@@ -1211,8 +1236,7 @@ void BufferCache<P>::WriteReadDownloads(u64 tick) {
             // TEST: what later reads' checks find of an earlier download where they kept its bytes.
             for (size_t later = 1; later < read_downloads.size(); ++later) {
                 if (read_downloads[later].check) [[unlikely]] {
-                    NoteLandedBytes(*read_downloads[later].check, download.write_ranges,
-                                    cpu_written);
+                    NoteLandedBytes(*read_downloads[later].check, download, cpu_written);
                 }
             }
             if (download.check) [[unlikely]] {
@@ -1322,6 +1346,8 @@ void BufferCache<P>::CheckReadDownload(const ReadDownload& download,
                   address, size, found, wanted, why);
         if (result == Result::Differs) {
             ExplainReadCheckDifference(download, address, size, found, wanted);
+        } else if (result == Result::Outdated) {
+            ExplainReadCheckOutdated(download, address, size);
         }
     };
     std::vector<u8> guest;
@@ -1453,11 +1479,110 @@ void BufferCache<P>::ExplainReadCheckDifference(const ReadDownload& download, DA
 }
 
 template <class P>
-void BufferCache<P>::NoteLandedBytes(ReadCheck& check, const Common::RangeSet<DAddr>& written,
+void BufferCache<P>::ExplainReadCheckOutdated(const ReadDownload& download, DAddr address,
+                                              u64 size) {
+    if constexpr (!IS_OPENGL) {
+        // The newest download noted as bringing it: early_landed before this read came (a), or
+        // one on its way at this read that landed before it (b).
+        const typename ReadCheck::Origin* origin = nullptr;
+        for (const auto& entry : download.check->origins) {
+            if (address >= entry.begin && address < entry.end) {
+                origin = &entry;
+            }
+        }
+        std::string path = "no download noted as bringing it";
+        u64 since = download.events_before;
+        u64 landed_at = download.events_before;
+        if (origin != nullptr) {
+            path = fmt::format("{} {} download of tick {}",
+                               origin->before_read ? "(a) landed before this read came, by"
+                                                   : "(b) on its way at this read, landed by",
+                               origin->early ? "an early" : "a read's", origin->tick);
+            since = origin->copied;
+            landed_at = origin->landed;
+        }
+        // What wrote it since that download's copy, oldest first.
+        static constexpr std::array<const char*, 6> kinds{
+            "GPU write", "unrecorded GPU write (query result copy)",
+            "DMA clear", "guest write",
+            "upload",    "inline upload",
+        };
+        const u64 total = read_check_event_count;
+        const u64 ring = read_check_events.size();
+        // No ring yet: no event was noted (NoteReadCheckEvent sizes it first).
+        const u64 first =
+            ring == 0 ? total : (std::max)(since, total > ring ? total - ring : u64{0});
+        std::string events;
+        u64 listed = 0;
+        u64 uploads = 0;
+        bool guest_write_since = false;
+        bool upload_since = false;
+        for (u64 index = first; index < total; ++index) {
+            const ReadCheckEventEntry& event = read_check_events[index % ring];
+            if (event.begin >= address + size || address >= event.end) {
+                continue;
+            }
+            const bool after_landing = event.sequence > landed_at;
+            const bool upload =
+                event.kind == ReadCheckEvent::Upload || event.kind == ReadCheckEvent::Inline;
+            uploads += upload ? 1 : 0;
+            upload_since = upload_since || (upload && after_landing);
+            guest_write_since =
+                guest_write_since || (event.kind == ReadCheckEvent::GuestWrite && after_landing);
+            if (listed++ >= 8) {
+                continue;
+            }
+            events += fmt::format(
+                "{}{}{} ({} it landed, {} this read's copy)", events.empty() ? "" : ", ",
+                kinds[static_cast<size_t>(event.kind)],
+                event.kind == ReadCheckEvent::GpuWrite
+                    ? fmt::format(" by {}",
+                                  GpuWaitStats::write_site_names[static_cast<size_t>(event.site)])
+                    : std::string{},
+                after_landing ? "after" : "before",
+                event.sequence > download.events_before ? "after" : "before");
+        }
+        if (listed > 8) {
+            events += fmt::format(" and {} more", listed - 8);
+        }
+        const DAddr page = Common::AlignDown(address, DEVICE_PAGESIZE);
+        LOG_ERROR(HW_GPU,
+                  "Read download check: {:#x}+{:#x} is outdated: {}; compared by {} download of "
+                  "tick {} (now {}); since that copy over it: {}{}; a guest write since it "
+                  "landed: {}; uploads since that copy: {}, since it landed: {}; newest GPU-side "
+                  "guest memory write noted there: {}; page {:#x} in the tracker: CPU-modified "
+                  "{}, GPU-modified {}; GPU-modified in the cache: {}; a guest CPU write "
+                  "collected there now: {}",
+                  address, size, path, download.early ? "an early" : "a read's", download.tick,
+                  runtime.CurrentTick(), events.empty() ? "nothing noted" : events,
+                  since < first ? " (older events lost)" : "", guest_write_since ? "yes" : "no",
+                  uploads, upload_since ? "yes" : "no",
+                  VideoCore::ReadCheckWrites::Find(address, size), page,
+                  memory_tracker.IsRegionCpuModified(page, DEVICE_PAGESIZE) ? "yes" : "no",
+                  memory_tracker.IsRegionGpuModified(page, DEVICE_PAGESIZE) ? "yes" : "no",
+                  gpu_modified_ranges.Intersects(address, size) ? "yes" : "no",
+                  PendingCpuWriteRanges().Intersects(address, size) ? "yes" : "no");
+    }
+}
+
+template <class P>
+void BufferCache<P>::NoteLandedBytes(ReadCheck& check, const ReadDownload& download,
                                      const Common::RangeSet<DAddr>& cpu_written) {
     if (check.kept.Empty()) {
         return;
     }
+    const Common::RangeSet<DAddr>& written = download.write_ranges;
+    const auto note_origin = [&](DAddr start, DAddr end) {
+        check.origins.push_back({
+            .begin = start,
+            .end = end,
+            .tick = download.tick,
+            .copied = download.events_before,
+            .landed = read_check_event_count,
+            .early = download.early,
+            .before_read = false,
+        });
+    };
     for (const BufferCopy& copy : check.copies) {
         const DAddr copy_addr = static_cast<DAddr>(copy.src_offset);
         u8* const landed = check.landed_bytes.data() + (copy.dst_offset - check.staging.offset);
@@ -1465,6 +1590,7 @@ void BufferCache<P>::NoteLandedBytes(ReadCheck& check, const Common::RangeSet<DA
             check.kept.ForEachInRange(lower, upper - lower, [&](DAddr start, DAddr end) {
                 device_memory.ReadBlockUnsafe(start, landed + (start - copy_addr), end - start);
                 check.landed.Add(start, end - start);
+                note_origin(start, end);
                 // A guest write collected and not yet applied kept its bytes from the download:
                 // newer than both copies, as a synchronous flush leaves it. Applied before this
                 // check lands, it no longer counts as collected, and would read as landed.
@@ -1521,6 +1647,8 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
 
     ClearDownload(*cpu_dest_address, amount);
     MarkVertexBuffersStale(*cpu_dest_address, amount);
+    NoteReadCheckEvent(*cpu_dest_address, amount, ReadCheckEvent::GpuWrite,
+                       GpuWaitStats::WriteSite::DmaCopy); // TEST
 
     BufferId buffer_a;
     BufferId buffer_b;
@@ -1607,6 +1735,7 @@ bool BufferCache<P>::DMAClear(GPUVAddr dst_address, u64 amount, u32 value) {
     FinishReadDownloads(*cpu_dst_address, size);
     ClearDownload(*cpu_dst_address, size);
     gpu_modified_ranges.Subtract(*cpu_dst_address, size);
+    NoteReadCheckEvent(*cpu_dst_address, size, ReadCheckEvent::DmaClear); // TEST
     // As an inline write: command list pages read the cleared words from guest memory.
     Nx2NoteListHostWrite(*cpu_dst_address, size);
 
@@ -3227,6 +3356,7 @@ void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u3
     for (auto& ranges : pending_download_ranges) {
         ranges.Subtract(device_addr, size);
     }
+    NoteReadCheckEvent(device_addr, size, ReadCheckEvent::GpuWrite, site); // TEST
     OutdateReadDownloads(device_addr, size);
     NoteReadBackWrite(device_addr, size);
     memory_tracker.MarkRegionAsGpuModified(device_addr, size);
@@ -3796,6 +3926,7 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
         const auto add_upload = [&](DAddr start, DAddr end) {
             if (start == end) return;
             const u64 range_size = end - start;
+            NoteReadCheckEvent(start, range_size, ReadCheckEvent::Upload); // TEST
             upload_copies.push_back(BufferCopy{
                 .src_offset = total_size_bytes,
                 .dst_offset = start - buffer_start,
@@ -3830,6 +3961,7 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
         u64 largest_copy = 0;
         DAddr buffer_start = buffer.CpuAddr();
         for_each_upload_range([&](u64 device_addr_out, u64 range_size) {
+            NoteReadCheckEvent(device_addr_out, range_size, ReadCheckEvent::Upload); // TEST
             copies.push_back(BufferCopy{
                 .src_offset = total_size_bytes,
                 .dst_offset = device_addr_out - buffer_start,
@@ -3931,6 +4063,7 @@ void BufferCache<P>::InlineMemoryImplementation(DAddr dest_address, size_t copy_
     ClearDownload(dest_address, copy_size);
     gpu_modified_ranges.Subtract(dest_address, copy_size);
     MarkVertexBuffersStale(dest_address, copy_size);
+    NoteReadCheckEvent(dest_address, copy_size, ReadCheckEvent::Inline); // TEST
 
     BufferId buffer_id = FindBuffer(dest_address, static_cast<u32>(copy_size), false);
     auto& buffer = slot_buffers[buffer_id];

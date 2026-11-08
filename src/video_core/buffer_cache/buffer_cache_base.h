@@ -845,6 +845,17 @@ private:
         /// A check alone, its read's bytes all brought by other downloads: the bytes it compares,
         /// which its read waits for as for a download of its own.
         Common::RangeSet<DAddr> own;
+        /// The downloads that brought `landed`, newest last, to explain an Outdated byte.
+        struct Origin {
+            DAddr begin{};
+            DAddr end{};
+            u64 tick{};
+            u64 copied{}; ///< read_check_events before its copy
+            u64 landed{}; ///< read_check_events before it landed
+            bool early{};
+            bool before_read{}; ///< Landed before this read came (early_landed), not kept
+        };
+        boost::container::small_vector<Origin, 2> origins;
     };
     struct ReadCheckTotals {
         u64 every{};      ///< Tests: check 1 in `every` read downloads, over EDEN_NX2_READ_CHECK
@@ -877,10 +888,6 @@ private:
     [[nodiscard]] bool ReadChecks() const {
         return read_check.every != 0 || ReadCheckEvery() != 0;
     }
-    /// A download landed `written`, but for the guest CPU writes collected then (`cpu_written`):
-    /// what guest memory holds now over a later check's `kept`.
-    void NoteLandedBytes(ReadCheck& check, const Common::RangeSet<DAddr>& written,
-                         const Common::RangeSet<DAddr>& cpu_written);
 
     /// A DownloadMemoryForRead: its copies, and what is left of them to do once the host GPU has
     /// run them.
@@ -900,7 +907,12 @@ private:
         /// Recorded right after a GPU write, before any read (RecordEarlyDownloads)
         bool early{};
         ReadTrace::Copy trace{}; ///< TEST: EDEN_NX2_READ_TRACE
+        u64 events_before{};     ///< TEST (EDEN_NX2_READ_CHECK): read_check_events before it
     };
+    /// A download landed its write_ranges, but for the guest CPU writes collected then
+    /// (`cpu_written`): what guest memory holds now over a later check's `kept`.
+    void NoteLandedBytes(ReadCheck& check, const ReadDownload& download,
+                         const Common::RangeSet<DAddr>& cpu_written);
     /// TEST (EDEN_NX2_READ_CHECK): compares guest memory with `download`'s check copy, right after
     /// the download landed.
     void CheckReadDownload(const ReadDownload& download,
@@ -908,6 +920,50 @@ private:
     /// TEST (EDEN_NX2_READ_CHECK): where a difference the check found comes from.
     void ExplainReadCheckDifference(const ReadDownload& download, DAddr address, u64 size, u8 found,
                                     u8 wanted);
+    /// TEST (EDEN_NX2_READ_CHECK): what changed the GPU's copy of an Outdated byte, which an
+    /// earlier download brought: the writes, guest writes and uploads over it since that copy.
+    void ExplainReadCheckOutdated(const ReadDownload& download, DAddr address, u64 size);
+    enum class ReadCheckEvent : u8 {
+        GpuWrite,   ///< MarkWrittenBuffer or DMACopy, with its GpuWaitStats write site
+        Unrecorded, ///< A GPU write the cache records only as outdating downloads (SyncValues)
+        DmaClear,
+        GuestWrite, ///< WriteMemory: a guest CPU write, or the GPU's side through guest memory
+        Upload,     ///< SynchronizeBuffer
+        Inline,     ///< InlineMemoryImplementation
+    };
+    struct ReadCheckEventEntry {
+        DAddr begin{};
+        DAddr end{};
+        u64 sequence{}; ///< 1 for the first event
+        ReadCheckEvent kind{};
+        GpuWaitStats::WriteSite site{};
+    };
+    /// The last ReadCheckEventRing events, sized by the first: a cache without the check has none.
+    std::vector<ReadCheckEventEntry> read_check_events;
+    u64 read_check_event_count{};
+    static constexpr size_t ReadCheckEventRing = 4096;
+    /// TEST (EDEN_NX2_READ_CHECK): something changed the GPU's copy or guest memory there.
+    void NoteReadCheckEvent(DAddr device_addr, u64 size, ReadCheckEvent kind,
+                            GpuWaitStats::WriteSite site = GpuWaitStats::WriteSite::Other) {
+        if (!ReadChecks() || size == 0 || (read_downloads.empty() && early_landed.empty())) {
+            return;
+        }
+        if (read_check_events.empty()) [[unlikely]] {
+            read_check_events.resize(ReadCheckEventRing);
+        }
+        if (kind == ReadCheckEvent::Unrecorded && read_check_event_count != 0) {
+            // MarkWrittenBuffer outdates the downloads after noting its write.
+            const ReadCheckEventEntry& last =
+                read_check_events[(read_check_event_count - 1) % read_check_events.size()];
+            if (last.kind == ReadCheckEvent::GpuWrite && last.begin == device_addr &&
+                last.end == device_addr + size) {
+                return;
+            }
+        }
+        ++read_check_event_count;
+        read_check_events[(read_check_event_count - 1) % read_check_events.size()] = {
+            device_addr, device_addr + size, read_check_event_count, kind, site};
+    }
     /// Oldest first, and written to guest memory in that order: none lands over newer bytes.
     std::deque<ReadDownload> read_downloads;
     /// All the read downloads' clean_ranges (they don't overlap): GPU-modified bytes already on
@@ -921,6 +977,8 @@ private:
     struct EarlyLanded {
         Common::RangeSet<DAddr> bytes;
         std::vector<u8> as_landed; ///< The page, DEVICE_PAGESIZE bytes
+        /// The downloads that landed them, newest last (at most 8): a check's Origin.
+        boost::container::small_vector<typename ReadCheck::Origin, 2> from;
     };
     std::unordered_map<DAddr, EarlyLanded> early_landed;
     /// Whether an early download serves this read: in check mode it flushes (and is compared).
