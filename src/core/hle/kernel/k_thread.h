@@ -8,8 +8,6 @@
 
 #include <array>
 #include <atomic>
-#include <condition_variable>
-#include <mutex>
 #include <span>
 #include <string>
 #include <utility>
@@ -956,9 +954,9 @@ private:
     std::shared_ptr<Common::Fiber> m_host_context{};
     ThreadType m_thread_type{};
     StepState m_step_state{};
-    bool m_dummy_thread_runnable{true};
-    std::mutex m_dummy_thread_mutex{};
-    std::condition_variable m_dummy_thread_cv{};
+    /// 1 while the host thread behind a dummy thread may run, 0 while the scheduler keeps it
+    /// waiting (an HLE service thread waiting for a request, a host thread on a kernel object).
+    std::atomic<u32> m_dummy_thread_runnable{1};
 
     // For debugging
     std::vector<KSynchronizationObject*> m_wait_objects_for_debugging{};

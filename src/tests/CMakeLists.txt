@@ -117,6 +117,7 @@ add_executable(tests
     common/paged_scalar.cpp
     common/queue_lifetime.cpp
     common/queue_timed_wait.cpp
+    common/nx2_address_wait.cpp
     common/range_set_move.cpp
     common/range_set_subtract.cpp
     video_core/uniform_cache_history.cpp
