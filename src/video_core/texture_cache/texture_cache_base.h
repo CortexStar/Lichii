@@ -26,15 +26,14 @@
 #include <boost/container/static_vector.hpp>
 #include <queue>
 
+#include <ranges>
 #include "common/common_types.h"
-#include "common/spin_recursive_mutex.h"
 #include "common/hash.h"
 #include "common/literals.h"
 #include "common/lru_cache.h"
-#include <ranges>
 #include "common/scratch_buffer.h"
 #include "common/slot_vector.h"
-#include "video_core/texture_cache/pending_download.h"
+#include "common/spin_recursive_mutex.h"
 #include "common/thread_worker.h"
 #include "video_core/compatible_formats.h"
 #include "video_core/control/channel_state_cache.h"
@@ -47,6 +46,8 @@
 #include "video_core/texture_cache/image_base.h"
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_view_base.h"
+#include "video_core/texture_cache/pending_download.h"
+#include "video_core/texture_cache/pool_page_watch.h"
 #include "video_core/texture_cache/render_targets.h"
 #include "video_core/texture_cache/stale_pages.h"
 #include "video_core/texture_cache/types.h"
@@ -537,6 +538,12 @@ public:
     /// Prepare an image to be used
     void PrepareImage(ImageId image_id, bool is_modification, bool invalidate);
 
+    /// Moves whenever a texture or sampler pool entry can stop being resident (a pool write, an
+    /// image event, a rebinding, a frame): what was resolved from pool entries before may differ.
+    [[nodiscard]] u64 PoolGeneration() const noexcept {
+        return pool_generation;
+    }
+
     Common::SpinRecursiveMutex mutex;
 
 private:
@@ -578,6 +585,56 @@ private:
 
     /// Find or create an image view in the guest descriptor table
     ImageViewId VisitImageView(u32 index, bool compute);
+
+    /// Descriptor table ids for the pool page watch: channel * 4 + kind.
+    static constexpr u32 POOL_GRAPHICS_TIC = 0;
+    static constexpr u32 POOL_GRAPHICS_TSC = 1;
+    static constexpr u32 POOL_COMPUTE_TIC = 2;
+    static constexpr u32 POOL_COMPUTE_TSC = 3;
+
+    [[nodiscard]] u32 PoolTableId(bool compute, bool sampler) const noexcept {
+        return static_cast<u32>(current_channel_id) * 4 + (compute ? POOL_COMPUTE_TIC : 0) +
+               (sampler ? 1U : 0U);
+    }
+
+    /// Calls func with the descriptor table a pool table id names.
+    template <typename Func>
+    void VisitPoolTable(u32 table_id, Func&& func);
+
+    /// Rebinds a table to the pool at gpu_addr, disarming its pages first. True when it changed.
+    template <typename Table>
+    bool SyncPoolTable(Table& table, u32 table_id, GPUVAddr gpu_addr, u32 limit);
+
+    /// Puts a write watch on the pool page holding the entry before it is read. True when the
+    /// page is watched, so the entry may become resident.
+    template <typename Table>
+    bool ArmPoolEntry(Table& table, u32 table_id, u32 index);
+
+    /// Drops every watch of a table (its pool is rebound or remapped).
+    template <typename Table>
+    void DisarmPoolTable(Table& table, u32 table_id);
+
+    /// Drops one watch: the cached-page count and the residency of the page's entries.
+    void DisarmPoolPage(u64 device_page, PoolPageWatch::Ref ref, bool written);
+
+    /// Makes an image table entry resident when its image needs no preparation on reuse.
+    template <typename Table>
+    void MakeViewResident(Table& table, u32 index, ImageViewId view_id);
+
+    /// Records that a TIC entry of the current channel is bound to a view of the image.
+    void NotePoolRef(ImageViewId view_id, u32 index, bool compute);
+
+    /// The image's contents, aliases or mapping changed: its entries are no longer resident.
+    void ClearPoolResidency(ImageId image_id);
+
+    /// A TIC entry bound to a view of an image (image_pool_refs).
+    struct PoolRef {
+        u32 channel;
+        u32 index;
+        bool compute;
+
+        bool operator==(const PoolRef&) const = default;
+    };
 
     /// Find or create a framebuffer with the given render target parameters
     FramebufferId GetFramebufferId(const RenderTargets& key);
@@ -742,6 +799,24 @@ private:
 
     Tegra::MaxwellDeviceMemoryManager& device_memory;
     std::deque<TextureCacheGPUMap> gpu_page_table_storage;
+
+    PoolPageWatch pool_watch;
+    std::unordered_map<ImageId, boost::container::small_vector<PoolRef, 2>> image_pool_refs;
+    u64 seen_gpu_written_generation = 0;
+    u64 pool_generation = 0;
+    /// Pool statistics (EDEN_NX2_TC_LOG, last 600 frames).
+    struct PoolStats {
+        u64 view_hits;
+        u64 view_resolves;
+        u64 sampler_hits;
+        u64 sampler_resolves;
+        u64 arms;
+        u64 write_disarms;
+        u64 gpu_written_disarms;
+        u64 rebinds;
+        u64 image_events;
+        u64 forgets;
+    } pool_stats{};
 
     RenderTargets render_targets;
     u64 render_targets_serial = 0;
