@@ -182,10 +182,10 @@ enum class Stat : u32 {
     DirtyWriteSkip,    ///< of those, over pages all CPU-dirty already
     UboClassicBank,    ///< classic binds of a native 64 KiB bank
     UboClassicSmall,   ///< classic binds within the stream size (GPU-written, or no host buffer)
-    BankCompare,       ///< UploadNativeBank calls (once a frame per bank)
+    BankCompare,       ///< UploadNativeBank calls (parts of banks no bind compared this frame)
     BankComparePages,  ///< bank pages compared with their shadow
-    BankPageRepeat,    ///< of those, pages another bank already compared this frame
-    BankShadowDrop,    ///< bank shadows dropped at the cap (the least recently compared)
+    BankBindCovered,   ///< bank binds whose bytes earlier binds compared this frame
+    BankShadowDrop,    ///< sweeps of the bank shadows not compared this frame at the cap
     BankSyncRefresh,   ///< bank shadow pages a sync upload refreshed
     Count,
 };
@@ -253,10 +253,10 @@ inline void Report() {
              rate(Stat::WriteMemoryCalls), rate(Stat::DirtyWriteSkip));
     LOG_INFO(HW_GPU,
              "Buffer cache banks per second: classic binds of banks {:.0f}, within the stream "
-             "size {:.0f} | bank compares {:.0f}, pages compared {:.0f}, already compared this "
-             "frame {:.0f} | shadows dropped {:.0f} | pages refreshed by syncs {:.0f}",
+             "size {:.0f} | bank compares {:.0f}, pages compared {:.0f}, binds already compared "
+             "this frame {:.0f} | shadow sweeps {:.0f} | granules refreshed by syncs {:.0f}",
              rate(Stat::UboClassicBank), rate(Stat::UboClassicSmall), rate(Stat::BankCompare),
-             rate(Stat::BankComparePages), rate(Stat::BankPageRepeat), rate(Stat::BankShadowDrop),
+             rate(Stat::BankComparePages), rate(Stat::BankBindCovered), rate(Stat::BankShadowDrop),
              rate(Stat::BankSyncRefresh));
     g_stats_start = now;
 }

@@ -230,7 +230,7 @@ struct BufferCacheTestAccess {
         cache.BindHostGraphicsUniformBuffer(0, 0, 0, true);
     }
     static void NextFrame(Cache& cache) {
-        cache.native_indirect_uniforms_this_frame.clear();
+        cache.native_bank_ranges_this_frame.Clear();
     }
     static u32 CpuMarks(Cache& cache) {
         return cache.memory_tracker.cpu_marks;
@@ -597,9 +597,41 @@ TEST_CASE("Native uniform uploads stop at holes and keep unaligned bank boundari
     f.device.Map(0x22000, 0x22000, 0x1000, f.asid);
     Access::NextFrame(*f.cache);
     Access::Uniform(*f.cache, channel, id, 0x20123, 0x10000);
-    REQUIRE(f.runtime.upload_bytes == 0x11edd);
+    REQUIRE(data[0x2000] == 0x6b);
     REQUIRE(data[0x10122] == 0x6b);
     REQUIRE(data[0x10123] == 0);
+}
+
+TEST_CASE("Overlapping native uniform bank windows upload each byte once a frame",
+          "[buffer_ports]") {
+    Fixture f;
+    f.memory->EnableNativeTiling();
+    Tegra::Control::ChannelState state{0};
+    state.memory_manager = &*f.memory;
+    state.payload.emplace(f.system, *f.memory, state);
+    VideoCommon::BufferCacheChannelInfo channel{state};
+    VideoCommon::UniformBufferSizes sizes{};
+    sizes[0][0] = 0x10000;
+    channel.uniform_buffer_sizes = &sizes;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x20000);
+    std::memset(f.bytes + 0x10000, 0x3c, 0x20000);
+    Access::Uniform(*f.cache, channel, id, 0x20000, 0x10000);
+    REQUIRE(f.runtime.upload_bytes == 0x10000);
+    // Windows at other starts within the frame upload only what no window covered yet.
+    Access::Uniform(*f.cache, channel, id, 0x20100, 0x10000);
+    REQUIRE(f.runtime.upload_bytes == 0x10100);
+    Access::Uniform(*f.cache, channel, id, 0x20080, 0x10000);
+    REQUIRE(f.runtime.upload_bytes == 0x10100);
+    const auto& data = Access::Get(*f.cache, id).bytes;
+    REQUIRE(data[0x100ff] == 0x3c);
+    REQUIRE(data[0x10100] == 0);
+    // Next frame, unchanged guest bytes are compared with the page shadows, not uploaded;
+    // a changed granule uploads alone, also from a window at a new start.
+    Access::NextFrame(*f.cache);
+    f.bytes[0x10000 + 0x4321] = 0x99;
+    Access::Uniform(*f.cache, channel, id, 0x20040, 0x10000);
+    REQUIRE(f.runtime.upload_bytes == 0x10100 + 0x100);
+    REQUIRE(data[0x4321] == 0x99);
 }
 
 TEST_CASE("Downloads keep CPU writes collected and not yet applied", "[buffer_ports]") {

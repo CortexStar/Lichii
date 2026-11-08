@@ -112,8 +112,7 @@ void BufferCache<P>::TickFrame() {
         return;
     }
     runtime.TickFrame(slot_buffers);
-    native_indirect_uniforms_this_frame.clear();
-    bank_pages_this_frame.clear();
+    native_bank_ranges_this_frame.Clear();
     Nx2BufCache::Report();
     if (frame_tick % 256 == 0) {
         // Hot pages that stopped changing (or stopped being used) are protected again.
@@ -1545,10 +1544,32 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     }
     const auto upload_bank = [&] {
         if (!(is_native_bank && !bank_streamed && size != 0 && gpu_memory != nullptr &&
-              gpu_memory->UsesNativeTiling() &&
-              (Nx2Perf::Verify() || !native_indirect_uniforms_this_frame.contains(device_addr)) &&
-              !memory_tracker.IsRegionGpuModified(device_addr, size) &&
-              native_indirect_uniforms_this_frame.insert(device_addr))) {
+              gpu_memory->UsesNativeTiling())) {
+            return;
+        }
+        // Each byte once a frame, whichever bank window covers it: only the parts no bind
+        // compared this frame. EDEN_NX2_PERF_VERIFY=1 uploads every bind.
+        if (Nx2Perf::Verify()) {
+            native_bank_ranges_this_frame.Subtract(device_addr, size);
+        }
+        boost::container::small_vector<std::pair<DAddr, DAddr>, 4> parts;
+        DAddr cursor = device_addr;
+        const DAddr bank_end = device_addr + size;
+        native_bank_ranges_this_frame.ForEachInRange(
+            device_addr, size, [&](DAddr covered_begin, DAddr covered_end) {
+                if (covered_begin > cursor) {
+                    parts.emplace_back(cursor, covered_begin);
+                }
+                cursor = (std::max)(cursor, covered_end);
+            });
+        if (cursor < bank_end) {
+            parts.emplace_back(cursor, bank_end);
+        }
+        if (parts.empty()) {
+            Nx2BufCache::Note(Nx2BufCache::Stat::BankBindCovered);
+            return;
+        }
+        if (memory_tracker.IsRegionGpuModified(device_addr, size)) {
             return;
         }
         // The bank size is only an upper limit: stop at the end of the mapped memory.
@@ -1558,17 +1579,40 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             mapped_size += Core::DEVICE_PAGESIZE - ((device_addr + mapped_size) & Core::DEVICE_PAGEMASK);
         }
         const u64 upload_size = (std::min<u64>)(mapped_size, size);
-        if (upload_size != 0) {
-            if constexpr (USE_MEMORY_MAPS && USE_MEMORY_MAPS_FOR_UPLOADS) {
-                UploadNativeBank(buffer, device_addr, upload_size);
-            } else {
-                std::array<BufferCopy, 1> copies{BufferCopy{
-                    .src_offset = 0,
-                    .dst_offset = buffer.Offset(device_addr),
-                    .size = upload_size,
-                }};
-                UploadMemory(buffer, upload_size, upload_size, copies);
-                InvalidateHotShadows(device_addr, upload_size);
+        if (upload_size == 0) {
+            return;
+        }
+        const DAddr upload_end = device_addr + upload_size;
+        native_bank_ranges_this_frame.Add(device_addr, upload_size);
+        if constexpr (USE_MEMORY_MAPS && USE_MEMORY_MAPS_FOR_UPLOADS) {
+            for (const auto& [begin, end] : parts) {
+                if (begin < upload_end) {
+                    UploadNativeBank(buffer, begin, (std::min)(end, upload_end) - begin);
+                }
+            }
+        } else {
+            boost::container::small_vector<BufferCopy, 4> copies;
+            u64 total_size = 0;
+            u64 largest_copy = 0;
+            for (const auto& [begin, end] : parts) {
+                if (begin >= upload_end) {
+                    break;
+                }
+                const u64 copy_size = (std::min)(end, upload_end) - begin;
+                copies.push_back(BufferCopy{
+                    .src_offset = total_size,
+                    .dst_offset = buffer.Offset(begin),
+                    .size = copy_size,
+                });
+                total_size += copy_size;
+                largest_copy = (std::max)(largest_copy, copy_size);
+            }
+            if (copies.empty()) {
+                return;
+            }
+            UploadMemory(buffer, total_size, largest_copy, std::span<BufferCopy>(copies));
+            for (const BufferCopy& copy : copies) {
+                InvalidateHotShadows(buffer.CpuAddr() + copy.dst_offset, copy.size);
             }
         }
     };
@@ -3264,72 +3308,94 @@ void BufferCache<P>::InlineMemoryImplementation(DAddr dest_address, size_t copy_
 }
 
 template <class P>
+typename BufferCache<P>::BankShadow* BufferCache<P>::BankShadowOf(DAddr page) {
+    if (const auto it = bank_shadows.find(page); it != bank_shadows.end()) {
+        return it->second.get();
+    }
+    if (bank_shadows.size() >= MAX_BANK_SHADOWS) {
+        // Pages no bind compared this frame go; pages of this frame's binds stay.
+        std::erase_if(bank_shadows, [this](const auto& entry) {
+            return entry.second->compared_frame != frame_tick;
+        });
+        Nx2BufCache::Note(Nx2BufCache::Stat::BankShadowDrop);
+        if (bank_shadows.size() >= MAX_BANK_SHADOWS) {
+            return nullptr;
+        }
+    }
+    return bank_shadows.emplace(page, std::make_unique<BankShadow>()).first->second.get();
+}
+
+template <class P>
 void BufferCache<P>::UploadNativeBank(Buffer& buffer, DAddr device_addr, u64 upload_size) {
     if constexpr (USE_MEMORY_MAPS && USE_MEMORY_MAPS_FOR_UPLOADS) {
-        // Ocarina binds ~a hundred programs' banks a frame; they rarely change.
-        if (bank_shadows.size() >= 256 && !bank_shadows.contains(device_addr)) {
-            // Only the least recently compared bank uploads whole again, not every bank.
-            auto victim = bank_shadows.begin();
-            for (auto it = bank_shadows.begin(); it != bank_shadows.end(); ++it) {
-                if (it->second->compared_frame < victim->second->compared_frame) {
-                    victim = it;
-                }
-            }
-            bank_shadows.erase(victim);
-            Nx2BufCache::Note(Nx2BufCache::Stat::BankShadowDrop);
-        }
-        std::unique_ptr<BankShadow>& slot = bank_shadows[device_addr];
-        if (!slot) {
-            slot = std::make_unique<BankShadow>();
-        }
-        BankShadow& shadow = *slot;
-        shadow.compared_frame = frame_tick;
         Nx2BufCache::Note(Nx2BufCache::Stat::BankCompare);
-        const u64 base_offset = buffer.Offset(device_addr);
-        boost::container::small_vector<BufferCopy, 17> copies;
+        struct Copy {
+            DAddr address;
+            u64 size;
+            const u8* bytes; ///< the shadow's, or guest memory's without a shadow
+        };
+        boost::container::small_vector<Copy, 16> copies;
         u64 total_size = 0;
-        u32 page = 0;
+        const auto add_copy = [&](DAddr address, u64 size, const u8* bytes) {
+            if (!copies.empty() && copies.back().address + copies.back().size == address &&
+                copies.back().bytes + copies.back().size == bytes) {
+                copies.back().size += size;
+            } else {
+                copies.push_back(Copy{address, size, bytes});
+            }
+            total_size += size;
+        };
         // As hot pages: guest bytes over a page the GPU wrote may be older than its results there
         // (not, or no longer, in gpu_modified_ranges). Such pages keep the usual tracking.
-        const bool bank_gpu_written = gpu_modified_ranges.Intersects(device_addr, upload_size) ||
-                                      Tegra::Nx2MayBeGpuWritten(device_addr, upload_size);
-        for (u64 offset = 0; offset < upload_size && page < 32; ++page) {
-            const DAddr address = device_addr + offset;
-            const u64 length =
-                (std::min<u64>)(Core::DEVICE_PAGESIZE - (address & Core::DEVICE_PAGEMASK),
-                                upload_size - offset);
-            const u32 bit = 1U << page;
+        const bool range_gpu_written = gpu_modified_ranges.Intersects(device_addr, upload_size) ||
+                                       Tegra::Nx2MayBeGpuWritten(device_addr, upload_size);
+        const DAddr end = device_addr + upload_size;
+        for (DAddr address = device_addr; address < end;) {
+            const DAddr page = Common::AlignDown(address, DEVICE_PAGESIZE);
+            const DAddr part_end = (std::min<DAddr>)(page + DEVICE_PAGESIZE, end);
+            const u64 length = part_end - address;
             const u8* const guest = device_memory.template GetPointer<u8>(address);
-            u8* const saved = shadow.bytes.data() + offset;
             const bool unusable =
                 guest == nullptr ||
-                (bank_gpu_written && (gpu_modified_ranges.Intersects(address, length) ||
-                                      Tegra::Nx2MayBeGpuWritten(address, length)));
-            if (!unusable && (shadow.valid & bit) != 0 && Nx2Profile::Enabled()) [[unlikely]] {
-                Nx2BufCache::Note(Nx2BufCache::Stat::BankComparePages);
-                if (!bank_pages_this_frame.insert(address & ~DAddr{Core::DEVICE_PAGEMASK})) {
-                    Nx2BufCache::Note(Nx2BufCache::Stat::BankPageRepeat);
-                }
-            }
+                (range_gpu_written && (gpu_modified_ranges.Intersects(address, length) ||
+                                       Tegra::Nx2MayBeGpuWritten(address, length)));
             if (unusable) {
-                shadow.valid &= ~bit;
-            } else if ((shadow.valid & bit) == 0 ||
-                       !Nx2BufCache::BytesEqual(saved, guest, length)) {
-                std::memcpy(saved, guest, length);
-                shadow.valid |= bit;
-                if (!copies.empty() &&
-                    copies.back().dst_offset + copies.back().size == base_offset + offset) {
-                    copies.back().size += length;
-                } else {
-                    copies.push_back(BufferCopy{
-                        .src_offset = total_size,
-                        .dst_offset = base_offset + offset,
-                        .size = length,
-                    });
-                }
-                total_size += length;
+                InvalidateBankShadows(address, length);
+                address = part_end;
+                continue;
             }
-            offset += length;
+            Nx2BufCache::Note(Nx2BufCache::Stat::BankComparePages);
+            BankShadow* const shadow = BankShadowOf(page);
+            if (shadow != nullptr) {
+                shadow->compared_frame = frame_tick;
+            }
+            for (DAddr granule = address; granule < part_end;) {
+                const u64 index = (granule - page) / BANK_GRANULE;
+                const DAddr granule_end =
+                    (std::min<DAddr>)(page + (index + 1) * BANK_GRANULE, part_end);
+                const u64 granule_size = granule_end - granule;
+                const u8* const source = guest + (granule - address);
+                if (shadow == nullptr) {
+                    add_copy(granule, granule_size, source);
+                    granule = granule_end;
+                    continue;
+                }
+                const u16 bit = static_cast<u16>(1U << index);
+                u8* const saved = shadow->bytes.data() + (granule - page);
+                // A valid granule holds what the host holds, also where this part doesn't reach:
+                // a part's bytes go to the shadow and the host alike, so the bit stays as it is,
+                // and only a whole granule sets it.
+                if ((shadow->valid & bit) == 0 ||
+                    !Nx2BufCache::BytesEqual(saved, source, granule_size)) {
+                    std::memcpy(saved, source, granule_size);
+                    if (granule_size == BANK_GRANULE) {
+                        shadow->valid |= bit;
+                    }
+                    add_copy(granule, granule_size, saved);
+                }
+                granule = granule_end;
+            }
+            address = part_end;
         }
         if (total_size == 0) {
             return;
@@ -3337,18 +3403,22 @@ void BufferCache<P>::UploadNativeBank(Buffer& buffer, DAddr device_addr, u64 upl
         // From the shadow, not guest memory again: the host buffer then holds exactly what the
         // shadow says, even if the guest writes the bank meanwhile.
         auto upload_staging = runtime.UploadStagingBuffer(total_size);
-        for (BufferCopy& copy : copies) {
-            std::memcpy(upload_staging.mapped_span.data() + copy.src_offset,
-                        shadow.bytes.data() + (copy.dst_offset - base_offset), copy.size);
-            copy.src_offset += upload_staging.offset;
+        boost::container::small_vector<BufferCopy, 16> buffer_copies;
+        u64 staging_offset = 0;
+        for (const Copy& copy : copies) {
+            std::memcpy(upload_staging.mapped_span.data() + staging_offset, copy.bytes, copy.size);
+            buffer_copies.push_back(BufferCopy{
+                .src_offset = upload_staging.offset + staging_offset,
+                .dst_offset = buffer.Offset(copy.address),
+                .size = copy.size,
+            });
+            staging_offset += copy.size;
         }
-        const std::span<BufferCopy> copies_span(copies.data(), copies.size());
+        const std::span<BufferCopy> copies_span(buffer_copies.data(), buffer_copies.size());
         const bool can_reorder = runtime.CanReorderUpload(buffer, copies_span);
         runtime.CopyBuffer(buffer, upload_staging.buffer, copies_span, true, can_reorder);
-        for (const BufferCopy& copy : copies) {
-            const u64 bank_offset = copy.dst_offset - base_offset;
-            RefreshHotShadows(device_addr + bank_offset, shadow.bytes.data() + bank_offset,
-                              copy.size);
+        for (const Copy& copy : copies) {
+            RefreshHotShadows(copy.address, copy.bytes, copy.size);
         }
         Nx2BufCache::Note(Nx2BufCache::Stat::BankUpload);
         Nx2BufCache::Note(Nx2BufCache::Stat::BankUploadBytes, total_size);
@@ -3584,35 +3654,9 @@ void BufferCache<P>::InvalidateHotShadows(DAddr device_addr, u64 size) {
 
 template <class P>
 void BufferCache<P>::RefreshBankShadows(DAddr page, const u8* bytes) {
-    if (bank_shadows.empty()) {
-        return;
-    }
-    constexpr DAddr bank_span = 0x10000;
-    auto it = bank_shadows.lower_bound(page > bank_span ? page - bank_span : 0);
-    for (; it != bank_shadows.end() && it->first < page + DEVICE_PAGESIZE; ++it) {
-        const DAddr bank = it->first;
-        if (bank + bank_span <= page) {
-            continue;
-        }
-        BankShadow& shadow = *it->second;
-        // UploadNativeBank splits a bank at device page boundaries: a device page wholly inside
-        // the bank is one shadow page, at the same offset.
-        if (page >= bank && page + DEVICE_PAGESIZE <= bank + bank_span) {
-            const u64 index = (page >> Core::DEVICE_PAGEBITS) - (bank >> Core::DEVICE_PAGEBITS);
-            if (index < 32) {
-                std::memcpy(shadow.bytes.data() + (page - bank), bytes, DEVICE_PAGESIZE);
-                shadow.valid |= 1U << index;
-            }
-            continue;
-        }
-        const DAddr first = (std::max)(bank, page);
-        const DAddr end = (std::min)(bank + bank_span, page + DEVICE_PAGESIZE);
-        const u64 first_index = (first >> Core::DEVICE_PAGEBITS) - (bank >> Core::DEVICE_PAGEBITS);
-        const u64 last_index =
-            ((end - 1) >> Core::DEVICE_PAGEBITS) - (bank >> Core::DEVICE_PAGEBITS);
-        for (u64 index = first_index; index <= last_index && index < 32; ++index) {
-            shadow.valid &= ~(1U << index);
-        }
+    if (const auto it = bank_shadows.find(page); it != bank_shadows.end()) {
+        std::memcpy(it->second->bytes.data(), bytes, DEVICE_PAGESIZE);
+        it->second->valid = 0xffff;
     }
 }
 
@@ -3645,19 +3689,12 @@ void BufferCache<P>::InvalidateBankShadows(DAddr device_addr, u64 size) {
         return;
     }
     const DAddr end = device_addr + size;
-    constexpr DAddr bank_span = 0x10000;
-    auto it = bank_shadows.lower_bound(device_addr > bank_span ? device_addr - bank_span : 0);
-    for (; it != bank_shadows.end() && it->first < end; ++it) {
-        const DAddr bank = it->first;
-        if (bank + bank_span <= device_addr) {
-            continue;
-        }
-        const DAddr first = (std::max)(bank, device_addr);
-        const u64 first_page = (first >> Core::DEVICE_PAGEBITS) - (bank >> Core::DEVICE_PAGEBITS);
-        const u64 last_page =
-            ((end - 1) >> Core::DEVICE_PAGEBITS) - (bank >> Core::DEVICE_PAGEBITS);
-        for (u64 page = first_page; page <= last_page && page < 32; ++page) {
-            it->second->valid &= ~(1U << page);
+    for (auto it = bank_shadows.lower_bound(Common::AlignDown(device_addr, DEVICE_PAGESIZE));
+         it != bank_shadows.end() && it->first < end; ++it) {
+        const DAddr first = (std::max)(it->first, device_addr) - it->first;
+        const DAddr last = (std::min<DAddr>)(it->first + DEVICE_PAGESIZE, end) - 1 - it->first;
+        for (u64 index = first / BANK_GRANULE; index <= last / BANK_GRANULE; ++index) {
+            it->second->valid &= static_cast<u16>(~(1U << index));
         }
     }
 }
@@ -3667,9 +3704,7 @@ bool BufferCache<P>::OverlapsBankShadow(DAddr device_addr, u64 size) const {
     if (bank_shadows.empty() || size == 0) {
         return false;
     }
-    constexpr DAddr bank_span = 0x10000;
-    const auto it =
-        bank_shadows.lower_bound(device_addr > bank_span ? device_addr - bank_span + 1 : 0);
+    const auto it = bank_shadows.lower_bound(Common::AlignDown(device_addr, DEVICE_PAGESIZE));
     return it != bank_shadows.end() && it->first < device_addr + size;
 }
 
@@ -3679,34 +3714,22 @@ void BufferCache<P>::RefreshBankShadowsFromUpload(DAddr device_addr, const u8* b
         return;
     }
     const DAddr end = device_addr + size;
-    constexpr DAddr bank_span = 0x10000;
-    auto it = bank_shadows.lower_bound(device_addr > bank_span ? device_addr - bank_span : 0);
-    for (; it != bank_shadows.end() && it->first < end; ++it) {
-        const DAddr bank = it->first;
-        if (bank + bank_span <= device_addr) {
-            continue;
-        }
+    for (auto it = bank_shadows.lower_bound(Common::AlignDown(device_addr, DEVICE_PAGESIZE));
+         it != bank_shadows.end() && it->first < end; ++it) {
+        const DAddr page = it->first;
         BankShadow& shadow = *it->second;
-        // Shadow page k of the bank (UploadNativeBank): the k-th device page from the bank's
-        // first, clipped to the bank. The bank's mapped end may stop earlier; a copy covering
-        // the clipped page covers that too.
-        const DAddr bank_page = Common::AlignDown(bank, DEVICE_PAGESIZE);
-        const DAddr first = (std::max)(bank, device_addr);
-        const DAddr last = (std::min)(bank + bank_span, end) - 1;
-        const u64 first_index = (first - bank_page) / DEVICE_PAGESIZE;
-        const u64 last_index = (last - bank_page) / DEVICE_PAGESIZE;
-        for (u64 index = first_index; index <= last_index && index < 32; ++index) {
-            const DAddr page_begin = (std::max)(bank, bank_page + index * DEVICE_PAGESIZE);
-            const DAddr page_end =
-                (std::min)(bank + bank_span, bank_page + (index + 1) * DEVICE_PAGESIZE);
-            const u32 bit = 1U << index;
-            if (page_begin >= device_addr && page_end <= end) {
-                std::memcpy(shadow.bytes.data() + (page_begin - bank),
-                            bytes + (page_begin - device_addr), page_end - page_begin);
+        const DAddr first = (std::max)(page, device_addr);
+        const DAddr last = (std::min<DAddr>)(page + DEVICE_PAGESIZE, end);
+        for (DAddr granule = Common::AlignDown(first, BANK_GRANULE); granule < last;
+             granule += BANK_GRANULE) {
+            const u16 bit = static_cast<u16>(1U << ((granule - page) / BANK_GRANULE));
+            if (granule >= device_addr && granule + BANK_GRANULE <= end) {
+                std::memcpy(shadow.bytes.data() + (granule - page), bytes + (granule - device_addr),
+                            BANK_GRANULE);
                 shadow.valid |= bit;
                 Nx2BufCache::Note(Nx2BufCache::Stat::BankSyncRefresh);
             } else {
-                shadow.valid &= ~bit;
+                shadow.valid &= static_cast<u16>(~bit);
             }
         }
     }
