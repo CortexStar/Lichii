@@ -109,7 +109,9 @@ public:
         skipped_fences = 0;
         should_flush |= query_cache.HasUncommittedFlushes();
         query_cache.CommitAsyncFlushes();
-        TFence new_fence = CreateFence(!should_flush);
+        // A query report's fence is a real host fence even with nothing to flush: its operation
+        // runs once the host GPU has run the work before it, not when a stubbed fence is popped.
+        TFence new_fence = CreateFence(!should_flush && !VideoCore::g_signaling_query_report_fence);
         if constexpr (can_async_check) {
             guard.lock();
         }
