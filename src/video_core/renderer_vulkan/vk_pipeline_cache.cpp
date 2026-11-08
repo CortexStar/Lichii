@@ -6,24 +6,26 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <thread>
 #include <unordered_set>
 #include <vector>
-#include <bit>
-#include <numeric>
 #include "common/cityhash.h"
-#include "common/scope_exit.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
+#include "common/memory_detect.h"
+#include "common/scope_exit.h"
 #include "common/thread.h"
 #include "common/thread_worker.h"
 #include "core/core.h"
@@ -36,13 +38,15 @@
 #include "shader_recompiler/program_header.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/pipeline_cache_files.h"
 #include "video_core/renderer_vulkan/async_draw_policy.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
-#include "video_core/renderer_vulkan/mesh_fallback_limits.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
+#include "video_core/renderer_vulkan/mesh_fallback_limits.h"
+#include "video_core/renderer_vulkan/pipeline_eviction_policy.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/pipeline_shader_emission.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
@@ -62,7 +66,6 @@
 #include "video_core/surface.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
-#include "video_core/gpu_logging/gpu_logging.h"
 
 #ifdef __ANDROID__
 #include "../../android/app/src/main/jni/android_settings.h"
@@ -786,6 +789,14 @@ bool PreloadAllPipelines() {
     }();
     return all;
 }
+
+// Graphics pipelines a Switch 2 title keeps before any is evicted: an eighth of system RAM at
+// ~0.45 MB of driver memory each (16 GB: ~4,600), and never fewer than the boot limit above.
+size_t Switch2PipelineBudget() {
+    static const size_t budget = std::max<size_t>(
+        MaxPipelinesWithoutUsedList, Common::GetMemInfo().TotalPhysicalMemory / 8 / (450 * 1024));
+    return budget;
+}
 } // Anonymous namespace
 
 PipelineCache::~PipelineCache() {
@@ -1238,7 +1249,9 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             })};
 
             std::scoped_lock lock{state.mutex};
-            if (pipeline) {
+            // A failed one is left out, as in the background prebuild, so the first draw that
+            // needs it builds it again instead of being skipped for the whole session.
+            if (pipeline && !pipeline->Failed()) {
                 graphics_cache.emplace(key, std::move(pipeline));
             }
             if (incomplete) {
@@ -1711,25 +1724,52 @@ void PipelineCache::EvictUnusedPipelines() {
         return;
     }
     const u64 cutoff = frame_count - EvictAfterFrames;
-    const u64 tick = scheduler.CurrentTick();
-    // ~0.9 GB of driver memory at ~0.45 MB each.
+    // A Switch 2 title translates a rebuilt pipeline's shaders on the GPU thread, so going back to
+    // an area rebuilt hundreds at once. Its pipelines are kept up to a memory budget. Past it, the
+    // least recently used are evicted, but still only ones unused for EvictAfterFrames: evicting
+    // pipelines used moments before lost the device on AMD.
+    const bool switch2 = Settings::CurrentProgramIsSwitch2();
+    size_t max_evicted = std::numeric_limits<size_t>::max();
+    if (switch2) {
+        const size_t budget = Switch2PipelineBudget();
+        if (graphics_cache.size() <= budget) {
+            return;
+        }
+        max_evicted = graphics_cache.size() - budget;
+    }
+    std::vector<GraphicsPipeline*> pipelines;
+    std::vector<EvictionCandidate> candidates;
+    for (const auto& [key, pipeline] : graphics_cache) {
+        GraphicsPipeline* const candidate = pipeline.get();
+        if (candidate != nullptr && candidate != current_pipeline && candidate->IsBuilt() &&
+            candidate->LastUse() < cutoff) {
+            pipelines.push_back(candidate);
+            candidates.push_back({candidate->LastUse(), candidate->WasUsed()});
+        }
+    }
+    // A pipeline built from the disk cache at boot that no draw has used yet stays, up to a
+    // budget: evicting it throws the prebuild away, and the game translates it again on the GPU
+    // thread when it reaches that content (OoT: 1174 of 1346 evicted on the title screen, 684
+    // rebuilt in 10 s on entering the field). Past the budget they go like the rest, so a large
+    // cache can't hold their driver memory for the whole session. ~0.9 GB at ~0.45 MB each.
+    // The Switch 2 memory budget is exceeded rather than evict a protected one.
     constexpr size_t MaxUnusedPrebuiltPipelines = 2000;
-    size_t kept_prebuilt = 0;
+    const std::vector<size_t> selected =
+        SelectPipelinesToEvict(candidates, MaxUnusedPrebuiltPipelines, max_evicted);
+    if (selected.empty()) {
+        return;
+    }
+    std::vector<GraphicsPipeline*> doomed;
+    doomed.reserve(selected.size());
+    for (const size_t index : selected) {
+        doomed.push_back(pipelines[index]);
+    }
+    std::ranges::sort(doomed);
+    const u64 tick = scheduler.CurrentTick();
     size_t evicted = 0;
     for (auto it = graphics_cache.begin(); it != graphics_cache.end();) {
         GraphicsPipeline* const pipeline = it->second.get();
-        if (pipeline == nullptr || pipeline == current_pipeline || !pipeline->IsBuilt() ||
-            pipeline->LastUse() >= cutoff) {
-            ++it;
-            continue;
-        }
-        // A pipeline built from the disk cache at boot that no draw has used yet stays, up to a
-        // budget: evicting it throws the prebuild away, and the game translates it again on the
-        // GPU thread when it reaches that content (OoT: 1174 of 1346 evicted on the title screen,
-        // 684 rebuilt in 10 s on entering the field). Past the budget they go like the rest, so a
-        // large cache can't hold their driver memory for the whole session.
-        if (!pipeline->WasUsed() && kept_prebuilt < MaxUnusedPrebuiltPipelines) {
-            ++kept_prebuilt;
+        if (!std::ranges::binary_search(doomed, pipeline)) {
             ++it;
             continue;
         }
@@ -1748,8 +1788,15 @@ void PipelineCache::EvictUnusedPipelines() {
             pipeline->ClearTransitions();
         }
     }
-    LOG_INFO(Render_Vulkan, "Evicted {} graphics pipelines unused for {} frames, {} left", evicted,
-             EvictAfterFrames, graphics_cache.size());
+    if (switch2) {
+        LOG_INFO(Render_Vulkan,
+                 "Evicted {} least recently used graphics pipelines unused for {} "
+                 "frames, over the budget of {}, {} left",
+                 evicted, EvictAfterFrames, Switch2PipelineBudget(), graphics_cache.size());
+    } else {
+        LOG_INFO(Render_Vulkan, "Evicted {} graphics pipelines unused for {} frames, {} left",
+                 evicted, EvictAfterFrames, graphics_cache.size());
+    }
 }
 
 /// Returns `pipeline` when it is built or the current draw must wait for it, and nullptr when the
