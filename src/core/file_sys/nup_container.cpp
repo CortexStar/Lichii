@@ -366,7 +366,7 @@ NupContainer::NupContainer(VirtualFile file_, std::size_t memory_cache_cap,
                            std::filesystem::path spill_dir_)
     : file(std::move(file_)), cache(std::make_shared<NupDecompressCache>()) {
     const char* fallback = std::getenv("EDEN_NUP_DAMAGED_FALLBACK");
-    damaged_fallback = fallback == nullptr || std::string_view{fallback} != "0";
+    damaged_fallback = fallback != nullptr && std::string_view{fallback} != "0";
     cache->cap = memory_cache_cap;
     cache->spill_dir = spill_dir_.empty()
                            ? Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "nup"
@@ -736,23 +736,33 @@ bool NupContainer::LacksZstdMagic(std::size_t file_index) const {
     if (node.codec == CodecRaw) {
         if (file->Read(head.data(), head.size(), static_cast<std::size_t>(node.extent_offset)) !=
             head.size()) {
-            return true;
+            LOG_ERROR(Loader, "NUP: short read checking Zstd magic for {}", node.name);
+            return false;
         }
         return head != ZstdMagic;
     }
     // Decompress only the start of the extent: the first block yields the first bytes.
+    const std::size_t compressed_size =
+        static_cast<std::size_t>(std::min<u64>(node.extent_size, 128 * 1024));
     const auto compressed =
-        file->ReadBytes(static_cast<std::size_t>(std::min<u64>(node.extent_size, 128 * 1024)),
-                        static_cast<std::size_t>(node.extent_offset));
-    ZSTD_DStream* stream = ZSTD_createDStream();
+        file->ReadBytes(compressed_size, static_cast<std::size_t>(node.extent_offset));
+    if (compressed.size() != compressed_size) {
+        LOG_ERROR(Loader, "NUP: short read checking Zstd magic for {}", node.name);
+        return false;
+    }
+    std::unique_ptr<ZSTD_DStream, decltype(&ZSTD_freeDStream)> stream{ZSTD_createDStream(),
+                                                                     ZSTD_freeDStream};
+    if (!stream) {
+        LOG_ERROR(Loader, "NUP: failed to create Zstd stream checking {}", node.name);
+        return false;
+    }
     ZSTD_inBuffer input{compressed.data(), compressed.size(), 0};
     ZSTD_outBuffer output{head.data(), head.size(), 0};
     while (output.pos < output.size && input.pos < input.size) {
-        if (ZSTD_isError(ZSTD_decompressStream(stream, &output, &input))) {
+        if (ZSTD_isError(ZSTD_decompressStream(stream.get(), &output, &input))) {
             break;
         }
     }
-    ZSTD_freeDStream(stream);
     return output.pos < output.size || head != ZstdMagic;
 }
 
@@ -761,7 +771,11 @@ std::optional<std::size_t> NupContainer::FindStandIn(std::size_t damaged,
     // Same directory and same last name token ("Nrm.bntx.zs"), longest common name prefix,
     // then the closest size: a texture of the same kind and, often, the same resolution.
     const std::string& name = files[damaged].name;
-    const std::string_view suffix = std::string_view{name}.substr(name.rfind('_') + 1);
+    const std::size_t separator = name.rfind('_');
+    if (separator == std::string::npos) {
+        return std::nullopt;
+    }
+    const std::string_view suffix = std::string_view{name}.substr(separator + 1);
     std::optional<std::size_t> best;
     std::size_t best_prefix = 0;
     u64 best_gap = 0;
