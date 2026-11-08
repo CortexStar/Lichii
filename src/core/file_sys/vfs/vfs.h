@@ -188,6 +188,11 @@ public:
 
     // Returns the full path of this file as a string, recursively
     virtual std::string GetFullPath() const;
+
+    /// The path of the host file whose bytes this file reads unchanged (UTF-8), or empty.
+    virtual std::string GetHostPath() const {
+        return {};
+    }
 };
 
 // A class representing a directory in an abstract filesystem.

@@ -75,6 +75,8 @@ add_library(
     fs/fs_types.h
     fs/fs_util.cpp
     fs/fs_util.h
+    fs/mapped_file.cpp
+    fs/mapped_file.h
     fs/path_util.cpp
     fs/path_util.h
     hash.h

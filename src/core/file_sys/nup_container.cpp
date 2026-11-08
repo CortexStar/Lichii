@@ -19,6 +19,7 @@
 #include <openssl/evp.h>
 #include <zstd.h>
 
+#include "common/fs/mapped_file.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/swap.h"
@@ -150,6 +151,69 @@ bool Sha256(const u8* data, std::size_t size, std::array<u8, 0x20>& out) {
     unsigned int length = 0;
     EVP_Digest(data, size, out.data(), &length, EVP_sha256(), nullptr);
     return length == out.size();
+}
+
+/// The container file mapped read-only. RealVfsFile::Read holds the real filesystem's lock and
+/// seeks and reads through stdio, so the guest's RomFS reads (Ocarina of Time: ~2,500 reads,
+/// ~450 MiB per save load) ran one at a time at ~1 GB/s; from the mapping they are copies out of
+/// the page cache on the reading thread.
+class NupMappedFile final : public VfsFile {
+public:
+    NupMappedFile(VirtualFile original_, std::unique_ptr<Common::FS::MappedFile> mapped_)
+        : original(std::move(original_)), mapped(std::move(mapped_)) {}
+
+    std::string GetName() const override {
+        return original->GetName();
+    }
+
+    std::size_t GetSize() const override {
+        return mapped->Data().size();
+    }
+
+    bool Resize(std::size_t) override {
+        return false;
+    }
+
+    VirtualDir GetContainingDirectory() const override {
+        return original->GetContainingDirectory();
+    }
+
+    bool IsWritable() const override {
+        return false;
+    }
+
+    bool IsReadable() const override {
+        return true;
+    }
+
+    std::size_t Read(u8* data, std::size_t length, std::size_t offset) const override {
+        return mapped->Read(data, length, offset);
+    }
+
+    std::size_t Write(const u8*, std::size_t, std::size_t) override {
+        return 0;
+    }
+
+    bool Rename(std::string_view) override {
+        return false;
+    }
+
+private:
+    VirtualFile original;
+    std::unique_ptr<Common::FS::MappedFile> mapped;
+};
+
+/// The mapped container when file reads a host file unchanged, else file itself.
+VirtualFile MapHostFile(VirtualFile file) {
+    const std::string host_path = file != nullptr ? file->GetHostPath() : std::string{};
+    if (host_path.empty()) {
+        return file;
+    }
+    auto mapped = Common::FS::MappedFile::Open(host_path);
+    if (mapped == nullptr || mapped->Data().size() != file->GetSize()) {
+        return file;
+    }
+    return std::make_shared<NupMappedFile>(std::move(file), std::move(mapped));
 }
 
 /// A member file whose extent is zstd-compressed. Decompresses on first read and caches the
@@ -402,7 +466,7 @@ void NupContainer::KeepParsed(std::unique_ptr<NupContainer> container) {
 
 NupContainer::NupContainer(VirtualFile file_, std::size_t memory_cache_cap,
                            std::filesystem::path spill_dir_)
-    : file(std::move(file_)), cache(std::make_shared<NupDecompressCache>()) {
+    : file(MapHostFile(std::move(file_))), cache(std::make_shared<NupDecompressCache>()) {
     cache->cap = memory_cache_cap;
     cache->spill_dir = spill_dir_.empty()
                            ? Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "nup"
