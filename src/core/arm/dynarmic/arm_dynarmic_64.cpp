@@ -731,6 +731,10 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
                     0x7FFF'FFFF));
             }
         }
+        // BL/BLR as host calls and RET as a host return checked against the guest return
+        // address: the CPU's return predictor predicts guest returns instead of one shared
+        // indirect jump through the return stack buffer (multicore only, no cycle counter).
+        config.host_call_return = !config.enable_cycle_counting;
     }
 #endif
     m_jit.emplace(config);

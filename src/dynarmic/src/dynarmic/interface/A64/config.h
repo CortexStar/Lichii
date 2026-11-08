@@ -354,6 +354,12 @@ struct UserConfig {
     /// the callback path (native_lse_atomics) retries a refused exclusive write until the word
     /// changes, and stops retrying once one of these is set.
     HaltReason memory_abort_halt_reasons = HaltReason::MemoryAbort;
+    /// x64 only, without cycle counting and with omit_block_frame. BL and BLR become a host
+    /// `call` and RET a host `ret` once the guest return address matches the one the call
+    /// pushed (else the fast dispatcher runs), so the host's return predictor predicts guest
+    /// returns. Spills and the check bit move into the JIT state; the host stack holds one frame
+    /// per guest call.
+    bool host_call_return = false;
 
     /// This option relates to translation. Generally when we run into an unpredictable
     /// instruction the ExceptionRaised callback is called. If this is true, we define

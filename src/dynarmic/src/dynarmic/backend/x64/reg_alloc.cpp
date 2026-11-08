@@ -185,8 +185,10 @@ bool Argument::IsInMemory(RegAlloc& reg_alloc) const noexcept {
     return HostLocIsSpill(*reg_alloc.ValueLocation(value.GetInst()));
 }
 
-RegAlloc::RegAlloc(std::bitset<32> gpr_order, std::bitset<32> xmm_order, bool spill_to_gpr, bool scratch_copy) noexcept
+RegAlloc::RegAlloc(std::bitset<32> gpr_order, std::bitset<32> xmm_order, bool spill_to_gpr, bool scratch_copy,
+                   std::optional<s32> spill_jit_offset) noexcept
     : gpr_order(gpr_order), xmm_order(xmm_order), spill_to_gpr(spill_to_gpr), scratch_copy(scratch_copy)
+    , spill_jit_offset(spill_jit_offset)
 {}
 
 RegAlloc::ArgumentInfo RegAlloc::GetArgumentInfo(const IR::Inst* inst) noexcept {
@@ -612,6 +614,9 @@ void RegAlloc::EmitMove(BlockOfCode& code, const size_t bit_width, const HostLoc
         ASSERT(HostLocIsSpill(loc));
         size_t i = size_t(loc) - size_t(HostLoc::FirstSpill);
         ASSERT(i < SpillCount && "Spill index greater than number of available spill locations");
+        if (spill_jit_offset) {
+            return Xbyak::util::r15 + *spill_jit_offset + i * sizeof(StackLayout::spill[0]);
+        }
         return Xbyak::util::rsp + reserved_stack_space + ABI_SHADOW_SPACE + offsetof(StackLayout, spill) + i * sizeof(StackLayout::spill[0]);
     };
     auto const spill_xmm_to_op = [&](const HostLoc loc) {
