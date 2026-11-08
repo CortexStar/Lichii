@@ -98,12 +98,13 @@ std::optional<DisplayHdrInfo> QueryDisplayHdr(void*) {
 }
 #endif
 
-HdrOutput ResolveHdrOutput(const std::optional<DisplayHdrInfo>& display, bool hdr_setting,
+HdrOutput ResolveHdrOutput(const std::optional<DisplayHdrInfo>& display, Settings::HdrMode mode,
                            u16 peak_setting, u16 reference_white_setting) {
     constexpr u32 DefaultPeak = 300; // the Switch 2 HDR calibration's starting value
     const auto nits = [](float value) { return static_cast<u32>(std::lround(value)); };
     HdrOutput output{};
-    output.enabled = hdr_setting && (!display || display->hdr_enabled);
+    output.enabled = mode == Settings::HdrMode::On ||
+                     (mode == Settings::HdrMode::Auto && display && display->hdr_enabled);
     u32 peak = peak_setting;
     if (peak == 0) {
         peak =

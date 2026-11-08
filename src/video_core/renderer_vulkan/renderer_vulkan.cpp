@@ -242,7 +242,7 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     VkFormat output_format = VK_FORMAT_B8G8R8A8_UNORM;
 #endif
     const bool hdr_output =
-        Settings::values.hdr.GetValue() && framebuffers.size() == 1 &&
+        Settings::values.hdr_mode.GetValue() != Settings::HdrMode::Off && framebuffers.size() == 1 &&
         framebuffers.front().color_space != Tegra::ColorSpace::RGB709;
     if (hdr_output) {
         // The guest sees HDR availability, not individual encodings. Presentation must reject an

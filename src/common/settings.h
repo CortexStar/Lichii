@@ -65,6 +65,7 @@ SETTING(u16, false);
 SWITCHABLE(AnisotropyMode, true);
 SWITCHABLE(AntiAliasing, false);
 SWITCHABLE(OotAntiAliasing, false);
+SWITCHABLE(HdrMode, false);
 SWITCHABLE(AspectRatio, true);
 SWITCHABLE(AstcDecodeMode, true);
 SWITCHABLE(AstcRecompression, true);
@@ -339,7 +340,15 @@ struct Values {
                                                                 linkage, true, "cpuopt_unsafe_ignore_global_monitor", Category::CpuUnsafe};
 
     // Renderer
-    SwitchableSetting<bool> hdr{linkage, false, "hdr", Category::Renderer};
+    // Off: the game always renders SDR. On: the game is told the display is HDR. Auto: HDR while
+    // the monitor showing the game runs in HDR, where the host can tell (Windows; elsewhere SDR).
+    SwitchableSetting<HdrMode> hdr_mode{linkage,
+#ifdef _WIN32
+                                        HdrMode::Auto,
+#else
+                                        HdrMode::Off,
+#endif
+                                        "hdr_mode", Category::Renderer};
     SwitchableSetting<u16, true> hdr_reference_white{linkage, 0, 0, 1000, "hdr_reference_white",
                                                   Category::Renderer, Specialization::Scalar};
     SwitchableSetting<u16, true> hdr_peak_luminance{linkage, 0, 0, 10000, "hdr_peak_luminance",

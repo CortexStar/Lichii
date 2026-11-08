@@ -2371,7 +2371,7 @@ private:
         const bool vulkan =
             Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Vulkan;
         const auto output = Common::ResolveHdrOutput(
-            display, Settings::values.hdr.GetValue() && vulkan,
+            display, vulkan ? Settings::values.hdr_mode.GetValue() : Settings::HdrMode::Off,
             Settings::values.hdr_peak_luminance.GetValue(),
             Settings::values.hdr_reference_white.GetValue());
         const u64 logged = (u64{output.enabled} << 32) | (u64{output.peak_luminance} << 16) |

@@ -376,7 +376,8 @@ bool PresentManager::RecreateSwapchain(Frame* frame) {
         if (frame->color_space == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
             // The values the guest was told it renders for (nx2:vi2 QueryDisplayHdrStatus).
             const auto output = Common::ResolveHdrOutput(
-                Common::QueryDisplayHdr(render_window.GetWindowInfo().render_surface), true,
+                Common::QueryDisplayHdr(render_window.GetWindowInfo().render_surface),
+                Settings::HdrMode::On,
                 Settings::values.hdr_peak_luminance.GetValue(),
                 Settings::values.hdr_reference_white.GetValue());
             swapchain.SetHdrMetadata(output.peak_luminance, output.reference_white);

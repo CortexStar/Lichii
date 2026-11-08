@@ -6,6 +6,7 @@
 #include <optional>
 
 #include "common/common_types.h"
+#include "common/settings_enums.h"
 
 namespace Common {
 
@@ -27,9 +28,9 @@ struct HdrOutput {
     u16 reference_white{}; ///< nits, at most peak_luminance
 };
 
-/// Combines the HDR settings with the display state. HDR is on when the setting allows it and,
-/// where the host can tell, the monitor runs in HDR. Luminance settings of 0 follow the monitor.
-HdrOutput ResolveHdrOutput(const std::optional<DisplayHdrInfo>& display, bool hdr_setting,
+/// Combines the HDR settings with the display state. Off and On decide alone; Auto turns HDR on
+/// only while the host reports the monitor in HDR. Luminance settings of 0 follow the monitor.
+HdrOutput ResolveHdrOutput(const std::optional<DisplayHdrInfo>& display, Settings::HdrMode mode,
                            u16 peak_setting, u16 reference_white_setting);
 
 } // namespace Common

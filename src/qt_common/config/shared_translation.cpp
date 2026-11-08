@@ -142,10 +142,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            "other race conditions."));
 
     // Renderer
-    INSERT(Settings, hdr, tr("HDR"),
-           tr("Enables HDR output. Requires Vulkan and an HDR-enabled display.\n"
-              "On Windows the game gets HDR only while Windows HDR is on for the monitor that\n"
-              "shows the game, so it renders SDR on an SDR desktop.\n"
+    INSERT(Settings, hdr_mode, tr("HDR"),
+           tr("HDR output for games that render HDR. Requires Vulkan.\n"
+              "Auto: HDR while Windows HDR is on for the monitor that shows the game, SDR\n"
+              "otherwise (SDR on hosts that cannot tell).\n"
+              "On: always tell the game the display is HDR. Off: always SDR.\n"
               "Supports native HDR10 and scRGB output; SDR content is not converted to HDR.\n"
               "HDR uses bilinear presentation without post-processing or frame generation.\n"
               "Takes effect when a game starts."));
@@ -614,6 +615,12 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                           {
                               PAIR(OotAntiAliasing, Game, tr("Game")),
                               PAIR(OotAntiAliasing, NoSharpening, tr("No sharpening")),
+                          }});
+    translations->insert({Settings::EnumMetadata<Settings::HdrMode>::Index(),
+                          {
+                              PAIR(HdrMode, Off, tr("Off")),
+                              PAIR(HdrMode, On, tr("On")),
+                              PAIR(HdrMode, Auto, tr("Auto")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::AspectRatio>::Index(),
                           {

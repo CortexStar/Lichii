@@ -262,7 +262,7 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             continue;
         }
 
-        if (setting->Id() == Settings::values.hdr.Id() ||
+        if (setting->Id() == Settings::values.hdr_mode.Id() ||
             setting->Id() == Settings::values.hdr_reference_white.Id() ||
             setting->Id() == Settings::values.hdr_peak_luminance.Id()) {
             hdr_widgets.push_back(widget);

@@ -6,20 +6,22 @@ Graphical enhancements and visual quality improvments. This doesn't cover textur
 
 ### Native HDR output
 
-**HDR is disabled by default and requires explicit opt-in.** Enabling it assumes that
+**HDR follows the monitor on Windows (Auto) and is off elsewhere.** Setting it to On assumes that
 you have configured a compatible HDR environment: Vulkan, a suitable GPU and driver,
 an HDR-capable display, and HDR enabled in the operating system where required.
 Verifying and maintaining that environment is the user's responsibility. Configure
 it before starting the game.
 
 This feature preserves native HDR output from Switch 2 games that support it. It
-does not add HDR to SDR-only games. On Windows the game is told the display runs HDR
-only while Windows HDR is on for the monitor that shows it, with that monitor's peak
-luminance and its SDR content brightness as reference white (HDR Peak Luminance and
-HDR Reference White at 0); on an SDR desktop the game renders SDR. Elsewhere,
-enabling HDR declares that your environment supports both HDR10 and scRGB. The
-emulator starts with an SDR swapchain and selects HDR output when the game supplies
-native HDR frames, and sends HDR10 metadata (BT.2020 primaries, the reported peak).
+does not add HDR to SDR-only games. The HDR setting is Auto by default on Windows:
+the game is told the display runs HDR only while Windows HDR is on for the monitor
+that shows it, with that monitor's peak luminance and its SDR content brightness as
+reference white (HDR Peak Luminance and HDR Reference White at 0); on an SDR desktop
+the game renders SDR. Elsewhere it is Off by default, and Auto means SDR because the
+host state is not known; On declares that your environment supports both HDR10 and
+scRGB. The emulator starts with an SDR swapchain and selects HDR output when the game
+supplies native HDR frames, and sends HDR10 metadata (BT.2020 primaries, the
+reported peak).
 
 The emulator selects the requested presentation format when creating the actual
 swapchain; this is not automatic setup or a compatibility workaround. It does
