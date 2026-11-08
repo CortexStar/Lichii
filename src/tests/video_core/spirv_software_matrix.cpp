@@ -8,6 +8,7 @@
 #include <map>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
 
@@ -470,18 +471,34 @@ std::map<u32, u32> Constants(const std::vector<u32>& code) {
     return constants;
 }
 
-void RequireHmmaMatrixTypes(const std::vector<u32>& code, u32 columns = 8) {
+// Requires exactly the A (rows x 16), B (16 x columns) and accumulator (rows x columns) types.
+void RequireHmmaMatrixTypes(const std::vector<u32>& code, u32 columns = 8, u32 rows = 16) {
     const auto constants = Constants(code);
     const auto types = Instructions(code, OP_TYPE_COOPERATIVE_MATRIX);
     REQUIRE(types.size() == 3);
+    std::array<u32, 3> rows_by_use{};
     std::array<u32, 3> columns_by_use{};
     for (const auto& words : types) {
         REQUIRE(words.size() == 6);
         REQUIRE(constants.at(words[2]) == 3); // Subgroup scope
-        REQUIRE(constants.at(words[3]) == 16);
+        rows_by_use.at(constants.at(words[5])) = constants.at(words[3]);
         columns_by_use.at(constants.at(words[5])) = constants.at(words[4]);
     }
+    REQUIRE(rows_by_use == std::array<u32, 3>{rows, 16, rows});          // A, B, accumulator
     REQUIRE(columns_by_use == std::array<u32, 3>{16, columns, columns}); // A, B, accumulator
+}
+
+// The tile word and row offset of a shared-memory pointer of the cooperative HMMA path: the access
+// chain's index is OpIAdd(tile, constant rows * 8).
+std::pair<u32, u32> SharedTileRows(const std::vector<u32>& code, u32 pointer) {
+    std::map<u32, std::vector<u32>> definitions;
+    for (const u32 opcode : {65U, 128U}) { // OpAccessChain, OpIAdd
+        for (auto& words : Instructions(code, opcode)) {
+            definitions.emplace(words[1], std::move(words));
+        }
+    }
+    const auto& index = definitions.at(definitions.at(pointer).back());
+    return {index[2], Constants(code).at(index[3])};
 }
 
 // SPV_KHR_cooperative_matrix requires the Vulkan memory model, which spirv-val does not check.
@@ -657,6 +674,45 @@ TEST_CASE("16x16x16 cooperative HMMA runs both depths through shared memory",
         REQUIRE(Instructions(code, 57).empty());  // OpFunctionCall
         REQUIRE(Instructions(code, 345).empty()); // OpGroupNonUniformShuffle
         REQUIRE(fixture.program.shared_memory_size == 2 * 384 * 4);
+    }
+}
+
+// Intel Xe2's only fp16 shape: each HMMA is the top and bottom 8 rows of A and C against one B.
+TEST_CASE("8x16x16 cooperative HMMA runs each HMMA as two products through shared memory",
+          "[video_core][tensor][ampere]") {
+    for (const auto& [depth, version] : {std::pair{16U, 0x00010500U}, std::pair{16U, 0x00010600U},
+                                        std::pair{8U, 0x00010600U}}) {
+        TensorProgram fixture{3, depth};
+        fixture.profile.supported_spirv = version;
+        fixture.profile.support_cooperative_hmma_8x16x16 = true;
+        const auto code = fixture.Emit("cooperative-8x16x16-k" + std::to_string(depth) + "-" +
+                                       std::to_string(version));
+        REQUIRE(code[1] == version);
+        REQUIRE(HasCapability(code, CAPABILITY_COOPERATIVE_MATRIX));
+        RequireVulkanMemoryModel(code);
+        RequireHmmaMatrixTypes(code, 16, 8);
+        REQUIRE(fixture.program.info.uses_cooperative_matrix);
+        // Per HMMA: B once, then A and C for each half.
+        REQUIRE(Instructions(code, OP_COOPERATIVE_MATRIX_LOAD).size() == 15);
+        REQUIRE(Instructions(code, OP_COOPERATIVE_MATRIX_MUL_ADD).size() == 6);
+        REQUIRE(Instructions(code, OP_COOPERATIVE_MATRIX_STORE).size() == 6);
+        REQUIRE(Instructions(code, 57).empty());  // OpFunctionCall
+        REQUIRE(Instructions(code, 345).empty()); // OpGroupNonUniformShuffle
+        REQUIRE(fixture.program.shared_memory_size == 2 * 384 * 4);
+        // The second product reads and writes the bottom 8 rows (64 words) of the same A and C.
+        const auto loads = Instructions(code, OP_COOPERATIVE_MATRIX_LOAD);
+        const auto stores = Instructions(code, OP_COOPERATIVE_MATRIX_STORE);
+        for (size_t hmma = 0; hmma < 3; ++hmma) {
+            const auto a_top = SharedTileRows(code, loads[hmma * 5 + 1][2]);
+            const auto c_top = SharedTileRows(code, loads[hmma * 5 + 2][2]);
+            REQUIRE(a_top.second == 0);
+            REQUIRE(c_top.second == 0);
+            REQUIRE(a_top.first != c_top.first);
+            REQUIRE(SharedTileRows(code, loads[hmma * 5 + 3][2]) == std::pair{a_top.first, 64U});
+            REQUIRE(SharedTileRows(code, loads[hmma * 5 + 4][2]) == std::pair{c_top.first, 64U});
+            REQUIRE(SharedTileRows(code, stores[hmma * 2][0]) == c_top);
+            REQUIRE(SharedTileRows(code, stores[hmma * 2 + 1][0]) == std::pair{c_top.first, 64U});
+        }
     }
 }
 
