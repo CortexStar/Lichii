@@ -332,6 +332,40 @@ TEST_CASE("NUP packs base, updates and add-ons and reads back through NupContain
     REQUIRE_FALSE(by_name.contains(".listing"));
 }
 
+TEST_CASE("NUP merges the update RomFS over the base straight from the TOC", "[nup]") {
+    TempDir t;
+    const auto root = t.path / "Game";
+    MakeDump(root);
+    Put(root / "updates/65536/romfs/copy/shared.bin", "update copy");
+    Put(root / "updates/65536/romfs/copy/extra.bin", "extra");
+    const auto archive = t.path / "Game.nup";
+    FileSys::Nup::PackOptions options{.raw_threshold = 16 * 1024};
+    REQUIRE(FileSys::Nup::PackDump(root, archive, options, {}, nullptr, nullptr) ==
+            FileSys::Nup::PackResult::Success);
+
+    FileSys::RealVfsFilesystem real;
+    NupContainer nup{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    const auto merged = nup.GetMergedRomFSDir(0, 1);
+    const auto reference = NupContainer::MergeShadowDirs(nup.GetRomFSDir(0), nup.GetRomFSDir(1));
+    REQUIRE(merged->GetName() == reference->GetName());
+    const auto tree = PackedTree(merged);
+    REQUIRE(tree == PackedTree(reference));
+    REQUIRE(tree.at("copy/shared.bin") == "update copy");
+    REQUIRE(tree.at("copy/extra.bin") == "extra");
+    REQUIRE(tree.at("big.bin") == std::string(64 * 1024, 'b'));
+    REQUIRE(tree.at("Zeta/a") == "a");
+    REQUIRE(tree.contains("System/Resource/ResourceSizeTable.Product.100.rsizetable"));
+    REQUIRE(tree.contains("System/Resource/ResourceSizeTable.Product.110.rsizetable"));
+
+    // Without a base or an update it is that package's own tree.
+    REQUIRE(PackedTree(nup.GetMergedRomFSDir(0, std::nullopt)) == PackedTree(nup.GetRomFSDir(0)));
+    REQUIRE(PackedTree(nup.GetMergedRomFSDir(std::nullopt, 1)) == PackedTree(nup.GetRomFSDir(1)));
+    // Package 2 has no RomFS.
+    REQUIRE(PackedTree(nup.GetMergedRomFSDir(0, 2)) == PackedTree(nup.GetRomFSDir(0)));
+    REQUIRE(nup.GetMergedRomFSDir(std::nullopt, std::nullopt) == nullptr);
+}
+
 TEST_CASE("NUP reads zstd members above the memory cache through a temporary file", "[nup]") {
     TempDir t;
     const auto root = t.path / "Game";

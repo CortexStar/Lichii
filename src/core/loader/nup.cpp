@@ -253,14 +253,10 @@ ResultStatus AppLoader_NUP::VerifyIntegrity(
 }
 
 ResultStatus AppLoader_NUP::ReadRomFS(FileSys::VirtualFile& out_file) {
-    const auto base_index = nup->FindBasePackage();
-    const auto base_romfs = base_index ? nup->GetRomFSDir(*base_index) : FileSys::VirtualDir{};
-    const auto update_index = nup->FindBestUpdatePackage();
-    const auto update_romfs =
-        update_index ? nup->GetRomFSDir(*update_index) : FileSys::VirtualDir{};
     // A standalone update carries the complete merged tree; a base+update pair
     // overlays the update onto the base (SPEC §4.1.4).
-    const auto merged = FileSys::NupContainer::MergeShadowDirs(base_romfs, update_romfs);
+    const auto merged =
+        nup->GetMergedRomFSDir(nup->FindBasePackage(), nup->FindBestUpdatePackage());
     if (merged == nullptr) {
         return ResultStatus::ErrorNoRomFS;
     }

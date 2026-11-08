@@ -159,6 +159,11 @@ public:
 
     VirtualDir GetExeFSDir(std::size_t package_index);
     VirtualDir GetRomFSDir(std::size_t package_index);
+    /// The base RomFS with the update's files over it, as MergeShadowDirs(GetRomFSDir(base),
+    /// GetRomFSDir(update)) gives it, built straight from the TOC: only the files that win are
+    /// opened and no per-package tree is built for directories both packages have.
+    VirtualDir GetMergedRomFSDir(std::optional<std::size_t> base_index,
+                                 std::optional<std::size_t> update_index);
     VirtualDir GetPackageDir(std::size_t package_index);
 
     /// Stream-hashes every member file against its stored SHA-256.
@@ -190,6 +195,7 @@ private:
     bool ValidateDirTree() const;
     void BuildDirTree(u32 dir_index, VectorVfsDirectory& out);
     VirtualDir BuildPackageDir(u32 dir_index);
+    VirtualDir MergeDirTrees(u32 base_dir, u32 overlay_dir);
     std::vector<u8> ReadExtentRaw(const FileNode& node) const;
 
     VirtualFile file;
