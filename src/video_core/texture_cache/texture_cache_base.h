@@ -627,6 +627,9 @@ private:
     /// The image's contents, aliases or mapping changed: its entries are no longer resident.
     void ClearPoolResidency(ImageId image_id);
 
+    /// The image's views are gone: the entries bound to them resolve again on their next read.
+    void ForgetPoolRefs(ImageId image_id);
+
     /// A TIC entry bound to a view of an image (image_pool_refs).
     struct PoolRef {
         u32 channel;
