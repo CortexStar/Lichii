@@ -22,7 +22,10 @@ constexpr u32 SAMPLER_HEAP_PAGES = 4096; // 16 MiB
 
 TextureHeap::TextureHeap(const Device& device_, MemoryAllocator& memory_allocator)
     : device{device_} {
-    if (!device.IsExtDescriptorHeapSupported() || !device.HasNullDescriptor()) {
+    // The heaps are buffers bound by device address: the allocator has to make them with
+    // VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT.
+    if (!device.IsExtDescriptorHeapSupported() || !device.HasNullDescriptor() ||
+        !device.IsBufferDeviceAddressSupported()) {
         return;
     }
     const auto& properties = device.DescriptorHeapProperties();
