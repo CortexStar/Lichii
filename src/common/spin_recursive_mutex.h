@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <thread>
 
+#include "common/nx2_address_wait.h"
+
 #if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
 #endif
@@ -17,6 +19,9 @@ namespace Common {
 /// thousands of times a second by the GPU thread, the fencing thread and CPU write traps, and
 /// held for microseconds: std::recursive_mutex put a waiting thread to sleep at once, and its
 /// wake-up took longer than the critical section (title 1's GPU thread spent ~8% asleep there).
+/// Sleepers use Nx2AddressWait (WaitOnAddress on Windows): std::atomic::wait's winpthreads
+/// condition variable made the unlocking GPU thread block on a shared mutex and woke every sleeper
+/// of the slot.
 class SpinRecursiveMutex {
 public:
     void lock() {
@@ -41,7 +46,8 @@ public:
             return true;
         }
         std::uint32_t expected = 0;
-        if (!state.compare_exchange_strong(expected, 1, std::memory_order_acquire,
+        if (state.load(std::memory_order_relaxed) != 0 ||
+            !state.compare_exchange_strong(expected, 1, std::memory_order_acquire,
                                            std::memory_order_relaxed)) {
             return false;
         }
@@ -56,7 +62,7 @@ public:
         }
         owner.store(std::thread::id{}, std::memory_order_relaxed);
         if (state.exchange(0, std::memory_order_release) == 2) {
-            state.notify_one();
+            Nx2AddressWait::WakeOne(state);
         }
     }
 
@@ -86,7 +92,7 @@ private:
         // 2: held with (possible) sleepers; taken this way it stays marked, so its unlock wakes
         // the next sleeper.
         while (state.exchange(2, std::memory_order_acquire) != 0) {
-            state.wait(2, std::memory_order_relaxed);
+            Nx2AddressWait::Wait(state, 2);
         }
     }
 
