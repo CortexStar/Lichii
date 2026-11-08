@@ -344,6 +344,9 @@ public:
     /// mapped now. Up to MaxNotedBytes by 256-byte granule, up to MaxCoarseNotedBytes by 64 KiB
     /// granule, longer writes count as unplaced.
     void NoteWrite(const Tegra::MemoryManager& memory, GPUVAddr address, u64 size);
+    /// NoteWrite for the entry sent at `position` (the one before it ends there), placed late: the
+    /// front's QMD view values a launch once the back ran what it waited for.
+    void NoteWriteAt(const Tegra::MemoryManager& memory, GPUVAddr address, u64 size, u64 position);
     /// The entry just sent may write guest memory anywhere and change the GPU's mappings
     /// (Writes::Anywhere).
     void NoteAnyWrite() {
@@ -466,8 +469,14 @@ private:
     static void NoteSetWrite(WriteSet& set, u64 granule, u64 position);
     /// The latest position of the writes to `granule` in its set, at most.
     [[nodiscard]] static u64 SetTarget(const WriteSet& set, u64 granule);
-    void NoteDeviceWrite(DAddr address, u64 size);
-    void NoteCoarseDeviceWrite(DAddr address, u64 size);
+    void NoteDeviceWrite(DAddr address, u64 size) {
+        NoteDeviceWriteAt(address, size, write_position);
+    }
+    void NoteDeviceWriteAt(DAddr address, u64 size, u64 position);
+    void NoteCoarseDeviceWrite(DAddr address, u64 size) {
+        NoteCoarseDeviceWriteAt(address, size, write_position);
+    }
+    void NoteCoarseDeviceWriteAt(DAddr address, u64 size, u64 position);
     /// The position WaitForWrites waits for.
     [[nodiscard]] u64 WritesTarget(const Tegra::MemoryManager& memory, GPUVAddr address,
                                    u64 size) const;

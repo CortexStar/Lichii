@@ -1619,20 +1619,21 @@ TEST_CASE("Split front values the releases of the QMD launches it sends as the b
     Access::RunBack(split);
     CHECK(word(0x20) == 7);
 
-    // Work that may write guest memory anywhere, still queued: the front can't tell what the
-    // back reads, its table is no longer the back's.
+    // Work that may write guest memory anywhere and change the mappings, still queued: the front
+    // can't tell what the back reads yet, the launch waits for it.
     split.Defer([] {});
     inline_qmd(qmds + 0x500, make_qmd(0, 0x30, Enable | OneWord, 1), false);
     CHECK_FALSE(queued(0x30).has_value());
     Access::RunBack(split);
-    // Taken over again once the back ran everything.
+    // The back ran everything: the front takes its table over, the waiting launch with it.
     inline_qmd(qmds + 0x600, make_qmd(0, 0x30, Enable | OneWord, 2), true);
     release = queued(0x30);
     REQUIRE(release.has_value());
     CHECK(release->payload == 2);
     Access::RunBack(split);
 
-    // A write to a waiting QMD still queued when its decrement is sent: not valued.
+    // A write to a waiting QMD still queued when its decrement is sent: the launch waits, not
+    // valued then.
     inline_qmd(qmds + 0x700, make_qmd(1, 0x40, Enable | OneWord | Maximum, 3), false);
     Access::RunBack(split);
     split.Defer([] {}, Writes::Noted);

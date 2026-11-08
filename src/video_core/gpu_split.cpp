@@ -319,6 +319,11 @@ void ForEachDeviceRange(const Tegra::MemoryManager& memory, GPUVAddr address, u6
 } // Anonymous namespace
 
 void GpuSplit::NoteWrite(const Tegra::MemoryManager& memory, GPUVAddr address, u64 size) {
+    NoteWriteAt(memory, address, size, write_position);
+}
+
+void GpuSplit::NoteWriteAt(const Tegra::MemoryManager& memory, GPUVAddr address, u64 size,
+                           u64 position) {
     if (size == 0) {
         return;
     }
@@ -328,13 +333,14 @@ void GpuSplit::NoteWrite(const Tegra::MemoryManager& memory, GPUVAddr address, u
         return;
     }
     if (size > MaxNotedBytes) {
-        ForEachDeviceRange(memory, address, size, [this](DAddr device, u64 bytes) {
-            NoteCoarseDeviceWrite(device, bytes);
+        ForEachDeviceRange(memory, address, size, [this, position](DAddr device, u64 bytes) {
+            NoteCoarseDeviceWriteAt(device, bytes, position);
         });
         return;
     }
-    ForEachDeviceRange(memory, address, size,
-                       [this](DAddr device, u64 bytes) { NoteDeviceWrite(device, bytes); });
+    ForEachDeviceRange(memory, address, size, [this, position](DAddr device, u64 bytes) {
+        NoteDeviceWriteAt(device, bytes, position);
+    });
 }
 
 void GpuSplit::NoteSetWrite(WriteSet& set, u64 granule, u64 position) {
@@ -366,20 +372,20 @@ u64 GpuSplit::SetTarget(const WriteSet& set, u64 granule) {
     return set.evicted;
 }
 
-void GpuSplit::NoteDeviceWrite(DAddr address, u64 size) {
+void GpuSplit::NoteDeviceWriteAt(DAddr address, u64 size, u64 position) {
     const u64 last = (address + size - 1) >> WriteGranuleBits;
     for (u64 granule = address >> WriteGranuleBits; granule <= last; ++granule) {
-        NoteSetWrite(write_sets[WriteSlot(granule)], granule, write_position);
+        NoteSetWrite(write_sets[WriteSlot(granule)], granule, position);
     }
-    last_noted_write = write_position;
+    last_noted_write = std::max(last_noted_write, position);
 }
 
-void GpuSplit::NoteCoarseDeviceWrite(DAddr address, u64 size) {
+void GpuSplit::NoteCoarseDeviceWriteAt(DAddr address, u64 size, u64 position) {
     const u64 last = (address + size - 1) >> CoarseGranuleBits;
     for (u64 granule = address >> CoarseGranuleBits; granule <= last; ++granule) {
-        NoteSetWrite(coarse_sets[CoarseSlot(granule)], granule, write_position);
+        NoteSetWrite(coarse_sets[CoarseSlot(granule)], granule, position);
     }
-    last_noted_write = write_position;
+    last_noted_write = std::max(last_noted_write, position);
 }
 
 u64 GpuSplit::WritesTarget(const Tegra::MemoryManager& memory, GPUVAddr address, u64 size) const {

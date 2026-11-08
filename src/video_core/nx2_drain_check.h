@@ -390,14 +390,18 @@ enum class Releaser : u32 {
     Count,
 };
 
-/// Why the front's QMD view could not value a signal (FrontQmdView::Signal).
+/// Why the front's QMD view could not value a signal (FrontQmdView::Signal), or one that waited.
 enum class QmdLost : u32 {
-    NotSynced,    ///< Its table is not the back's yet (the back has not caught up since)
-    Unplaced,     ///< Work that may write guest memory anywhere was still queued
-    GpuWritten,   ///< A QMD it read is on a page GPU work wrote
-    Pending,      ///< A write into a QMD it read was still queued
-    ReleasedInto, ///< A release of the same signal writes into a QMD it read
-    Mappings,     ///< Work that may change the GPU's mappings was still queued
+    NotSynced,        ///< Its table is not the back's yet (the back has not caught up since)
+    Unplaced,         ///< Work that may write guest memory anywhere was still queued
+    GpuWritten,       ///< A QMD it read is on a page GPU work wrote
+    Pending,          ///< A write into a QMD it read was still queued
+    ReleasedInto,     ///< A release of the same signal writes into a QMD it read
+    Mappings,         ///< Work that may change the GPU's mappings was still queued
+    WrittenAfter,     ///< Waiting, a QMD it reads was written after it
+    MappedAfter,      ///< Waiting, the mappings may have changed after it
+    LateReleasedInto, ///< Waiting, a release of it writes a QMD read late
+    TooMany,          ///< Too many signals waited
     Count,
 };
 
