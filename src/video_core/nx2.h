@@ -45,13 +45,17 @@ inline void Nx2MarkGpuWritten(u64 device_address, u64 size) {
     if (size == 0) {
         return;
     }
+    const u64 first = device_address >> Nx2WrittenPageBits;
     const u64 last = std::min<u64>((device_address + size - 1) >> Nx2WrittenPageBits,
                                    g_nx2_gpu_written_pages.size() * 64 - 1);
-    for (u64 page = device_address >> Nx2WrittenPageBits; page <= last; ++page) {
-        auto& word = g_nx2_gpu_written_pages[page / 64];
-        const u64 bit = u64{1} << (page % 64);
-        if ((word.load(std::memory_order_relaxed) & bit) == 0) {
-            word.fetch_or(bit, std::memory_order_relaxed);
+    // A word (64 pages) at a time: storage bindings span up to 64 MiB.
+    for (u64 word_index = first / 64; first <= last && word_index <= last / 64; ++word_index) {
+        const u64 low = word_index == first / 64 ? first % 64 : 0;
+        const u64 high = word_index == last / 64 ? last % 64 : 63;
+        const u64 bits = (~u64{0} >> (63 - (high - low))) << low;
+        auto& word = g_nx2_gpu_written_pages[word_index];
+        if ((word.load(std::memory_order_relaxed) & bits) != bits) {
+            word.fetch_or(bits, std::memory_order_relaxed);
         }
     }
 }

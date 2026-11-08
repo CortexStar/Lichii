@@ -33,3 +33,21 @@ TEST_CASE("Nx2MayBeGpuWritten sees every page a GPU write marked", "[video_core]
     Tegra::Nx2ClearGpuWrittenPages();
     CHECK_FALSE(Tegra::Nx2MayBeGpuWritten(base, 64 * page));
 }
+
+TEST_CASE("Nx2MarkGpuWritten marks a range over several bitmap words exactly",
+          "[video_core][nx2]") {
+    constexpr u64 page = u64{1} << Tegra::Nx2WrittenPageBits;
+    constexpr u64 base = 0x20000000; // Page-aligned at a bitmap word
+    Tegra::Nx2ClearGpuWrittenPages();
+    // Pages 5 through 134: the end of one word, a full word and the start of the next.
+    Tegra::Nx2MarkGpuWritten(base + 5 * page + 1, 130 * page - 2);
+    CHECK_FALSE(Tegra::Nx2IsGpuWritten(base + 4 * page));
+    for (u64 index = 5; index <= 134; ++index) {
+        CHECK(Tegra::Nx2IsGpuWritten(base + index * page));
+    }
+    CHECK_FALSE(Tegra::Nx2IsGpuWritten(base + 135 * page));
+    // Marking again changes nothing.
+    Tegra::Nx2MarkGpuWritten(base + 5 * page, page);
+    CHECK_FALSE(Tegra::Nx2IsGpuWritten(base + 4 * page));
+    Tegra::Nx2ClearGpuWrittenPages();
+}
