@@ -85,6 +85,7 @@ using VideoCommon::GuessMissing;
 using VideoCommon::GraphicsEnvironment;
 
 constexpr u32 CACHE_VERSION = VideoCommon::VulkanPipelineCacheVersion;
+size_t KeptPipelines(size_t cached_at_boot);
 constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
 constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
 constexpr auto& VULKAN_CACHE_MAGIC_NUMBER = VideoCommon::VulkanDriverPipelineCacheMagic;
@@ -662,6 +663,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     }
 
     LOG_INFO(Render_Vulkan, "DynamicState setting value: {}", u32(Settings::values.dyna_state.GetValue()));
+    kept_pipelines.store(KeptPipelines(0), std::memory_order::relaxed);
     LogEvictionPolicy();
 
     dynamic_features = {};
@@ -784,29 +786,30 @@ bool PreloadAllPipelines() {
 // A graphics pipeline unused for this many frames (~2.5 min at 60 FPS) may be destroyed.
 constexpr u64 EvictAfterFrames = 9000;
 
-// Built graphics pipelines kept before unused ones are destroyed; 0 destroys every pipeline unused
-// for EvictAfterFrames (Android, or EDEN_NX2_KEPT_PIPELINES=0). EDEN_NX2_KEPT_PIPELINES=<n> sets
-// the limit on desktop.
-size_t KeptPipelines() {
-    static const size_t kept = []() -> size_t {
+// Built graphics pipelines kept before unused ones are destroyed, for a session that loaded
+// `cached_at_boot` pipelines from the disk cache; 0 destroys every pipeline unused for
+// EvictAfterFrames (Android, or EDEN_NX2_KEPT_PIPELINES=0). EDEN_NX2_KEPT_PIPELINES=<n> sets the
+// limit on desktop; otherwise it fits the disk cache (KeptPipelinesForCache).
+size_t KeptPipelines(size_t cached_at_boot) {
 #ifdef __ANDROID__
-        return 0;
+    return 0;
 #else
+    static const std::optional<size_t> forced = []() -> std::optional<size_t> {
         const char* value = std::getenv("EDEN_NX2_KEPT_PIPELINES");
         if (value == nullptr || value[0] == '\0') {
-            return DefaultKeptPipelines;
+            return std::nullopt;
         }
         char* end = nullptr;
         const unsigned long long parsed = std::strtoull(value, &end, 10);
         if (end == value || *end != '\0' || value[0] == '-') {
-            LOG_WARNING(Render_Vulkan, "EDEN_NX2_KEPT_PIPELINES={} is not a number, using {}",
-                        value, DefaultKeptPipelines);
-            return DefaultKeptPipelines;
+            LOG_WARNING(Render_Vulkan,
+                        "EDEN_NX2_KEPT_PIPELINES={} is not a number, using the default", value);
+            return std::nullopt;
         }
         return static_cast<size_t>(parsed);
-#endif
     }();
-    return kept;
+    return forced ? *forced : KeptPipelinesForCache(cached_at_boot);
+#endif
 }
 } // Anonymous namespace
 
@@ -1274,6 +1277,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     compute_envs.clear();
 
     LOG_INFO(Render_Vulkan, "Total Pipeline Count: {}", state.total);
+    kept_pipelines.store(KeptPipelines(state.total), std::memory_order::relaxed);
+    LogEvictionPolicy();
     if (skipped_pipelines != 0) {
         LOG_INFO(
             Render_Vulkan,
@@ -1722,7 +1727,7 @@ void PipelineCache::EvictUnusedPipelines() {
     // EvictAfterFrames may be destroyed. Rebuilding it later requires a full GPU-thread shader
     // translation (~8.5 ms each) plus a driver pipeline cache hit, and pausing or a long cutscene
     // evicts an area's pipelines so returning rebuilds them all at once (OoT: 8,158 rebuilt in
-    // 80 min, multi-second freezes). So on desktop they are only destroyed past KeptPipelines()
+    // 80 min, multi-second freezes). So on desktop they are only destroyed past kept_pipelines
     // built, least recently used first.
     if (frame_count <= EvictAfterFrames) {
         return;
@@ -1742,7 +1747,7 @@ void PipelineCache::EvictUnusedPipelines() {
         return pipeline != nullptr && pipeline != current_pipeline && pipeline->IsBuilt() &&
                pipeline->LastUse() < cutoff;
     };
-    if (const size_t kept = KeptPipelines(); kept != 0) {
+    if (const size_t kept = kept_pipelines.load(std::memory_order::relaxed); kept != 0) {
         const size_t built = static_cast<size_t>(
             std::count_if(graphics_cache.begin(), graphics_cache.end(), [](const auto& entry) {
                 return entry.second != nullptr && entry.second->IsBuilt();
@@ -1802,7 +1807,9 @@ void PipelineCache::EvictUnusedPipelines() {
 void PipelineCache::LogEvictionPolicy() const {
     if (device.IsMoltenVK()) {
         LOG_INFO(Render_Vulkan, "Pipeline eviction: off on MoltenVK");
-    } else if (const size_t kept = KeptPipelines(); kept != 0) {
+    } else if (PreloadAllPipelines()) {
+        LOG_INFO(Render_Vulkan, "Pipeline eviction: off (EDEN_NX2_PRELOAD_ALL_PIPELINES=1)");
+    } else if (const size_t kept = kept_pipelines.load(std::memory_order::relaxed); kept != 0) {
         LOG_INFO(Render_Vulkan,
                  "Pipeline eviction: unused pipelines are destroyed only past {} built", kept);
     } else {
