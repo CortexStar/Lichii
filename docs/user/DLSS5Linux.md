@@ -124,15 +124,18 @@ render resolution.
 - **No effect:** check `doctor`, the active settings and the counters above.
   Confirm Lichii uses Vulkan and was launched with `VKLayer_DLSS5=1`. A missing
   helper or failed neural initialization can leave the original image visible.
-- **Model initialization fails after resizing/fullscreen:** inspect the helper
-  log. In the test below, changing to 3840 × 2160 failed while both GPUs were
-  nearly full; memory pressure was suspected but not established as the cause.
-  Return to a previously working window size. A temporary
+- **Model initialization or evaluation fails after resizing/fullscreen:** inspect
+  the helper log and available GPU memory. A follow-up 4K test returned
+  `0xbad0000d` (`OutOfGPUMemory`) during evaluation. Stopping another GPU-heavy
+  workload freed enough memory for full-resolution 4K processing. Free VRAM
+  before retrying, or return to a previously working window size. A temporary
   `set workingscale 0.5` reduces the neural pass width and height without changing
   Lichii's display resolution. Restart a failed helper with
   `dlssnr-helper restart`, reapply the desired live settings, and verify that
-  counters advance. Full working resolution was subsequently restored at
-  2400 × 1350.
+  counters advance. A successful model-creation message alone is insufficient:
+  evaluation can still run out of memory. See the local helper modification and
+  test limits below before treating resolution changes as validated on an
+  unmodified layer release.
 - **UI changes or motion artifacts:** this setup processes the completed image
   and uses estimated motion. It has no validated game-specific HUD separation.
   Disable the effect to compare before reporting an emulator rendering bug.
@@ -157,7 +160,7 @@ Manual testing on 8 November 2026 used:
 | GPUs installed | Two RTX PRO 6000 Blackwell Workstation Edition GPUs, 96 GB each |
 | External layer | Local 64-bit DLSS5VKLayer 0.3.1-2 build, commit `9f43793d354063399b463a2a20adf30ce07e1c60` |
 | Helper runner | Proton-CachyOS (`proton-cachyos-slr`) |
-| Preferred settings | Natural, one pass, full working resolution at 2400 × 1350 |
+| Preferred settings | Natural, one pass, full working resolution; tested at 2400 × 1350 and 3840 × 2160 |
 
 Two installed GPUs do not imply that this setup distributes neural processing
 across both. Initialization logs, advancing frame counters and matched title-screen
@@ -165,7 +168,25 @@ captures confirmed processing and visible changes to foliage, rocks and lighting
 The title logo also changed. The tester reported satisfactory appearance and
 preferred one pass after trying two.
 
-The 4K resize failure remains unresolved. No controlled FPS/latency benchmark,
+Follow-up testing used a local helper modification based on the layer commit
+above: tear down the NGX runtime before reinitializing it for a resolution change,
+clear the helper's ready state before rebuilding, and release the owned NVAPI
+module during teardown. The original path released the features but then loaded
+and initialized the runtime again without a matching runtime teardown. This
+helper modification is not included in Lichii or in this documentation change,
+and is not a claim about an upstream DLSS5VKLayer release.
+
+With the modified helper and the competing GPU workload stopped, full-resolution
+3840 × 2160 processing succeeded. Two round trips of the neural working size
+between 2400 × 1350 and 3840 × 2160 passed, with the model active and frame counters
+advancing at each size. Lichii remained open at 4K throughout; these checks
+exercise helper resource recreation, not repeated window/fullscreen transitions.
+The final state was one Natural pass at full 4K with comparison disabled.
+
+The follow-up evaluation error confirms memory exhaustion in that test. The
+earlier initialization error was `0xbad00002` (platform error); its exact cause
+has not been isolated. The cleanup change alone did not eliminate memory
+exhaustion while the competing workload was running. No controlled FPS/latency benchmark,
 long-duration stability test, or broad game/GPU compatibility test was performed.
 For reports, include the exact versions, presentation size, layer settings and
 whether the issue reproduces with the layer disabled. Review logs for personal
