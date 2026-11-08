@@ -363,22 +363,6 @@ public:
                         }
                     }
                     for (const auto& [start, end] : merged) {
-                            for (size_t slot = start; slot < end; ++slot) {
-                                const size_t offset = base_offset + (slot - span_start) * query_size;
-                                cmdbuf.FillBuffer(buffer, offset, 4, 1024);
-                                cmdbuf.FillBuffer(buffer, offset + 4, 4, 0);
-                            }
-                        }
-                        static constexpr VkMemoryBarrier PRESET_BARRIER{
-                            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-                            .pNext = nullptr,
-                            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-                            .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-                        };
-                        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                               VK_PIPELINE_STAGE_TRANSFER_BIT, 0, PRESET_BARRIER);
-                    }
-                    for (const auto& [start, end] : merged) {
                         if (resolve_availability) {
                             cmdbuf.CopyQueryPoolResults(
                                 query_pool, static_cast<u32>(start), static_cast<u32>(end - start),
