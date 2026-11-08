@@ -5,6 +5,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 #include <catch2/catch_test_macros.hpp>
 #include "common/common_types.h"
 #include "core/arm/guest_functions.h"
@@ -317,4 +318,91 @@ TEST_CASE("MurmurHash3X86_32 matches the reference run in the JIT", "[guest_cpu]
         }
     }
     CHECK(mismatches == 0);
+}
+namespace {
+
+// musl's fmodf (src/math/fmodf.c, MIT) built with clang -O2 for aarch64.
+constexpr std::array<u32, 93> MuslFmodf{
+    0x1E26002C, 0x531F798A, 0x3400032A, 0x1E260028, 0x52AFF009, 0x12007908, 0x6B09011F, 0x54000288,
+    0x1E260009, 0x53177928, 0x7103FD1F, 0x54000200, 0x531F792B, 0x6B0A017F, 0x54000209, 0x5317798B,
+    0x34000248, 0x52A0100A, 0x3300592A, 0x3400032B, 0x52A0100D, 0x3300598D, 0x6B0B011F, 0x540004AC,
+    0x6B0D014B, 0x54000565, 0x1400002C, 0x1E210800, 0x1E201800, 0xD65F03C0, 0x2F00E401, 0x1E210801,
+    0x1E200C20, 0xD65F03C0, 0x5317592A, 0x2A1F03E8, 0x37F8008A, 0x531F794A, 0x51000508, 0x36FFFFCA,
+    0x5280002A, 0x4B08014A, 0x1ACA212A, 0x35FFFD2B, 0x5317598D, 0x2A1F03EB, 0x37F8008D, 0x531F79AD,
+    0x5100056B, 0x36FFFFCD, 0x5280002D, 0x4B0B01AD, 0x1ACD218D, 0x6B0B011F, 0x540000CC, 0x17FFFFE1,
+    0x51000508, 0x531F794A, 0x6B0B011F, 0x540000CD, 0x6B0D014C, 0x54FFFF64, 0x2A0C03EA, 0x35FFFF2C,
+    0x1400000F, 0x2A0B03E8, 0x6B0D014B, 0x54000064, 0x2A0B03EA, 0x3400014B, 0x53177D4B, 0x12010129,
+    0x3500014B, 0x531F794B, 0x7150015F, 0x51000508, 0x2A0B03EA, 0x54FFFF83, 0x14000005, 0x2F00E401,
+    0x1E210800, 0xD65F03C0, 0x2A0A03EB, 0x5280002A, 0x5160016C, 0x7100051F, 0x4B08014A, 0x1ACA256A,
+    0x2A085D8B, 0x1A8BB148, 0x2A090108, 0x1E270100, 0xD65F03C0,
+};
+
+} // namespace
+
+TEST_CASE("Fmodf matches musl fmodf run in the JIT", "[guest_cpu]") {
+    GuestEnvironment env;
+    env.Load(MuslFmodf, Function);
+    env.Load({Svc0}, Stop);
+    Dynarmic::A64::Jit jit{BaseConfig(env)};
+    env.jit = &jit;
+
+    std::vector<u32> values{
+        0x00000000, 0x80000000, 0x00000001, 0x80000001, 0x00000003, 0x0000FFFF, 0x00400000,
+        0x007FFFFF, 0x807FFFFF, 0x00800000, 0x00800001, 0x01000000, 0x33800000, 0x3F000000,
+        0x3F800000, 0xBF800000, 0x3F800001, 0x40000000, 0x40490FDB, 0xC0490FDB, 0x4B000000,
+        0x4B7FFFFF, 0x5F000000, 0x7F000000, 0x7F7FFFFF, 0xFF7FFFFF, 0x7F800000, 0xFF800000,
+        0x7FC00000, 0xFFC00001, 0x7FFFFFFF, 0x7F800001, 0xFFA00000, 0x7FBFFFFF,
+    };
+    XorShift rng{0x9E3779B97F4A7C15};
+    std::vector<std::pair<u32, u32>> pairs;
+    for (const u32 x : values) {
+        for (const u32 y : values) {
+            pairs.emplace_back(x, y);
+        }
+    }
+    for (int i = 0; i < 200'000; ++i) {
+        const u64 r = rng.Next();
+        pairs.emplace_back(static_cast<u32>(r), static_cast<u32>(r >> 32));
+    }
+    // Every exponent distance, with random mantissas: the shift-subtract loop of every length.
+    for (u32 ex = 0; ex < 255; ++ex) {
+        for (u32 ey = 0; ey <= ex; ++ey) {
+            const u64 r = rng.Next();
+            const u32 x = (ex << 23) | (static_cast<u32>(r) & 0x807FFFFF);
+            const u32 y = (ey << 23) | (static_cast<u32>(r >> 32) & 0x807FFFFF);
+            pairs.emplace_back(x, y);
+        }
+    }
+
+    for (const u32 fpcr : {0U, 1U << 25, 1U << 24, 3U << 24}) {
+        jit.SetFpcr(fpcr);
+        // Dynarmic does not raise IDC when FZ flushes an input; the host function does, as the
+        // Arm FPUnpack pseudocode says. Compare it only without FZ. musl's FP operations are all
+        // exact (products with a zero, infinity or NaN, and quotients of a zero or infinity by
+        // itself), so IXC is never raised; dynarmic's x64 FDIV reports a stray IXC for 0/0 and
+        // the JIT run can carry one, so IXC is left out.
+        const u32 flag_mask = (fpcr & (1U << 24)) != 0 ? 0x0F : 0x8F;
+        u32 mismatches = 0;
+        for (const auto [x, y] : pairs) {
+            jit.SetVector(0, {x, 0x1111});
+            jit.SetVector(1, {y, 0x2222});
+            jit.SetFpsr(0);
+            jit.SetRegister(30, Stop);
+            jit.SetPC(Function);
+            jit.Run();
+            const auto expected = Core::Fmodf(x, y, fpcr);
+            const auto v0 = jit.GetVector(0);
+            const u32 fpsr = jit.GetFpsr() & 0x9F;
+            if (v0[0] != expected.value || v0[1] != 0 ||
+                (fpsr & flag_mask) != (expected.fpsr & flag_mask)) {
+                if (++mismatches <= 8) {
+                    UNSCOPED_INFO("fpcr " << std::hex << fpcr << " x " << x << " y " << y
+                                          << ": guest " << v0[0] << " fpsr " << fpsr
+                                          << ", host " << expected.value << " fpsr "
+                                          << expected.fpsr);
+                }
+            }
+        }
+        CHECK(mismatches == 0);
+    }
 }

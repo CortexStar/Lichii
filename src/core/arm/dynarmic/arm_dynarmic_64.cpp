@@ -316,6 +316,9 @@ std::optional<Dynarmic::A64::HostFunctionEntry> DynarmicCallbacks64::GetHostFunc
     case GuestFunction::MurmurHash3String:
         function = &HostMurmurHash3String;
         break;
+    case GuestFunction::Fmodf:
+        function = &HostFmodf;
+        break;
     }
     return Dynarmic::A64::HostFunctionEntry{function, this};
 }
@@ -400,6 +403,16 @@ bool DynarmicCallbacks64::HostMurmurHash3String(void* user,
         address += page_left;
     }
     state.x[0] = hash.Finish();
+    return true;
+}
+
+bool DynarmicCallbacks64::HostFmodf(void*, const Dynarmic::A64::HostFunctionState& state) {
+    const FmodfResult result = Fmodf(static_cast<u32>(state.v[0]), static_cast<u32>(state.v[2]),
+                                     state.fpcr);
+    // Writing s0 clears the rest of v0.
+    state.v[0] = result.value;
+    state.v[1] = 0;
+    *state.fpsr_exc |= result.fpsr;
     return true;
 }
 
