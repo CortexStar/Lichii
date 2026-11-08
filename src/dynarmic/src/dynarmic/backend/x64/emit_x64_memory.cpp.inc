@@ -86,6 +86,7 @@ template<std::size_t bitsize, auto callback>
 void AxxEmitX64::EmitMemoryRead(AxxEmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     const bool ordered = IsOrdered(args[2].GetImmediateAccType());
+    const bool ordered_mov = ordered && (bitsize == 128 || !conf.tso_ordered_loads);
     const auto fastmem_marker = ShouldFastmem(ctx, inst);
 
     if (!conf.page_table && !fastmem_marker) {
@@ -126,7 +127,7 @@ void AxxEmitX64::EmitMemoryRead(AxxEmitContext& ctx, IR::Inst* inst) {
         bool require_abort_handling = false;
         const auto src_ptr = EmitFastmemVAddr(code, ctx, *abort, vaddr, require_abort_handling);
 
-        const auto location = EmitReadMemoryMov<bitsize>(code, value_idx, src_ptr, ordered);
+        const auto location = EmitReadMemoryMov<bitsize>(code, value_idx, src_ptr, ordered_mov);
 
         ctx.deferred_emits.emplace_back([=, this, &ctx] {
             code.L(*abort);
@@ -141,7 +142,7 @@ void AxxEmitX64::EmitMemoryRead(AxxEmitContext& ctx, IR::Inst* inst) {
         // Use page table
         ASSERT(conf.page_table);
         const auto src_ptr = EmitVAddrLookup(code, ctx, bitsize, *abort, vaddr);
-        EmitReadMemoryMov<bitsize>(code, value_idx, src_ptr, ordered);
+        EmitReadMemoryMov<bitsize>(code, value_idx, src_ptr, ordered_mov);
 
         ctx.deferred_emits.emplace_back([=, this, &ctx] {
             code.L(*abort);
@@ -374,7 +375,7 @@ void AxxEmitX64::EmitExclusiveReadMemoryInline(AxxEmitContext& ctx, IR::Inst* in
 
         const auto src_ptr = EmitFastmemVAddr(code, ctx, *abort, vaddr, require_abort_handling);
 
-        const auto location = EmitReadMemoryMov<bitsize>(code, value_idx, src_ptr, ordered);
+        const auto location = EmitReadMemoryMov<bitsize>(code, value_idx, src_ptr, ordered && (bitsize == 128 || !conf.tso_ordered_loads));
 
         AddFastmemPatch(location, code.getCurr(), wrapped_fn, *fastmem_marker, conf.recompile_on_exclusive_fastmem_failure);
 

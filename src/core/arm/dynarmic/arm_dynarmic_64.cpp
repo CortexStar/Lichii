@@ -456,6 +456,16 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
         config.fastmem_pointer = std::nullopt;
         config.fastmem_exclusive_access = false;
     }
+#if defined(ARCHITECTURE_x86_64)
+    // x86-64 host code generation options; Paranoid keeps dynarmic's defaults.
+    if (Settings::values.cpu_accuracy.GetValue() != Settings::CpuAccuracy::Paranoid) {
+        // x86-64 is TSO: LDAPR/LDAR/LDAXR need no locked RMW (STLR keeps XCHG), and DMB xxLD/xxST
+        // order nothing TSO does not already order. Ocarina of Time has ~68k LDAPRB sites (static
+        // init guards), each a LOCK XADD that bounced the guard's cache line between the cores.
+        config.tso_ordered_loads = true;
+        config.elide_ld_st_barriers = true;
+    }
+#endif
     m_jit.emplace(config);
 }
 
