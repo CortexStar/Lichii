@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <utility>
 
@@ -59,8 +60,9 @@ QString Describe(const QJSValue& value) {
 
 /// A plain name: a module cannot climb out of the folders it is given.
 bool PlainName(const QString& name) {
+    // No ':' either: on Windows "D:file" names a path on another drive.
     return !name.isEmpty() && name != QStringLiteral("..") && !name.contains(QLatin1Char('/')) &&
-           !name.contains(QLatin1Char('\\'));
+           !name.contains(QLatin1Char('\\')) && !name.contains(QLatin1Char(':'));
 }
 
 int Length(const QJSValue& array) {
@@ -127,10 +129,16 @@ constexpr const char* Bootstrap = R"((function (host) {
         store: (name, text) => host.store(name, String(text)),
     };
 }))";
-/// The running game, or null while none runs or it is stopping.
-Kernel::KProcess* RunningGame() {
+/// The running game while `lock` (from LockGuestMemoryReaders) is held, or null while none runs
+/// or it is stopping. Its memory stays valid until the lock is released.
+Kernel::KProcess* RunningGame(std::shared_lock<std::shared_mutex>& lock) {
     Core::System* const system = QtCommon::system.get();
-    if (system == nullptr || system->IsShuttingDown()) {
+    if (system == nullptr) {
+        return nullptr;
+    }
+    lock = system->LockGuestMemoryReaders();
+    if (system->IsShuttingDown()) {
+        lock.unlock();
         return nullptr;
     }
     return system->ApplicationProcess();
@@ -140,16 +148,24 @@ Kernel::KProcess* RunningGame() {
 /// panel or game ends it within one slice.
 std::vector<u64> SearchHeap(const std::vector<u8>& pattern, const std::atomic<bool>& stopping) {
     std::vector<u64> hits;
-    Kernel::KProcess* const process = RunningGame();
-    if (process == nullptr || pattern.empty()) {
-        return hits;
+    u64 start = 0;
+    u64 end = 0;
+    {
+        std::shared_lock<std::shared_mutex> lock;
+        Kernel::KProcess* const process = RunningGame(lock);
+        if (process == nullptr || pattern.empty()) {
+            return hits;
+        }
+        start = GetInteger(process->GetPageTable().GetHeapRegionStart());
+        end = start + process->GetPageTable().GetHeapRegionSize();
     }
-    const u64 start = GetInteger(process->GetPageTable().GetHeapRegionStart());
-    const u64 end = start + process->GetPageTable().GetHeapRegionSize();
     // Small slices: a stopping game or panel ends the search within a few milliseconds.
     constexpr u64 Slice = u64{16} << 20;
     for (u64 at = start; at < end && hits.size() < 64; at += Slice) {
-        if (stopping.load(std::memory_order_relaxed) || RunningGame() == nullptr) {
+        // Each slice holds the readers' lock, so the process is not torn down under it.
+        std::shared_lock<std::shared_mutex> lock;
+        Kernel::KProcess* const process = RunningGame(lock);
+        if (stopping.load(std::memory_order_relaxed) || process == nullptr) {
             break;
         }
         const u64 slice_end = (std::min)(end, at + Slice);
@@ -185,7 +201,8 @@ QJSValue NotesHost::memory(const QString& address, int size) {
         engine->throwError(QStringLiteral("memory: want a hex address and a size up to 4096"));
         return {};
     }
-    Kernel::KProcess* const process = RunningGame();
+    std::shared_lock<std::shared_mutex> lock;
+    Kernel::KProcess* const process = RunningGame(lock);
     if (process == nullptr) {
         return QJSValue{QJSValue::NullValue};
     }
@@ -355,6 +372,11 @@ bool NotesScript::Load(const QString& path, const QStringList& library_dirs, QSt
     if (!PlainName(folder) || folder == QStringLiteral(".") || !PlainName(file) ||
         file == QStringLiteral(".")) {
         error = QStringLiteral("A module's folder and file must be plain names");
+        return false;
+    }
+    // A module reads its own game's saves: notes/<program id>.js names folder <program id>.
+    if (QFileInfo{path}.completeBaseName().compare(folder, Qt::CaseInsensitive) != 0) {
+        error = QStringLiteral("A module's folder must be its game's program id");
         return false;
     }
     return true;
