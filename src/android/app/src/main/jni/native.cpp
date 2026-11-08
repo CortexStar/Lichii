@@ -482,6 +482,10 @@ Common::Android::SoftwareKeyboard::AndroidKeyboard* EmulationSession::SoftwareKe
 
 void EmulationSession::LoadDiskCacheProgress(VideoCore::LoadCallbackStage stage, int progress,
                                              int max) {
+    // The app's stage list has no warm-up stage: it shows as shader building.
+    if (stage == VideoCore::LoadCallbackStage::Warm) {
+        stage = VideoCore::LoadCallbackStage::Build;
+    }
     JNIEnv* env = Common::Android::GetEnvForThread();
     env->CallStaticVoidMethod(Common::Android::GetDiskCacheProgressClass(),
                               Common::Android::GetDiskCacheLoadProgress(), static_cast<jint>(stage),

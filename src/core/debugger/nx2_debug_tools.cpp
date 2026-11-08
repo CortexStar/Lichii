@@ -209,11 +209,27 @@ json Status(ToolState& state, const json& params) {
 }
 
 json FrameTimes(ToolState& state, const json& params) {
+    const bool include_intervals = params.value("include_intervals", false);
     const double seconds = params.value("seconds", 5.0);
     const double refresh_hz = params.value("refresh_hz", 60.0);
     if (!std::isfinite(seconds) || seconds <= 0.0 || seconds > 60.0 ||
         !std::isfinite(refresh_hz) || refresh_hz <= 0.0) {
         throw std::runtime_error{"seconds must be > 0 and <= 60; refresh_hz must be > 0"};
+    }
+    if (params.contains("since_present")) {
+        const auto& value = params.at("since_present");
+        if (!value.is_number_unsigned()) {
+            throw std::runtime_error{"since_present must be a nonnegative integer"};
+        }
+        const u64 before = value.get<u64>();
+        const u64 after = g_nx2_present_count.load(std::memory_order_relaxed);
+        if (before > after) {
+            throw std::runtime_error{"since_present exceeds the current present count"};
+        }
+        const u64 end_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count();
+        return ReadFrameTimes(before, after, 1, end_ns, refresh_hz, include_intervals);
     }
     const u64 before = g_nx2_present_count.load(std::memory_order_relaxed);
     const auto begin = std::chrono::steady_clock::now();
@@ -228,15 +244,17 @@ json FrameTimes(ToolState& state, const json& params) {
         std::chrono::duration_cast<std::chrono::nanoseconds>(begin.time_since_epoch()).count();
     const u64 end_ns =
         std::chrono::duration_cast<std::chrono::nanoseconds>(end.time_since_epoch()).count();
-    return ReadFrameTimes(before, after, begin_ns, end_ns, refresh_hz);
+    return ReadFrameTimes(before, after, begin_ns, end_ns, refresh_hz, include_intervals);
 }
 
 } // Anonymous namespace
 
-json ReadFrameTimes(u64 before, u64 after, u64 begin_ns, u64 end_ns, double refresh_hz) {
+json ReadFrameTimes(u64 before, u64 after, u64 begin_ns, u64 end_ns, double refresh_hz,
+                    bool include_intervals) {
     const u64 capacity = g_nx2_present_times_ns.size();
     bool truncated = after < before || after - before > capacity;
-    const u64 first = (std::max)(before + 1, after > capacity ? after - capacity + 1 : u64{1});
+    const u64 first = (std::max)(before < after ? before + 1 : after,
+                               after > capacity ? after - capacity + 1 : u64{1});
     std::vector<double> intervals;
     u64 previous = 0;
     for (u64 frame = after; frame >= first; --frame) {
@@ -258,8 +276,9 @@ json ReadFrameTimes(u64 before, u64 after, u64 begin_ns, u64 end_ns, double refr
 
     std::ranges::reverse(intervals);
     json recent = json::array();
-    for (size_t i = intervals.size() > 120 ? intervals.size() - 120 : 0; i < intervals.size(); ++i) {
-        recent.push_back(std::round(intervals[i] * 10.0) / 10.0);
+    for (size_t i = !include_intervals && intervals.size() > 120 ? intervals.size() - 120 : 0;
+         i < intervals.size(); ++i) {
+        recent.push_back(include_intervals ? intervals[i] : std::round(intervals[i] * 10.0) / 10.0);
     }
     std::ranges::sort(intervals);
     const size_t frames = intervals.size();
@@ -287,6 +306,8 @@ json ReadFrameTimes(u64 before, u64 after, u64 begin_ns, u64 end_ns, double refr
         return frames == 0 ? 0.0 : static_cast<double>(buckets[bucket]) / static_cast<double>(frames);
     };
     return {{"frames", frames},
+            {"before_present", before},
+            {"after_present", after},
             {"mean_ms", mean},
             {"fps", mean > 0.0 ? 1000.0 / mean : 0.0},
             {"p50_ms", median},

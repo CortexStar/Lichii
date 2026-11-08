@@ -44,12 +44,16 @@ TOOLS = [
         "name": "frame_times",
         "description": "Guest-present frame intervals over seconds (default 5, max 60): mean, "
                        "fps, percentiles, VSync interval shares (refresh_hz defaults to 60), "
-                       "stutters and the last 120 intervals. Reports ring overflow as truncated.",
+                       "stutters and the last 120 intervals. Use since_present to read a past "
+                       "input sequence without waiting; include_intervals returns all retained "
+                       "intervals at full precision. Reports ring overflow as truncated.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 60, "default": 5},
                 "refresh_hz": {"type": "number", "exclusiveMinimum": 0, "default": 60},
+                "since_present": {"type": "integer", "minimum": 0},
+                "include_intervals": {"type": "boolean", "default": False},
             },
         },
     },
@@ -272,8 +276,8 @@ class Emulator:
         self.sock = None
         self.buffer = b""
 
-    def call(self, method, params, timeout):
-        for attempt in (0, 1):
+    def call(self, method, params, timeout, retry_disconnect=True):
+        for attempt in range(2 if retry_disconnect else 1):
             try:
                 if self.sock is None:
                     self.sock = socket.create_connection((self.host, self.port), timeout=5)
@@ -300,7 +304,7 @@ class Emulator:
             except OSError as error:
                 # A stale connection from an earlier boot: reconnect once.
                 self.close()
-                if attempt == 1:
+                if not retry_disconnect or attempt == 1:
                     raise EmulatorError(str(error)) from error
         if "error" in response:
             raise EmulatorError(response["error"])

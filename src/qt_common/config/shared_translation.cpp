@@ -298,6 +298,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Enables GPU vendor-specific pipeline cache.\nThis option can improve shader loading "
               "time significantly in cases where the Vulkan driver does not store pipeline cache "
               "files internally."));
+    INSERT(Settings, shader_warm_at_boot, tr("Prepare shaders before the game starts:"),
+           tr("When a game's shader warm-up has not run yet, it can run on the loading screen, on "
+              "every CPU thread, and the game starts once it is done (about 10 minutes the first "
+              "time). Never runs it in the background while the game plays, at low priority. Ask "
+              "asks at launch."));
     INSERT(Settings, native_async_draws, tr("Switch 2 draws with unbuilt pipelines:"),
            tr("Only applies when asynchronous shader building is on. Decides what a Switch 2 draw "
               "does when its graphics pipeline is still building.\n"
@@ -309,6 +314,31 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Used by the Bounded mode: the most time per frame that Switch 2 draws may wait in "
               "total for pipelines that are still building. Once spent, the remaining unbuilt "
               "draws of that frame are skipped."));
+
+    INSERT(Settings, use_graphics_pipeline_library,
+           tr("Shader libraries (faster first-time shader builds)"),
+           tr("Builds each shader stage once and links them into pipelines, so new shaders "
+              "cause shorter stutters.\nAlso runs the shader warm-up at game start when the game "
+              "has one.\nTakes effect after restarting the game."));
+    INSERT(Settings, shader_calls_not_inlined,
+           tr("Faster shader compiles (shared functions as calls)"),
+           tr("Builds large functions that a shader uses in several places once, as calls, "
+              "instead of copying them into every place. Driver compiles of such shaders get "
+              "several times faster (compute warm-up about 3x); the game may run slightly "
+              "slower.\nApplies to shaders built after the change."));
+    INSERT(Settings, use_mesh_shader_warmup,
+           tr("Prewarm predicted mesh shaders (experimental)"),
+           tr("Prepares predicted mesh shaders to reduce first-visit stutters. Benefits vary by "
+              "game and GPU; it can add startup time or background CPU work.\n"
+              "Uses the 'Prepare shaders before the game starts' timing setting and requires "
+              "prepared shader data. Uses mesh shader libraries when shader libraries are "
+              "enabled and supported. Does not skip draws or effects.\n"
+              "Takes effect after restarting the game. Turning it off stops future mesh "
+              "prewarming and mesh shader libraries; existing caches are kept."));
+    INSERT(Settings, shader_warm_threads, tr("Shader warm-up threads:"),
+           tr("CPU threads the shader warm-up uses (low priority). More threads finish the "
+              "warm-up sooner but leave less CPU to the game while it runs.\nTakes "
+              "effect at the next game start."));
     INSERT(Settings, enable_compute_pipelines, tr("Enable Compute Pipelines (Intel Vulkan Only)"),
            tr("Required by some games.\nThis setting only exists for Intel "
               "proprietary drivers and may crash if enabled.\nCompute pipelines are always enabled "
@@ -697,6 +727,12 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                           {
                               PAIR(ConsoleMode, Docked, tr("Docked")),
                               PAIR(ConsoleMode, Handheld, tr("Handheld")),
+                          }});
+    translations->insert({Settings::EnumMetadata<Settings::ShaderWarmAtBoot>::Index(),
+                          {
+                              PAIR(ShaderWarmAtBoot, Ask, tr("Ask")),
+                              PAIR(ShaderWarmAtBoot, Always, tr("Always")),
+                              PAIR(ShaderWarmAtBoot, Never, tr("Never (in the background)")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::NativeAsyncDraws>::Index(),
                           {

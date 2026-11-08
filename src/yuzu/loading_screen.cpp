@@ -86,11 +86,13 @@ LoadingScreen::LoadingScreen(QWidget* parent)
         {VideoCore::LoadCallbackStage::Prepare, tr("Loading...")},
         {VideoCore::LoadCallbackStage::Build, tr("Loading Shaders %1 / %2")},
         {VideoCore::LoadCallbackStage::Complete, tr("Launching...")},
+        {VideoCore::LoadCallbackStage::Warm, tr("Preparing shaders %1 / %2")},
     };
     progressbar_style = {
         {VideoCore::LoadCallbackStage::Prepare, PROGRESSBAR_STYLE_PREPARE},
         {VideoCore::LoadCallbackStage::Build, PROGRESSBAR_STYLE_BUILD},
         {VideoCore::LoadCallbackStage::Complete, PROGRESSBAR_STYLE_COMPLETE},
+        {VideoCore::LoadCallbackStage::Warm, PROGRESSBAR_STYLE_BUILD},
     };
 }
 
@@ -149,6 +151,8 @@ void LoadingScreen::OnLoadProgress(VideoCore::LoadCallbackStage stage, std::size
     if (total != previous_total) {
         ui->progress_bar->setMaximum(static_cast<int>(total));
         previous_total = total;
+        // A new total is a new part (the warm-up goes from compute to graphics): estimate anew.
+        slow_shader_compile_start = false;
     }
     // Reset the progress bar ranges if compilation is done
     if (stage == VideoCore::LoadCallbackStage::Complete) {
@@ -165,7 +169,7 @@ void LoadingScreen::OnLoadProgress(VideoCore::LoadCallbackStage stage, std::size
         }
         // only calculate an estimate time after a second has passed since stage change
         const auto diff = duration_cast<milliseconds>(now - slow_shader_start);
-        if (diff > seconds{1}) {
+        if (diff > seconds{1} && value > slow_shader_first_value) {
             const auto eta_mseconds =
                 static_cast<long>(static_cast<double>(total - slow_shader_first_value) /
                                   (value - slow_shader_first_value) * diff.count());
@@ -178,7 +182,8 @@ void LoadingScreen::OnLoadProgress(VideoCore::LoadCallbackStage stage, std::size
     }
 
     // update labels and progress bar
-    if (stage == VideoCore::LoadCallbackStage::Build) {
+    if (stage == VideoCore::LoadCallbackStage::Build ||
+        stage == VideoCore::LoadCallbackStage::Warm) {
         ui->stage->setText(stage_translations[stage].arg(value).arg(total));
     } else {
         ui->stage->setText(stage_translations[stage]);

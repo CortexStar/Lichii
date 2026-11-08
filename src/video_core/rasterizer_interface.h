@@ -44,6 +44,9 @@ enum class LoadCallbackStage {
     Prepare,
     Build,
     Complete,
+    /// The shader warm-up running before the game starts (value / total of the current part).
+    /// Last, so the values of the others stay as frontends that know only those expect.
+    Warm,
 };
 using DiskResourceLoadCallback = std::function<void(LoadCallbackStage, std::size_t, std::size_t)>;
 

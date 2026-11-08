@@ -166,6 +166,48 @@ to 0.1 ms. With fewer than two presents, statistics are zero and the interval li
 Only available samples from the 4096-timestamp ring are used; overflow sets `truncated: true`.
 For example: `{"method":"frame_times","params":{"seconds":5,"refresh_hz":60}}`.
 
+For a scripted comparison, first read `status.presents`, run `input_sequence`, then call
+`frame_times` with `since_present` set to that count and `include_intervals: true`. This reads
+the retained window immediately, so sampling does not block input on the single-request server.
+The response includes `before_present` and `after_present`; all retained intervals are returned
+at full precision when requested. Keep the sequence below 4096 presents and reject truncated
+samples. Use identical save snapshots, inputs, build/settings and starting caches for comparisons;
+report boot preparation separately from gameplay and distinguish guest presents from display timing.
+`tools/nx2/measure_stutters.py sequence.json result.json --server 127.0.0.1:6545`
+automates replay and collection, including counts above fixed 50/100/250/500 ms thresholds.
+The sequence file is an `input_sequence` params object. It does not reset saves or caches.
+Long sequences (up to 36,000 requested presents) are split into bounded requests; the recorder
+overlaps one timestamp to retain intervals across request boundaries and computes percentiles
+from the complete series. Request gaps can add neutral frames. Held inputs longer than a chunk
+are rejected rather than silently released and pressed again.
+Adjacent active steps can still be separated by a neutral request gap; use neutral waits at
+chunk boundaries, or a single request when uninterrupted holds across steps are required.
+`--chunk-frames 120 --stop-file <new-save-file> --endpoint-image endpoint.png` can stop at a
+previously absent checkpoint file and capture one endpoint image. File creation alone does not
+prove player control: verify the HUD and then test movement outside the measurement. The final
+capture/request cost remains in the measured series. A wall-time limit and exact interval-count
+checks reject incomplete runs; input requests are never automatically replayed after a disconnect.
+The primary [Ocarina intro benchmark](benchmarks/ocarina-intro-2026-11-08.json) runs from
+New Game through the unskipped intro to verified player control. It records three configurations
+with fresh saves, a shared historical runtime-cache seed, and separate empty NVIDIA caches.
+The [timing chart](benchmarks/ocarina-intro-2026-11-08.png) shows the complete interval series;
+compare both long stalls and overall pacing. These are single passes, not variance estimates.
+The earlier [camera-sweep comparison](benchmarks/ocarina-prewarm-2026-11-08.json) remains as
+historical evidence on an older build and a shorter route.
+
+For controlled mesh-budget experiments, the offline CLI builder accepts
+`eden-cli --build-warm <game> <title-id-hex> <output-dir> --mesh-candidates <0..4096> <runtime-cache>`.
+The tool override defaults to 512; zero disables mesh recipe generation. Report the actual
+generated count as well as the requested limit: deduplication, matching rules and available
+runtime templates can exhaust the candidate pool before reaching the limit. Keep the same
+runtime seed and conventional warm-up recipes across comparisons, and verify that larger mesh
+files preserve the smaller set. Regenerate into separate folders and use independent cold
+driver caches for gameplay measurements.
+The [Ocarina budget comparison](benchmarks/ocarina-mesh-budget-2026-11-08.json) reuses the 512
+baseline and measures requested limits of 1,024 and 2,048. Both yield the same 970 candidates;
+the two larger-budget runs show no consistent overall intro improvement, while cold mesh
+preparation increases from 85 seconds to about 250 seconds. The default remains 512.
+
 **`screenshot`** `{height?, save?, timeout_s?}`. It requests a 16:9 layout from
 `Layout::DefaultFrameLayout`, and the renderer blits the presented framebuffers into it. The
 BGRA result is turned into RGB and encoded as PNG with stb, which `common` already compiles. The
