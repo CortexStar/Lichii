@@ -70,11 +70,20 @@ A64EmitX64::A64EmitX64(BlockOfCode& code, A64::UserConfig conf, A64::Jit* jit_in
     if (conf.far_code) {
         code.EnableFarCode(conf.code_cache_size / 4);
     }
+    if (conf.indirect_branch_cache && conf.HasOptimization(OptimizationFlag::FastDispatch)) {
+        // Data the JIT code writes: on pages of its own, away from code (self-modifying-code
+        // checks work per page).
+        code.align(4096);
+        indirect_branch_cache = static_cast<IndirectBranchCacheEntry*>(
+            code.AllocateFromCodeSpace(indirect_branch_cache_entries * sizeof(IndirectBranchCacheEntry)));
+        code.align(4096);
+    }
     GenMemory128Accessors();
     GenFastmemFallbacks();
     GenTerminalHandlers();
     code.PreludeComplete();
     ClearFastDispatchTable();
+    ClearIndirectBranchCache();
 
     if (conf.fastmem_pointer.has_value()) {
         exception_handler.SetFastmemCallback([this](u64 rip_) {
@@ -268,11 +277,53 @@ void A64EmitX64::ClearCache() {
     pending_exit_stubs.clear();
     block_ranges.ClearCache();
     ClearFastDispatchTable();
+    ClearIndirectBranchCache();
+    indirect_branch_cache_used = 0;
     fastmem_patch_info.clear();
 }
 
 void A64EmitX64::InvalidateCacheRanges(const boost::icl::interval_set<u64>& ranges) {
     InvalidateBasicBlocks(block_ranges.InvalidateRanges(ranges));
+    // Entries may point at blocks of changed guest code.
+    ClearIndirectBranchCache();
+}
+
+void A64EmitX64::ClearIndirectBranchCache() {
+    if (!indirect_branch_cache) {
+        return;
+    }
+    code.EnableWriting();
+    // No entry matches a PC that is not 4-byte aligned.
+    // Sites keep their entries (and their `site` pointer): only the cached targets go.
+    for (size_t i = 0; i < indirect_branch_cache_entries; ++i) {
+        indirect_branch_cache[i].pc = ~u64(0);
+        indirect_branch_cache[i].code_ptr = 0;
+        indirect_branch_cache[i].misses = 0;
+    }
+    code.DisableWriting();
+}
+
+bool A64EmitX64::EmitIndirectBranchCache() {
+    if (!indirect_branch_cache || indirect_branch_cache_used == indirect_branch_cache_entries) {
+        return false;
+    }
+    IndirectBranchCacheEntry* const entry = &indirect_branch_cache[indirect_branch_cache_used++];
+    // The site starts with the (7-byte) halt-check compare, so a 5-byte jump fits over it; the
+    // fast dispatcher checks for a halt itself.
+    entry->site = code.getCurr<u8*>();
+    code.cmp(dword[code.ABI_JIT_PTR + offsetof(A64JitState, halt_reason)], 0);
+    ASSERT(code.getCurr<u8*>() - entry->site >= 5);
+    code.jne(code.GetForceReturnFromRunCodeAddress());
+    // The entry holds the raw PC: this block's FPCR is the FPCR the target was looked up with.
+    code.mov(rax, qword[code.ABI_JIT_PTR + offsetof(A64JitState, pc)]);
+    Xbyak::Label miss;
+    code.cmp(rax, qword[code.rip + &entry->pc]);
+    code.jne(miss);
+    code.jmp(qword[code.rip + &entry->code_ptr]);
+    code.L(miss);
+    code.lea(rbp, ptr[code.rip + entry]);
+    code.jmp(terminal_handler_fast_dispatch_fill, code.T_NEAR);
+    return true;
 }
 
 void A64EmitX64::ClearFastDispatchTable() {
@@ -368,6 +419,67 @@ void A64EmitX64::GenTerminalHandlers() {
         code.mov(ptr[r12 + offsetof(FastDispatchEntry, code_ptr)], rax);
         code.jmp(rax);
         PerfMapRegister(terminal_handler_fast_dispatch_hint, code.getCurr(), "a64_terminal_handler_fast_dispatch_hint");
+
+        if (indirect_branch_cache) {
+            // As above (the site checked for a halt already), then the found code pointer and
+            // the PC also go into the site's entry at rbp (callee-saved: it survives LookupBlock).
+            Xbyak::Label fill, miss;
+            code.align();
+            terminal_handler_fast_dispatch_fill = code.getCurr<const void*>();
+            calculate_location_descriptor();
+            code.mov(r8, u64(fast_dispatch_table.data()));
+            code.mov(r12, rbx);
+            if (code.HasHostFeature(HostFeature::SSE42)) {
+                code.crc32(r12, r8);
+            }
+            code.and_(r12d, fast_dispatch_table_mask);
+            code.lea(r12, ptr[r8 + r12]);
+            for (size_t way = 0; way < fast_dispatch_set_size; ++way) {
+                const size_t entry = way * sizeof(FastDispatchEntry);
+                Xbyak::Label next_way;
+                code.cmp(rbx, qword[r12 + entry + offsetof(FastDispatchEntry, location_descriptor)]);
+                code.jne(way + 1 < fast_dispatch_set_size ? next_way : miss, code.T_NEAR);
+                code.mov(rax, qword[r12 + entry + offsetof(FastDispatchEntry, code_ptr)]);
+                code.jmp(fill, code.T_NEAR);
+                code.L(next_way);
+            }
+            code.L(miss);
+            for (size_t way = fast_dispatch_set_size - 1; way > 0; --way) {
+                const size_t to = way * sizeof(FastDispatchEntry);
+                const size_t from = to - sizeof(FastDispatchEntry);
+                code.mov(rax, qword[r12 + from + offsetof(FastDispatchEntry, location_descriptor)]);
+                code.mov(rcx, qword[r12 + from + offsetof(FastDispatchEntry, code_ptr)]);
+                code.mov(qword[r12 + to + offsetof(FastDispatchEntry, location_descriptor)], rax);
+                code.mov(qword[r12 + to + offsetof(FastDispatchEntry, code_ptr)], rcx);
+            }
+            code.mov(qword[r12 + offsetof(FastDispatchEntry, location_descriptor)], rbx);
+            if (HostCallReturn(conf)) {
+                code.mov(rsp, qword[code.ABI_JIT_PTR + offsetof(A64JitState, host_stack_base)]);
+            }
+            code.LookupBlock();
+            code.mov(ptr[r12 + offsetof(FastDispatchEntry, code_ptr)], rax);
+            code.L(fill);
+            // A site that keeps changing target (a jump table, a polymorphic call) stops being
+            // cached: its first instruction becomes a jump to the plain fast dispatcher (only this
+            // core runs this code cache, and it is in here, not at the site).
+            Xbyak::Label megamorphic;
+            code.add(qword[rbp + offsetof(IndirectBranchCacheEntry, misses)], 1);
+            code.cmp(qword[rbp + offsetof(IndirectBranchCacheEntry, misses)], indirect_branch_cache_max_misses);
+            code.ja(megamorphic, code.T_NEAR);
+            code.mov(rcx, qword[code.ABI_JIT_PTR + offsetof(A64JitState, pc)]);
+            code.mov(qword[rbp + offsetof(IndirectBranchCacheEntry, pc)], rcx);
+            code.mov(qword[rbp + offsetof(IndirectBranchCacheEntry, code_ptr)], rax);
+            code.jmp(rax);
+            code.L(megamorphic);
+            code.mov(rcx, qword[rbp + offsetof(IndirectBranchCacheEntry, site)]);
+            code.mov(rdx, u64(terminal_handler_fast_dispatch_hint));
+            code.sub(rdx, rcx);
+            code.sub(rdx, 5);
+            code.mov(byte[rcx], u8(0xE9));
+            code.mov(dword[rcx + 1], edx);
+            code.jmp(rax);
+            PerfMapRegister(terminal_handler_fast_dispatch_fill, code.getCurr(), "a64_terminal_handler_fast_dispatch_fill");
+        }
 
         code.align();
         fast_dispatch_table_lookup = code.getCurr<FastDispatchEntry& (*)(u64)>();
@@ -976,7 +1088,7 @@ bool EmitTerminalImpl(A64EmitX64& e, IR::Term::PopRSBHint, IR::LocationDescripto
 bool EmitTerminalImpl(A64EmitX64& e, IR::Term::FastDispatchHint, IR::LocationDescriptor, bool is_single_step) {
     if (!e.conf.HasOptimization(OptimizationFlag::FastDispatch) || is_single_step) {
         e.code.ReturnFromRunCode();
-    } else {
+    } else if (!e.EmitIndirectBranchCache()) {
         e.code.jmp(e.terminal_handler_fast_dispatch_hint);
     }
     return true;

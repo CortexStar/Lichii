@@ -179,6 +179,22 @@ public:
     boost::container::stable_vector<Xbyak::Label> shared_labels;
     const void* terminal_handler_pop_rsb_hint = nullptr;
     const void* terminal_handler_fast_dispatch_hint = nullptr;
+    /// indirect_branch_cache: the fast dispatcher that also writes the site's entry (at rbp).
+    const void* terminal_handler_fast_dispatch_fill = nullptr;
+    struct IndirectBranchCacheEntry {
+        u64 pc;
+        u64 code_ptr;
+        u8* site;    // the site's PC load, overwritten with a jump to the fast dispatcher once megamorphic
+        u64 misses;  // refills so far
+    };
+    static constexpr u64 indirect_branch_cache_max_misses = 16;
+    static constexpr size_t indirect_branch_cache_entries = 32768;
+    IndirectBranchCacheEntry* indirect_branch_cache = nullptr;  // in the code space, own pages
+    size_t indirect_branch_cache_used = 0;
+    void ClearIndirectBranchCache();
+    /// Indirect jump to the guest PC in A64JitState::pc through a new cache entry; false when
+    /// none is left (the caller then takes the fast dispatcher).
+    bool EmitIndirectBranchCache();
     FastDispatchEntry& (*fast_dispatch_table_lookup)(u64) = nullptr;
     A64::Jit* jit_interface = nullptr;
     void (*memory_read_128)() = nullptr;
