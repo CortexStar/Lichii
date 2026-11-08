@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Lichii <noreply@anthropic.com>
+Date: Sat, 8 Nov 2026 13:30:00 +0100
+Subject: [PATCH] stream: include <cstdlib> for std::abort
+
+libc++ 23 no longer includes <cstdlib> through the other standard headers, so
+std::abort in stream.h fails to compile with llvm-mingw's clang 23.
+---
+ src/stream.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/stream.h b/src/stream.h
+--- a/src/stream.h
++++ b/src/stream.h
+@@ -11,6 +11,7 @@
+ #include <cassert>
+ #include <concepts>
+ #include <cstddef>
++#include <cstdlib>
+ #include <functional>
+ #include <string_view>
+ #include <unordered_map>
