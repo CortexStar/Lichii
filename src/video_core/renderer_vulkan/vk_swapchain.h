@@ -100,6 +100,9 @@ public:
         return surface_format.format;
     }
 
+    /// Hands the display the HDR10 mastering metadata (VK_EXT_hdr_metadata) of an HDR10 swapchain.
+    void SetHdrMetadata(u16 peak_luminance, u16 reference_white) const;
+
     /// Returns the cached SDR surface format, including while an HDR swapchain is active.
     VkFormat GetSdrImageFormat() const {
         return sdr_image_format.load();

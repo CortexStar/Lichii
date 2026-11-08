@@ -33,10 +33,20 @@ VkSurfaceFormatKHR ChooseSwapSurfaceFormat(vk::Span<VkSurfaceFormatKHR> formats,
     if (requested_format == VK_FORMAT_R16G16B16A16_SFLOAT ||
         requested_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ||
         requested_color_space != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
-        return {
-            .format = requested_format,
-            .colorSpace = requested_color_space,
-        };
+        // A swapchain may only use a pair the surface lists
+        // (VUID-VkSwapchainCreateInfoKHR-imageFormat-01273).
+        const bool listed = std::ranges::any_of(formats, [&](const VkSurfaceFormatKHR& format) {
+            return format.format == requested_format &&
+                   format.colorSpace == requested_color_space;
+        });
+        if (listed) {
+            return {
+                .format = requested_format,
+                .colorSpace = requested_color_space,
+            };
+        }
+        LOG_ERROR(Render_Vulkan, "The surface has no {} {} format, presenting SDR",
+                  string_VkFormat(requested_format), string_VkColorSpaceKHR(requested_color_space));
     }
     if (formats.size() == 1 && formats[0].format == VK_FORMAT_UNDEFINED) {
         VkSurfaceFormatKHR format;
@@ -54,10 +64,7 @@ VkSurfaceFormatKHR ChooseSwapSurfaceFormat(vk::Span<VkSurfaceFormatKHR> formats,
     const auto sdr = std::find_if(formats.begin(), formats.end(), [](const auto& format) {
         return format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     });
-    return sdr != formats.end()
-               ? *sdr
-               : VkSurfaceFormatKHR{.format = requested_format,
-                                    .colorSpace = requested_color_space};
+    return sdr != formats.end() ? *sdr : formats[0];
 }
 
 static VkPresentModeKHR ChooseSwapPresentMode(bool has_imm, bool has_mailbox,
@@ -416,6 +423,31 @@ void Swapchain::Destroy() {
     present_semaphores.clear();
     render_semaphores.clear();
     swapchain.reset();
+}
+
+void Swapchain::SetHdrMetadata(u16 peak_luminance, u16 reference_white) const {
+    if (!device.IsExtHdrMetadataEnabled() ||
+        surface_format.colorSpace != VK_COLOR_SPACE_HDR10_ST2084_EXT) {
+        return;
+    }
+    // The game tone maps to the peak it was told about, so that is the brightest the stream
+    // gets. Mastering primaries are BT.2020 with a D65 white (the colour space's own); the frame
+    // average is not known.
+    const VkHdrMetadataEXT metadata{
+        .sType = VK_STRUCTURE_TYPE_HDR_METADATA_EXT,
+        .pNext = nullptr,
+        .displayPrimaryRed = {0.708f, 0.292f},
+        .displayPrimaryGreen = {0.170f, 0.797f},
+        .displayPrimaryBlue = {0.131f, 0.046f},
+        .whitePoint = {0.3127f, 0.3290f},
+        .maxLuminance = static_cast<float>(peak_luminance),
+        .minLuminance = 0.0f,
+        .maxContentLightLevel = static_cast<float>(peak_luminance),
+        .maxFrameAverageLightLevel = 0.0f,
+    };
+    device.GetLogical().SetHdrMetadataEXT(*swapchain, metadata);
+    LOG_INFO(Render_Vulkan, "HDR10 metadata: peak {} nits (reference white {} nits)",
+             peak_luminance, reference_white);
 }
 
 bool Swapchain::NeedsPresentModeUpdate() const {
