@@ -18,6 +18,7 @@
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "video_core/dirty_flags.h"
+#include "video_core/draw_class_stats.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu.h"
@@ -53,6 +54,7 @@ Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)
 #endif
     , upload_state{memory_manager, regs.upload}
 {
+    draw_classes = VideoCommon::DrawClass::Enabled();
     dirty.flags.flip();
     InitializeRegisterDefaults();
     execution_mask.reset();
@@ -367,6 +369,9 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
     regs.reg_array[method] = argument;
     for (auto const& table : dirty.tables)
         dirty.flags[table[method]] = true;
+    if (draw_classes) {
+        draw_changes |= VideoCommon::DrawClass::Table()[method];
+    }
 }
 
 void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argument, bool is_last_call) {
@@ -800,6 +805,9 @@ void Maxwell3D::CallMultiMethod(Core::System& system, u32 method, const u32* bas
     case MAXWELL3D_REG_INDEX(const_buffer.buffer) + 14:
     case MAXWELL3D_REG_INDEX(const_buffer.buffer) + 15: {
         VideoCommon::Nx2Profile::Scope zone{VideoCommon::Nx2Profile::Zone::CbMulti};
+        if (draw_classes) {
+            draw_changes |= VideoCommon::DrawClass::Bit(VideoCommon::DrawClass::ConstData);
+        }
         ProcessCBMultiData(base_start, amount);
         break;
     }
@@ -2432,6 +2440,15 @@ void Maxwell3D::ApplyFrontDelta(Core::System& system, const u64* entries, u32 co
     // The rest: the register and its two dirty flags, the loop specialized on the shadow RAM
     // mode and the same-value skip (fixed for the delta). The flags are collected and raised
     // together at the end: nothing reads them in between.
+    if (draw_classes) {
+        const auto& groups = VideoCommon::DrawClass::Table();
+        for (u32 j = i; j < count; ++j) {
+            const u32 method = static_cast<u32>(entries[j]) & 0xffff;
+            if (!skip_same || regs.reg_array[method] != static_cast<u32>(entries[j] >> 32)) {
+                draw_changes |= groups[method];
+            }
+        }
+    }
     const auto& table0 = dirty.tables[0];
     const auto& table1 = dirty.tables[1];
     u32* const reg_array = regs.reg_array.data();

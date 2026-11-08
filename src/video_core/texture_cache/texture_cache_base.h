@@ -357,6 +357,11 @@ public:
         return bindings_epoch;
     }
 
+    /// Changes whenever the render targets do.
+    [[nodiscard]] u64 RenderTargetsSerial() const noexcept {
+        return render_targets_serial;
+    }
+
     /// Binding memo: one texture, image or sampler binding as FillImageViews and
     /// GetSamplerId resolved it, with the guest TIC/TSC entries it was resolved from. It stands
     /// while guest memory holds the same entries, the descriptor pools stay, and nothing happened

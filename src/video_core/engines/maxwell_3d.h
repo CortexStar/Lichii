@@ -14,6 +14,7 @@
 #include <optional>
 #include <span>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "common/assert.h"
@@ -3271,6 +3272,12 @@ public:
         Tables tables{};
     } dirty;
 
+    /// EDEN_NX2_DRAW_CLASSES: the register groups (VideoCommon::DrawClass::Group bits) changed
+    /// since the last draw took them.
+    [[nodiscard]] u8 TakeDrawChanges() noexcept {
+        return std::exchange(draw_changes, u8{0});
+    }
+
     DrawManager draw_manager;
 
     GPUVAddr GetMacroAddress(size_t index) const {
@@ -3434,6 +3441,9 @@ private:
 
     std::vector<std::pair<GPUVAddr, size_t>> macro_segments;
     bool current_macro_dirty{};
+    /// EDEN_NX2_DRAW_CLASSES (TakeDrawChanges).
+    u8 draw_changes{};
+    bool draw_classes{};
 
     // Split GPU thread, macros on the front (FrontCallMethod): the front's state, and whether
     // the front owns the macro code and bindings (the back thread then leaves them alone).
