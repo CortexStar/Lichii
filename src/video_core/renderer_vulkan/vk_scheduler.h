@@ -10,6 +10,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdio>
 #include <functional>
 #include <memory>
 #include <span>
@@ -29,6 +30,7 @@
 #include "video_core/renderer_vulkan/fragment_barrier_state.h"
 #include "video_core/renderer_vulkan/render_pass_barrier_tracker.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#include "video_core/vulkan_common/gpu_markers.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace VideoCommon {
@@ -89,6 +91,23 @@ public:
     template <typename Func>
     void TraceGpuWork(vk::CommandBuffer cmdbuf, u64 hash, u64 fragment_hash,
                       std::array<u32, 3> size, Func&& work) {
+        if (GpuMarkers::Enabled()) {
+            std::array<char, 40> label{};
+            std::snprintf(label.data(), label.size(), "%016llx %016llx",
+                          static_cast<unsigned long long>(hash),
+                          static_cast<unsigned long long>(fragment_hash));
+            std::array<float, 4> color{0.2f, 0.6f, 1.0f, 1.0f};
+            cmdbuf.BeginDebugUtilsLabelEXT(label.data(), color);
+        }
+        TraceGpuWorkTimed(cmdbuf, hash, fragment_hash, size, work);
+        if (GpuMarkers::Enabled()) {
+            cmdbuf.EndDebugUtilsLabelEXT();
+        }
+    }
+
+    template <typename Func>
+    void TraceGpuWorkTimed(vk::CommandBuffer cmdbuf, u64 hash, u64 fragment_hash,
+                           std::array<u32, 3> size, Func&& work) {
         if (!trace_gpu_recording || !trace_work_pool || trace_work_count == TraceMaxWork) {
             work();
             return;
