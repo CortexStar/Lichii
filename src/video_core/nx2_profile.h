@@ -111,7 +111,7 @@ inline u64 Ticks() {
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
-    std::array<u64, 11> counters{}; ///< See Counter
+    std::array<u64, 12> counters{}; ///< See Counter
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_ns{};
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_count{};
     u64 child_ns{};    ///< Time of the zones nested in the current one
@@ -170,6 +170,7 @@ enum class Counter : u32 {
     LatePublishTicks,
     LatePublishes,
     ResnapshotWords, ///< TEST: command list words copied again at resumes
+    EarlyPublishes,  ///< TEST: publishes to a back waiting for work, before publish_every
 };
 
 /// Method calls on this thread by method (3D registers on the back, macros on the front), and
@@ -289,12 +290,13 @@ inline void Report(const char* thread_name = "GPU thread") {
     line += fmt::format(" | acquires {:.0f} ({:.0f} waited)",
                         static_cast<double>(data.counters[6]) * 1e9 / window,
                         static_cast<double>(data.counters[7]) * 1e9 / window);
-    if (data.counters[9] != 0 || data.counters[10] != 0) {
+    if (data.counters[9] != 0 || data.counters[10] != 0 || data.counters[11] != 0) {
         // TEST: the back idle while words it could run waited on the front.
-        line += fmt::format(" | publishes to an idle back late by {:.1f} ms ({:.0f}/s) | "
-                            "resnapshot words {:.0f}/s",
+        line += fmt::format(" | publishes to an idle back late by {:.1f} ms ({:.0f}/s), early "
+                            "{:.0f}/s | resnapshot words {:.0f}/s",
                             static_cast<double>(data.counters[8]) * 1000.0 / window_ticks,
                             static_cast<double>(data.counters[9]) * 1e9 / window,
+                            static_cast<double>(data.counters[11]) * 1e9 / window,
                             static_cast<double>(data.counters[10]) * 1e9 / window);
     }
     std::string drains;

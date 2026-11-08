@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -52,29 +53,33 @@ public:
     }
 
     /// The back ran everything sent and runs nothing (the split drained, or it waits for work):
-    /// takes over the table `back` shares with the other engines.
-    void TakeOver(const Tegra::NativeQmdScheduler& back) {
+    /// takes over the table `back` shares with the other engines. `where`: TEST.
+    void TakeOver(const Tegra::NativeQmdScheduler& back, Nx2AcquireStats::QmdTakeOver where) {
         const auto start = std::chrono::steady_clock::now(); // TEST
         scheduler.CopyStates(back);
         synced = true;
-        Nx2AcquireStats::NoteQmdSync(std::chrono::steady_clock::now() - start);
+        Nx2AcquireStats::NoteQmdSync(where, std::chrono::steady_clock::now() - start);
     }
 
     /// The front, between commands and before QMD methods: takes the back's table over if the
     /// view lost it and the back has run everything sent.
-    void MaybeTakeOver(const GpuSplit& split, const Tegra::NativeQmdScheduler& back) {
+    void MaybeTakeOver(const GpuSplit& split, const Tegra::NativeQmdScheduler& back,
+                       Nx2AcquireStats::QmdTakeOver where) {
         if (!synced && split.Ran(split.Position())) [[unlikely]] {
-            TakeOver(back);
+            TakeOver(back, where);
         }
     }
-    void MaybeTakeOver(const GpuSplit& split) {
-        MaybeTakeOver(split, back_table);
+    void MaybeTakeOver(const GpuSplit& split, Nx2AcquireStats::QmdTakeOver where) {
+        MaybeTakeOver(split, back_table, where);
     }
 
-    /// TEST (EDEN_NX2_DRAIN_CHECK): the releases noted since the last call, and whether every
-    /// signal since was valued; nothing if no signal was sent since.
+    /// TEST (EDEN_NX2_DRAIN_CHECK): the releases noted since the last call, the descriptors read
+    /// for them, and whether every signal since was valued; every 512th time while the view is
+    /// synced, a copy of its table; nothing if no signal was sent since.
     struct Checks {
         std::vector<Nx2DrainCheck::QmdRelease> releases;
+        std::vector<Nx2DrainCheck::QmdRead> reads;
+        std::shared_ptr<const Tegra::NativeQmdScheduler> table;
         bool valued;
     };
     [[nodiscard]] std::optional<Checks> TakeChecks() {
@@ -82,8 +87,15 @@ public:
             return std::nullopt;
         }
         checks_pending = false;
-        Checks taken{std::move(checks), !checks_unvalued};
+        Checks taken{std::move(checks), std::move(check_reads), nullptr, !checks_unvalued};
+        if (taken.valued && synced && ++table_checks % 512 == 0) {
+            auto copy =
+                std::make_shared<Tegra::NativeQmdScheduler>(Tegra::NativeQmdScheduler::OwnTable{});
+            copy->CopyStates(scheduler);
+            taken.table = std::move(copy);
+        }
         checks.clear();
+        check_reads.clear();
         checks_unvalued = false;
         return taken;
     }
@@ -125,7 +137,7 @@ public:
         // A change of the mappings still queued may unmap what the back reads or releases to.
         if (!split.Ran(split.LastMappingChange())) {
             synced = false;
-            Unvalued(split, Lost::Unplaced);
+            Unvalued(split, Lost::Mappings);
             return;
         }
         releases.clear();
@@ -139,6 +151,9 @@ public:
             } else if (const auto unknown = ReadDescriptor(split, memory, qmd_address, descriptor);
                        unknown && !lost) {
                 lost = unknown;
+            }
+            if (checks_pending) {
+                check_reads.push_back({qmd_address, descriptor}); // TEST
             }
             // A release this signal ran before writes into the QMD.
             for (const Release& earlier : releases) {
@@ -187,9 +202,14 @@ private:
     /// A signal the front can't value: its releases may write guest memory anywhere (they change
     /// no mappings).
     void Unvalued(GpuSplit& split, Nx2AcquireStats::QmdLost lost) {
+        // TEST: what sent the write the view could not read past.
+        const UnplacedKind kind = lost == Nx2AcquireStats::QmdLost::Mappings
+                                      ? split.LastMappingKind()
+                                      : split.LastUnplacedKind();
         split.NoteUnplacedWrite();
-        checks_unvalued = true; // TEST
-        Nx2AcquireStats::NoteQmdSignal(lost);
+        split.TagUnplaced(UnplacedKind::QmdLaunch); // TEST
+        checks_unvalued = true;                     // TEST
+        Nx2AcquireStats::NoteQmdSignal(lost, kind);
     }
 
     /// Reads into `descriptor` the QMD at `qmd_address` as the back will read it running the entry
@@ -212,6 +232,7 @@ private:
         if (const InlineWrite* written = QueuedInlineWrite(split, *device);
             written != nullptr && written->position == target) {
             descriptor = written->qmd;
+            Nx2AcquireStats::NoteQmdInlineRead(); // TEST
             return std::nullopt;
         }
         return target == split.LastUnplacedWrite() ? Lost::Unplaced : Lost::Pending;
@@ -331,6 +352,8 @@ private:
     size_t inline_writes_count{};
     /// TEST (EDEN_NX2_DRAIN_CHECK): see TakeChecks.
     std::vector<Nx2DrainCheck::QmdRelease> checks;
+    std::vector<Nx2DrainCheck::QmdRead> check_reads;
+    u64 table_checks{};
     bool checks_pending{};
     bool checks_unvalued{};
 };

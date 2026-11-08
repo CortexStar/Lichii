@@ -32,6 +32,22 @@ class EngineInterface;
 
 namespace VideoCommon {
 
+/// TEST (EDEN_NX2_ACQUIRE_STATS): what sent the last write the front could not place
+/// (GpuSplit::TagUnplaced), for why the QMD view could not value a signal.
+enum class UnplacedKind : u8 {
+    Other,      ///< A deferred call nobody tagged
+    RunCommand, ///< A function the CPU queued in order (unmaps, events)
+    Engine,     ///< An engine method the front sends as it is (blits)
+    Oversized,  ///< A placed write longer than the coarse slots take
+    QmdLaunch,  ///< A QMD launch the view could not value
+    InlineQmd,  ///< An inline QMD behind a change of the mappings
+    Count,
+};
+
+inline constexpr std::array<const char*, static_cast<size_t>(UnplacedKind::Count)>
+    unplaced_kind_names{"other",        "CPU functions", "engines", "oversized writes",
+                        "QMD launches", "inline QMDs"};
+
 /// Why the split's front waited for its back (EDEN_NX2_GPU_PROFILE counts each).
 enum class DrainSite : u32 {
     Other,
@@ -308,11 +324,30 @@ public:
     void NoteAnyWrite() {
         NoteUnplacedWrite();
         last_mapping_change = write_position;
+        last_mapping_kind = UnplacedKind::Other; // TEST
     }
     /// The entry just sent may write guest memory anywhere (Writes::Unplaced).
     void NoteUnplacedWrite() {
         last_any_write = write_position;
         last_unplaced_write = write_position;
+        last_unplaced_kind = UnplacedKind::Other; // TEST
+    }
+    /// TEST: what sent the entry just sent, if it may write anywhere or change the mappings.
+    void TagUnplaced(UnplacedKind kind) {
+        if (last_unplaced_write == write_position) {
+            last_unplaced_kind = kind;
+        }
+        if (last_mapping_change == write_position) {
+            last_mapping_kind = kind;
+        }
+    }
+    /// TEST: what sent the last entry that may write anywhere (LastUnplacedWrite), and the last
+    /// that may change the mappings (LastMappingChange).
+    [[nodiscard]] UnplacedKind LastUnplacedKind() const {
+        return last_unplaced_kind;
+    }
+    [[nodiscard]] UnplacedKind LastMappingKind() const {
+        return last_mapping_kind;
     }
     /// The entry just sent may write the GPU caches anywhere (Writes::Caches).
     void NoteCacheWrite() {
@@ -428,6 +463,9 @@ private:
         if (unpublished >= publish_every ||
             (unpublished >= PublishAfterWait &&
              back_idle_at.load(std::memory_order_relaxed) == published_local)) {
+            if (profile_publishes && unpublished < publish_every) [[unlikely]] {
+                NoteEarlyPublish(); // TEST
+            }
             Publish();
         }
     }
@@ -438,6 +476,8 @@ private:
     bool profile_publishes{};
     void NoteFirstUnpublished();
     void NoteLatePublish();
+    /// TEST: Commit publishes before publish_every, because the back waits for the words.
+    void NoteEarlyPublish();
     void WaitForSpace(size_t words);
     void SelectEngine(Tegra::Engines::EngineInterface* engine) {
         if (engine != front_engine) [[unlikely]] {
@@ -495,6 +535,8 @@ private:
     u64 last_any_write{};
     u64 last_unplaced_write{};
     u64 last_mapping_change{};
+    UnplacedKind last_unplaced_kind{}; ///< TEST: see TagUnplaced
+    UnplacedKind last_mapping_kind{};  ///< TEST
     u64 last_noted_write{};
     std::array<u64, size_t{1} << WriteSlotBits> write_positions{};
     std::array<u64, size_t{1} << CoarseSlotBits> coarse_positions{};

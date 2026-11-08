@@ -51,6 +51,14 @@ public:
             *table = *other.table;
         }
     }
+    /// TEST (EDEN_NX2_DRAIN_CHECK): whether `other` holds the same QMD states, while nothing
+    /// runs on either; how many QMDs this one holds.
+    [[nodiscard]] bool SameStates(const NativeQmdScheduler& other) const {
+        return *table == *other.table;
+    }
+    [[nodiscard]] std::size_t StateCount() const {
+        return table->size();
+    }
     // Optional diagnostics: called with "load"/"count"/"defer"/"run" events.
     std::function<void(std::string_view, Address, std::int32_t)> trace;
     // Optional diagnostics: called with the QMD, slot and raw words of a release it skips.
@@ -166,6 +174,8 @@ private:
         bool loaded{};
         bool scheduled{};
         bool completed{};
+
+        bool operator==(const State&) const = default; ///< TEST: SameStates
     };
     // One table for every channel: a QMD's dependency counter is state of the QMD itself, and
     // title 1 schedules a QMD on one channel while another decrements it (a decrement that

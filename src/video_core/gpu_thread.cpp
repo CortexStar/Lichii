@@ -93,7 +93,8 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 }
                 if (split.Active()) {
                     // The back may have run everything sent meanwhile.
-                    VideoCommon::FrontQmdView::Get().MaybeTakeOver(split);
+                    VideoCommon::FrontQmdView::Get().MaybeTakeOver(
+                        split, VideoCommon::Nx2AcquireStats::QmdTakeOver::BetweenCommands);
                 }
                 if (!state.queue.TryPop(next)) {
                     // The CPU usually releases the semaphore soon after: poll for half a
@@ -125,7 +126,8 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
             if (split.Active()) {
                 // Between commands the back may have run out of work, and everything sent.
                 split.PublishSoon();
-                VideoCommon::FrontQmdView::Get().MaybeTakeOver(split);
+                VideoCommon::FrontQmdView::Get().MaybeTakeOver(
+                    split, VideoCommon::Nx2AcquireStats::QmdTakeOver::BetweenCommands);
                 // Only command lists are parsed here; everything else runs on the back thread
                 // in order, and so does the signal that the command ran.
                 auto* const rasterizer_ptr = renderer.ReadRasterizer();
@@ -145,6 +147,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                         split.Drain(VideoCommon::DrainSite::Map);
                     } else {
                         split.DeferFunction(std::move(run->func));
+                        split.TagUnplaced(VideoCommon::UnplacedKind::RunCommand); // TEST
                     }
                 } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
                     // Writes guest memory with what the caches hold of it.

@@ -148,6 +148,8 @@ void GpuSplit::Stop() {
     last_any_write = 0;
     last_unplaced_write = 0;
     last_mapping_change = 0;
+    last_unplaced_kind = UnplacedKind::Other;
+    last_mapping_kind = UnplacedKind::Other;
     last_noted_write = 0;
     write_positions.fill(0);
     coarse_positions.fill(0);
@@ -200,6 +202,10 @@ void GpuSplit::WaitForSpace(size_t words) {
 
 void GpuSplit::NoteFirstUnpublished() {
     first_unpublished_ticks = Nx2Profile::Ticks();
+}
+
+void GpuSplit::NoteEarlyPublish() {
+    Nx2Profile::Add(Nx2Profile::Counter::EarlyPublishes, 1);
 }
 
 void GpuSplit::NoteLatePublish() {
@@ -317,6 +323,7 @@ void GpuSplit::NoteWrite(const Tegra::MemoryManager& memory, GPUVAddr address, u
     }
     if (size > MaxCoarseNotedBytes || address + size < address) {
         NoteUnplacedWrite();
+        TagUnplaced(UnplacedKind::Oversized); // TEST
         return;
     }
     if (size > MaxNotedBytes) {

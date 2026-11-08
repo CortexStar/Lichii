@@ -565,6 +565,7 @@ void DmaPusher::CallMethod(u32 argument) {
             split.Method(subchannel, dma_state.method, argument, dma_state.is_last_call,
                          WantsSegment() ? &segment : nullptr,
                          EngineWrites(*subchannel, engine_type, dma_state.method));
+            split.TagUnplaced(VideoCommon::UnplacedKind::Engine); // TEST
             NoteEngineWrites(engine_type, dma_state.method);
             return;
         }
@@ -625,6 +626,7 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
             split.MultiMethod(subchannel, dma_state.method, base_start, num_methods,
                               dma_state.method_count, WantsSegment() ? &segment : nullptr,
                               EngineWrites(*subchannel, engine_type, dma_state.method));
+            split.TagUnplaced(VideoCommon::UnplacedKind::Engine); // TEST
             // The back runs them one by one: a copy engine launch each.
             const bool launches = engine_type == Engines::EngineTypes::MaxwellDMA &&
                                   dma_state.method == Engines::MaxwellDMA::LaunchDmaMethod;

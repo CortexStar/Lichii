@@ -350,6 +350,11 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             [&](u64 address, NativeQmdScheduler::Descriptor& descriptor) {
                 if (!memory_manager.IsFullyMappedRange(address, sizeof(descriptor))) return false;
                 memory_manager.ReadBlockUnsafe(address, descriptor.data(), sizeof(descriptor));
+                if (VideoCommon::Nx2DrainCheck::g_enabled) [[unlikely]] {
+                    // TEST: what the front's QMD view compares the descriptors it read with.
+                    VideoCommon::Nx2DrainCheck::NoteQmdRead(address, descriptor,
+                                                            VideoCommon::GpuSplit::OnBackThread());
+                }
                 if (static u32 logged{}; (descriptor[53] & (1U << 23)) && logged < 8) {
                     ++logged;
                     LOG_INFO(HW_GPU, "Native QMD {:#x} releases: {:08x} | {:08x} | {:08x}", address,
@@ -1493,6 +1498,16 @@ struct FrontQmdMemory {
     return method < 0xe00 ? Writes::Noted : Writes::Unplaced;
 }
 
+// TEST (EDEN_NX2_DRAIN_CHECK): whether QMD maximum and reduction releases land as the back runs
+// them (FenceManager::SignalFence runs its operation at once), for the QMD view check.
+[[nodiscard]] bool QmdReleasesLandAtOnce() {
+    return Settings::IsGPUFenceBehaviorDefault()
+               ? !Settings::IsGPULevelHigh()
+               : !Settings::IsGPUFenceBehaviorBalanced() && !Settings::IsGPUFenceBehaviorAccurate();
+}
+
+using QmdTakeOver = VideoCommon::Nx2AcquireStats::QmdTakeOver; // TEST
+
 } // Anonymous namespace
 
 // Split GPU thread with macros on its front half (gpu_split.h, EDEN_NX2_SPLIT=2): the front
@@ -1524,7 +1539,7 @@ KeplerCompute::FrontState& KeplerCompute::Front(VideoCommon::GpuSplit& split) {
         front_macros = true;
         // A new session's or a restarted split's: the QMDs the back scheduled meanwhile, in the
         // table the engines share. The back is idle, its table the current one.
-        GetFrontQmd().TakeOver(native_qmd);
+        GetFrontQmd().TakeOver(native_qmd, QmdTakeOver::FrontStart);
     }
     return *front;
 }
@@ -1594,6 +1609,7 @@ void KeplerCompute::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit&
     auto& fs = Front(split);
     if (method >= fs.registers.size()) {
         split.Method(this, method, argument, is_last_call, segment, FrontWrites(method));
+        split.TagUnplaced(VideoCommon::UnplacedKind::Engine); // TEST
         return;
     }
     if (method >= 0xe00) {
@@ -1612,15 +1628,16 @@ void KeplerCompute::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit&
     }
     FrontApply(fs, method, argument);
     if (IsQmdMethod(method)) {
-        GetFrontQmd().MaybeTakeOver(split, native_qmd);
+        GetFrontQmd().MaybeTakeOver(split, native_qmd, QmdTakeOver::QmdMethod);
     }
     split.Method(this, method, argument, is_last_call, segment, FrontWrites(method));
     FrontNoteWrites(split, fs, method, argument, false);
     FrontQmdCheck(split);
 }
 
-// TEST (EDEN_NX2_DRAIN_CHECK): has the back compare what it releases for the QMD methods just
-// sent with what the front's QMD view noted for them.
+// TEST (EDEN_NX2_DRAIN_CHECK): has the back compare what it reads and releases for the QMD
+// methods just sent with what the front's QMD view read and noted for them, and now and then its
+// QMD table with the view's.
 void KeplerCompute::FrontQmdCheck(VideoCommon::GpuSplit& split) {
     if (!VideoCommon::Nx2DrainCheck::g_enabled) [[likely]] {
         return;
@@ -1630,8 +1647,14 @@ void KeplerCompute::FrontQmdCheck(VideoCommon::GpuSplit& split) {
         return;
     }
     split.DeferFunction(
-        [predicted = std::move(checks->releases), valued = checks->valued] {
-            VideoCommon::Nx2DrainCheck::CheckQmdReleases(predicted, valued);
+        [predicted = std::move(checks->releases), reads = std::move(checks->reads),
+         table = std::move(checks->table), valued = checks->valued && QmdReleasesLandAtOnce()] {
+            VideoCommon::Nx2DrainCheck::CheckQmdReleases(predicted, reads, valued);
+            if (table && valued) {
+                const NativeQmdScheduler shared; // The table the engines share
+                VideoCommon::Nx2DrainCheck::NoteQmdTables(table->SameStates(shared),
+                                                          table->StateCount());
+            }
         },
         VideoCommon::GpuSplit::Writes::Noted);
 }
@@ -1732,6 +1755,7 @@ void KeplerCompute::FrontInlineQmd(VideoCommon::GpuSplit& split, const FrontStat
         if (!split.Ran(split.LastMappingChange())) {
             GetFrontQmd().Lose();
             split.NoteUnplacedWrite();
+            split.TagUnplaced(VideoCommon::UnplacedKind::InlineQmd); // TEST
         }
         return;
     }
@@ -1761,13 +1785,14 @@ void KeplerCompute::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuS
     if (method >= fs.registers.size()) {
         split.MultiMethod(this, method, base_start, amount, methods_pending, segment,
                           FrontWrites(method));
+        split.TagUnplaced(VideoCommon::UnplacedKind::Engine); // TEST
         return;
     }
     for (u32 i = 0; i < amount; ++i) {
         FrontApply(fs, method, base_start[i]);
     }
     if (IsQmdMethod(method)) {
-        GetFrontQmd().MaybeTakeOver(split, native_qmd);
+        GetFrontQmd().MaybeTakeOver(split, native_qmd, QmdTakeOver::QmdMethod);
     }
     split.MultiMethod(this, method, base_start, amount, methods_pending, segment,
                       FrontWrites(method));
@@ -1800,7 +1825,7 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
         }
         FrontApply(fs, address, value);
         if (IsQmdMethod(address)) {
-            GetFrontQmd().MaybeTakeOver(split, native_qmd);
+            GetFrontQmd().MaybeTakeOver(split, native_qmd, QmdTakeOver::QmdMethod);
         }
         split.MacroWrite(this, address, value, FrontWrites(address));
         FrontNoteWrites(split, fs, address, value, true);
