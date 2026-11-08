@@ -503,6 +503,28 @@ public:
         }
     }
 
+    /// Visits the device address ranges the last configured dispatch binds as uniform, storage
+    /// and texture buffers, with whether it may write them: func(DAddr, u64 size, bool written).
+    template <typename Func>
+    void ForEachComputeBufferRange(Func&& func) const {
+        const auto* const sizes = channel_state->compute_uniform_buffer_sizes;
+        ForEachEnabledBit(channel_state->enabled_compute_uniform_buffer_mask, [&](u32 index) {
+            const Binding& binding = channel_state->compute_uniform_buffers[index];
+            func(binding.device_addr,
+                 u64{sizes ? std::min(binding.size, (*sizes)[index]) : binding.size}, false);
+        });
+        ForEachEnabledBit(channel_state->enabled_compute_storage_buffers, [&](u32 index) {
+            const Binding& binding = channel_state->compute_storage_buffers[index];
+            func(binding.device_addr, u64{binding.size},
+                 ((channel_state->written_compute_storage_buffers >> index) & 1) != 0);
+        });
+        ForEachEnabledBit(channel_state->enabled_compute_texture_buffers, [&](u32 index) {
+            const TextureBufferBinding& binding = channel_state->compute_texture_buffers[index];
+            func(binding.device_addr, u64{binding.size},
+                 ((channel_state->written_compute_texture_buffers >> index) & 1) != 0);
+        });
+    }
+
     /// Return true when a region is registered on the cache
     [[nodiscard]] bool IsRegionRegistered(DAddr addr, size_t size);
 

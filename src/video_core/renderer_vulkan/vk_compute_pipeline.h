@@ -81,6 +81,16 @@ public:
         return written_images;
     }
 
+    struct ImageAccess {
+        VkImage image;
+        bool written;
+    };
+
+    /// The images (not buffer views) the last configured dispatch samples, loads or stores.
+    [[nodiscard]] std::span<const ImageAccess> ImageAccesses() const noexcept {
+        return image_accesses;
+    }
+
     struct SampledImage {
         u32 tic;
         VideoCommon::ImageViewId id;
@@ -112,6 +122,7 @@ private:
     u64 shader_hash{};
     u32 num_descriptor_entries{};
     boost::container::small_vector<VideoCommon::ImageViewId, 8> written_images;
+    boost::container::small_vector<ImageAccess, 16> image_accesses;
     std::vector<SampledImage> sampled_images;
 
     VideoCommon::ComputeUniformBufferSizes uniform_buffer_sizes{};

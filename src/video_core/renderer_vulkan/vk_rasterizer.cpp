@@ -258,6 +258,22 @@ bool SupportsPrimitiveRestart(VkPrimitiveTopology topology) {
     }
 }
 
+/// Before a guest dispatch: earlier writes visible to it, its indirect arguments included. `src`
+/// is what the writes since the last such barrier may come from. Recorded in the dispatch's own
+/// command (as #805 b62f49104d does) instead of one of its own.
+void RecordDispatchBarrier(vk::CommandBuffer cmdbuf, VkPipelineStageFlags src) {
+    static constexpr VkMemoryBarrier READ_BARRIER{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .pNext = nullptr,
+        .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+    };
+    cmdbuf.PipelineBarrier(src,
+                           VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
+                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                           0, READ_BARRIER);
+}
+
 bool IsPrimitiveRestartSupported(const Device& device, VkPrimitiveTopology topology) {
     return ((topology != VK_PRIMITIVE_TOPOLOGY_PATCH_LIST &&
              device.IsTopologyListPrimitiveRestartSupported()) ||
@@ -1929,22 +1945,51 @@ void RasterizerVulkan::DispatchCompute() {
         const u32 index = Tegra::Texture::TexturePair(handle, qmd.linked_tsc != 0).first;
         texture_cache.PublishComputeCollisionImage(index);
     };
-    // Earlier writes must be visible to the dispatch, its indirect arguments included, and what it
-    // writes to the next render pass.
-    const auto record_read_barrier = [this] {
-        static constexpr VkMemoryBarrier READ_BARRIER{
-            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-            .pNext = nullptr,
-            .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
-            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
-        };
-        scheduler.Record([](vk::CommandBuffer cmdbuf) {
-            cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
-                                   VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
-                                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                   0, READ_BARRIER);
-        });
+    // Earlier writes must be visible to the dispatch, its indirect arguments included. The barrier
+    // is only recorded when the dispatch depends on what ran since the last one; with nothing but
+    // dispatches since then, it only has to wait for compute work. The next render pass orders
+    // what the dispatch writes (Scheduler::NoteComputeWrites).
+    const auto decide_barrier = [&](bool unknown_accesses) -> std::optional<VkPipelineStageFlags> {
+        const bool other_work = scheduler.RecordedCommands() != dispatch_recorded_commands;
+        dispatch_accesses.Clear();
+        if (unknown_accesses || byte_addressed_shadow) {
+            dispatch_accesses.MarkUnknown();
+        } else {
+            buffer_cache.ForEachComputeBufferRange([&](DAddr addr, u64 size, bool written) {
+                if (written) {
+                    dispatch_accesses.WriteBuffer(addr, size);
+                } else {
+                    dispatch_accesses.ReadBuffer(addr, size);
+                }
+            });
+            for (const ComputePipeline::ImageAccess& access : pipeline->ImageAccesses()) {
+                u64 handle{};
+                std::memcpy(&handle, &access.image, sizeof(access.image));
+                if (access.written) {
+                    dispatch_accesses.WriteImage(handle);
+                } else {
+                    dispatch_accesses.ReadImage(handle);
+                }
+            }
+        }
+        using Decision = VideoCommon::HazardTracker::Decision;
+        const Decision decision = dispatch_hazards.Next(other_work, dispatch_accesses);
+        if (VideoCommon::Nx2Profile::Enabled()) {
+            using VideoCommon::Nx2Profile::Counter;
+            static constexpr std::array<Counter, static_cast<size_t>(Decision::Count)> counters{
+                Counter::DispatchNoBarrier,  Counter::DispatchBarrierOther,
+                Counter::DispatchBarrierUnknown, Counter::DispatchBarrierRaw,
+                Counter::DispatchBarrierWaw, Counter::DispatchBarrierWar,
+            };
+            VideoCommon::Nx2Profile::Add(counters[static_cast<size_t>(decision)], 1);
+        }
         scheduler.NoteComputeWrites();
+        if (decision == Decision::NoBarrier) {
+            return std::nullopt;
+        }
+        return decision == Decision::OtherWork
+                   ? VkPipelineStageFlags{vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER}
+                   : VkPipelineStageFlags{VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT};
     };
     if (frame_dump.CapturingBuffers()) {
         std::optional<std::array<u32, 3>> indirect_grid;
@@ -1965,10 +2010,15 @@ void RasterizerVulkan::DispatchCompute() {
         const auto [buffer, offset] =
             buffer_cache.ObtainBuffer(*indirect_address, 12, sync_info, post_op);
         scheduler.RequestOutsideRenderPassOperationContext();
-        record_read_barrier();
+        // The arguments' buffer is not tracked: the barrier as before.
+        const auto barrier = decide_barrier(true);
         scheduler.TraceComputePipeline(pipeline->ShaderHash());
-        scheduler.Record([this, pipeline, indirect_buffer = buffer->Handle(),
-                          indirect_offset = offset](vk::CommandBuffer cmdbuf) {
+        scheduler.RecordForDispatch([this, pipeline, indirect_buffer = buffer->Handle(),
+                                     indirect_offset = offset,
+                                     barrier](vk::CommandBuffer cmdbuf) {
+            if (barrier) {
+                RecordDispatchBarrier(cmdbuf, *barrier);
+            }
             if (!pipeline->IsBound()) {
                 return;
             }
@@ -1976,6 +2026,7 @@ void RasterizerVulkan::DispatchCompute() {
                 cmdbuf.DispatchIndirect(indirect_buffer, indirect_offset);
             });
         });
+        dispatch_recorded_commands = scheduler.RecordedCommands();
         SubmitNx2ListCopies();
         publish_collision_map();
         return;
@@ -1986,7 +2037,13 @@ void RasterizerVulkan::DispatchCompute() {
         return;
     }
     scheduler.RequestOutsideRenderPassOperationContext();
-    record_read_barrier();
+    // A replaced dispatch runs the replacement's own work: the barrier as before.
+    const auto barrier = decide_barrier(can_replace);
+    if (barrier && can_replace) {
+        // DLSS's evaluation may be recorded next, before the dispatch: the barrier goes first.
+        scheduler.RecordForDispatch(
+            [barrier](vk::CommandBuffer cmdbuf) { RecordDispatchBarrier(cmdbuf, *barrier); });
+    }
 #ifdef EGLANTINE_STREAMLINE
     const auto* const replacement =
         can_replace && !byte_addressed_shadow && TryOcarinaDlss(*pipeline, true)
@@ -1998,11 +2055,16 @@ void RasterizerVulkan::DispatchCompute() {
 #else
     scheduler.TraceComputePipeline(pipeline->ShaderHash());
 #endif
-    scheduler.Record([this, pipeline, dim, byte_addressed_shadow, bind = std::move(deferred_bind)
+    scheduler.RecordForDispatch([this, pipeline, dim, byte_addressed_shadow,
+                                 bind = std::move(deferred_bind),
+                                 barrier = can_replace ? std::nullopt : barrier
 #ifdef EGLANTINE_STREAMLINE
-                      , replacement
+                                 , replacement
 #endif
-                     ](vk::CommandBuffer cmdbuf) {
+                                ](vk::CommandBuffer cmdbuf) {
+        if (barrier) {
+            RecordDispatchBarrier(cmdbuf, *barrier);
+        }
 #ifdef EGLANTINE_STREAMLINE
         if (replacement && !replacement->EvaluationFailed()) {
             return;
@@ -2026,6 +2088,10 @@ void RasterizerVulkan::DispatchCompute() {
             TextureCacheRuntime::CopyByteAddressedShadow(cmdbuf, *byte_addressed_shadow, true);
         }
     });
+    // A packed R16 shadow copies by transfer inside the dispatch's command, and a replacement
+    // records its own work: the next dispatch counts those as other work.
+    dispatch_recorded_commands =
+        can_replace || byte_addressed_shadow ? ~u64{0} : scheduler.RecordedCommands();
     if (can_replace) {
         // The deferred native binding may follow DLSS's command buffer bindings.
         scheduler.InvalidateState();
