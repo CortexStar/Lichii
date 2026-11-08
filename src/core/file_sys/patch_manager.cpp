@@ -63,7 +63,16 @@ struct BuiltinPatch {
     size_t state_size = 0;
     // Another built-in this one contains; it is skipped once this one is applied.
     std::string_view replaces{};
+    /// Applies only while the game renders for a 21:9 display (UltrawideRendering()).
+    bool ultrawide = false;
 };
+
+/// The game renders for the window's 21:9 shape instead of 16:9: the aspect ratio setting asks
+/// for 21:9 and the console is docked (handheld keeps the 1080p panel's 16:9).
+bool UltrawideRendering() {
+    return Settings::values.aspect_ratio.GetValue() == Settings::AspectRatio::R21_9 &&
+           Settings::IsDockedMode();
+}
 
 constexpr std::array<u8, 4> MAX_RESOLUTION_ORIGINAL{0xE8, 0x41, 0x00, 0x36};
 constexpr std::array<u8, 4> MAX_RESOLUTION_BRANCH{0x0F, 0x02, 0x00, 0x14};
@@ -119,6 +128,24 @@ constexpr std::array FPS_UNLOCK_RECORDS{
     BuiltinPatchRecord{0x3C46200, FPS_UNLOCK_ROUTINE, {}, true},
 };
 
+// Ocarina's output size comes from the 7-entry table at main+0x3F58540 (640x480 ... 3840x2160),
+// read only by main+0x112C5E0. Its 1440p entry becomes 3440x1440. main+0x1087F40 and main+0x1087E70
+// turn a size back into the table index; without the width check any 1440-high size stays index 5.
+// The camera parameters' DefaultAspect (default DefaultNear 0.1, DefaultFar 25000, DefaultFovy 50
+// at main+0x3EF5DC0) becomes 43:18 with the same vertical field of view (Hor+).
+constexpr std::array<u8, 8> ULTRAWIDE_SIZE_ORIGINAL{0x00, 0x0A, 0x00, 0x00, 0xA0, 0x05, 0x00, 0x00};
+constexpr std::array<u8, 8> ULTRAWIDE_SIZE{0x70, 0x0D, 0x00, 0x00, 0xA0, 0x05, 0x00, 0x00};
+constexpr std::array<u8, 4> ULTRAWIDE_WIDTH_BRANCH{0x61, 0x00, 0x00, 0x54}; // b.ne, skips 1440p
+constexpr std::array<u8, 4> ULTRAWIDE_NOP{0x1F, 0x20, 0x03, 0xD5};
+constexpr std::array<u8, 4> ULTRAWIDE_ASPECT_ORIGINAL{0x3B, 0x8E, 0xE3, 0x3F}; // 1.777778f
+constexpr std::array<u8, 4> ULTRAWIDE_ASPECT{0x8E, 0xE3, 0x18, 0x40};          // 43 / 18
+constexpr std::array ULTRAWIDE_RECORDS{
+    BuiltinPatchRecord{0x3F58568, ULTRAWIDE_SIZE, ULTRAWIDE_SIZE_ORIGINAL},
+    BuiltinPatchRecord{0x1087FC0, ULTRAWIDE_NOP, ULTRAWIDE_WIDTH_BRANCH},
+    BuiltinPatchRecord{0x1087EE0, ULTRAWIDE_NOP, ULTRAWIDE_WIDTH_BRANCH},
+    BuiltinPatchRecord{0x3EF5DCC, ULTRAWIDE_ASPECT, ULTRAWIDE_ASPECT_ORIGINAL},
+};
+
 constexpr std::array BUILTIN_PATCHES{
     // Ocarina of Time takes its "dynamic resolution disabled" path, so the 3D renders at full scale
     // instead of following the GPU-time controller down to its 480p floor.
@@ -149,6 +176,14 @@ constexpr std::array BUILTIN_PATCHES{
         .records = DYNAMIC_FPS_RECORDS,
         .state_offset = 0x4E9FE00,
         .state_size = 16,
+    },
+    BuiltinPatch{
+        .name = "Ultrawide 21:9 (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = ULTRAWIDE_RECORDS,
+        .ultrawide = true,
     },
 };
 
@@ -588,6 +623,11 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         if (patch.build_id != build_id) {
             LOG_INFO(Loader, "    - Skipping \"{}\": build id {} is not {}", patch.name, build_id,
                      patch.build_id);
+            continue;
+        }
+        if (patch.ultrawide && !UltrawideRendering()) {
+            LOG_INFO(Loader, "    - Skipping \"{}\": aspect ratio is not 21:9 or not docked",
+                     patch.name);
             continue;
         }
         const auto fits = [](const std::vector<u8>& data, size_t offset, size_t size) {

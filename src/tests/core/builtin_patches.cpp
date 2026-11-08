@@ -393,3 +393,91 @@ TEST_CASE("Built-in Dynamic FPS leaves both records alone when a user mod change
     std::memcpy(expected.data() + offset, &mod_word, sizeof(mod_word));
     REQUIRE(context.Manager().PatchNSO(nso, "main") == expected);
 }
+
+namespace {
+
+constexpr std::string_view Ultrawide = "Ultrawide 21:9 (built-in)";
+constexpr size_t UltrawideSizeOffset = sizeof(Loader::NSOHeader) + 0x3F58568;
+constexpr size_t UltrawideIndexOffset = sizeof(Loader::NSOHeader) + 0x1087FC0;
+constexpr size_t UltrawideListIndexOffset = sizeof(Loader::NSOHeader) + 0x1087EE0;
+constexpr size_t UltrawideAspectOffset = sizeof(Loader::NSOHeader) + 0x3EF5DCC;
+constexpr u32 BneInstruction = 0x54000061;
+constexpr u32 AspectSixteenNine = 0x3FE38E3B;
+constexpr u32 AspectFortyThreeEighteen = 0x4018E38E;
+
+void PutWord(std::vector<u8>& nso, size_t offset, u32 word) {
+    std::memcpy(nso.data() + offset, &word, sizeof(word));
+}
+
+std::vector<u8> MakeUltrawideMain() {
+    auto nso = MakeMain(OcarinaBuildId, TbzInstruction);
+    nso.resize(UltrawideSizeOffset + 8);
+    PutWord(nso, UltrawideSizeOffset, 2560);
+    PutWord(nso, UltrawideSizeOffset + 4, 1440);
+    PutWord(nso, UltrawideIndexOffset, BneInstruction);
+    PutWord(nso, UltrawideListIndexOffset, BneInstruction);
+    PutWord(nso, UltrawideAspectOffset, AspectSixteenNine);
+    return nso;
+}
+
+class UltrawideSettings {
+public:
+    UltrawideSettings(Settings::AspectRatio aspect, Settings::ConsoleMode mode)
+        : previous_aspect{Settings::values.aspect_ratio.GetValue()},
+          previous_mode{Settings::values.use_docked_mode.GetValue()} {
+        Settings::values.aspect_ratio.SetValue(aspect);
+        Settings::values.use_docked_mode.SetValue(mode);
+    }
+    ~UltrawideSettings() {
+        Settings::values.aspect_ratio.SetValue(previous_aspect);
+        Settings::values.use_docked_mode.SetValue(previous_mode);
+    }
+    UltrawideSettings(const UltrawideSettings&) = delete;
+    UltrawideSettings& operator=(const UltrawideSettings&) = delete;
+
+private:
+    Settings::AspectRatio previous_aspect;
+    Settings::ConsoleMode previous_mode;
+};
+
+} // Anonymous namespace
+
+TEST_CASE("Built-in Ultrawide applies only docked with the 21:9 aspect ratio", "[patch_manager]") {
+    PatchManagerTestContext context;
+    Settings::values.disabled_addons[OcarinaTitleId] = {std::string{MaxResolution}};
+    const auto nso = MakeUltrawideMain();
+
+    SECTION("Docked at 21:9 renders 3440x1440 with a 43:18 camera") {
+        UltrawideSettings settings{Settings::AspectRatio::R21_9, Settings::ConsoleMode::Docked};
+        const auto patched = context.Manager().PatchNSO(nso, "main");
+        REQUIRE(WordAt(patched, UltrawideSizeOffset) == 3440);
+        REQUIRE(WordAt(patched, UltrawideSizeOffset + 4) == 1440);
+        REQUIRE(WordAt(patched, UltrawideIndexOffset) == NopInstruction);
+        REQUIRE(WordAt(patched, UltrawideListIndexOffset) == NopInstruction);
+        REQUIRE(WordAt(patched, UltrawideAspectOffset) == AspectFortyThreeEighteen);
+    }
+
+    SECTION("16:9 leaves the game alone") {
+        UltrawideSettings settings{Settings::AspectRatio::R16_9, Settings::ConsoleMode::Docked};
+        REQUIRE(context.Manager().PatchNSO(nso, "main") == nso);
+    }
+
+    SECTION("Handheld leaves the game alone") {
+        UltrawideSettings settings{Settings::AspectRatio::R21_9, Settings::ConsoleMode::Handheld};
+        REQUIRE(context.Manager().PatchNSO(nso, "main") == nso);
+    }
+
+    SECTION("Disabled in Add-Ons leaves the game alone") {
+        UltrawideSettings settings{Settings::AspectRatio::R21_9, Settings::ConsoleMode::Docked};
+        Settings::values.disabled_addons[OcarinaTitleId] = {std::string{MaxResolution},
+                                                            std::string{Ultrawide}};
+        REQUIRE(context.Manager().PatchNSO(nso, "main") == nso);
+    }
+
+    SECTION("One unexpected original skips every record") {
+        UltrawideSettings settings{Settings::AspectRatio::R21_9, Settings::ConsoleMode::Docked};
+        auto other = nso;
+        PutWord(other, UltrawideAspectOffset, 0x3FE38E39);
+        REQUIRE(context.Manager().PatchNSO(other, "main") == other);
+    }
+}
