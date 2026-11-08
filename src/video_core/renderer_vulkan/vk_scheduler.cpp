@@ -30,6 +30,7 @@
 #include "video_core/renderer_vulkan/vk_command_pool.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#include "video_core/native_verify.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
@@ -512,50 +513,81 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, bool tracked,
     BeginRenderPassImpl(framebuffer, renderpass, nullptr, 0, tracked);
 }
 
-namespace {
-/// EDEN_NX2_NATIVE_VERIFY=barriers (a comma-separated list may name other layers too): every draw
-/// the same-images memo skips is checked in full as well; differences are logged as errors.
-bool VerifyPassBarriers() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("EDEN_NX2_NATIVE_VERIFY");
-        return value != nullptr && std::string_view{value}.find("barriers") != std::string_view::npos;
-    }();
-    return enabled;
-}
-} // Anonymous namespace
-
 void Scheduler::PrepareDrawImages(std::span<const VkImage> images, bool other_writes) {
-    if (pass_barriers.SameAsCheckedDraw(images)) {
-        if (VerifyPassBarriers()) {
-            static u64 checked{};
-            static u64 differences{};
-            ++checked;
-            const bool full = pass_barriers.DrawNeedsBarrier(images, other_writes);
-            const bool memo = other_writes && pass_barriers.Pending();
-            if (full != memo && ++differences <= 64) {
-                LOG_ERROR(Render_Vulkan,
-                          "Native verify barriers: draw with {} images needs a pass barrier {} "
-                          "but the memo says {}",
-                          images.size(), full, memo);
-            }
-            static auto last_report = std::chrono::steady_clock::now();
-            if (const auto now = std::chrono::steady_clock::now();
-                now - last_report >= std::chrono::seconds{10}) {
-                last_report = now;
-                LOG_INFO(Render_Vulkan, "Native verify barriers: {} memo hits, {} differences",
-                         checked, differences);
-            }
+    if (pass_barriers.Remembers(images)) {
+        PrepareRememberedDraw(other_writes);
+        return;
+    }
+    CheckDrawImages(images, other_writes);
+    pass_barriers.Remember(0, images);
+}
+
+void Scheduler::PrepareDrawImages(u64 generation, std::span<const VkImage> images,
+                                  bool other_writes) {
+    if (pass_barriers.Remembers(generation)) {
+        PrepareRememberedDraw(other_writes);
+        return;
+    }
+    CheckDrawImages(images, other_writes);
+    pass_barriers.Remember(generation, images);
+}
+
+void Scheduler::PrepareDrawImages(u64 generation, bool other_writes) {
+    if (!pass_barriers.Remembers(generation)) {
+        // A set that was never handed over: its reads are unknown, so the pass is ordered as an
+        // untracked one.
+        static bool logged{};
+        if (!std::exchange(logged, true)) {
+            LOG_ERROR(Render_Vulkan, "Draw reused image set {} that was never handed over",
+                      generation);
         }
-        if (other_writes && pass_barriers.Pending()) {
+        pass_reads_known = false;
+        if (pass_barriers.Pending()) {
             RequestOutsideRenderPassOperationContext();
             if (pass_barriers.Pending()) {
                 RecordRenderPassBarrier();
             }
-            pass_barriers.NoteDraw(images);
-            pass_barriers.NoteCheckedDraw(images);
         }
         return;
     }
+    PrepareRememberedDraw(other_writes);
+}
+
+void Scheduler::PrepareRememberedDraw(bool other_writes) {
+    const std::span<const VkImage> images = pass_barriers.RememberedImages();
+    if (!pass_barriers.Current()) {
+        // A pass ended or a barrier was recorded since the set was checked.
+        CheckDrawImages(images, other_writes);
+        pass_barriers.RememberAgain();
+        return;
+    }
+    const bool needs_barrier = other_writes && pass_barriers.Pending();
+    if (VideoCommon::NativeVerify::Barriers()) {
+        static u64 checked{};
+        static u64 differences{};
+        ++checked;
+        const bool full = pass_barriers.DrawNeedsBarrier(images, other_writes);
+        if (full != needs_barrier && ++differences <= 64) {
+            LOG_ERROR(Render_Vulkan,
+                      "Native verify barriers: draw with {} images needs a pass barrier {} but "
+                      "its remembered set says {}",
+                      images.size(), full, needs_barrier);
+        }
+        static auto last_report = std::chrono::steady_clock::now();
+        if (const auto now = std::chrono::steady_clock::now();
+            now - last_report >= std::chrono::seconds{10}) {
+            last_report = now;
+            LOG_INFO(Render_Vulkan, "Native verify barriers: {} remembered draws, {} differences",
+                     checked, differences);
+        }
+    }
+    if (needs_barrier) {
+        CheckDrawImages(images, other_writes);
+        pass_barriers.RememberAgain();
+    }
+}
+
+void Scheduler::CheckDrawImages(std::span<const VkImage> images, bool other_writes) {
     if (pass_barriers.DrawNeedsBarrier(images, other_writes)) {
         RequestOutsideRenderPassOperationContext();
         if (pass_barriers.Pending()) {
@@ -563,7 +595,6 @@ void Scheduler::PrepareDrawImages(std::span<const VkImage> images, bool other_wr
         }
     }
     pass_barriers.NoteDraw(images);
-    pass_barriers.NoteCheckedDraw(images);
 }
 
 void Scheduler::RecordRenderPassBarrier() {

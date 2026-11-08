@@ -149,6 +149,11 @@ public:
      * @param other_writes The draw writes storage memory or transform feedback buffers.
      */
     void PrepareDrawImages(std::span<const VkImage> images, bool other_writes);
+    /// The same for a draw whose image set the caller names by a generation it bumps whenever the
+    /// set changes: `images` is only read for a generation not seen last.
+    void PrepareDrawImages(u64 generation, std::span<const VkImage> images, bool other_writes);
+    /// The same for a draw reusing the image set of `generation`, handed over before.
+    void PrepareDrawImages(u64 generation, bool other_writes);
 
     /// Defers a full-attachment color clear so it becomes the next render pass.
     bool DeferColorClear(const Framebuffer* framebuffer, u32 rt_slot, const VkClearValue& value);
@@ -535,6 +540,10 @@ private:
 
     /// Records the barrier that orders the render passes ended so far before later work.
     void RecordRenderPassBarrier();
+    /// PrepareDrawImages for the set the pass barrier tracker remembers.
+    void PrepareRememberedDraw(bool other_writes);
+    /// The full check of a draw's images against the pending passes, and their note.
+    void CheckDrawImages(std::span<const VkImage> images, bool other_writes);
 
     void WorkerThread(std::stop_token stop_token);
 

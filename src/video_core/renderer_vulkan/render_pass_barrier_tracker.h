@@ -7,6 +7,7 @@
 #include <array>
 #include <cstring>
 #include <span>
+#include <vector>
 
 #include <vulkan/vulkan_core.h>
 
@@ -90,25 +91,39 @@ public:
     }
 
     /**
-     * Whether DrawNeedsBarrier and NoteDraw can be skipped for a draw with `images`: the last draw
-     * checked them, and no pass ended and no barrier was recorded since. DrawNeedsBarrier then
-     * gives the same answer (no barrier, or one would have cleared the sets) and NoteDraw has
-     * nothing to add. Draws mostly sample what the draw before them sampled.
+     * The image set of the last checked draw, so the next draw with the same set can skip the
+     * check. While no pass ended and no barrier was recorded since (Current), DrawNeedsBarrier
+     * gives that draw's answer again (no barrier, or one would have cleared the sets) and NoteDraw
+     * has nothing to add. Draws mostly sample what the draw before them sampled. A set is named
+     * by a generation its producer bumps when the set changes (a bindless draw's index table), or
+     * by its images (generation 0).
      */
-    [[nodiscard]] bool SameAsCheckedDraw(std::span<const VkImage> images) const {
-        return checked_epoch == epoch && images.size() == checked_count &&
-               std::equal(images.begin(), images.end(), checked_images.begin());
+    [[nodiscard]] bool Remembers(u64 generation) const {
+        return generation != 0 && generation == checked_generation;
     }
-
-    /// The draw with `images` was checked and noted; NoteCheckedDraw's images if they all fit.
-    void NoteCheckedDraw(std::span<const VkImage> images) {
-        if (images.size() > checked_images.size()) {
-            checked_epoch = ~u64{0};
-            return;
-        }
-        std::copy(images.begin(), images.end(), checked_images.begin());
-        checked_count = images.size();
+    [[nodiscard]] bool Remembers(std::span<const VkImage> images) const {
+        return checked_generation == 0 && checked_valid &&
+               std::ranges::equal(images, checked_images);
+    }
+    /// The remembered set was checked against the current pending sets.
+    [[nodiscard]] bool Current() const {
+        return checked_valid && checked_epoch == epoch;
+    }
+    [[nodiscard]] std::span<const VkImage> RememberedImages() const {
+        return checked_images;
+    }
+    /// The remembered set was checked and noted again now.
+    void RememberAgain() {
         checked_epoch = epoch;
+    }
+    /// A draw with `images` (named by `generation`) was checked and noted now.
+    void Remember(u64 generation, std::span<const VkImage> images) {
+        if (images.data() != checked_images.data()) {
+            checked_images.assign(images.begin(), images.end());
+        }
+        checked_generation = generation;
+        checked_epoch = epoch;
+        checked_valid = true;
     }
 
     /// The barrier was recorded: everything before it is ordered.
@@ -194,9 +209,10 @@ private:
     bool pending{};
     /// Moves whenever the sets or `pending` can change (EndPass, Clear).
     u64 epoch{};
-    std::array<VkImage, 32> checked_images{};
-    size_t checked_count{};
-    u64 checked_epoch{~u64{0}};
+    std::vector<VkImage> checked_images;
+    u64 checked_generation{};
+    u64 checked_epoch{};
+    bool checked_valid{};
 };
 
 } // namespace Vulkan
