@@ -88,6 +88,12 @@ public:
         return frame_index;
     }
 
+    /// Whether Lichii's own VkSwapchainKHR presents, rather than a frame generation swapchain
+    /// that owns presentation and its pacing.
+    [[nodiscard]] bool IsNativeSwapchain() const noexcept {
+        return true;
+    }
+
     VkImage GetImageIndex(std::size_t index) const {
         return images[index];
     }
