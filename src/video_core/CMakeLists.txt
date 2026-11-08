@@ -208,6 +208,12 @@ add_library(video_core STATIC
     renderer_vulkan/vk_fence_manager.h
     renderer_vulkan/vk_frame_dump.cpp
     renderer_vulkan/vk_frame_dump.h
+    renderer_vulkan/vk_gpl.cpp
+    renderer_vulkan/vk_gpl.h
+    renderer_vulkan/vk_gpl_pipeline.cpp
+    renderer_vulkan/vk_scheduler_rendering.cpp
+    renderer_vulkan/vk_shaderwarm.cpp
+    renderer_vulkan/vk_shaderwarm.h
     renderer_vulkan/vk_graphics_pipeline.cpp
     renderer_vulkan/vk_graphics_pipeline.h
     renderer_vulkan/vk_multi_range_buffer.cpp
@@ -273,6 +279,10 @@ add_library(video_core STATIC
     shader_cache.cpp
     shader_cache.h
     shader_environment.cpp
+    nx2_ir_cache.cpp
+    nx2_ir_cache.h
+    nx2_precompile_env.cpp
+    nx2_precompile_env.h
     shader_environment.h
     shader_handle_program.h
     shader_notify.cpp

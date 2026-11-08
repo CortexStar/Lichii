@@ -92,6 +92,7 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
     X(vkCmdBeginConditionalRenderingEXT);
     X(vkCmdBeginQuery);
     X(vkCmdBeginRenderPass);
+    X(vkCmdBeginRendering);
     X(vkCmdBeginTransformFeedbackEXT);
     X(vkCmdBeginDebugUtilsLabelEXT);
     X(vkCmdBindDescriptorSets);
@@ -120,6 +121,7 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
     X(vkCmdEndConditionalRenderingEXT);
     X(vkCmdEndQuery);
     X(vkCmdEndRenderPass);
+    X(vkCmdEndRendering);
     X(vkCmdEndTransformFeedbackEXT);
     X(vkCmdEndDebugUtilsLabelEXT);
     X(vkCmdFillBuffer);

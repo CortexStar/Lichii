@@ -11,6 +11,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <memory>
+#include <optional>
 #include <limits>
 #include <cstdio>
 #include <cstdlib>
@@ -60,6 +61,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/vk_gpl.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
@@ -1037,7 +1039,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
             recorded |= FrameDumpBuffers(false, pipeline->ShaderHashes());
         }
         if (recorded) {
-            scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
+            scheduler.RequestRenderpass(texture_cache.GetFramebuffer(), device.IsGplEnabled());
         }
     }
     if (VideoCommon::RenderTrace::SampleFrame(render_trace_frame) && render_trace_draws <= 2048) {
@@ -1693,7 +1695,7 @@ void RasterizerVulkan::CaptureIndirectTrace() {
     });
     slot->tick = scheduler.CurrentTick();
     slot->pending = true;
-    scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
+    scheduler.RequestRenderpass(texture_cache.GetFramebuffer(), device.IsGplEnabled());
     scheduler.NoteRenderPassStores();
 }
 
@@ -1914,7 +1916,7 @@ void RasterizerVulkan::Clear(u32 layer_count) {
                                  !scheduler.IsRenderPassActive() &&
                                  (!use_color || color_full_channels) && ds_deferrable;
     if (!can_defer_clear) {
-        scheduler.RequestRenderpass(framebuffer);
+        scheduler.RequestRenderpass(framebuffer, device.IsGplEnabled());
     }
 
     query_cache.NotifySegment(true);
@@ -3058,7 +3060,7 @@ void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
         }
     }
     if (frame_dump.BeginPass(framebuffer, colors)) {
-        scheduler.RequestRenderpass(framebuffer);
+        scheduler.RequestRenderpass(framebuffer, device.IsGplEnabled());
     }
 }
 
@@ -4299,9 +4301,23 @@ void RasterizerVulkan::UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs) 
                                           device.GetMaxVertexInputBindings()));
 
 
+    // nx2 shaderwarm: with library vertex stages, constant attributes read a null vertex buffer.
+    const std::optional<u32> null_binding{
+        GplNullAttributeBinding(device, regs, max_attributes, max_bindings)};
     for (u32 index = 0; index < max_attributes; ++index) {
         const Maxwell::VertexAttribute attribute{regs.vertex_attrib_format[index]};
         const u32 binding{attribute.buffer};
+        if (attribute.constant && null_binding) {
+            attributes.push_back({
+                .sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+                .pNext = nullptr,
+                .location = index,
+                .binding = *null_binding,
+                .format = VK_FORMAT_R32_SFLOAT,
+                .offset = 0,
+            });
+            continue;
+        }
         if (attribute.constant || binding >= max_bindings) {
             continue;
         }
@@ -4336,8 +4352,16 @@ void RasterizerVulkan::UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs) 
         dirty[Dirty::VertexBinding0 + index] = false;
     }
 
-    scheduler.Record([bindings, attributes](vk::CommandBuffer cmdbuf) {
+    if (null_binding) {
+        bindings[*null_binding].stride = 0;
+        bindings[*null_binding].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        bindings[*null_binding].divisor = 1;
+    }
+    scheduler.Record([bindings, attributes, null_binding](vk::CommandBuffer cmdbuf) {
         cmdbuf.SetVertexInputEXT(bindings, attributes);
+        if (null_binding) {
+            cmdbuf.BindVertexBuffer(*null_binding, VK_NULL_HANDLE, 0);
+        }
     });
 }
 
