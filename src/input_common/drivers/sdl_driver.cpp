@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <functional>
 #include <numbers>
 #include <span>
@@ -870,6 +871,9 @@ SDLDriver::SDLDriver(std::string input_engine_) : InputEngine(std::move(input_en
     SDL_AddEventWatch(&SDLEventWatcher, this);
 
 #ifdef _WIN32
+    // EXPERIMENT (do not merge): EDEN_INPUT_IMMEDIATE=0 leaves every gamepad to SDL.
+    const char* const immediate = std::getenv("EDEN_INPUT_IMMEDIATE");
+    if (immediate == nullptr || immediate[0] != '0')
     gameinput = GameInputSource::Create({
         .connected =
             [this](GameInputSource::Pad pad, const GameInputSource::Device& device) {
