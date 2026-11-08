@@ -431,6 +431,25 @@ TEST_CASE("The current Vulkan cache starts from the newest version it lists",
         VideoCommon::PipelineCacheMagic, VideoCommon::VulkanPipelineCacheVersion));
 }
 
+TEST_CASE("The driver pipeline cache starts from the newest older version",
+          "[pipeline_cache_files][carry_over]") {
+    const std::span<const u32> versions{VideoCommon::CompatibleVulkanDriverPipelineCacheVersions};
+    REQUIRE_FALSE(versions.empty());
+    TempDir temp;
+    for (const u32 version : versions) {
+        WriteCache(VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan_pipelines", version),
+                   VideoCommon::VulkanDriverPipelineCacheMagic, version, "driver");
+    }
+    const auto carried = VideoCommon::CarryOverPipelineCache(
+        temp.path, "vulkan_pipelines", VideoCommon::VulkanDriverPipelineCacheMagic, versions,
+        VideoCommon::VulkanPipelineCacheVersion);
+    REQUIRE(carried.version == versions.front());
+    REQUIRE(VideoCommon::PipelineCacheHeaderMatches(
+        VideoCommon::VersionedPipelineCachePath(temp.path, "vulkan_pipelines",
+                                                VideoCommon::VulkanPipelineCacheVersion),
+        VideoCommon::VulkanDriverPipelineCacheMagic, VideoCommon::VulkanPipelineCacheVersion));
+}
+
 TEST_CASE("A cleared cache stays empty while an older cache could replace it",
           "[pipeline_cache_files][carry_over]") {
     TempDir temp;

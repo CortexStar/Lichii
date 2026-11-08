@@ -27,12 +27,17 @@ inline constexpr u32 OpenGLPipelineCacheVersion = 48;
 // fail one by one and their pipelines are built when the game uses them; a new version would
 // throw every record away instead. CompatibleVulkanPipelineCacheVersions lists the older versions
 // with this version's record layout.
-inline constexpr u32 VulkanPipelineCacheVersion = 54;
+inline constexpr u32 VulkanPipelineCacheVersion = 55;
 
 /// Older Vulkan cache versions with this version's record layout, newest first. A build that
 /// finds no cache of its own version starts from the newest of these on disk, so an update keeps
-/// the pipelines the game has already shown.
-inline constexpr std::array<u32, 2> CompatibleVulkanPipelineCacheVersions{53, 52};
+/// the pipelines the game has already shown. None for 55: its graphics keys leave out the vertex
+/// attribute types a program doesn't read, so a key of an older version is never looked up again.
+inline constexpr std::array<u32, 0> CompatibleVulkanPipelineCacheVersions{};
+
+/// Older versions whose driver pipeline cache (vulkan_pipelines) a new version starts from,
+/// newest first. The driver keys its records by the pipelines it built, not by Eden's keys.
+inline constexpr std::array<u32, 3> CompatibleVulkanDriverPipelineCacheVersions{54, 53, 52};
 
 /// Header magic of the guest environment caches and of the Vulkan driver pipeline cache.
 inline constexpr std::array<char, 8> PipelineCacheMagic{'y', 'u', 'z', 'u', 'c', 'a', 'c', 'h'};
@@ -52,9 +57,11 @@ inline constexpr std::array<char, 8> VulkanDriverPipelineCacheMagic{'y', 'u', 'z
 }
 static_assert(IsOlderVersionList(CompatibleVulkanPipelineCacheVersions,
                                  VulkanPipelineCacheVersion));
+static_assert(IsOlderVersionList(CompatibleVulkanDriverPipelineCacheVersions,
+                                 VulkanPipelineCacheVersion));
 // A version with another record layout must not start from these: their files would be read as
 // its own. Check the list whenever the version changes, then update this.
-static_assert(VulkanPipelineCacheVersion == 54,
+static_assert(VulkanPipelineCacheVersion == 55,
               "Check CompatibleVulkanPipelineCacheVersions against the new version");
 
 // Official Eglantine (cache version 18 at c0cb3325) and this fork (a different version) both

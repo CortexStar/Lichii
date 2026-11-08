@@ -291,7 +291,7 @@ void RemoveVulkanDriverPipelineCache(u64 program_id) {
     // start from that one again.
     if (VideoCommon::ClearPipelineCache(shader_cache_folder_path, "vulkan_pipelines",
                                         VideoCommon::VulkanDriverPipelineCacheMagic,
-                                        VideoCommon::CompatibleVulkanPipelineCacheVersions,
+                                        VideoCommon::CompatibleVulkanDriverPipelineCacheVersions,
                                         VideoCommon::VulkanPipelineCacheVersion) ==
         VideoCommon::PipelineCacheClear::Failed) {
         QtCommon::Frontend::Warning(tr("Error Removing Vulkan Driver Pipeline Cache"),
