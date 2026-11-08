@@ -68,6 +68,9 @@ TextureHeap::TextureHeap(const Device& device_, MemoryAllocator& memory_allocato
             heap.buffer.SetObjectNameEXT(name);
         }
         heap.host = heap.buffer.Mapped().data();
+        // Left uninitialised: every page is filled (PreparePage) before a descriptor in it is
+        // written or published.
+        heap.shadow = std::make_unique_for_overwrite<u8[]>(size);
         heap.address = device.GetLogical().GetBufferDeviceAddress(*heap.buffer);
         heap.capacity_pages = pages;
         return true;
@@ -120,8 +123,8 @@ TextureHeap::TextureHeap(const Device& device_, MemoryAllocator& memory_allocato
 
 TextureHeap::~TextureHeap() = default;
 
-u8* TextureHeap::PageHost(const HeapBuffer& heap, u32 physical) const noexcept {
-    return heap.host + size_t{physical} * PoolMirror::PAGE_SIZE;
+void TextureHeap::Publish(const HeapBuffer& heap, size_t offset, size_t size) noexcept {
+    std::memcpy(heap.host + offset, heap.shadow.get() + offset, size);
 }
 
 bool TextureHeap::PreparePage(PoolMirror::Heap heap, u32 physical, u32 copy_from, bool reserved) {
@@ -142,17 +145,20 @@ bool TextureHeap::PreparePage(PoolMirror::Heap heap, u32 physical, u32 copy_from
         usable = false;
         return false;
     }
-    u8* const page = PageHost(target, physical);
+    const size_t page_offset = size_t{physical} * PoolMirror::PAGE_SIZE;
+    u8* const page = Shadow(target, page_offset);
     if (copy_from != PoolMirror::HeapPageVersions::NO_PAGE) {
-        std::memcpy(page, PageHost(target, copy_from), PoolMirror::PAGE_SIZE);
-        return true;
+        std::memcpy(page, Shadow(target, size_t{copy_from} * PoolMirror::PAGE_SIZE),
+                    PoolMirror::PAGE_SIZE);
+    } else {
+        const std::span<const u8> fill = heap == PoolMirror::Heap::Image
+                                             ? std::span<const u8>{null_image}
+                                             : std::span<const u8>{null_sampler};
+        for (size_t offset = 0; offset < PoolMirror::PAGE_SIZE; offset += fill.size()) {
+            std::memcpy(page + offset, fill.data(), fill.size());
+        }
     }
-    const std::span<const u8> fill = heap == PoolMirror::Heap::Image
-                                         ? std::span<const u8>{null_image}
-                                         : std::span<const u8>{null_sampler};
-    for (size_t offset = 0; offset < PoolMirror::PAGE_SIZE; offset += fill.size()) {
-        std::memcpy(page + offset, fill.data(), fill.size());
-    }
+    Publish(target, page_offset, PoolMirror::PAGE_SIZE);
     return true;
 }
 
@@ -161,12 +167,14 @@ void TextureHeap::WriteImage(u32 physical, u32 logical_slot, const ImageView* vi
     if (!usable || physical >= images.capacity_pages) {
         return;
     }
-    u8* const host =
-        PageHost(images, physical) +
+    const size_t offset =
+        size_t{physical} * PoolMirror::PAGE_SIZE +
         size_t{logical_slot % PoolMirror::IMAGE_SLOTS_PER_PAGE} * PoolMirror::IMAGE_DESCRIPTOR_SIZE;
+    u8* const host = Shadow(images, offset);
     ImageView::HeapViewInfo view_info{};
     if (view == nullptr || !view->HeapViewCreateInfo(type, view_info)) {
         std::memcpy(host, null_image.data(), null_image.size());
+        Publish(images, offset, PoolMirror::IMAGE_DESCRIPTOR_SIZE);
         return;
     }
     const VkImageDescriptorInfoEXT image_info{
@@ -183,6 +191,7 @@ void TextureHeap::WriteImage(u32 physical, u32 logical_slot, const ImageView* vi
     };
     const VkHostAddressRangeEXT range{host, PoolMirror::IMAGE_DESCRIPTOR_SIZE};
     device.GetLogical().WriteResourceDescriptorsEXT(info, &range);
+    Publish(images, offset, PoolMirror::IMAGE_DESCRIPTOR_SIZE);
 }
 
 void TextureHeap::WriteSampler(u32 physical, u32 logical_slot, const Sampler& sampler,
@@ -190,16 +199,18 @@ void TextureHeap::WriteSampler(u32 physical, u32 logical_slot, const Sampler& sa
     if (!usable || physical >= samplers.capacity_pages) {
         return;
     }
-    u8* const host =
-        PageHost(samplers, physical) + size_t{logical_slot % PoolMirror::SAMPLER_SLOTS_PER_PAGE} *
-                                           PoolMirror::SAMPLER_DESCRIPTOR_SIZE;
+    const size_t offset = size_t{physical} * PoolMirror::PAGE_SIZE +
+                          size_t{logical_slot % PoolMirror::SAMPLER_SLOTS_PER_PAGE} *
+                              PoolMirror::SAMPLER_DESCRIPTOR_SIZE;
+    u8* const host = Shadow(samplers, offset);
     Sampler::HeapSamplerInfo sampler_info{};
     if (!sampler.HeapSamplerCreateInfo(variant, sampler_info)) {
         std::memcpy(host, null_sampler.data(), null_sampler.size());
-        return;
+    } else {
+        const VkHostAddressRangeEXT range{host, PoolMirror::SAMPLER_DESCRIPTOR_SIZE};
+        device.GetLogical().WriteSamplerDescriptorsEXT(sampler_info.create_info, &range);
     }
-    const VkHostAddressRangeEXT range{host, PoolMirror::SAMPLER_DESCRIPTOR_SIZE};
-    device.GetLogical().WriteSamplerDescriptorsEXT(sampler_info.create_info, &range);
+    Publish(samplers, offset, PoolMirror::SAMPLER_DESCRIPTOR_SIZE);
 }
 
 bool TextureHeap::HoldsImage(u32 index, const ImageView* view, Shader::TextureType type) const {

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <memory>
 
 #include "common/common_types.h"
 #include "shader_recompiler/shader_info.h"
@@ -22,7 +23,9 @@ class Sampler;
 /// sampler descriptors. The texture cache decides which physical page a write goes to
 /// (HeapPageVersions, copy-on-write): a page it hands out is either fresh (no recorded draw can
 /// read it) or already current and unread since it was mapped, so host writes into the mapped,
-/// coherent heap memory never race the GPU.
+/// coherent heap memory never race the GPU. That memory is uncached on the host (write-combined
+/// upload memory): every descriptor is built in a cached shadow of the heap and then copied over,
+/// so the host never reads the GPU heap (a page copy reads the shadow).
 class TextureHeap {
 public:
     explicit TextureHeap(const Device& device, MemoryAllocator& memory_allocator);
@@ -124,12 +127,19 @@ public:
 private:
     struct HeapBuffer {
         vk::Buffer buffer;
-        u8* host{};
+        u8* host{};                   ///< the mapped heap: written only
+        std::unique_ptr<u8[]> shadow; ///< the same bytes in cached host memory: read and written
         VkDeviceAddress address{};
         u32 capacity_pages{};
     };
 
-    [[nodiscard]] u8* PageHost(const HeapBuffer& heap, u32 physical) const noexcept;
+    /// A page or descriptor in the shadow.
+    [[nodiscard]] static u8* Shadow(const HeapBuffer& heap, size_t offset) noexcept {
+        return heap.shadow.get() + offset;
+    }
+
+    /// Copies [offset, offset + size) of the shadow into the heap.
+    static void Publish(const HeapBuffer& heap, size_t offset, size_t size) noexcept;
 
     const Device& device;
     HeapBuffer images;
