@@ -334,7 +334,7 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
 
             hold_graphics.emplace(setting->Id(), widget);
 #endif
-#ifdef EGLANTINE_STREAMLINE
+#if defined(EGLANTINE_STREAMLINE) && defined(_WIN32)
         } else if (setting->Id() == Settings::values.nvidia_dlss.Id()) {
             // NVIDIA's files and a download button under the checkbox.
             QWidget* group = new QWidget(this);

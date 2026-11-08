@@ -6,7 +6,7 @@
 
 #pragma once
 
-#ifdef EGLANTINE_STREAMLINE
+#if defined(EGLANTINE_STREAMLINE) && defined(_WIN32)
 
 #include <QWidget>
 

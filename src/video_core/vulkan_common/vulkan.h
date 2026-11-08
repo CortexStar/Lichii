@@ -37,6 +37,11 @@
 #undef False
 #undef None
 #undef True
+// Xlib (VK_USE_PLATFORM_XLIB_KHR) macros that collide with enumerators such as NvResult
+#undef Success
+#undef BadValue
+#undef Status
+#undef Bool
 
 // "Catch-all" handle for both Android and.. the rest of platforms
 struct VkSurfaceKHR_T;

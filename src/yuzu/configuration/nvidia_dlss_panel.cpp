@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#ifdef EGLANTINE_STREAMLINE
+#if defined(EGLANTINE_STREAMLINE) && defined(_WIN32)
 
 #include "common/httplib.h"
 

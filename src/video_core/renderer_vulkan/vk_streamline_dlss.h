@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS
+// NVIDIA DLSS (through NVIDIA Streamline on Windows, NGX on Linux) in place of a game's DLSS
 // evaluation. NVIDIA's DLLs come from the user's PC; see vulkan_common/streamline.h.
 
 #pragma once
@@ -73,7 +73,9 @@ private:
     const Device& device;
     Scheduler& scheduler;
     MemoryAllocator& memory_allocator;
-    void* set_options{}; ///< slDLSSSetOptions
+    void* set_options{}; ///< slDLSSSetOptions (Windows)
+    void* ngx_feature{}; ///< NVSDK_NGX_Handle (Linux, NGX)
+    void* ngx_params{};  ///< NVSDK_NGX_Parameter (Linux, NGX)
     VkExtent2D render_extent{};
     VkExtent2D upscale_extent{};
     bool hdr_input = true;
