@@ -1830,41 +1830,47 @@ bool TextureCache<P>::ResolveForDraw(std::span<const u32> raw_handles, bool via_
     PoolMirrorState& mirror =
         compute ? channel_state->compute_mirror : channel_state->graphics_mirror;
     const bool native = gpu_memory->UsesNativeTiling();
-    for (size_t i = 0; i < raw_handles.size(); ++i) {
-        const auto [raw_tic, tsc] = Tegra::Texture::TexturePair(raw_handles[i], via_header_index);
-        const u32 tic =
-            Tegra::Texture::TextureHeaderIndex(raw_tic, image_table.current_limit, native);
-        const ImageViewId view_id = VisitImageView(raw_tic, compute);
-        const SamplerId sampler_id = GetSamplerId(tsc, compute);
-        u32 meta = PoolMirror::Meta::NULL_ENTRY;
-        if (tic <= image_table.current_limit) {
-            // What the heap will hold once the pending updates are taken.
-            meta = tic < mirror.meta.size() && image_table.mirrored_ids[tic] == view_id
-                       ? mirror.meta[tic]
-                       : MirrorMeta(view_id);
-        }
-        out[i] = {tic, tsc, meta, ~0U, {~0U, ~0U}};
-        if (tic <= image_table.current_limit) {
-            // The layout after the pending reset, if any.
-            out[i].image_slot = tic;
-        }
-        if (!view_id || tsc > sampler_table.current_limit) {
-            continue;
-        }
-        const u32 sampler_class = meta & PoolMirror::Meta::CLASS_MASK;
-        const PoolMirror::Layout layout{.tic_stride = image_table.current_limit + 1,
-                                        .tsc_stride = sampler_table.current_limit + 1,
-                                        .num_classes = sampler_classes.Size()};
-        for (u32 depth_use = 0; depth_use < 2; ++depth_use) {
-            out[i].sampler_slots[depth_use] =
-                layout.SamplerSlot(sampler_class, depth_use != 0, tsc);
-            const size_t variant = size_t{sampler_class} * 2 + depth_use;
-            if (variant >= mirror.samplers.size() || tsc >= mirror.samplers[variant].size() ||
-                mirror.samplers[variant][tsc] != sampler_id) {
-                mirror.wanted_samplers.push_back({sampler_class, depth_use, tsc});
+    // Preparing one entry's image can delete views resolved before it (rescaling an alias):
+    // resolve again until a pass deletes nothing, as FillImageViews does.
+    do {
+        has_deleted_images = false;
+        for (size_t i = 0; i < raw_handles.size(); ++i) {
+            const auto [raw_tic, tsc] =
+                Tegra::Texture::TexturePair(raw_handles[i], via_header_index);
+            const u32 tic =
+                Tegra::Texture::TextureHeaderIndex(raw_tic, image_table.current_limit, native);
+            const ImageViewId view_id = VisitImageView(raw_tic, compute);
+            const SamplerId sampler_id = GetSamplerId(tsc, compute);
+            u32 meta = PoolMirror::Meta::NULL_ENTRY;
+            if (tic <= image_table.current_limit) {
+                // What the heap will hold once the pending updates are taken.
+                meta = tic < mirror.meta.size() && image_table.mirrored_ids[tic] == view_id
+                           ? mirror.meta[tic]
+                           : MirrorMeta(view_id);
+            }
+            out[i] = {tic, tsc, meta, ~0U, {~0U, ~0U}, view_id};
+            if (tic <= image_table.current_limit) {
+                // The layout after the pending reset, if any.
+                out[i].image_slot = tic;
+            }
+            if (!view_id || tsc > sampler_table.current_limit) {
+                continue;
+            }
+            const u32 sampler_class = meta & PoolMirror::Meta::CLASS_MASK;
+            const PoolMirror::Layout layout{.tic_stride = image_table.current_limit + 1,
+                                            .tsc_stride = sampler_table.current_limit + 1,
+                                            .num_classes = sampler_classes.Size()};
+            for (u32 depth_use = 0; depth_use < 2; ++depth_use) {
+                out[i].sampler_slots[depth_use] =
+                    layout.SamplerSlot(sampler_class, depth_use != 0, tsc);
+                const size_t variant = size_t{sampler_class} * 2 + depth_use;
+                if (variant >= mirror.samplers.size() || tsc >= mirror.samplers[variant].size() ||
+                    mirror.samplers[variant][tsc] != sampler_id) {
+                    mirror.wanted_samplers.push_back({sampler_class, depth_use, tsc});
+                }
             }
         }
-    }
+    } while (has_deleted_images);
     return image_table.HasMirrorUpdates() || sampler_table.HasMirrorUpdates() ||
            !mirror.wanted_samplers.empty() || mirror.layout.num_classes != sampler_classes.Size();
 }
