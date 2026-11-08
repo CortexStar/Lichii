@@ -939,13 +939,16 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 emit(base(0x5c10000000000000ULL) | (u64{source} << 8) | (u64{250} << 20));
                 break;
             }
-            if (insn.Bits(24, 8) != 255 || insn.Bits(64, 8) != 255 || insn.words[2] != 0x078e00ff) {
+            const bool negated_cbuf_addend = opcode == 0x624 && insn.Bits(63, 1);
+            if (insn.Bits(24, 8) != 255 || insn.Bits(64, 8) != 255 || insn.words[2] != 0x078e00ff ||
+                negated_cbuf_addend) {
                 // Bit 63 negates the constant buffer addend (bit 62 would be its absolute value).
+                // A zero product with a negated addend also takes this path: 0 * 0 - c.
                 if ((insn.words[2] & ~0x2ffU) != 0x078e0000 || (opcode == 0x624 && insn.Bits(62, 1)))
                     return fail(index, "native multiply wide addend mode");
                 const u32 a = operand(0, false), b = operand(1, false);
                 u32 c = operand(2, false);
-                if (opcode == 0x624 && insn.Bits(63, 1)) {
+                if (negated_cbuf_addend) {
                     emit(0x5c10000000000000ULL | predicate | 252 | (u64{255} << 8) | (u64{c} << 20) | (u64{1} << 48));
                     c = 252;
                 }
