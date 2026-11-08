@@ -22,6 +22,7 @@ enum class Layer : u32 {
     Uniforms, ///< constant buffer bank bytes the shader reads vs guest memory
     Textures, ///< resident texture pool entries vs a full resolve of every resident hit
     Bindless, ///< the pool-mirroring descriptor heap vs the bound pool entries
+    Barriers, ///< render pass barriers from a draw's remembered image set vs the full check
     Count,
 };
 
@@ -30,6 +31,7 @@ inline constexpr std::array<std::string_view, static_cast<size_t>(Layer::Count)>
     "uniforms",
     "textures",
     "bindless",
+    "barriers",
 };
 
 /// The layers EDEN_NX2_NATIVE_VERIFY names, read once.
@@ -73,6 +75,12 @@ void Check(Layer layer, bool same, fmt::format_string<Args...> format, Args&&...
 /// The pool-mirroring descriptor heap against the bound pool entries.
 [[nodiscard]] inline bool Bindless() {
     return Enabled(Layer::Bindless);
+}
+
+/// Render pass barriers decided from a draw's remembered image set against the full per-draw
+/// check (RenderPassBarrierTracker).
+[[nodiscard]] inline bool Barriers() {
+    return Enabled(Layer::Barriers);
 }
 
 /// Logs each enabled layer's line once 10 s passed since the last one. Any thread.
