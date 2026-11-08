@@ -1,0 +1,32 @@
+diff --git a/core/ngx_snippet.cpp b/core/ngx_snippet.cpp
+index 69ae460..f0e9761 100644
+--- a/core/ngx_snippet.cpp
++++ b/core/ngx_snippet.cpp
+@@ -728,7 +728,8 @@ void NgxTeardown(NgxSnippet& s, VkDevice device) {
+     RemoveCallerSpoof(g_coreSpoof);
+     if (s.core) { FreeLibrary(s.core); s.core = nullptr; }
+     if (s.snippet) { FreeLibrary(s.snippet); s.snippet = nullptr; }
++    if (s.nvapi) { FreeLibrary(s.nvapi); s.nvapi = nullptr; }
+     s.ready = false;
+ }
+ 
+-}  // namespace dlssnr
+\ No newline at end of file
++}  // namespace dlssnr
+diff --git a/helper/main.cpp b/helper/main.cpp
+index c4b57a9..c5f9399 100644
+--- a/helper/main.cpp
++++ b/helper/main.cpp
+@@ -2237,7 +2237,11 @@ static bool EnsureNeural(NeuralState& ns, ShmMap& shm, uint32_t w, uint32_t h) {
+     if (ns.ready && ns.w == w && ns.h == h && ns.sdr16Built == wantSdr16) return true;
+     if (ns.ngx.disabled) return false;
+ 
+-    if (ns.ngx.snippet) NgxReleaseAllPasses(ns.ngx, ns.vk.device);
++    // NgxLoadAndInit below owns a fresh runtime initialization, not just a new
++    // feature. Balance its module loads and restore hooks before loading again.
++    ns.ready = false;
++    if (ns.ngx.snippet) NgxTeardown(ns.ngx, ns.vk.device);
++    ns.ngx = {};
+     DestroyOpticalFlow(ns.vk, ns.flow);
+     DestroyImage2D(ns.vk, ns.colorIn);
+     DestroyImage2D(ns.vk, ns.colorOut);

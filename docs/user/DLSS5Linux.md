@@ -14,6 +14,12 @@ using NVIDIA Optical Flow instead of receiving the game's engine motion vectors.
 This is an experimental third-party setup, not an NVIDIA-supported Lichii
 integration. Its output can alter menus, text and artwork as well as the scene.
 
+Basic rendering at 2400 × 1350 was tested with the unmodified layer source listed
+below. No Lichii source changes were needed. The later resize tests used the
+[local helper patch](#local-helper-patch-used-for-resize-testing); that patch is
+provided for reproducing those tests, not established as a prerequisite for all
+4K use. Sufficient free GPU memory was necessary even with the patch.
+
 ## Prerequisites
 
 - A Linux x86-64 Lichii build with the Vulkan graphics backend selected.
@@ -49,6 +55,19 @@ layer enabled for that process, replacing the path with your AppImage:
 VKLayer_DLSS5=1 /path/to/lichii-linux-x86_64-pgo.appimage
 ```
 
+If you configured a custom `shm=` path in the helper's
+`${XDG_CONFIG_HOME:-$HOME/.config}/dlssnr/config.ini`, pass that same absolute path
+to Lichii's layer as well. For example, replacing the path below with your actual
+helper configuration:
+
+```bash
+DLSSNR_SHM_PATH="/absolute/path/to/your/shm.bin"
+DLSSNR_SHM="$DLSSNR_SHM_PATH" VKLayer_DLSS5=1 /path/to/lichii-linux-x86_64-pgo.appimage
+```
+
+Use the same `DLSSNR_SHM_PATH` for the control commands below. Setting that CLI
+variable alone does not reconfigure the helper or Lichii's layer.
+
 Open a game. The layer skips very small startup surfaces, so the helper may wait
 for frames until a game starts. To adjust settings, run `dlssnr-gui` in another
 terminal. In the tested version, closing that GUI requests a helper shutdown;
@@ -65,10 +84,13 @@ The following commands apply those settings to the running helper. For the
 tested user-local installation, the CLI is at the path shown below; replace it
 with your installation's `dlssnr-shmctl` path if necessary. If using the GUI,
 open it before these commands because it loads saved settings when it starts.
+In the GUI's **Passes** dialog, clear the first pass's **Style** override so it
+inherits the global Natural setting. For the baseline below, clear any other
+per-pass overrides too. Saved overrides take precedence over global CLI values.
 
 ```bash
 DLSSNR_CTL="$HOME/.local/lib/dlssnr/bin/dlssnr-shmctl"
-DLSSNR_SHM_PATH="/tmp/dlssnr-$UID/shm.bin"
+DLSSNR_SHM_PATH="${DLSSNR_SHM_PATH:-/tmp/dlssnr-$UID/shm.bin}"
 "$DLSSNR_CTL" "$DLSSNR_SHM_PATH" set enabled 1
 "$DLSSNR_CTL" "$DLSSNR_SHM_PATH" set style 1
 "$DLSSNR_CTL" "$DLSSNR_SHM_PATH" set passes 1
@@ -87,23 +109,28 @@ restarts. The shared-memory path above is the layer's default. If you configured
 a custom path, use that path instead. Settings affect other applications sharing
 the same helper, so test one application at a time.
 
-For a centre-screen comparison wipe, then a return to the full enhanced image:
+Enable a centre-screen comparison wipe:
 
 ```bash
 "$DLSSNR_CTL" "$DLSSNR_SHM_PATH" set compare 2
-# After comparing:
-"$DLSSNR_CTL" "$DLSSNR_SHM_PATH" set compare 0
 ```
 
 Compare both a stationary scene and camera movement. Look for changes to text,
 fine foliage, particles and moving objects, and assess frame pacing as well as
 appearance.
 
+When finished comparing, return to the full enhanced image:
+
+```bash
+"$DLSSNR_CTL" "$DLSSNR_SHM_PATH" set compare 0
+```
+
 ## Verify processing
 
 ```bash
 dlssnr-helper status
 "$DLSSNR_CTL" "$DLSSNR_SHM_PATH" status
+"$DLSSNR_CTL" "$DLSSNR_SHM_PATH" settings
 ```
 
 A running helper alone does not prove neural rendering is active. While the game
@@ -148,6 +175,47 @@ explicitly unmodified launch, close Lichii normally and run:
 DLSSNR_DISABLE=1 /path/to/lichii-linux-x86_64-pgo.appimage
 ```
 
+## Local helper patch used for resize testing
+
+The exact [helper resize patch](./patches/DLSS5VKLayer-resize.patch) is included as
+a reproduction artifact. It applies to DLSS5VKLayer commit
+`9f43793d354063399b463a2a20adf30ce07e1c60` (0.3.1-2), not to Lichii's source.
+It changes two files:
+
+- `helper/main.cpp`: mark the neural state unready, fully tear down the old NGX
+  runtime, and reset its state before rebuilding for a new resolution. Previously
+  only the model features were released before another runtime load/init.
+- `core/ngx_snippet.cpp`: release the helper's owned NVAPI module during teardown.
+
+To reproduce the patched test, check out that layer revision in a separate source
+directory and apply the patch there (replace the patch path below):
+
+```bash
+git apply --check /path/to/DLSS5VKLayer-resize.patch
+git apply /path/to/DLSS5VKLayer-resize.patch
+```
+
+Follow the layer's build instructions to configure its Windows cross-build and
+build `build/windows/windows/dlssnr_helper.exe`. Once that build directory and
+toolchain are configured, the helper-only target is:
+
+```bash
+ninja -C build/windows windows/dlssnr_helper.exe
+```
+
+Stop the helper with `dlssnr-helper stop`, back up the installed helper executable,
+and replace it with the rebuilt executable. In the tested user-local installation
+the destination was `~/.local/lib/dlssnr/helper/dlssnr_helper.exe`; check your
+installation's path using `dlssnr-helper doctor`. Start the helper again, reapply
+the desired settings and verify advancing frame counters. No layer library,
+AppImage or proprietary NVIDIA DLL was changed for this fix. Restore the backed-up
+executable with the helper stopped to roll back.
+
+This is a local experimental fix, not an upstream layer release. It does not
+prevent out-of-memory failures: the successful follow-up also required stopping
+a competing GPU inference workload. The patch is provided as documentation;
+Lichii does not build, install or apply it automatically.
+
 ## Tested configuration and limits
 
 Manual testing on 8 November 2026 used:
@@ -173,8 +241,8 @@ above: tear down the NGX runtime before reinitializing it for a resolution chang
 clear the helper's ready state before rebuilding, and release the owned NVAPI
 module during teardown. The original path released the features but then loaded
 and initialized the runtime again without a matching runtime teardown. This
-helper modification is not included in Lichii or in this documentation change,
-and is not a claim about an upstream DLSS5VKLayer release.
+helper modification is supplied above as a reproduction patch, not integrated
+into Lichii or claimed as part of an upstream DLSS5VKLayer release.
 
 With the modified helper and the competing GPU workload stopped, full-resolution
 3840 × 2160 processing succeeded. Two round trips of the neural working size
