@@ -11,6 +11,8 @@
 #include <string_view>
 #include <vector>
 
+#include "common/common_types.h"
+
 // AMD's FSR runtime (amd_fidelityfx_loader_vk.dll with amd_fidelityfx_upscaler_vk.dll and
 // amd_fidelityfx_framegeneration_vk.dll), for AMD FSR 4 upscaling and AMD FSR frame generation.
 // The DLLs are AMD's signed, closed binaries: Lichii does not ship them and loads them from a
@@ -42,6 +44,24 @@ bool Load();
 /// lookup").
 [[nodiscard]] bool HasUpscaler();
 [[nodiscard]] bool HasFrameGeneration();
+
+/// Marks a call into AMD's runtime (or one of its callbacks into Lichii) for crash reports: AMD's
+/// DLLs carry no symbols, so a crash handler names the calls that were running and the last ones
+/// made (Breadcrumbs).
+class Scope {
+public:
+    explicit Scope(const char* call) noexcept;
+    ~Scope();
+    Scope(const Scope&) = delete;
+    Scope& operator=(const Scope&) = delete;
+
+private:
+    u32 slot;
+};
+
+/// The AMD runtime calls in progress and the last ones made, oldest first, for a crash handler
+/// (no allocation, no locks: safe to read from one).
+void WriteBreadcrumbs(char* buffer, size_t size) noexcept;
 
 /// Whether `name` (as ffxQueryDescGetVersions reports it: "4.1.2", "FSR 4.1.2 *", ...) is a
 /// version 4 or newer.

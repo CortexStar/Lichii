@@ -32,6 +32,7 @@ struct GameQueue {
 } g_game_queue;
 
 VkResult SubmitToGameQueue(uint32_t count, const VkSubmitInfo* submits, VkFence fence) {
+    AmdFfx::Scope ffx_scope{"submitFunc (game queue)"};
     std::scoped_lock lock{*g_game_queue.mutex};
     return g_game_queue.submit(g_game_queue.queue, count, submits, fence);
 }
@@ -105,6 +106,7 @@ struct AmdFrameGen::Impl {
         config.allowAsyncWorkloads = true;
         config.generationRect = generation_rect;
         config.frameID = frame_id;
+        AmdFfx::Scope ffx_scope{"ffxConfigure(frame generation)"};
         if (const auto result = AmdFfx::Api().configure(&frame_gen_context, &config.header);
             result != FFX_API_RETURN_OK) {
             LOG_ERROR(Render_Vulkan, "AMD FSR frame generation: ffxConfigure returned {}", result);
@@ -115,6 +117,7 @@ struct AmdFrameGen::Impl {
 
     /// AMD's swapchain calls this inside present to record frame generation.
     static ffxReturnCode_t Generate(ffxDispatchDescFrameGeneration* params, void* context) {
+        AmdFfx::Scope ffx_scope{"frameGenerationCallback"};
         auto* const self = static_cast<Impl*>(context);
         params->backbufferTransferFunction = self->hdr ? FFX_API_BACKBUFFER_TRANSFER_FUNCTION_PQ
                                                        : FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
@@ -135,6 +138,7 @@ struct AmdFrameGen::Impl {
         if (frame_gen_context == nullptr) {
             return;
         }
+        AmdFfx::Scope ffx_scope{"WaitForPresents + destroy(frame generation)"};
         ffxDispatchDescFrameGenerationSwapChainWaitForPresentsVK wait{};
         wait.header.type = FFX_API_DISPATCH_DESC_TYPE_FGSWAPCHAIN_WAIT_FOR_PRESENTS_VK;
         AmdFfx::Api().dispatch(&swapchain_context, &wait.header);
@@ -163,6 +167,7 @@ struct AmdFrameGen::Impl {
         desc.backBufferFormat = ffxApiGetSurfaceFormatVK(format);
         desc.header.pNext = &backend.header;
         backend.header.pNext = &version.header;
+        AmdFfx::Scope ffx_scope{"ffxCreateContext(frame generation)"};
         if (const auto result =
                 AmdFfx::Api().create_context(&frame_gen_context, &desc.header, nullptr);
             result != FFX_API_RETURN_OK) {
@@ -196,6 +201,7 @@ AmdFrameGen::~AmdFrameGen() {
         return;
     }
     state.DestroyFrameGenContext();
+    AmdFfx::Scope ffx_scope{"destroy(frame generation swapchain)"};
     AmdFfx::Api().destroy_context(&state.swapchain_context, nullptr);
     // After the context, as the header asks; pContext is the frame generation swapchain.
     if (state.functions.pOutDestroySwapchainFFXAPI != nullptr && state.swapchain != nullptr) {
@@ -257,6 +263,7 @@ VkResult AmdFrameGen::CreateSwapchain(const VkSwapchainCreateInfoKHR& ci,
         }
         VkSwapchainCreateInfoKHR info = ci;
         info.oldSwapchain = VK_NULL_HANDLE;
+        AmdFfx::Scope ffx_scope{"pOutCreateSwapchainFFXAPI"};
         const VkResult result = state.functions.pOutCreateSwapchainFFXAPI(
             *state.device.GetLogical(), &info, nullptr, &state.swapchain, state.swapchain);
         if (result != VK_SUCCESS) {
@@ -293,6 +300,7 @@ VkResult AmdFrameGen::CreateSwapchain(const VkSwapchainCreateInfoKHR& ci,
     desc.presentQueue = queue(device.GetFrameGenPresentQueue());
     desc.imageAcquireQueue = queue(device.GetFrameGenAcquireQueue());
     desc.header.pNext = &version.header;
+    AmdFfx::Scope ffx_scope{"ffxCreateContext(frame generation swapchain)"};
     if (const auto result =
             AmdFfx::Api().create_context(&state.swapchain_context, &desc.header, nullptr);
         result != FFX_API_RETURN_OK) {
@@ -322,6 +330,7 @@ VkResult AmdFrameGen::CreateSwapchain(const VkSwapchainCreateInfoKHR& ci,
 std::vector<VkImage> AmdFrameGen::GetImages(VkSwapchainKHR swapchain) const {
     const auto& state = *impl;
     u32 count = 0;
+    AmdFfx::Scope ffx_scope{"pOutGetSwapchainImagesKHR"};
     state.functions.pOutGetSwapchainImagesKHR(*state.device.GetLogical(), swapchain, &count,
                                               nullptr);
     std::vector<VkImage> images(count);
@@ -333,6 +342,7 @@ std::vector<VkImage> AmdFrameGen::GetImages(VkSwapchainKHR swapchain) const {
 
 VkResult AmdFrameGen::AcquireNextImage(VkSwapchainKHR swapchain, u64 timeout,
                                        VkSemaphore semaphore, u32* image_index) const {
+    AmdFfx::Scope ffx_scope{"pOutAcquireNextImageKHR"};
     return impl->functions.pOutAcquireNextImageKHR(*impl->device.GetLogical(), swapchain, timeout,
                                                    semaphore, VK_NULL_HANDLE, image_index);
 }
@@ -341,6 +351,7 @@ void AmdFrameGen::WaitForPresents() {
     if (impl->swapchain_context == nullptr) {
         return;
     }
+    AmdFfx::Scope ffx_scope{"WaitForPresents"};
     ffxDispatchDescFrameGenerationSwapChainWaitForPresentsVK wait{};
     wait.header.type = FFX_API_DISPATCH_DESC_TYPE_FGSWAPCHAIN_WAIT_FOR_PRESENTS_VK;
     AmdFfx::Api().dispatch(&impl->swapchain_context, &wait.header);
@@ -349,6 +360,7 @@ void AmdFrameGen::WaitForPresents() {
 void AmdFrameGen::SetHdrMetadata(VkSwapchainKHR swapchain,
                                  const VkHdrMetadataEXT& metadata) const {
     if (impl->functions.pOutSetHdrMetadataEXT != nullptr) {
+        AmdFfx::Scope ffx_scope{"pOutSetHdrMetadataEXT"};
         impl->functions.pOutSetHdrMetadataEXT(*impl->device.GetLogical(), 1, &swapchain,
                                               &metadata);
     }
@@ -360,6 +372,7 @@ VkResult AmdFrameGen::Present(VkQueue game_queue, const VkPresentInfoKHR& presen
         // No inputs this frame (a menu, a load, the game's own image): present it as rendered.
         state.Configure(false);
     }
+    AmdFfx::Scope ffx_scope{"pOutQueuePresentKHR"};
     const VkResult result = state.functions.pOutQueuePresentKHR(game_queue, &present_info);
     ++state.frame_id;
     return result;
@@ -437,6 +450,7 @@ void AmdFrameGen::Prepare(Scheduler& scheduler, const PrepareInputs& in) {
                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, inputs);
         ffxDispatchDescFrameGenerationPrepareV2 dispatch = prepare;
         dispatch.commandList = *cmdbuf;
+        AmdFfx::Scope ffx_scope{"ffxDispatch(frame generation prepare)"};
         if (const auto result = AmdFfx::Api().dispatch(context, &dispatch.header);
             result != FFX_API_RETURN_OK) {
             LOG_ERROR(Render_Vulkan, "AMD FSR frame generation: prepare returned {}", result);

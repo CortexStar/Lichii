@@ -117,6 +117,7 @@ void AmdFsr4Upscaler::Destroy(std::unique_ptr<Context>& context) {
     if (context->context != nullptr) {
         // The GPU and the scheduler's worker may still use it.
         scheduler.Finish();
+        AmdFfx::Scope ffx_scope{"destroy(FSR 4)"};
         AmdFfx::Api().destroy_context(&context->context, nullptr);
     }
     context.reset();
@@ -252,6 +253,7 @@ bool AmdFsr4Upscaler::Prepare(VkExtent2D max_render_size, VkExtent2D upscale_siz
             override_version.versionId = *id;
             version.header.pNext = &override_version.header;
         }
+        AmdFfx::Scope ffx_scope{"ffxCreateContext(FSR 4)"};
         if (const ffxReturnCode_t result =
                 AmdFfx::Api().create_context(&c.context, &desc.header, nullptr);
             result != FFX_API_RETURN_OK) {
@@ -413,6 +415,7 @@ bool AmdFsr4Upscaler::Upscale(const Inputs& in) {
                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, to_compute);
         ffxDispatchDescUpscale dispatch = d;
         dispatch.commandList = *cmdbuf;
+        AmdFfx::Scope ffx_scope{"ffxDispatch(FSR 4 upscale)"};
         if (const ffxReturnCode_t result = AmdFfx::Api().dispatch(context, &dispatch.header);
             result != FFX_API_RETURN_OK) {
             LOG_ERROR(Render_Vulkan, "AMD FSR 4: ffxDispatch returned {}", result);

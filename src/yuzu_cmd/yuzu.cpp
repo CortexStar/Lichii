@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <csignal>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -61,6 +62,7 @@
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
+#include "video_core/vulkan_common/amd_ffx.h"
 #include "yuzu_cmd/emu_window/emu_window_sdl3.h"
 #ifdef HAS_OPENGL
 #include "yuzu_cmd/emu_window/emu_window_sdl3_gl.h"
@@ -90,6 +92,9 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 // EDEN_NX2_CRASH_DUMP=<dir>: on an unhandled exception (a real crash; fastmem faults are handled
 // before this), write <dir>/eden-crash-<pid>.dmp. A debugger changes the timing enough to hide
 // some crashes, so this catches them at full speed. dbghelp.dll is loaded only then.
+// The crash report also goes to <dir>/eden-crash-<pid>.txt: stderr is often not captured.
+static std::FILE* crash_text{};
+
 // Prints a code address as module+offset (resolve with llvm-symbolizer and the module's PDB).
 static void PrintCodeAddress(const char* label, const void* address) {
     HMODULE module{};
@@ -100,9 +105,47 @@ static void PrintCodeAddress(const char* label, const void* address) {
         GetModuleFileNameA(module, name, sizeof(name));
     }
     const char* base_name = std::strrchr(name, '\\');
+    const auto offset = static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(address) -
+                                                        reinterpret_cast<uintptr_t>(module));
     std::fprintf(stderr, "  %s %p %s+%#llx\n", label, address, base_name ? base_name + 1 : name,
-                 static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(address) -
-                                                 reinterpret_cast<uintptr_t>(module)));
+                 offset);
+    if (crash_text != nullptr) {
+        std::fprintf(crash_text, "  %s %p %s+%#llx\n", label, address,
+                     base_name ? base_name + 1 : name, offset);
+    }
+}
+
+// The AMD FSR runtime calls running and the last ones made (its DLLs have no symbols).
+static void PrintAmdBreadcrumbs() {
+    char crumbs[1024];
+    Vulkan::AmdFfx::WriteBreadcrumbs(crumbs, sizeof(crumbs));
+    std::fprintf(stderr, "%s\n", crumbs);
+    if (crash_text != nullptr) {
+        std::fprintf(crash_text, "%s\n", crumbs);
+        std::fflush(crash_text);
+    }
+}
+
+// abort() and std::terminate end the process without an exception the filter sees.
+static void ReportAbort(const char* what) {
+    const char* directory = std::getenv("EDEN_NX2_CRASH_DUMP");
+    if (directory != nullptr && crash_text == nullptr) {
+        char path[MAX_PATH];
+        std::snprintf(path, sizeof(path), "%s\\eden-crash-%lu.txt", directory,
+                      GetCurrentProcessId());
+        crash_text = std::fopen(path, "w");
+    }
+    std::fprintf(stderr, "%s on thread %lu\n", what, GetCurrentThreadId());
+    if (crash_text != nullptr) {
+        std::fprintf(crash_text, "%s on thread %lu\n", what, GetCurrentThreadId());
+    }
+    void* frames[48];
+    const USHORT count = RtlCaptureStackBackTrace(0, 48, frames, nullptr);
+    for (USHORT i = 0; i < count; ++i) {
+        PrintCodeAddress("frame", frames[i]);
+    }
+    PrintAmdBreadcrumbs();
+    std::fflush(stderr);
 }
 
 static LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* exception) {
@@ -111,8 +154,22 @@ static LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* exception) {
     if (directory == nullptr || written.exchange(true)) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
+    {
+        char path[MAX_PATH];
+        std::snprintf(path, sizeof(path), "%s\\eden-crash-%lu.txt", directory,
+                      GetCurrentProcessId());
+        crash_text = std::fopen(path, "w");
+    }
     // The faulting address and stack first: they survive even if the dump fails.
     const EXCEPTION_RECORD& record = *exception->ExceptionRecord;
+    if (crash_text != nullptr) {
+        std::fprintf(crash_text, "Unhandled exception %#lx on thread %lu, info %#llx %#llx\n",
+                     record.ExceptionCode, GetCurrentThreadId(),
+                     static_cast<unsigned long long>(
+                         record.NumberParameters > 0 ? record.ExceptionInformation[0] : 0),
+                     static_cast<unsigned long long>(
+                         record.NumberParameters > 1 ? record.ExceptionInformation[1] : 0));
+    }
     std::fprintf(stderr, "Unhandled exception %#lx on thread %lu, info %#llx %#llx\n",
                  record.ExceptionCode, GetCurrentThreadId(),
                  static_cast<unsigned long long>(record.NumberParameters > 0 ? record.ExceptionInformation[0] : 0),
@@ -123,6 +180,7 @@ static LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* exception) {
     for (USHORT i = 0; i < count; ++i) {
         PrintCodeAddress("frame", frames[i]);
     }
+    PrintAmdBreadcrumbs();
     std::fflush(stderr);
     struct ExceptionInformation {
         DWORD thread_id;
@@ -554,6 +612,11 @@ static bool BuildWarm(Core::System& system, int argc, char** argv) {
 extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
 #ifdef _WIN32
     SetUnhandledExceptionFilter(WriteCrashDump);
+    std::signal(SIGABRT, [](int) { ReportAbort("abort()"); });
+    std::set_terminate([] {
+        ReportAbort("std::terminate");
+        std::abort();
+    });
 #endif
     // SDL calls SDL_AppIterate back to back by default, which kept a host core at 100% polling
     // input. 1000 Hz, as the Qt frontend's 1 ms timer: at 240 Hz input waited ~2 ms on average

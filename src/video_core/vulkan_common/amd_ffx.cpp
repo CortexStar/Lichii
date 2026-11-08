@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <mutex>
 #include <system_error>
@@ -80,6 +81,71 @@ std::optional<size_t> NewestVersion4(std::span<const std::string> names) {
         }
     }
     return newest;
+}
+
+namespace {
+
+/// Breadcrumbs: the calls in progress (one slot each) and a ring of the last calls entered.
+struct Crumbs {
+    static constexpr u32 Slots = 16;
+    std::array<std::atomic<const char*>, Slots> running{};
+    std::array<std::atomic<const char*>, Slots> recent{};
+    std::atomic<u32> next_recent{};
+};
+
+Crumbs& GetCrumbs() {
+    static Crumbs crumbs;
+    return crumbs;
+}
+
+} // Anonymous namespace
+
+Scope::Scope(const char* call) noexcept : slot{Crumbs::Slots} {
+    Crumbs& crumbs = GetCrumbs();
+    const u32 index = crumbs.next_recent.fetch_add(1, std::memory_order_relaxed);
+    crumbs.recent[index % Crumbs::Slots].store(call, std::memory_order_relaxed);
+    for (u32 i = 0; i < Crumbs::Slots; ++i) {
+        const char* expected = nullptr;
+        if (crumbs.running[i].compare_exchange_strong(expected, call)) {
+            slot = i;
+            break;
+        }
+    }
+}
+
+Scope::~Scope() {
+    if (slot < Crumbs::Slots) {
+        GetCrumbs().running[slot].store(nullptr, std::memory_order_release);
+    }
+}
+
+void WriteBreadcrumbs(char* buffer, size_t size) noexcept {
+    if (size == 0) {
+        return;
+    }
+    size_t used = 0;
+    const auto append = [&](const char* text) {
+        for (; *text != '\0' && used + 1 < size; ++text) {
+            buffer[used++] = *text;
+        }
+    };
+    Crumbs& crumbs = GetCrumbs();
+    append("AMD FSR calls running:");
+    for (const auto& call : crumbs.running) {
+        if (const char* name = call.load(std::memory_order_acquire)) {
+            append(" ");
+            append(name);
+        }
+    }
+    append("; last calls:");
+    const u32 end = crumbs.next_recent.load(std::memory_order_relaxed);
+    for (u32 i = end > Crumbs::Slots ? end - Crumbs::Slots : 0; i < end; ++i) {
+        if (const char* name = crumbs.recent[i % Crumbs::Slots].load(std::memory_order_relaxed)) {
+            append(" ");
+            append(name);
+        }
+    }
+    buffer[used] = '\0';
 }
 
 namespace {
@@ -205,6 +271,7 @@ std::vector<Version> QueryVersions(std::uint64_t create_desc_type, VkDeviceConte
     query.createDescType = create_desc_type;
     query.device = &device;
     query.outputCount = &count;
+    Scope scope{"ffxQuery(versions)"};
     if (Api().query(nullptr, &query.header) != FFX_API_RETURN_OK || count == 0) {
         return versions;
     }
@@ -225,6 +292,7 @@ std::vector<Version> QueryVersions(std::uint64_t create_desc_type, VkDeviceConte
 std::string ProviderName(ffxContext& context) {
     ffxQueryGetProviderVersion query{};
     query.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
+    Scope scope{"ffxQuery(provider version)"};
     if (Api().query(&context, &query.header) != FFX_API_RETURN_OK || query.versionName == nullptr) {
         return "?";
     }
