@@ -63,6 +63,7 @@ VK_DEFINE_HANDLE(VmaPool)
     FEATURE(EXT, DepthBiasControl, DEPTH_BIAS_CONTROL, depth_bias_control)                         \
     FEATURE(EXT, DepthClipControl, DEPTH_CLIP_CONTROL, depth_clip_control)                         \
     FEATURE(EXT, DescriptorBuffer, DESCRIPTOR_BUFFER, descriptor_buffer)                           \
+    FEATURE(EXT, DescriptorHeap, DESCRIPTOR_HEAP, descriptor_heap)                                 \
     FEATURE(EXT, ExtendedDynamicState, EXTENDED_DYNAMIC_STATE, extended_dynamic_state)             \
     FEATURE(EXT, ExtendedDynamicState2, EXTENDED_DYNAMIC_STATE_2, extended_dynamic_state2)         \
     FEATURE(EXT, ExtendedDynamicState3, EXTENDED_DYNAMIC_STATE_3, extended_dynamic_state3)         \
@@ -639,6 +640,16 @@ FN_MAX_LIMIT_LIST
     /// Returns the descriptor buffer properties of the device.
     const VkPhysicalDeviceDescriptorBufferPropertiesEXT& DescriptorBufferProperties() const {
         return properties.descriptor_buffer;
+    }
+
+    /// Returns true if the device supports descriptor heaps (bindless textures and samplers).
+    bool IsExtDescriptorHeapSupported() const {
+        return extensions.descriptor_heap;
+    }
+
+    /// Returns the descriptor heap properties of the device.
+    const VkPhysicalDeviceDescriptorHeapPropertiesEXT& DescriptorHeapProperties() const {
+        return properties.descriptor_heap;
     }
 
     /// Returns true if the device supports buffer device address.
@@ -1451,6 +1462,7 @@ private:
         VkPhysicalDeviceFloatControlsProperties float_controls{};
         VkPhysicalDevicePushDescriptorPropertiesKHR push_descriptor{};
         VkPhysicalDeviceDescriptorBufferPropertiesEXT descriptor_buffer{};
+        VkPhysicalDeviceDescriptorHeapPropertiesEXT descriptor_heap{};
         VkPhysicalDeviceSubgroupSizeControlProperties subgroup_size_control{};
         VkPhysicalDeviceTransformFeedbackPropertiesEXT transform_feedback{};
         VkPhysicalDeviceMaintenance5PropertiesKHR maintenance5{};
