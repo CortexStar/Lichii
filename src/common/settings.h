@@ -432,6 +432,9 @@ struct Values {
                                                   false};
     // NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS.
     SwitchableSetting<bool> nvidia_dlss{linkage, false, "nvidia_dlss", Category::Renderer};
+    // Folder holding AMD's FSR runtime DLLs (amd_fidelityfx_loader_vk.dll and its effect DLLs),
+    // for AMD FSR 4 and AMD FSR frame generation; empty searches the user folder's "amd-fsr".
+    Setting<std::string> amd_fsr_dir{linkage, std::string(), "amd_fsr_dir", Category::Renderer};
     // AMD RCAS sharpening on NVIDIA DLSS's output (DLSS has none of its own since 3.1), in
     // percent; 0 leaves it unsharpened. Not applied in DLAA.
     SwitchableSetting<int, true> dlss_sharpening{linkage,

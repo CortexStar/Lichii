@@ -169,6 +169,7 @@ public:
         GenerateEdenPath(EdenPath::TASDir, eden_path / TAS_DIR);
         GenerateEdenPath(EdenPath::IconsDir, eden_path / ICONS_DIR);
         GenerateEdenPath(EdenPath::StreamlineDir, eden_path / STREAMLINE_DIR);
+        GenerateEdenPath(EdenPath::AmdFsrDir, eden_path / AMD_FSR_DIR);
         // config
         GenerateEdenPath(EdenPath::ConfigDir, eden_path_config);
         // cache

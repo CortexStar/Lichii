@@ -293,6 +293,8 @@ add_library(video_core STATIC
     renderer_vulkan/descriptor_payload_growth.h
     vulkan_common/vulkan_debug_callback.cpp
     vulkan_common/vulkan_debug_callback.h
+    vulkan_common/amd_ffx.cpp
+    vulkan_common/amd_ffx.h
     vulkan_common/vulkan_device.cpp
     vulkan_common/vulkan_device.h
     vulkan_common/vulkan_instance.cpp
@@ -621,6 +623,14 @@ if (ENABLE_NVIDIA_DLSS)
     target_link_libraries(video_core PRIVATE version wintrust crypt32)
     target_compile_definitions(video_core PUBLIC EGLANTINE_STREAMLINE)
     message(STATUS "NVIDIA DLSS through Streamline: ${STREAMLINE_INCLUDE_DIR}")
+endif()
+
+# AMD FSR 4 and AMD FSR frame generation through AMD's signed runtime DLLs, loaded at run time
+# from a folder the user chooses (vulkan_common/amd_ffx.cpp). Only the MIT API headers in
+# externals/FidelityFX-API are compiled in; nothing of AMD's is linked or shipped.
+if (WIN32)
+    target_sources(video_core PRIVATE vulkan_common/amd_ffx_api.h)
+    target_include_directories(video_core PRIVATE ${CMAKE_SOURCE_DIR}/externals/FidelityFX-API)
 endif()
 
 create_target_directory_groups(video_core)

@@ -29,6 +29,7 @@
 #define SDMC_DIR "sdmc"
 #define SHADER_DIR "shader"
 #define STREAMLINE_DIR "streamline"
+#define AMD_FSR_DIR "amd-fsr"
 #define TAS_DIR "tas"
 #define ICONS_DIR "icons"
 

@@ -31,6 +31,7 @@
 #include "video_core/post_processing/fx_chain.h"
 #endif
 #include "video_core/hdr_capture.h"
+#include "video_core/vulkan_common/amd_ffx.h"
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
 #include "video_core/renderer_vulkan/vk_blit_screen.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -124,6 +125,8 @@ Device CreateDevice(const vk::Instance& instance, const vk::InstanceDispatch& dl
         throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);
     }
     const vk::PhysicalDevice physical_device(devices[device_index], dld);
+    // Before the device: AMD's FSR runtime decides which queues and features it gets.
+    void(AmdFfx::Load());
     return Device(*instance, physical_device, surface, dld);
 }
 

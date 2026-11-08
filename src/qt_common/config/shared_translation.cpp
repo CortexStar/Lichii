@@ -193,6 +193,12 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Sharpens NVIDIA DLSS's upscaled output with AMD FidelityFX RCAS (DLSS has had no "
               "sharpening of its own since DLSS 3.1). Not applied in DLAA. 0% leaves it "
               "unsharpened."));
+    INSERT(Settings, amd_fsr_dir, tr("AMD FSR runtime folder"),
+           tr("Folder with AMD's FSR runtime: amd_fidelityfx_loader_vk.dll, "
+              "amd_fidelityfx_upscaler_vk.dll and amd_fidelityfx_framegeneration_vk.dll (AMD FSR "
+              "SDK 2.4.0 or newer, signedbin folder). Needed for AMD FSR 4 and AMD FSR frame "
+              "generation; Lichii does not ship AMD's files. Empty uses the amd-fsr folder in "
+              "Lichii's user folder. Takes effect when a game starts."));
     INSERT(Settings, nvidia_dlss, tr("Use NVIDIA DLSS in place of a game's DLSS (experimental)"),
            tr("Uses NVIDIA DLSS on GeForce RTX cards in place of a Switch 2 game's own DLSS, "
               "instead of AMD FSR 3.1.\nNeeds NVIDIA's Streamline loader, and NVIDIA DLSS unless "
