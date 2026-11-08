@@ -117,6 +117,17 @@ AMD's upscalers instead of DLSS, on any vendor's build (no Streamline):
 - **Frame cap:** with "Variable Refresh Rate Display" on, AMD frame generation holds the game at
   half of floor(R - R^2/3600) (112 at 240 Hz, so 224 shown, inside the VRR window that driver
   pacing needs) through the nx2:vi2 present pacer (`ChooseAmdFrameGenPolicy`, `HostFrameCap`).
+- **Frames start from the display:** with present waits (VK_KHR_present_wait2) or AMD's frame
+  generation swapchain, the nx2:vi2 vsync event the game starts its frames on is signalled by
+  the presenter when the frame before the last reaches the display (or AMD's swapchain takes a
+  present), not by a fixed timer (`video_core/host_vsync.h`). Starts are held to the pacer's
+  rate: the vsync rate, the FPS limit, the VRR cap, and the movie cadence
+  (`DisplayVsyncDeadline`). The timer steps in only when the display stops signalling
+  (`TimerVsyncSignals`). `EDEN_NX2_HOST_VSYNC=0` keeps the timer for A/B runs.
+- **Anti-Lag 2** (`anti_lag`, VK_AMD_anti_lag): its input stage runs right before that signal on
+  the presenting thread, a host thread, so the guest's cores never block there. It holds the rate
+  as maxFPS in place of Lichii's wait. The present stage, with the same frame index, runs right
+  before that frame's present.
 - **Latency:** guest frame start to host present is logged every 600 frames and reported by
   `present_status` (mean, p50, p99, max). Judge pacing on PresentMon's MsBetweenDisplayChange:
   with the driver metering flips, present-call intervals alternate (OptiScaler's "thick" graph)

@@ -46,6 +46,8 @@ struct FrameGenStatus {
 };
 
 struct PresentStatus {
+    bool anti_lag{};              ///< VK_AMD_anti_lag in use
+    bool host_vsync{};            ///< the display has started the game's frames (HostVsync)
     u32 refresh_hz{};             ///< of the window's monitor; 0 when unknown
     u32 frame_cap{};              ///< game frames per second held (HostFrameCap); 0: none
     bool amd_frame_gen{};         ///< AMD's frame generation swapchain presents

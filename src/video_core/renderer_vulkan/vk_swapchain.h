@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -52,8 +53,9 @@ public:
     /// `may_flush`: false on the async present thread (see Scheduler::Wait).
     bool AcquireNextImage(bool may_flush = true);
 
-    /// Presents the rendered image to the swapchain.
-    void Present(VkSemaphore render_semaphore);
+    /// Presents the rendered image to the swapchain. `new_frame` is false for a repeat of the
+    /// last image (the present cadence): its display starts no guest frame.
+    void Present(VkSemaphore render_semaphore, bool new_frame = true);
 
     /// Returns true when the swapchain needs to be recreated.
     bool NeedsRecreation() const {
@@ -232,6 +234,8 @@ private:
     std::atomic<u32> frame_cap{};
     bool present_wait{}; ///< Presents carry ids (VK_KHR_present_id2) and are waited for.
     u64 present_id{};    ///< Id of the last present.
+    /// Whether the presents with the last ids (by id modulo the size) carried a new guest frame.
+    std::array<bool, 8> present_new_frame{};
 
     bool is_outdated{};
     bool is_suboptimal{};

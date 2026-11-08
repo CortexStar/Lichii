@@ -561,6 +561,9 @@ struct Values {
                                                         false,
                                                         &frame_gen};
 
+    // AMD Anti-Lag 2 (VK_AMD_anti_lag) right before the game starts each frame.
+    SwitchableSetting<bool> anti_lag{linkage, true, "anti_lag", Category::Renderer};
+
     SwitchableSetting<bool> frame_gen_dump_flow{linkage, false, "frame_gen_dump_flow",
                                                 Category::Renderer};
 

@@ -56,9 +56,10 @@ TOOLS = [
     {
         "name": "present_status",
         "description": "Presentation for the bench: guest frame start to host present latency "
-                       "(last 1024 frames: mean, p50, p99, max), the VRR frame cap (shown and "
-                       "rendered fps), Anti-Lag 2, and AMD FSR frame generation's driver-pacing "
-                       "prerequisites (swapchain version, driver, VSync off, fullscreen, HAGS).",
+                       "(last 1024 frames: mean, p50, p99, max), the game frame cap, Anti-Lag 2, "
+                       "whether the display starts the game's frames, and AMD FSR frame "
+                       "generation's driver-pacing prerequisites (swapchain version, driver, "
+                       "VSync off, fullscreen, HAGS).",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {

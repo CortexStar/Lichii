@@ -193,6 +193,10 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Sharpens NVIDIA DLSS's upscaled output with AMD FidelityFX RCAS (DLSS has had no "
               "sharpening of its own since DLSS 3.1). Not applied in DLAA. 0% leaves it "
               "unsharpened."));
+    INSERT(Settings, anti_lag, tr("AMD Anti-Lag 2"),
+           tr("Lowers input latency on AMD Radeon GPUs (VK_AMD_anti_lag): the driver delays the "
+              "start of the game's next frame instead of letting frames queue, and holds the "
+              "frame rate limit there."));
     INSERT(Settings, amd_fsr_dir, tr("AMD FSR runtime folder"),
            tr("Folder with AMD's FSR runtime: amd_fidelityfx_loader_vk.dll, "
               "amd_fidelityfx_upscaler_vk.dll and amd_fidelityfx_framegeneration_vk.dll (AMD FSR "

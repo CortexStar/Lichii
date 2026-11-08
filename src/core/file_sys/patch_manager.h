@@ -31,6 +31,10 @@ class NACP;
 
 enum class PatchType { Update, DLC, Mod };
 
+/// A built-in patch that lets the game run faster than its console frame rate (Ocarina of Time's
+/// FPS Unlock or Dynamic FPS) is applied to `title_id`'s main module.
+[[nodiscard]] bool FrameRateUnlocked(u64 title_id);
+
 enum class PatchSource {
     Unknown,
     NAND,

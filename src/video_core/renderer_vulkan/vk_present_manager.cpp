@@ -843,7 +843,7 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         }
         Common::InputLatency::RecordPresent(std::exchange(frame->input_ns, 0));
     }
-    swapchain.Present(render_semaphore);
+    swapchain.Present(render_semaphore, !presenting_repeat);
 }
 
 } // namespace Vulkan

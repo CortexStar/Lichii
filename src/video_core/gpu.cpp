@@ -33,6 +33,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/guest_frame_timing.h"
+#include "video_core/host_vsync.h"
 #include "video_core/gpu.h"
 #include "video_core/pending_maps.h"
 #include "video_core/gpu_thread.h"
@@ -659,7 +660,11 @@ void GPU::RequestComposite(std::vector<Tegra::FramebufferConfig>&& layers,
 }
 
 void GPU::GuestFrameBoundary() {
-    static_cast<void>(VideoCore::GuestFrameTiming::BeginFrame());
+    // While the display starts the game's frames (HostVsync), they are numbered there.
+    const auto last = VideoCore::HostVsync::LastStart();
+    if (!last || std::chrono::steady_clock::now() - *last > std::chrono::milliseconds{100}) {
+        static_cast<void>(VideoCore::GuestFrameTiming::BeginFrame());
+    }
 }
 
 void GPU::WaitForComposite() {

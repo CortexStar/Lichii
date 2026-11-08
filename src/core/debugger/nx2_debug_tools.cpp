@@ -236,6 +236,8 @@ json PresentStatus(ToolState& state, const json&) {
           {"p50_ms", latency.p50_ms},
           {"p99_ms", latency.p99_ms},
           {"max_ms", latency.max_ms}}},
+        {"anti_lag", status.anti_lag},
+        {"host_vsync", status.host_vsync},
         {"refresh_hz", status.refresh_hz},
         {"frame_cap", status.frame_cap},
         {"frame_gen_pacing",

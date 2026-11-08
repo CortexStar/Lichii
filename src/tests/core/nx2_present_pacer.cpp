@@ -151,3 +151,46 @@ TEST_CASE("NX2 movie cadence paces at a multiple of the movie rate", "[core][nx2
     // 30 fps movies.
     REQUIRE(MovieCadenceRate(112, 30) == 90);
 }
+
+TEST_CASE("NX2 display start rate follows the host cap when the frame rate is unlocked",
+          "[core][nx2_present_pacer]") {
+    using Service::DisplayStartRate;
+    // Unlocked at 240 Hz with VRR: the cap (224), not the console's 60 Hz.
+    REQUIRE(DisplayStartRate(true, 60, 0, 224, 0) == 224);
+    // With AMD frame generation the cap is halved for real frames.
+    REQUIRE(DisplayStartRate(true, 60, 0, 112, 0) == 112);
+    // The user's limit below the cap wins; no limit and no cap: none.
+    REQUIRE(DisplayStartRate(true, 60, 144, 224, 0) == 144);
+    REQUIRE(DisplayStartRate(true, 60, 0, 0, 0) == 0);
+    // Locked: the console's vsync rate, lowered by the limit and the cap.
+    REQUIRE(DisplayStartRate(false, 60, 0, 224, 0) == 60);
+    REQUIRE(DisplayStartRate(false, 60, 0, 0, 0) == 60);
+    REQUIRE(DisplayStartRate(false, 60, 30, 224, 0) == 30);
+    REQUIRE(DisplayStartRate(false, 120, 0, 112, 0) == 112);
+    // A 60 fps movie keeps its cadence either way.
+    REQUIRE(DisplayStartRate(true, 60, 0, 224, 60) == 180);
+    REQUIRE(DisplayStartRate(false, 60, 0, 224, 60) == 60);
+}
+
+TEST_CASE("NX2 display vsync starts frames at the display, under the paced rate",
+          "[core][nx2_present_pacer]") {
+    using Service::DisplayVsyncDeadline;
+    // The first frame, or no limit: at once.
+    REQUIRE(DisplayVsyncDeadline(std::nullopt, Start, 112) == Start);
+    REQUIRE(DisplayVsyncDeadline(Start, Start + 1ms, 0) == Start + 1ms);
+    // 112 fps (AMD frame generation's game rate at 240 Hz): 8.928571 ms between starts.
+    const auto next = DisplayVsyncDeadline(Start, Start + 4ms, 112);
+    REQUIRE(next == Start + 8'928'571ns);
+    // A display signal after the interval starts the frame at once.
+    REQUIRE(DisplayVsyncDeadline(Start, Start + 10ms, 112) == Start + 10ms);
+    // A 30 fps movie cadence (MovieCadenceRate) holds starts 33 ms apart.
+    REQUIRE(DisplayVsyncDeadline(Start, Start + 20ms, 30) == Start + 33'333'333ns);
+}
+
+TEST_CASE("NX2 vsync timer steps in only when the display stops", "[core][nx2_present_pacer]") {
+    using Service::TimerVsyncSignals;
+    REQUIRE(TimerVsyncSignals(std::nullopt, Start, OneVblank));
+    REQUIRE_FALSE(TimerVsyncSignals(Start, Start + OneVblank, OneVblank));
+    REQUIRE_FALSE(TimerVsyncSignals(Start, Start + 2 * OneVblank, OneVblank));
+    REQUIRE(TimerVsyncSignals(Start, Start + ThreeVblanks, OneVblank));
+}

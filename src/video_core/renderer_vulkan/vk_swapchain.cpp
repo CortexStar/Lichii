@@ -17,6 +17,7 @@
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
+#include "video_core/host_vsync.h"
 #include "video_core/renderer_vulkan/present_mode_policy.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
@@ -193,6 +194,10 @@ bool Swapchain::AcquireNextImage(bool may_flush) {
     if (present_wait && present_id > 1 && IsNativeSwapchain()) {
         const VkResult wait = device.GetLogical().WaitForPresent2KHR(*swapchain, present_id - 1,
                                                                     PresentWaitTimeoutNs);
+        if (wait == VK_SUCCESS && present_new_frame[(present_id - 1) % present_new_frame.size()]) {
+            // The present before the last is on screen: the game may start its next frame.
+            VideoCore::HostVsync::Displayed();
+        }
         switch (wait) {
         case VK_SUCCESS:
         case VK_TIMEOUT:
@@ -291,7 +296,7 @@ bool Swapchain::AcquireNextImage(bool may_flush) {
     return false;
 }
 
-void Swapchain::Present(VkSemaphore render_semaphore) {
+void Swapchain::Present(VkSemaphore render_semaphore, bool new_frame) {
     const auto present_queue{device.GetPresentQueue()};
     const u64 next_present_id = present_id + 1;
     const VkPresentId2KHR present_id_info{
@@ -317,13 +322,18 @@ void Swapchain::Present(VkSemaphore render_semaphore) {
     if (present_wait) {
         // The id belongs to this present whatever it returns.
         present_id = next_present_id;
+        present_new_frame[present_id % present_new_frame.size()] = new_frame;
     }
     const VkResult present_result = [&] {
 #ifdef _WIN32
         if (amd_swapchain != VK_NULL_HANDLE) {
             // AMD's present submits to the game queue through its submit callback, which takes
             // the submit mutex itself (present/amd_frame_gen.cpp).
-            return amd_frame_gen->Present(*device.GetGraphicsQueue(), present_info);
+            const VkResult result =
+                amd_frame_gen->Present(*device.GetGraphicsQueue(), present_info);
+            // AMD's swapchain took the frame and paces it from here: the game's next frame starts.
+            VideoCore::HostVsync::Displayed();
+            return result;
         }
 #endif
         std::scoped_lock lock{scheduler.submit_mutex};

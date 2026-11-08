@@ -22,6 +22,7 @@
 #include "video_core/renderer_vulkan/present/frame_gen.h"
 #include "video_core/renderer_vulkan/present/perf_overlay_pass.h"
 #endif
+#include "video_core/renderer_vulkan/vk_anti_lag.h"
 #include "video_core/renderer_vulkan/vk_blit_screen.h"
 #include "video_core/renderer_vulkan/vk_present_manager.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -132,6 +133,7 @@ private:
     MemoryAllocator memory_allocator;
     StateTracker state_tracker;
     Scheduler scheduler;
+    AntiLag anti_lag;
     Swapchain swapchain;
     PresentManager present_manager;
     BlitScreen blit_swapchain;

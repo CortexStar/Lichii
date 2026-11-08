@@ -86,6 +86,63 @@ constexpr std::uint32_t ConsoleVsyncHz = 60;
     return rate / movie_rate * movie_rate;
 }
 
+/**
+ * Returns the rate the host's display starts the game's frames at most (HostVsync::SetRate): the
+ * FPS limit with the VRR cap and, while a movie plays, its cadence. A game whose frame rate is
+ * unlocked starts frames as fast as that allows; otherwise no faster than the console's vsync.
+ *
+ * @param frame_rate_unlocked A built-in frame rate unlock is applied (FileSys::FrameRateUnlocked).
+ * @param console_vsync_hz    The console's vsync rate (Settings frame_rate_limit).
+ * @param fps_limit           Frames per second the user asked for, or 0 for none.
+ * @param host_cap            The renderer's frame cap (RendererBase::HostFrameCap), or 0 for none.
+ * @param movie_rate          Frame rate of the movie playing, or 0 when none plays.
+ * @return 0 for no limit.
+ */
+[[nodiscard]] constexpr std::uint32_t DisplayStartRate(bool frame_rate_unlocked,
+                                                       std::uint32_t console_vsync_hz,
+                                                       std::uint32_t fps_limit,
+                                                       std::uint32_t host_cap,
+                                                       std::uint32_t movie_rate) {
+    const std::uint32_t limit = EffectiveFpsLimit(fps_limit, host_cap);
+    const std::uint32_t rate =
+        frame_rate_unlocked ? limit : EffectiveFpsLimit(console_vsync_hz, limit);
+    return MovieCadenceRate(rate, movie_rate);
+}
+
+/**
+ * Display-driven vsync: when a frame reaching the host's display starts the game's next frame.
+ * At once, but not before the previous start plus the interval of @p rate (the FPS limit with the
+ * VRR cap and the movie cadence), so the game starts no more frames than the pacer presents.
+ *
+ * @param last_start When the previous frame started, if one did.
+ * @param displayed  When the host saw a frame reach the display.
+ * @param rate       Frames per second to hold, or 0 for none.
+ */
+[[nodiscard]] constexpr std::chrono::steady_clock::time_point DisplayVsyncDeadline(
+    std::optional<std::chrono::steady_clock::time_point> last_start,
+    std::chrono::steady_clock::time_point displayed, std::uint32_t rate) {
+    if (!last_start || rate == 0) {
+        return displayed;
+    }
+    const auto earliest = *last_start + std::chrono::nanoseconds{1'000'000'000LL / rate};
+    return (std::max)(displayed, earliest);
+}
+
+/**
+ * Whether the fixed-rate vsync timer still starts the game's frames: only while the display has
+ * not done so for two timer periods (no present waits, an occluded window, a load without
+ * presents), so the game never stalls when display signals stop.
+ *
+ * @param last_display When the display last started a frame, if ever.
+ * @param now          The timer's callback time.
+ * @param interval     The timer's period.
+ */
+[[nodiscard]] constexpr bool TimerVsyncSignals(
+    std::optional<std::chrono::steady_clock::time_point> last_display,
+    std::chrono::steady_clock::time_point now, std::chrono::nanoseconds interval) {
+    return !last_display || now - *last_display > 2 * interval;
+}
+
 class Nx2PresentPacer {
 public:
     using Clock = std::chrono::steady_clock;
