@@ -14,6 +14,7 @@ add_executable(dynarmic_tests
     A32/test_svc.cpp
     A32/test_thumb_instructions.cpp
     A32/testenv.h
+    block_range_information.cpp
     decoder_tests.cpp
     # A64
     A64/a64.cpp
