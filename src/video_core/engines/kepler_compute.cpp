@@ -1166,20 +1166,8 @@ bool KeplerCompute::ScaleDlssRenderRegion(GPUVAddr constants,
     motion_surface.format = Tegra::RenderTargetFormat::R16G16_FLOAT;
     // The game's motion vectors point from the previous position to the current one (a rightward
     // pan gives negative x while the scene moves left), the reverse of what the upscale expects.
-    // Test switches: EDEN_NX2_DLSS_MOTION_SCALE=<x>,<y> and EDEN_NX2_DLSS_HISTORY=0 (de-jitter only).
-    static const std::array<f32, 2> motion_scale = [] {
-        std::array<f32, 2> scale{-1.0f, -1.0f};
-        if (const char* value = std::getenv("EDEN_NX2_DLSS_MOTION_SCALE")) {
-            char* end{};
-            scale[0] = static_cast<f32>(std::strtod(value, &end));
-            scale[1] = *end == ',' ? static_cast<f32>(std::strtod(end + 1, nullptr)) : scale[0];
-        }
-        return scale;
-    }();
-    static const bool use_history = [] {
-        const char* value = std::getenv("EDEN_NX2_DLSS_HISTORY");
-        return !(value && std::string_view{value} == "0");
-    }();
+    constexpr std::array<f32, 2> motion_scale{-1.0f, -1.0f};
+    constexpr bool use_history = true;
     const bool done = rasterizer->AccelerateTemporalUpscale(
         surface(*input), surface(*output), motion_surface, depth ? &*depth : nullptr,
         jitter->offset, motion_scale, use_history, std::array{width, height});
