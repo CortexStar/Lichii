@@ -48,6 +48,7 @@ KeplerCompute::KeplerCompute(MemoryManager& memory_manager_)
     : memory_manager{memory_manager_}
     , upload_state{memory_manager, regs.upload}
 {
+    engine_type = EngineTypes::KeplerCompute;
     // EDEN_NX2_QMD_TRACE: log the QMD scheduler's loads, dependency counts and launches.
     if (std::getenv("EDEN_NX2_QMD_TRACE")) {
         native_qmd.trace = [this](std::string_view event, u64 address, s32 value) {
@@ -1821,6 +1822,8 @@ void KeplerCompute::BackWrites(Core::System& system, const u64* writes, u32 coun
                 upload_state.HoldWrites(holding);
             }
         }
+        // Timed per method as GpuSplit::Execute times Method entries (EDEN_NX2_GPU_PROFILE).
+        VideoCommon::Nx2Profile::MethodScope method_scope{static_cast<u32>(engine_type), method};
         ConsumeSink(system);
         CallMethod(system, method, argument, (write & GpuSplit::WriteIsLast) != 0);
     }

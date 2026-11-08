@@ -27,6 +27,7 @@ using namespace Texture;
 MaxwellDMA::MaxwellDMA(MemoryManager& memory_manager_)
     : memory_manager{memory_manager_}
 {
+    engine_type = EngineTypes::MaxwellDMA;
     execution_mask.reset();
     execution_mask[offsetof(Regs, launch_dma) / sizeof(u32)] = true;
 }

@@ -47,6 +47,8 @@ public:
     /// A Maxwell3D whose CallMethod takes its fast path (Nx2Perf): GpuSplit's back calls it
     /// without the virtual call.
     bool fast_maxwell3d{};
+    /// Which engine this is (the split back's profile zones and per-method times).
+    EngineTypes engine_type{EngineTypes::Nv01Timer};
     std::vector<std::pair<u32, u32>> method_sink{};
     GPUVAddr current_dma_segment;
     bool current_dirty{};
