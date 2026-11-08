@@ -1641,6 +1641,13 @@ void Device::RemoveUnsuitableExtensions() {
     RemoveExtensionFeatureIfUnsuitable(extensions.depth_clip_control, features.depth_clip_control,
                                        VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
 
+    // Buffer device addresses: core since Vulkan 1.2, where the extension list doesn't name it
+    // (FEATURE_EXTENSION sets the flag below 1.2 only), so the queried feature says it.
+    extensions.buffer_device_address = features.buffer_device_address.bufferDeviceAddress;
+    RemoveExtensionFeatureIfUnsuitable(extensions.buffer_device_address,
+                                       features.buffer_device_address,
+                                       VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+
     // VK_EXT_descriptor_buffer
     extensions.descriptor_buffer = features.descriptor_buffer.descriptorBuffer;
     RemoveExtensionFeatureIfUnsuitable(extensions.descriptor_buffer, features.descriptor_buffer,
