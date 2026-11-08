@@ -30,7 +30,7 @@ namespace Vulkan {
 // that uses that shader, whatever its partner stage. The vertex input and fragment output parts
 // are cheap and built per pipeline. A new pipeline whose shaders were seen before costs a link:
 // a fraction of a millisecond with a fast link, a few milliseconds with an optimized one
-// (Device::LinksGraphicsLibrariesOptimized), against a full build of tens of milliseconds.
+// (GraphicsLibraryLinksOptimized), against a full build of tens of milliseconds.
 //
 // For a shader library to be independent of its partner, each stage has its own descriptor set
 // (set index = stage index, VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT) with its bindings

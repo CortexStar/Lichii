@@ -1757,7 +1757,7 @@ void Device::RemoveUnsuitableExtensions() {
                                        VK_EXT_MESH_SHADER_EXTENSION_NAME);
 
     // VK_EXT_graphics_pipeline_library. Without fast linking every link is optimized
-    // (LinksGraphicsLibrariesOptimized).
+    // (GraphicsLibraryLinksOptimized).
     if (graphics_pipeline_library_requested) {
         const bool usable = graphics_pipeline_library_features.graphicsPipelineLibrary;
         if (!usable) {
@@ -1768,9 +1768,10 @@ void Device::RemoveUnsuitableExtensions() {
         graphics_pipeline_library_enabled = usable;
         if (usable) {
             LOG_INFO(Render_Vulkan,
-                     "Nx2Perf gpl: graphics pipeline libraries on ({} links, independent "
-                     "interpolation decoration {})",
-                     LinksGraphicsLibrariesOptimized() ? "optimized" : "fast",
+                     "Nx2Perf gpl: graphics pipeline libraries on (fast linking {}, link time "
+                     "optimization info kept {}, independent interpolation decoration {})",
+                     properties.graphics_pipeline_library.graphicsPipelineLibraryFastLinking,
+                     KeepsGraphicsLibraryLinkInfo(),
                      properties.graphics_pipeline_library
                          .graphicsPipelineLibraryIndependentInterpolationDecoration);
         }

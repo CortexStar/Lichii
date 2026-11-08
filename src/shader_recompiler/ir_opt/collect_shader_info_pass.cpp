@@ -4,6 +4,9 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <unordered_set>
+#include <vector>
+
 #include "common/alignment.h"
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ir/modifiers.h"
@@ -993,7 +996,68 @@ void GatherInfoFromHeader(Environment& env, Info& info) {
         // TODO: Legacy varyings
     }
 }
+bool ReadsQuad(IR::Opcode opcode) {
+    switch (opcode) {
+    case IR::Opcode::DPdxFine:
+    case IR::Opcode::DPdyFine:
+    case IR::Opcode::DPdxCoarse:
+    case IR::Opcode::DPdyCoarse:
+    case IR::Opcode::BindlessImageSampleImplicitLod:
+    case IR::Opcode::BindlessImageSampleDrefImplicitLod:
+    case IR::Opcode::BindlessImageQueryLod:
+    case IR::Opcode::BoundImageSampleImplicitLod:
+    case IR::Opcode::BoundImageSampleDrefImplicitLod:
+    case IR::Opcode::BoundImageQueryLod:
+    case IR::Opcode::ImageSampleImplicitLod:
+    case IR::Opcode::ImageSampleDrefImplicitLod:
+    case IR::Opcode::ImageQueryLod:
+    case IR::Opcode::FSwizzleAdd:
+    case IR::Opcode::QuadBroadcast:
+    case IR::Opcode::QuadSwap:
+        return true;
+    default:
+        return false;
+    }
+}
 } // Anonymous namespace
+
+bool UsesQuadAfterDemote(const IR::Program& program) {
+    std::vector<const IR::Block*> pending;
+    std::unordered_set<const IR::Block*> reached;
+    for (const IR::Block* const block : program.blocks) {
+        bool demoted{};
+        for (const IR::Inst& inst : block->Instructions()) {
+            if (demoted && ReadsQuad(inst.GetOpcode())) {
+                return true;
+            }
+            demoted |= inst.GetOpcode() == IR::Opcode::DemoteToHelperInvocation;
+        }
+        if (!demoted) {
+            continue;
+        }
+        for (const IR::Block* const successor : block->ImmSuccessors()) {
+            if (reached.insert(successor).second) {
+                pending.push_back(successor);
+            }
+        }
+    }
+    // Everything in a block reachable from a demote runs after it.
+    while (!pending.empty()) {
+        const IR::Block* const block = pending.back();
+        pending.pop_back();
+        for (const IR::Inst& inst : block->Instructions()) {
+            if (ReadsQuad(inst.GetOpcode())) {
+                return true;
+            }
+        }
+        for (const IR::Block* const successor : block->ImmSuccessors()) {
+            if (reached.insert(successor).second) {
+                pending.push_back(successor);
+            }
+        }
+    }
+    return false;
+}
 
 void CollectShaderInfoPass(Environment& env, IR::Program& program) {
     Info& info{program.info};
@@ -1028,6 +1092,9 @@ void CollectShaderInfoPass(Environment& env, IR::Program& program) {
         for (IR::Inst& inst : block->Instructions()) {
             Visit(info, inst);
         }
+    }
+    if (program.stage == Stage::Fragment && info.uses_demote_to_helper_invocation) {
+        info.uses_quad_after_demote = UsesQuadAfterDemote(program);
     }
     GatherInfoFromHeader(env, info);
 }

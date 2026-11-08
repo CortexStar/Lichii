@@ -1822,7 +1822,7 @@ bool InPart(GplPart part, size_t stage) {
 
 VkPipelineCreateFlags LibraryFlags(const Device& device) {
     VkPipelineCreateFlags flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
-    if (device.LinksGraphicsLibrariesOptimized()) {
+    if (device.KeepsGraphicsLibraryLinkInfo()) {
         flags |= VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT;
     }
     return flags;
@@ -2131,7 +2131,8 @@ bool GraphicsPipeline::MakeLibraryPipeline(VkRenderPass render_pass) {
             .basePipelineIndex = 0,
         },
         *pipeline_cache);
-    pipeline = LinkLibraries(render_pass, device.LinksGraphicsLibrariesOptimized());
+    pipeline = LinkLibraries(render_pass, device.LinksGraphicsLibrariesOptimized(
+                                              stage_infos[NUM_STAGES - 1].uses_quad_after_demote));
     linked = true;
     return true;
 }

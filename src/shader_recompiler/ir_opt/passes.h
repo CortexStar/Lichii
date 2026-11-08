@@ -19,6 +19,10 @@ struct HostTranslateInfo;
 namespace Shader::Optimization {
 
 void CollectShaderInfoPass(Environment& env, IR::Program& program);
+/// Whether an instruction that reads other lanes of the quad (a derivative, an implicit-LOD sample
+/// or level query, a quad shuffle or FSWZADD) can run after a DemoteToHelperInvocation: later in
+/// its block, or in any block reachable from it (loops included).
+[[nodiscard]] bool UsesQuadAfterDemote(const IR::Program& program);
 void ConditionalBarrierPass(IR::Program& program);
 void ConstantPropagationPass(Environment& env, IR::Program& program);
 void DeadCodeEliminationPass(IR::Program& program);
