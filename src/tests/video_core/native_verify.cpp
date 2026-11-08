@@ -14,10 +14,12 @@ TEST_CASE("EDEN_NX2_NATIVE_VERIFY names layers by name, comma separated", "[nati
     constexpr u32 textures = 1U << static_cast<u32>(Layer::Textures);
     constexpr u32 bindless = 1U << static_cast<u32>(Layer::Bindless);
     constexpr u32 barriers = 1U << static_cast<u32>(Layer::Barriers);
+    constexpr u32 dynstate = 1U << static_cast<u32>(Layer::DynState);
     REQUIRE(ParseMask("") == 0);
     REQUIRE(ParseMask("storage") == storage);
     REQUIRE(ParseMask("uniforms,storage") == (storage | uniforms));
-    REQUIRE(ParseMask("all") == (storage | uniforms | textures | bindless | barriers));
+    REQUIRE(ParseMask("all") == (storage | uniforms | textures | bindless | barriers | dynstate));
+    REQUIRE(ParseMask("dynstate") == dynstate);
     REQUIRE(ParseMask("textures") == textures);
     REQUIRE(ParseMask("bindless,textures") == (textures | bindless));
     REQUIRE(ParseMask("texture") == 0);

@@ -21,19 +21,20 @@
 #include "video_core/buffer_cache/nx2_write_handoff.h"
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/engines/maxwell_dma.h"
+#include "video_core/hazard_tracker.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/oot_network.h"
 #include "video_core/rasterizer_interface.h"
-#include "video_core/hazard_tracker.h"
 #include "video_core/renderer_vulkan/blit_image.h"
+#include "video_core/renderer_vulkan/dynamic_state_delta.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_descriptor_buffer.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_fence_manager.h"
+#include "video_core/renderer_vulkan/vk_frame_dump.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
-#include "video_core/renderer_vulkan/vk_frame_dump.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
@@ -217,81 +218,36 @@ private:
 
     void HandleTransformFeedback();
 
-    void UpdateViewportsState(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateScissorsState(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateDepthBias(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateBlendConstants(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateDepthBounds(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateStencilFaces(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateLineWidth(Tegra::Engines::Maxwell3D::Regs& regs);
-
-    void UpdateCullMode(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateDepthBoundsTestEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateDepthTestEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateDepthWriteEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateDepthCompareOp(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdatePrimitiveRestartEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateRasterizerDiscardEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateConservativeRasterizationMode(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateLineStippleEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateLineStipple(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateLineRasterizationMode(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateDepthBiasEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateLogicOpEnable(Tegra::Engines::Maxwell3D::Regs& regs);
+    /// The value a dynamic state slot takes for the registers and the draw's pipeline (null:
+    /// DrawTexture); 0 words when the device doesn't record it dynamically.
+    u32 ComputeDynamicState(DynamicStateDelta::Slot slot,
+                            const Tegra::Engines::Maxwell3D::Regs& regs,
+                            const GraphicsPipeline* pipeline, u32* out);
+    /// Stages the slot's value; without batching records it at once.
+    void StageDynamicState(DynamicStateDelta::Slot slot,
+                           const Tegra::Engines::Maxwell3D::Regs& regs,
+                           const GraphicsPipeline* pipeline);
+    /// Records the staged slots among `slots` as one command.
+    void RecordDynamicStatePacket(u64 slots);
+    /// EDEN_NX2_NATIVE_VERIFY=dynstate: every slot the draw uses holds what the registers give.
+    void VerifyDynamicState(const Tegra::Engines::Maxwell3D::Regs& regs,
+                            const GraphicsPipeline* pipeline, bool emulated_mesh);
     /// Whether HostLogicOpEnable differs from what the command buffer holds (or it holds none).
     [[nodiscard]] bool LogicOpEnableChanged(const Tegra::Engines::Maxwell3D::Regs& regs) const;
-    void UpdateDepthClampEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateAlphaToCoverageEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateAlphaToOneEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateFrontFace(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateStencilOp(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateStencilTestEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateLogicOp(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateBlending(Tegra::Engines::Maxwell3D::Regs& regs, const GraphicsPipeline* pipeline);
-    void UpdateColorWriteEnable(Tegra::Engines::Maxwell3D::Regs& regs);
+    /// The viewports alone (clears).
+    void UpdateViewportsState(Tegra::Engines::Maxwell3D::Regs& regs);
 
     void UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs);
 
-    /// One slot per dynamic state whose last recorded value is cached (DynamicStateChanged).
-    enum class DynSlot : u32 {
-        Viewports,
-        Scissors,
-        DepthBias,
-        BlendConstants,
-        DepthBounds,
-        LineWidth,
-        CullMode,
-        DepthBoundsTestEnable,
-        DepthTestEnable,
-        DepthWriteEnable,
-        StencilTestEnable,
-        DepthCompareOp,
-        FrontFace,
-        StencilOp,
-        PrimitiveRestartEnable,
-        RasterizerDiscardEnable,
-        DepthBiasEnable,
-        LogicOp,
-        LogicOpEnable,
-        ColorWriteEnable,
-        VertexInput,
-    };
-
-    /// False when `value` is what slot last recorded into the current command buffer (the
-    /// record can be skipped); otherwise caches it and returns true.
-    template <typename T>
-    bool DynamicStateChanged(DynSlot slot, T& cached, const T& value);
-    void ForgetDynamicState(DynSlot slot) noexcept {
-        dyn_cache.valid &= ~(u64{1} << static_cast<u32>(slot));
-    }
     void BuildDynamicStateMask();
 
-    struct VertexInputLayout {
-        boost::container::static_vector<VkVertexInputBindingDescription2EXT, 32> bindings;
-        boost::container::static_vector<VkVertexInputAttributeDescription2EXT, 32> attributes;
-    };
+    using VertexInputLayout = DynamicStateDelta::VertexInputLayout;
     /// Attribute formats, per binding stride, instancing and divisor, and the repacked bindings.
     using VertexInputKey = std::array<u32, 32 + 32 * 3 + 1>;
+    [[nodiscard]] VertexInputKey MakeVertexInputKey(
+        const Tegra::Engines::Maxwell3D::Regs& regs) const;
+    [[nodiscard]] u32 MaxVertexInputAttributes() const;
+    [[nodiscard]] u32 MaxVertexInputBindings() const;
     struct VertexInputKeyHash {
         size_t operator()(const VertexInputKey& key) const noexcept;
     };
@@ -442,34 +398,13 @@ private:
     /// The current submission's arena, after its counter is reset.
     const MeshArena& AcquireMeshArena();
 
-    /// Dynamic state last recorded into the command buffer of `epoch` (bit per DynSlot in
-    /// `valid`). Viewports and scissors are keyed on the registers they are computed from.
-    struct DynamicStateCache {
-        u64 epoch{};
-        u64 valid{};
-        std::array<u32, 6 + 16 * 7> viewports{};
-        std::array<u32, 6 + 16 * 3> scissors{};
-        std::array<f32, 3> depth_bias{};
-        std::array<f32, 4> blend_constants{};
-        std::array<f32, 2> depth_bounds{};
-        f32 line_width{};
-        u32 cull_mode{};
-        u32 depth_bounds_test{};
-        u32 depth_test{};
-        u32 depth_write{};
-        u32 stencil_test{};
-        u32 depth_compare{};
-        u32 front_face{};
-        std::array<u32, 9> stencil_op{};
-        u32 primitive_restart{};
-        u32 rasterizer_discard{};
-        u32 depth_bias_enable{};
-        u32 logic_op{};
-        u32 logic_op_enable{};
-        std::array<VkBool32, 8> color_write_enable{};
-        const void* vertex_input{};
-    };
-    DynamicStateCache dyn_cache;
+    /// What the command buffer holds of each dynamic state, and the slots staged for the draw.
+    DynamicStateDelta::Tracker dyn_state;
+    /// The slots the draws record dynamically on this device (BuildDynamicStateMask).
+    u64 dyn_state_slots{};
+    DynamicStateDelta::ApplyOptions dyn_apply_options{};
+    /// One command per draw for the changed states (false: one per changed state).
+    bool dyn_state_batch{true};
     /// The dirty flags UpdateDynamicStates consumes on this device: none set, nothing to record.
     Tegra::Engines::Maxwell3D::DirtyState::Flags dyn_state_mask{};
     bool dyn_state_mask_built{};
