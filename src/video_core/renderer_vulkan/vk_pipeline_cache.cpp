@@ -35,10 +35,12 @@
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/ir_opt/passes.h"
 #include "shader_recompiler/program_header.h"
+#include "video_core/dirty_flags.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_bindmemo_stats.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/pipeline_cache_files.h"
 #include "video_core/pipeline_cache_policy.h"
@@ -871,16 +873,67 @@ void PipelineCache::SaveUsedPipelines() {
 }
 
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
-
+    namespace Memo = VideoCommon::Nx2BindMemo;
+    using Stat = Memo::Stat;
+    Memo::Note(Stat::PipeCalls);
+    bool shaders_dirty = maxwell3d->dirty.flags[VideoCommon::Dirty::Shaders];
+    // The shader registers were written; the stages may hash the same.
+    const bool compare_shaders = shaders_dirty && key_pipeline != nullptr;
+    decltype(graphics_key.unique_hashes) previous_hashes{};
+    if (compare_shaders) {
+        previous_hashes = graphics_key.unique_hashes;
+    }
     if (!RefreshStages(graphics_key.unique_hashes)) {
         current_pipeline = nullptr;
+        key_pipeline = nullptr;
         return nullptr;
     }
-    if (dynamic_features.has_dynamic_vertex_input) {
+    const bool shaders_same = compare_shaders && previous_hashes == graphics_key.unique_hashes;
+    if (shaders_same) {
+        shaders_dirty = false;
+    }
+    // With dynamic vertex input the key holds the attribute types masked by what the program
+    // reads (below); the watch compares and patches the types Refresh computes, unmasked.
+    const bool dynamic_vertex_input = dynamic_features.has_dynamic_vertex_input;
+    const u64 keyed_attribute_types = graphics_key.state.attribute_types;
+    if (dynamic_vertex_input) {
         graphics_key.state.attribute_types = vertex_attribute_types;
     }
-    graphics_key.state.Refresh(*maxwell3d, dynamic_features);
-    if (dynamic_features.has_dynamic_vertex_input) {
+    // When nothing Refresh reads changed, the state part of the key stands; with the same
+    // shaders too, so does the pipeline the last lookup found for it. When only the blend
+    // registers (no dynamic blend state) or the attribute types (dynamic vertex input) moved,
+    // only those parts are redone.
+    bool state_same = false;
+    PipelineStateWatch::Patch patch{};
+    if (graphics_key.state.xfb_enabled != 0) {
+        Memo::Note(Stat::PipeMissXfb);
+    } else {
+        state_same = state_watch.StateUnchanged(*maxwell3d, graphics_key.state, patch);
+    }
+    if (state_same && patch.Any()) {
+        // The key's state changed in those parts only; Next() finds the pipeline for it.
+        state_watch.ApplyPatch(*maxwell3d, graphics_key.state, patch);
+    } else if (state_same && !shaders_dirty) {
+        if (key_pipeline != nullptr && key_pipeline == current_pipeline) {
+            Memo::Note(Stat::PipeSkip);
+            if (shaders_same) {
+                Memo::Note(Stat::PipeSkipShadersSame);
+            }
+            // Same program and same types: the masked types still stand.
+            graphics_key.state.attribute_types = keyed_attribute_types;
+            current_pipeline->MarkUsed(frame_count);
+            return BuiltPipeline(current_pipeline);
+        }
+        Memo::Note(Stat::PipeMissKeyStale);
+    } else if (state_same) {
+        Memo::Note(Stat::PipeStateSameShadersChanged);
+    }
+    if (!state_same) {
+        graphics_key.state.Refresh(*maxwell3d, dynamic_features);
+        state_watch.Store(*maxwell3d, dynamic_features);
+    }
+    key_pipeline = nullptr;
+    if (dynamic_vertex_input) {
         // Refresh only rewrites the types when the vertex input changes, so the masked copy in the
         // key must not carry over to the next program. Types of attributes the program doesn't
         // read would split its pipelines by whatever the game left in those registers (Ocarina
@@ -895,14 +948,18 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         graphics_key.state.attribute_types = VideoCommon::KeyedAttributeTypes(
             vertex_attribute_types, graphics_key.unique_hashes, attribute_masks);
     }
+
     if (current_pipeline) {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
         if (next) {
+            Memo::Note(next == current_pipeline ? Stat::PipeNextSame : Stat::PipeNextTransition);
             current_pipeline = next;
             current_pipeline->MarkUsed(frame_count);
+            key_pipeline = current_pipeline;
             return BuiltPipeline(current_pipeline);
         }
     }
+    Memo::Note(Stat::PipeSlowPath);
     return CurrentGraphicsPipelineSlowPath();
 }
 
@@ -1726,6 +1783,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     }
     current_pipeline = pipeline.get();
     current_pipeline->MarkUsed(frame_count);
+    key_pipeline = current_pipeline;
     return BuiltPipeline(current_pipeline);
 }
 
@@ -1737,6 +1795,7 @@ void PipelineCache::TickFrame() {
         graphics_libraries.Report();
     }
     binary_cache.Report();
+    VideoCommon::Nx2BindMemo::Report();
     while (!evicted_pipelines.empty() && scheduler.IsFree(evicted_pipelines.front().first)) {
         evicted_pipelines.pop_front();
     }

@@ -71,6 +71,9 @@ enum : u8 {
     ColorMask,
     ViewportSwizzles,
 
+    PipelineState, ///< a register FixedPipelineState::Refresh reads was written
+                   ///< (PipelineStateWatch)
+
     Last,
 };
 static_assert(Last <= (std::numeric_limits<u8>::max)());
