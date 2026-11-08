@@ -35,6 +35,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/native_query_trace.h"
 #include "video_core/oot_network.h"
+#include "video_core/oot_ultrawide.h"
 #ifdef ARCHITECTURE_x86_64
 #include "video_core/macro_turing_jit.h"
 #endif
@@ -622,9 +623,13 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
             if (handle == 0 || (handle & 0xfffff) > regs.tic.limit) return std::nullopt;
             return GetTICEntry(handle & 0xfffff);
         };
-        const auto upscale_pair = [](const std::optional<Texture::TICEntry>& from,
-                                     const std::optional<Texture::TICEntry>& to,
-                                     bool same_format) {
+        // Ocarina at 21:9 (Ultrawide Add-On): the network's output is the 21:9 frame's size and the
+        // game's movie layer draws it into the centred 16:9 (patch_manager.cpp).
+        const bool wide_movies = Settings::values.aspect_ratio.GetValue() ==
+                                 Settings::AspectRatio::R21_9;
+        const auto upscale_pair = [wide_movies](const std::optional<Texture::TICEntry>& from,
+                                                const std::optional<Texture::TICEntry>& to,
+                                                bool same_format) {
             if (!from || !to || (same_format && from->format != to->format) ||
                 from->Address() == 0 || to->Address() == 0 ||
                 from->Address() == to->Address() || !from->IsBlockLinear() ||
@@ -632,6 +637,11 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
                 return false;
             const u64 from_width = from->Width(), from_height = from->Height();
             const u64 to_width = to->Width(), to_height = to->Height();
+            if (wide_movies && from_width >= 64 &&
+                VideoCommon::OotUltrawide::IsWideMovieOutput(from->Width(), from->Height(),
+                                                             to->Width(), to->Height())) {
+                return true;
+            }
             const u64 cross_a = to_width * from_height, cross_b = to_height * from_width;
             return from_width >= 64 && to_width > from_width && to_width <= from_width * 4 &&
                    (cross_a > cross_b ? cross_a - cross_b : cross_b - cross_a) * 32 <= cross_a;
