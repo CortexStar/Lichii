@@ -299,14 +299,14 @@ GraphicsPipeline::GraphicsPipeline(
     GuestDescriptorQueue& guest_descriptor_queue_, DescriptorBufferRing& descriptor_buffer_ring_,
     Common::ThreadWorker* worker_thread,
     PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
-    const GraphicsPipelineCacheKey& key_, std::array<vk::ShaderModule, NUM_STAGES> stages,
+    const GraphicsPipelineCacheKey& key_, std::shared_ptr<const GraphicsShaderModules> modules,
     const std::array<const Shader::Info*, NUM_STAGES>& infos,
-    std::function<std::array<vk::ShaderModule, NUM_STAGES>()> emit_stages,
+    std::function<std::shared_ptr<const GraphicsShaderModules>()> emit_stages,
     std::optional<MeshEmulationSetup> mesh_emulation_)
     : key{key_}, device{device_}, texture_cache{texture_cache_}, buffer_cache{buffer_cache_},
       pipeline_cache(pipeline_cache_), scheduler{scheduler_},
       guest_descriptor_queue{guest_descriptor_queue_},
-      descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)},
+      descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(modules)},
       worker_only_build{worker_thread && static_cast<bool>(emit_stages)},
       mesh_emulation{std::move(mesh_emulation_)} {
     if (shader_notify) {
@@ -452,8 +452,10 @@ GraphicsPipeline::GraphicsPipeline(
             LOG_CRITICAL(Render_Vulkan,
                          "Graphics pipeline build failed: {} (stages: tcs={} tes={} geom={}, "
                          "patch control points {}, device max patch size {})",
-                         exception.what(), spv_modules[1] ? 1 : 0, spv_modules[2] ? 1 : 0,
-                         spv_modules[3] ? 1 : 0, key.state.patch_control_points_minus_one.Value() + 1,
+                         exception.what(), spv_modules && (*spv_modules)[1] ? 1 : 0,
+                         spv_modules && (*spv_modules)[2] ? 1 : 0,
+                         spv_modules && (*spv_modules)[3] ? 1 : 0,
+                         key.state.patch_control_points_minus_one.Value() + 1,
                          device.GetMaxTessellationPatchSize());
             throw;
         }
@@ -462,9 +464,7 @@ GraphicsPipeline::GraphicsPipeline(
         }
         // Nothing reads the shader modules once the pipeline exists, and the driver keeps a copy
         // of each one's SPIR-V while it lives (title 1: ~1,500 pipelines, 2-5 modules each).
-        for (vk::ShaderModule& module : spv_modules) {
-            module.reset();
-        }
+        spv_modules.reset();
         if (worker_only_build) {
             const auto elapsed = std::chrono::steady_clock::now() - begin;
             static std::atomic<u32> logged{};
@@ -1130,12 +1130,12 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                 *pipeline_cache);
         };
         mesh_vertex_module = BuildShader(device, mesh_emulation->vertex_spirv);
-        mesh_compute_pipeline = make_compute(*spv_modules[mesh_emulation->mesh_stage],
+        mesh_compute_pipeline = make_compute(*(*spv_modules)[mesh_emulation->mesh_stage],
                                              *pipeline_layout,
                                              &stage_infos[mesh_emulation->mesh_stage]);
         if (mesh_emulation->has_task) {
             task_compute_pipeline =
-                make_compute(*spv_modules[0], *pipeline_layout, &stage_infos[0]);
+                make_compute(*(*spv_modules)[0], *pipeline_layout, &stage_infos[0]);
             distribution_module = BuildShader(device, mesh_emulation->distribution_spirv);
             distribution_pipeline =
                 make_compute(*distribution_module, *distribution_layout, nullptr);
@@ -1202,7 +1202,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     if (!vertex_binding_divisors.empty()) {
         vertex_input_ci.pNext = &input_divisor_ci;
     }
-    const bool has_tess_stages = spv_modules[1] || spv_modules[2];
+    const bool has_tess_stages = (*spv_modules)[1] || (*spv_modules)[2];
     auto input_assembly_topology = MaxwellToVK::PrimitiveTopology(device, key.state.topology);
     if (input_assembly_topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) {
         if (!has_tess_stages) {
@@ -1526,7 +1526,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     };
     static_vector<VkPipelineShaderStageCreateInfo, 5> shader_stages;
     for (size_t stage = 0; stage < Maxwell::MaxShaderStage; ++stage) {
-        if (!spv_modules[stage]) {
+        if (!(*spv_modules)[stage]) {
             continue;
         }
         if (mesh_emulation && mesh_emulation->has_task && stage == mesh_emulation->mesh_stage) {
@@ -1550,7 +1550,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
             .pNext = force_warp_size ? &subgroup_size_ci : nullptr,
             .flags = 0,
             .stage = stage_flag,
-            .module = emulated_vertex ? *mesh_vertex_module : *spv_modules[stage],
+            .module = emulated_vertex ? *mesh_vertex_module : *(*spv_modules)[stage],
             .pName = "main",
             .pSpecializationInfo = nullptr,
         });
