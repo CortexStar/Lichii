@@ -20,6 +20,10 @@ class MemoryAllocator;
 class Scheduler;
 class StagingBufferPool;
 
+/// The temporal upscaler Ocarina uses this session: the settings, EDEN_NX2_DLSS_REPLACEMENT,
+/// DLSS availability, and native when FSR 3.1 is unsupported on the device.
+[[nodiscard]] VideoCommon::OcarinaUpscaleBackend ResolveOcarinaUpscaler(const Device& device);
+
 struct OcarinaActorMesh {
     std::vector<u8> vertices;
     std::vector<u16> indices;

@@ -2736,18 +2736,10 @@ bool RasterizerVulkan::OcarinaTemporalEnabled() const {
     if (oot_backend) {
         return *oot_backend != VideoCommon::OcarinaUpscaleBackend::Native;
     }
-    const char* value = std::getenv("EDEN_NX2_DLSS_REPLACEMENT");
-    bool dlss_available = false;
-#ifdef EGLANTINE_STREAMLINE
-    dlss_available = Streamline::IsDlssAvailable();
-#endif
-    const auto backend = VideoCommon::SelectOcarinaUpscaler(
-        Settings::values.ocarina_fsr.GetValue(), Settings::values.nvidia_dlss.GetValue(),
-        dlss_available, value ? value : "");
-    oot_backend = backend;
-    if (backend == VideoCommon::OcarinaUpscaleBackend::Fsr && !Fsr3Upscaler::IsSupported(device)) {
+    oot_backend = ResolveOcarinaUpscaler(device);
+    if (*oot_backend == VideoCommon::OcarinaUpscaleBackend::Native &&
+        Settings::values.ocarina_fsr.GetValue() && !Fsr3Upscaler::IsSupported(device)) {
         LOG_WARNING(Render_Vulkan, "Ocarina FSR 3.1 unsupported on this device; using native upscale");
-        oot_backend = VideoCommon::OcarinaUpscaleBackend::Native;
     }
     return *oot_backend != VideoCommon::OcarinaUpscaleBackend::Native;
 }

@@ -22,6 +22,7 @@
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #ifdef EGLANTINE_STREAMLINE
 #include "video_core/renderer_vulkan/vk_streamline_dlss.h"
+#include "video_core/vulkan_common/streamline.h"
 #endif
 
 #include "video_core/host_shaders/ocarina_camera_motion_comp_spv.h"
@@ -1031,4 +1032,19 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
     state.last_view_projection = current;
     return true;
 }
+VideoCommon::OcarinaUpscaleBackend ResolveOcarinaUpscaler(const Device& device) {
+    const char* value = std::getenv("EDEN_NX2_DLSS_REPLACEMENT");
+    bool dlss_available = false;
+#ifdef EGLANTINE_STREAMLINE
+    dlss_available = Streamline::IsDlssAvailable();
+#endif
+    const auto backend = VideoCommon::SelectOcarinaUpscaler(
+        Settings::values.ocarina_fsr.GetValue(), Settings::values.nvidia_dlss.GetValue(),
+        dlss_available, value ? value : "");
+    if (backend == VideoCommon::OcarinaUpscaleBackend::Fsr && !Fsr3Upscaler::IsSupported(device)) {
+        return VideoCommon::OcarinaUpscaleBackend::Native;
+    }
+    return backend;
+}
+
 } // namespace Vulkan

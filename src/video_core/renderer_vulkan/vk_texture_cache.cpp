@@ -40,6 +40,7 @@
 #include "video_core/renderer_vulkan/framebuffer_limits.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
+#include "video_core/renderer_vulkan/vk_ocarina_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
@@ -4696,11 +4697,13 @@ Sampler::Sampler(TextureCacheRuntime& runtime, const Tegra::Texture::TSCEntry& t
     }
     // Ocarina with FSR: FSR renders below the output size, so textures would pick the render
     // size's mips. AMD recommends a mip bias of log2(render / output) - 1, -1.58 for docked
-    // 1440p -> 4K, added to mipmapped samplers so textures keep the output's detail.
-    // EDEN_NX2_OOT_LOD_BIAS=<bias> replaces it (0 turns it off, also applies handheld).
+    // 1440p -> 4K, added to mipmapped samplers so textures keep the output's detail. Only when
+    // the session's upscaler is FSR (not DLSS or native). EDEN_NX2_OOT_LOD_BIAS=<bias> replaces
+    // it (0 turns it off, also applies handheld).
     f32 lod_bias = tsc.LodBias();
-    if (tsc.mipmap_filter != TextureMipmapFilter::None && Settings::values.ocarina_fsr.GetValue() &&
-        Settings::GetCurrentProgramID() == 0x0400486024DEC000ULL) {
+    if (tsc.mipmap_filter != TextureMipmapFilter::None &&
+        Settings::GetCurrentProgramID() == 0x0400486024DEC000ULL &&
+        ResolveOcarinaUpscaler(runtime.device) == VideoCommon::OcarinaUpscaleBackend::Fsr) {
         static const char* const lod_bias_env = std::getenv("EDEN_NX2_OOT_LOD_BIAS");
         const f32 fsr_lod_bias = lod_bias_env
             ? std::clamp(std::strtof(lod_bias_env, nullptr), -4.0f, 0.0f)
