@@ -2143,7 +2143,13 @@ void Device::RemoveUnsuitableExtensions() {
         }
         shader_object_usable &= met;
     }
-    extensions.shader_object = shader_object_usable;
+    // EXPERIMENT (do not merge): pipelines unless EDEN_NX2_SHADER_OBJECT=1, for the pipelines
+    // vs shader objects A/B; the winner ships unconditionally.
+    static const bool shader_objects_wanted = [] {
+        const char* const value = std::getenv("EDEN_NX2_SHADER_OBJECT");
+        return value != nullptr && value[0] == '1';
+    }();
+    extensions.shader_object = shader_objects_wanted && shader_object_usable;
     RemoveExtensionFeatureIfUnsuitable(extensions.shader_object, features.shader_object,
                                        VK_EXT_SHADER_OBJECT_EXTENSION_NAME);
 }
