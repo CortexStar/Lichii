@@ -19,6 +19,7 @@
 #include "common/common_types.h"
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/query_cache/conditional_rendering.h"
 #include "video_core/query_cache/query_base.h"
 #include "video_core/query_cache/types.h"
 
@@ -90,6 +91,17 @@ public:
         return mask;
     }
 
+    /// Whether FlushRegion would write into the region: a query whose final value is not in
+    /// guest memory yet, or a host query not synced to it (SemiFlushQueryDirty).
+    [[nodiscard]] bool FlushWouldWrite(VAddr addr, std::size_t size) {
+        bool result = false;
+        IterateCache<false>(addr, size, [this, &result](QueryLocation location) {
+            result |= IsQueryFlushPending(location);
+            return result;
+        });
+        return result;
+    }
+
     /// Return true when a CPU region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size) {
         bool result = false;
@@ -111,7 +123,7 @@ public:
 
     void NotifyWFI();
 
-    bool AccelerateHostConditionalRendering();
+    ConditionalRendering AccelerateHostConditionalRendering();
 
     // Async downloads
     void CommitAsyncFlushes();
@@ -186,6 +198,7 @@ protected:
 
     void InvalidateQuery(QueryLocation location);
     bool IsQueryDirty(QueryLocation location);
+    bool IsQueryFlushPending(QueryLocation location);
     bool SemiFlushQueryDirty(QueryLocation location);
     void RequestGuestHostSync();
     void UnregisterPending();

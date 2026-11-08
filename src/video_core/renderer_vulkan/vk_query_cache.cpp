@@ -1506,15 +1506,26 @@ private:
 } // namespace
 
 struct QueryCacheRuntimeImpl {
-    QueryCacheRuntimeImpl(QueryCacheRuntime& runtime, VideoCore::RasterizerInterface* rasterizer_, Tegra::MaxwellDeviceMemoryManager& device_memory_, Vulkan::BufferCache& buffer_cache_, const Device& device_, const MemoryAllocator& memory_allocator_, Scheduler& scheduler_, StagingBufferPool& staging_pool_, ComputePassDescriptorQueue& compute_pass_descriptor_queue, DescriptorPool& descriptor_pool, TextureCache& texture_cache_)
-        : rasterizer{rasterizer_}, device_memory{device_memory_}, buffer_cache{buffer_cache_}
-        , device{device_}, memory_allocator{memory_allocator_}, scheduler{scheduler_}
-        , staging_pool{staging_pool_}, guest_streamer(0, runtime)
-        , sample_streamer(size_t(QueryType::ZPassPixelCount64), runtime, rasterizer, texture_cache_, device, scheduler, memory_allocator, compute_pass_descriptor_queue, descriptor_pool)
-        , tfb_streamer(size_t(QueryType::StreamingByteCount), runtime, device, scheduler, memory_allocator, staging_pool)
-        , primitives_succeeded_streamer(size_t(QueryType::StreamingPrimitivesSucceeded), runtime, tfb_streamer, device_memory_)
-        , primitives_needed_minus_succeeded_streamer(size_t(QueryType::StreamingPrimitivesNeededMinusSucceeded), runtime, 0u)
-        , hcr_setup{}, hcr_is_set{}, is_hcr_running{}, maxwell3d{} {
+    QueryCacheRuntimeImpl(QueryCacheRuntime& runtime, VideoCore::RasterizerInterface* rasterizer_,
+                          Tegra::MaxwellDeviceMemoryManager& device_memory_,
+                          Vulkan::BufferCache& buffer_cache_, const Device& device_,
+                          const MemoryAllocator& memory_allocator_, Scheduler& scheduler_,
+                          StagingBufferPool& staging_pool_,
+                          ComputePassDescriptorQueue& compute_pass_descriptor_queue,
+                          DescriptorPool& descriptor_pool, TextureCache& texture_cache_)
+        : rasterizer{rasterizer_}, device_memory{device_memory_}, buffer_cache{buffer_cache_},
+          texture_cache{texture_cache_}, device{device_}, memory_allocator{memory_allocator_},
+          scheduler{scheduler_}, staging_pool{staging_pool_}, guest_streamer(0, runtime),
+          sample_streamer(size_t(QueryType::ZPassPixelCount64), runtime, rasterizer, texture_cache_,
+                          device, scheduler, memory_allocator, compute_pass_descriptor_queue,
+                          descriptor_pool),
+          tfb_streamer(size_t(QueryType::StreamingByteCount), runtime, device, scheduler,
+                       memory_allocator, staging_pool),
+          primitives_succeeded_streamer(size_t(QueryType::StreamingPrimitivesSucceeded), runtime,
+                                        tfb_streamer, device_memory_),
+          primitives_needed_minus_succeeded_streamer(
+              size_t(QueryType::StreamingPrimitivesNeededMinusSucceeded), runtime, 0u),
+          hcr_setup{}, hcr_is_set{}, is_hcr_running{}, maxwell3d{} {
 
         hcr_setup.sType = VK_STRUCTURE_TYPE_CONDITIONAL_RENDERING_BEGIN_INFO_EXT;
         hcr_setup.pNext = nullptr;
@@ -1542,6 +1553,8 @@ struct QueryCacheRuntimeImpl {
     VideoCore::RasterizerInterface* rasterizer;
     Tegra::MaxwellDeviceMemoryManager& device_memory;
     Vulkan::BufferCache& buffer_cache;
+    /// Its GPU-modified page filter: whether an image may hold newer data over a condition.
+    TextureCache& texture_cache;
 
     const Device& device;
     const MemoryAllocator& memory_allocator;
@@ -1710,99 +1723,102 @@ void QueryCacheRuntime::TraceConditionalRendering(const char* path, bool handled
     }
 }
 
-bool QueryCacheRuntime::HostConditionalRenderingCompareValue(VideoCommon::LookupData object_1,
-                                                             [[maybe_unused]] bool qc_dirty) {
+VideoCommon::ConditionalRendering QueryCacheRuntime::HostConditionalRenderingCompareValue(
+    VideoCommon::LookupData object_1, [[maybe_unused]] bool qc_dirty) {
     if (!impl->device.IsExtConditionalRendering()) {
         TraceConditionalRendering("extension-unavailable", false, object_1.address);
-        return false;
+        return VideoCommon::ConditionalRendering::Flush;
     }
     HostConditionalRenderingCompareBCImpl(object_1.address, true, true);
     TraceConditionalRendering("resolve-zero", true, object_1.address);
-    return true;
+    return VideoCommon::ConditionalRendering::Host;
 }
 
-bool QueryCacheRuntime::HostConditionalRenderingCompareValues(VideoCommon::LookupData object_1,
-                                                              VideoCommon::LookupData object_2,
-                                                              bool qc_dirty, bool equal_check) {
-    if (!impl->device.IsExtConditionalRendering()) {
-        TraceConditionalRendering("extension-unavailable", false, object_1.address, object_2.address);
-        return false;
+VideoCommon::ConditionalRendering QueryCacheRuntime::HostConditionalRenderingCompareValues(
+    VideoCommon::LookupData object_1, VideoCommon::LookupData object_2, bool qc_dirty,
+    bool equal_check, bool query_flush_writes) {
+    using VideoCommon::ConditionPath;
+    const std::array<VideoCommon::LookupData*, 2> objects{&object_1, &object_2};
+    VideoCommon::ConditionOperands operands{.query_dirty = qc_dirty};
+    const bool extension = impl->device.IsExtConditionalRendering();
+    if (extension) {
+        std::scoped_lock lk(impl->buffer_cache.mutex);
+        for (size_t i = 0; i < 2; i++) {
+            operands.in_query_cache[i] = objects[i]->found_query != nullptr;
+            operands.gpu_modified[i] =
+                !operands.in_query_cache[i] &&
+                impl->buffer_cache.IsRegionGpuModified(objects[i]->address, 8);
+        }
     }
-
-    const auto check_in_bc = [&](DAddr address) {
-        return impl->buffer_cache.IsRegionGpuModified(address, 8);
-    };
-    const auto check_value = [&](DAddr address) {
-        u8* ptr = impl->device_memory.GetPointer<u8>(address);
+    const auto driver_id = impl->device.GetDriverID();
+    const bool is_gpu_high = Settings::IsGPULevelHigh();
+    const bool driver_bypass =
+        (!is_gpu_high && driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS) ||
+        driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
+        driver_id == VK_DRIVER_ID_ARM_PROPRIETARY || driver_id == VK_DRIVER_ID_MESA_TURNIP;
+    const auto reads_zero = [&](size_t i) {
+        const u8* const ptr = impl->device_memory.GetPointer<u8>(objects[i]->address);
         u64 value{};
         if (ptr != nullptr) {
             std::memcpy(&value, ptr, sizeof(value));
         }
         return value == 0;
     };
-    std::array<VideoCommon::LookupData*, 2> objects{&object_1, &object_2};
-    std::array<bool, 2> is_in_bc{};
-    std::array<bool, 2> is_in_qc{};
-    std::array<bool, 2> is_in_ac{};
-    std::array<bool, 2> is_null{};
-    {
-        std::scoped_lock lk(impl->buffer_cache.mutex);
-        for (size_t i = 0; i < 2; i++) {
-            is_in_qc[i] = objects[i]->found_query != nullptr;
-            is_in_bc[i] = !is_in_qc[i] && check_in_bc(objects[i]->address);
-            is_in_ac[i] = is_in_qc[i] || is_in_bc[i];
-        }
-    }
-
-    if (!is_in_ac[0] && !is_in_ac[1]) {
-        EndHostConditionalRendering();
-        TraceConditionalRendering("uncached", false, object_1.address, object_2.address);
-        return false;
-    }
-
-    if (!qc_dirty && !is_in_bc[0] && !is_in_bc[1]) {
-        EndHostConditionalRendering();
-        TraceConditionalRendering("guest-synchronized", false, object_1.address, object_2.address);
-        return false;
-    }
-
-    auto driver_id = impl->device.GetDriverID();
-    const bool is_gpu_high = Settings::IsGPULevelHigh();
-
-    if ((!is_gpu_high && driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS) || driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY || driver_id == VK_DRIVER_ID_ARM_PROPRIETARY || driver_id == VK_DRIVER_ID_MESA_TURNIP) {
-        EndHostConditionalRendering();
-        TraceConditionalRendering("driver-bypass", true, object_1.address, object_2.address);
-        return true;
-    }
-
-    for (size_t i = 0; i < 2; i++) {
-        is_null[i] = !is_in_ac[i] && check_value(objects[i]->address);
-    }
-
-    for (size_t i = 0; i < 2; i++) {
-        if (is_null[i]) {
-            size_t j = (i + 1) % 2;
-            HostConditionalRenderingCompareValueImpl(*objects[j], equal_check);
-            TraceConditionalRendering(i == 0 ? "initial-zero" : "current-zero", true,
-                                      object_1.address, object_2.address);
+    const ConditionPath path = VideoCommon::DecideConditionPath(extension, operands, driver_bypass,
+                                                                is_gpu_high, reads_zero);
+    // What a flushing read of the 24-byte compare structure (Maxwell3D::ProcessQueryCondition)
+    // would write into it first: GPU-written texture or buffer data, pending query results.
+    const auto flush_writes = [&] {
+        if (query_flush_writes ||
+            impl->texture_cache.MayHaveGpuModifiedImages(object_1.address, 24)) {
             return true;
         }
-    }
-
-    if (!is_gpu_high) {
+        std::scoped_lock lk(impl->buffer_cache.mutex);
+        return impl->buffer_cache.IsRegionGpuModified(object_1.address, 24);
+    };
+    const bool declined =
+        path == ConditionPath::Uncached || path == ConditionPath::GuestSynchronized;
+    const VideoCommon::ConditionalRendering handling =
+        VideoCommon::HandlingOf(path, declined && flush_writes());
+    switch (path) {
+    case ConditionPath::ExtensionUnavailable:
+        TraceConditionalRendering("extension-unavailable", false, object_1.address,
+                                  object_2.address);
+        break;
+    case ConditionPath::Uncached:
+        EndHostConditionalRendering();
+        TraceConditionalRendering("uncached", false, object_1.address, object_2.address);
+        break;
+    case ConditionPath::GuestSynchronized:
+        EndHostConditionalRendering();
+        TraceConditionalRendering("guest-synchronized", false, object_1.address, object_2.address);
+        break;
+    case ConditionPath::DriverBypass:
+        EndHostConditionalRendering();
+        TraceConditionalRendering("driver-bypass", true, object_1.address, object_2.address);
+        break;
+    case ConditionPath::InitialZero:
+        HostConditionalRenderingCompareValueImpl(object_2, equal_check);
+        TraceConditionalRendering("initial-zero", true, object_1.address, object_2.address);
+        break;
+    case ConditionPath::CurrentZero:
+        HostConditionalRenderingCompareValueImpl(object_1, equal_check);
+        TraceConditionalRendering("current-zero", true, object_1.address, object_2.address);
+        break;
+    case ConditionPath::AccuracyBypass:
         EndHostConditionalRendering();
         TraceConditionalRendering("accuracy-bypass", true, object_1.address, object_2.address);
-        return true;
-    }
-
-    if (!is_in_bc[0] && !is_in_bc[1]) {
+        break;
+    case ConditionPath::QueryCacheBypass:
         EndHostConditionalRendering();
         TraceConditionalRendering("query-cache-bypass", true, object_1.address, object_2.address);
-        return true;
+        break;
+    case ConditionPath::ResolveCompare:
+        HostConditionalRenderingCompareBCImpl(object_1.address, equal_check);
+        TraceConditionalRendering("resolve-compare", true, object_1.address, object_2.address);
+        break;
     }
-    HostConditionalRenderingCompareBCImpl(object_1.address, equal_check);
-    TraceConditionalRendering("resolve-compare", true, object_1.address, object_2.address);
-    return true;
+    return handling;
 }
 
 QueryCacheRuntime::~QueryCacheRuntime() = default;

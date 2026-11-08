@@ -161,7 +161,7 @@ public:
     void TiledCacheBarrier() override;
     void FlushCommands() override;
     void TickFrame() override;
-    bool AccelerateConditionalRendering() override;
+    VideoCommon::ConditionalRendering AccelerateConditionalRendering() override;
     bool HasDrawTransformFeedback() override;
     bool AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surface& src,
                                const Tegra::Engines::Fermi2D::Surface& dst,

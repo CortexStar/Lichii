@@ -18,6 +18,7 @@
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/game_dlss_status.h"
 #include "video_core/gpu.h"
+#include "video_core/query_cache/conditional_rendering.h"
 #include "video_core/query_cache/types.h"
 #include "video_core/rasterizer_download_area.h"
 
@@ -279,8 +280,10 @@ public:
     /// Notify rasterizer that a frame is about to finish
     virtual void TickFrame() = 0;
 
-    virtual bool AccelerateConditionalRendering() {
-        return false;
+    /// Decides the render_enable condition on the host when it can; otherwise says how the CPU
+    /// reads its operands.
+    virtual VideoCommon::ConditionalRendering AccelerateConditionalRendering() {
+        return VideoCommon::ConditionalRendering::Flush;
     }
 
     /// Attempt to use a faster method to perform a surface copy

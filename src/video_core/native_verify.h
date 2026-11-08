@@ -18,17 +18,18 @@
 namespace VideoCommon::NativeVerify {
 
 enum class Layer : u32 {
-    Storage,  ///< GPU page table entries vs the buffers storage bindings resolve to
-    Uniforms, ///< constant buffer bank bytes the shader reads vs guest memory
-    Textures, ///< resident texture pool entries vs a full resolve of every resident hit
-    Bindless, ///< the pool-mirroring descriptor heap vs the bound pool entries
-    Barriers, ///< render pass barriers from a draw's remembered image set vs the full check
-    DynState, ///< dynamic state the command buffer holds vs the values the registers give
+    Storage,    ///< GPU page table entries vs the buffers storage bindings resolve to
+    Uniforms,   ///< constant buffer bank bytes the shader reads vs guest memory
+    Textures,   ///< resident texture pool entries vs a full resolve of every resident hit
+    Bindless,   ///< the pool-mirroring descriptor heap vs the bound pool entries
+    Barriers,   ///< render pass barriers from a draw's remembered image set vs the full check
+    DynState,   ///< dynamic state the command buffer holds vs the values the registers give
+    Conditions, ///< render_enable operands read as guest memory stands vs read after a flush
     Count,
 };
 
 inline constexpr std::array<std::string_view, static_cast<size_t>(Layer::Count)> layer_names{
-    "storage", "uniforms", "textures", "bindless", "barriers", "dynstate",
+    "storage", "uniforms", "textures", "bindless", "barriers", "dynstate", "conditions",
 };
 
 /// The layers EDEN_NX2_NATIVE_VERIFY names, read once.

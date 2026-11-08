@@ -48,11 +48,14 @@ public:
 
     void ResumeHostConditionalRendering();
 
-    bool HostConditionalRenderingCompareValue(VideoCommon::LookupData object_1, bool qc_dirty);
+    VideoCommon::ConditionalRendering HostConditionalRenderingCompareValue(
+        VideoCommon::LookupData object_1, bool qc_dirty);
 
-    bool HostConditionalRenderingCompareValues(VideoCommon::LookupData object_1,
-                                               VideoCommon::LookupData object_2, bool qc_dirty,
-                                               bool equal_check);
+    /// `query_flush_writes`: the query cache's flush would write into the 24-byte compare
+    /// structure (QueryCacheBase::FlushWouldWrite).
+    VideoCommon::ConditionalRendering HostConditionalRenderingCompareValues(
+        VideoCommon::LookupData object_1, VideoCommon::LookupData object_2, bool qc_dirty,
+        bool equal_check, bool query_flush_writes);
 
     VideoCommon::StreamerInterface* GetStreamerInterface(VideoCommon::QueryType query_type);
 

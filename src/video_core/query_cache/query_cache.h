@@ -442,7 +442,7 @@ void QueryCacheBase<Traits>::NotifySegment(bool resume) {
 }
 
 template <typename Traits>
-bool QueryCacheBase<Traits>::AccelerateHostConditionalRendering() {
+ConditionalRendering QueryCacheBase<Traits>::AccelerateHostConditionalRendering() {
     bool qc_dirty = false;
     const auto gen_lookup = [this, &qc_dirty](GPUVAddr address) -> VideoCommon::LookupData {
         auto cpu_addr_opt = gpu_memory->GpuToCpuAddress(address);
@@ -486,35 +486,33 @@ bool QueryCacheBase<Traits>::AccelerateHostConditionalRendering() {
     auto& regs = maxwell3d->regs;
     if (regs.render_enable_override != Maxwell::Regs::RenderEnable::Override::UseRenderEnable) {
         impl->runtime.EndHostConditionalRendering();
-        return false;
+        return ConditionalRendering::Flush;
     }
     const ComparisonMode mode = static_cast<ComparisonMode>(regs.render_enable.mode);
     const GPUVAddr address = regs.render_enable.Address();
     switch (mode) {
     case ComparisonMode::True:
         impl->runtime.EndHostConditionalRendering();
-        return false;
+        return ConditionalRendering::Flush;
     case ComparisonMode::False:
         impl->runtime.EndHostConditionalRendering();
-        return false;
+        return ConditionalRendering::Flush;
     case ComparisonMode::Conditional: {
         VideoCommon::LookupData object_1{gen_lookup(address)};
         return impl->runtime.HostConditionalRenderingCompareValue(object_1, qc_dirty);
     }
-    case ComparisonMode::IfEqual: {
-        VideoCommon::LookupData object_1{gen_lookup(address)};
-        VideoCommon::LookupData object_2{gen_lookup(address + 16)};
-        return impl->runtime.HostConditionalRenderingCompareValues(object_1, object_2, qc_dirty,
-                                                                   true);
-    }
+    case ComparisonMode::IfEqual:
     case ComparisonMode::IfNotEqual: {
         VideoCommon::LookupData object_1{gen_lookup(address)};
         VideoCommon::LookupData object_2{gen_lookup(address + 16)};
-        return impl->runtime.HostConditionalRenderingCompareValues(object_1, object_2, qc_dirty,
-                                                                   false);
+        // The 24-byte compare structure Maxwell3D reads when the condition is decided on the CPU.
+        const bool query_flush_writes =
+            object_1.address != 0 && FlushWouldWrite(object_1.address, 24);
+        return impl->runtime.HostConditionalRenderingCompareValues(
+            object_1, object_2, qc_dirty, mode == ComparisonMode::IfEqual, query_flush_writes);
     }
     default:
-        return false;
+        return ConditionalRendering::Flush;
     }
 }
 
@@ -628,6 +626,15 @@ bool QueryCacheBase<Traits>::IsQueryDirty(QueryCacheBase<Traits>::QueryLocation 
     }
     return True(query_base->flags & QueryFlagBits::IsHostManaged) &&
            False(query_base->flags & QueryFlagBits::IsGuestSynced);
+}
+
+template <typename Traits>
+bool QueryCacheBase<Traits>::IsQueryFlushPending(QueryCacheBase<Traits>::QueryLocation location) {
+    const auto* const query_base = impl->ObtainQuery(location);
+    // What SemiFlushQueryDirty writes (a final value) or reports dirty (a host query).
+    return query_base != nullptr && False(query_base->flags & QueryFlagBits::IsGuestSynced) &&
+           (True(query_base->flags & QueryFlagBits::IsFinalValueSynced) ||
+            True(query_base->flags & QueryFlagBits::IsHostManaged));
 }
 
 template <typename Traits>

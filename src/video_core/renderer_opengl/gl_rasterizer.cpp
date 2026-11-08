@@ -704,20 +704,21 @@ void RasterizerOpenGL::TickFrame() {
     }
 }
 
-bool RasterizerOpenGL::AccelerateConditionalRendering() {
+VideoCommon::ConditionalRendering RasterizerOpenGL::AccelerateConditionalRendering() {
+    using VideoCommon::ConditionalRendering;
     gpu_memory->FlushCaching();
     if (Settings::IsGPULevelHigh()) {
         // Reimplement Host conditional rendering.
-        return false;
+        return ConditionalRendering::Flush;
     }
     // Medium / Low Hack: stub any checks on queries written into the buffer cache.
     const GPUVAddr condition_address{maxwell3d->regs.render_enable.Address()};
     Maxwell::ReportSemaphore::Compare cmp;
     if (gpu_memory->IsMemoryDirty(condition_address, sizeof(cmp),
                                   VideoCommon::CacheType::BufferCache)) {
-        return true;
+        return ConditionalRendering::Host;
     }
-    return false;
+    return ConditionalRendering::Flush;
 }
 
 bool RasterizerOpenGL::AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surface& src,

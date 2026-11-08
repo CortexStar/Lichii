@@ -24,6 +24,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/macro_hle_oot.h"
 #include "video_core/memory_manager.h"
+#include "video_core/native_verify.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
 #include "video_core/nx2_list_indirect.h"
@@ -904,7 +905,9 @@ void Maxwell3D::ProcessQueryGet() {
 }
 
 void Maxwell3D::ProcessQueryCondition() {
-    if (rasterizer->AccelerateConditionalRendering()) {
+    using VideoCommon::ConditionalRendering;
+    const ConditionalRendering handling = rasterizer->AccelerateConditionalRendering();
+    if (handling == ConditionalRendering::Host) {
         execute_on = true;
         return;
     }
@@ -912,6 +915,29 @@ void Maxwell3D::ProcessQueryCondition() {
     const GPUVAddr condition_address{regs.render_enable.Address()};
     Regs::ReportSemaphore::Compare cmp{};
     bool operands_read = false;
+    // When the query cache found no cache holding a newer copy of the operands (GuestMemory),
+    // guest memory is read as it stands: the flushing read gathers the guest cores' CPU writes
+    // and asks the texture, buffer and query caches for downloads first (Ocarina of Time's
+    // field: 18.4 ms a second over ~2,000 conditions, "render enable read" in
+    // notes/waves/cons6b-heap-profile-eden_log.txt).
+    const auto read_operands = [&] {
+        if (handling != ConditionalRendering::GuestMemory) {
+            memory_manager.ReadBlock(condition_address, &cmp, sizeof(cmp));
+            return;
+        }
+        memory_manager.ReadBlockUnsafe(condition_address, &cmp, sizeof(cmp));
+        namespace Verify = VideoCommon::NativeVerify;
+        if (Verify::Enabled(Verify::Layer::Conditions)) {
+            Regs::ReportSemaphore::Compare flushed{};
+            memory_manager.ReadBlock(condition_address, &flushed, sizeof(flushed));
+            Verify::Check(Verify::Layer::Conditions, std::memcmp(&flushed, &cmp, sizeof(cmp)) == 0,
+                          "render_enable operands at {:#x}: guest {:#x}/{:#x} {:#x}/{:#x}, "
+                          "flushed {:#x}/{:#x} {:#x}/{:#x}",
+                          condition_address, cmp.initial_sequence, cmp.initial_mode,
+                          cmp.current_sequence, cmp.current_mode, flushed.initial_sequence,
+                          flushed.initial_mode, flushed.current_sequence, flushed.current_mode);
+        }
+    };
     switch (regs.render_enable_override) {
     case Regs::RenderEnable::Override::AlwaysRender:
         execute_on = true;
@@ -930,20 +956,20 @@ void Maxwell3D::ProcessQueryCondition() {
             break;
         }
         case Regs::RenderEnable::Mode::Conditional: {
-            memory_manager.ReadBlock(condition_address, &cmp, sizeof(cmp));
+            read_operands();
             operands_read = true;
             execute_on = cmp.initial_sequence != 0U && cmp.initial_mode != 0U;
             break;
         }
         case Regs::RenderEnable::Mode::IfEqual: {
-            memory_manager.ReadBlock(condition_address, &cmp, sizeof(cmp));
+            read_operands();
             operands_read = true;
             execute_on = cmp.initial_sequence == cmp.current_sequence &&
                          cmp.initial_mode == cmp.current_mode;
             break;
         }
         case Regs::RenderEnable::Mode::IfNotEqual: {
-            memory_manager.ReadBlock(condition_address, &cmp, sizeof(cmp));
+            read_operands();
             operands_read = true;
             execute_on = cmp.initial_sequence != cmp.current_sequence ||
                          cmp.initial_mode != cmp.current_mode;

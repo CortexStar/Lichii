@@ -3120,7 +3120,7 @@ void RasterizerVulkan::TickFrame() {
     }
 }
 
-bool RasterizerVulkan::AccelerateConditionalRendering() {
+VideoCommon::ConditionalRendering RasterizerVulkan::AccelerateConditionalRendering() {
     {
         VideoCommon::Nx2Profile::Scope flush_scope{
             VideoCommon::Nx2Profile::Zone::RenderEnableFlush};
