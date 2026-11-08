@@ -380,11 +380,8 @@ TEST_CASE("Fmodf matches musl fmodf run in the JIT", "[guest_cpu]") {
     for (const u32 fpcr : {0U, 1U << 25, 1U << 24, 3U << 24}) {
         jit.SetFpcr(fpcr);
         // Dynarmic does not raise IDC when FZ flushes an input; the host function does, as the
-        // Arm FPUnpack pseudocode says. Compare it only without FZ. musl's FP operations are all
-        // exact (products with a zero, infinity or NaN, and quotients of a zero or infinity by
-        // itself), so IXC is never raised; dynarmic's x64 FDIV reports a stray IXC for 0/0 and
-        // the JIT run can carry one, so IXC is left out.
-        const u32 flag_mask = (fpcr & (1U << 24)) != 0 ? 0x0F : 0x8F;
+        // Arm FPUnpack pseudocode says. Compare it only without FZ.
+        const u32 flag_mask = (fpcr & (1U << 24)) != 0 ? 0x1F : 0x9F;
         u32 mismatches = 0;
         for (const auto [x, y] : pairs) {
             jit.SetVector(0, {x, 0x1111});
@@ -462,4 +459,19 @@ TEST_CASE("Vector FRECPE (single) matches FPRecipEstimate", "[guest_cpu]") {
         }
     }
     CHECK(mismatches == 0);
+}
+
+TEST_CASE("Compiling a block leaves the guest FPSR alone", "[guest_cpu]") {
+    GuestEnvironment env;
+    // Many blocks, each first run compiles it: b +4 x 512; svc #0
+    for (u64 i = 0; i < 512; ++i) {
+        env.code[Entry + 4 * i] = 0x14000001;
+    }
+    env.code[Entry + 4 * 512] = Svc0;
+    Dynarmic::A64::Jit jit{BaseConfig(env)};
+    env.jit = &jit;
+    jit.SetFpsr(0);
+    jit.SetPC(Entry);
+    jit.Run();
+    CHECK(jit.GetFpsr() == 0);
 }
