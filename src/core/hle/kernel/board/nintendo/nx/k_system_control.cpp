@@ -113,6 +113,11 @@ bool KSystemControl::Init::ShouldIncreaseThreadResourceLimit() {
     return true;
 }
 
+size_t KSystemControl::Nx2RemoteMemorySize() {
+    static const size_t size = std::getenv("EDEN_NX2_APP_POOL_PROBE") != nullptr ? 512_MiB : 0;
+    return size;
+}
+
 std::size_t KSystemControl::Init::GetApplicationPoolSize() {
     // Get the base pool size.
     const size_t base_pool_size = []() -> size_t {
@@ -141,7 +146,8 @@ std::size_t KSystemControl::Init::GetApplicationPoolSize() {
     // EDEN_NX2_APP_POOL_PROBE=<MiB> grows the pool: The Duskbloods network test's CSMemory heap "M"
     // asks for more than the 12 GB arrangement leaves (playDB-CNT issue 2).
     if (const char* probe = std::getenv("EDEN_NX2_APP_POOL_PROBE"); probe != nullptr) {
-        return base_pool_size + static_cast<size_t>(std::strtoull(probe, nullptr, 10)) * 1_MiB;
+        return base_pool_size + static_cast<size_t>(std::strtoull(probe, nullptr, 10)) * 1_MiB +
+               KSystemControl::Nx2RemoteMemorySize();
     }
 
     // Return (possibly) adjusted size.

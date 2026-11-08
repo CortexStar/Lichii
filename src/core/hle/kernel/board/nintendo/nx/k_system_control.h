@@ -29,6 +29,13 @@ public:
     static constexpr size_t Nx2GraphicsServerMemorySize = 2ULL * 1024 * 1024 * 1024; // 2_GiB
 
 public:
+    // Switch 2 "remote memory" (svcGetInfo types 31 and 32). Only with EDEN_NX2_APP_POOL_PROBE,
+    // which the network test launchers set. The application pool grows by this much, and the
+    // memory totals the game reads leave it out: The Duskbloods network test sizes its heap from
+    // those totals, so the remote memory stays free for MapPhysicalMemory. Its Gameface UI maps
+    // pages there and fails with ResultOutOfMemory in The Blood-Drenched Moon without it.
+    static size_t Nx2RemoteMemorySize();
+
     class Init {
     public:
         // Initialization.

@@ -11,6 +11,7 @@
 #include "core/hle/kernel/k_memory_manager.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_resource_limit.h"
+#include "core/hle/kernel/k_system_control.h"
 #include "core/hle/kernel/svc.h"
 #include "core/hle/kernel/svc_results.h"
 #include "core/hle/kernel/svc_version.h"
@@ -88,9 +89,9 @@ Result GetInfo(Core::System& system, u64* result, InfoType info_id_type, Handle 
             R_SUCCEED();
         }
         case InfoType::Nx2RemoteMemorySize:
-            // Unknown real value; nothing backs it yet. The Duskbloods network test crashes on a
-            // null pointer if it is 0 (playDB-CNT issue 2).
-            *result = std::getenv("EDEN_NX2_APP_POOL_PROBE") != nullptr ? u64{512} << 20 : 0;
+            // Unknown real value; the application pool backs it (see Nx2RemoteMemorySize). The
+            // Duskbloods network test crashes on a null pointer if it is 0 (playDB-CNT issue 2).
+            *result = KSystemControl::Nx2RemoteMemorySize();
             LOG_WARNING(Kernel_SVC, "(STUBBED) Switch 2 InfoType 31 (remote memory size), returning {:#x}",
                         *result);
             R_SUCCEED();
@@ -117,7 +118,8 @@ Result GetInfo(Core::System& system, u64* result, InfoType info_id_type, Handle 
             *result = process->GetPageTable().GetStackRegionSize();
             R_SUCCEED();
         case InfoType::TotalMemorySize:
-            *result = process->GetTotalUserPhysicalMemorySize(system.Kernel());
+            *result = process->GetTotalUserPhysicalMemorySize(system.Kernel()) -
+                      KSystemControl::Nx2RemoteMemorySize();
             R_SUCCEED();
         case InfoType::UsedMemorySize:
             *result = process->GetUsedUserPhysicalMemorySize(system.Kernel());
@@ -135,7 +137,8 @@ Result GetInfo(Core::System& system, u64* result, InfoType info_id_type, Handle 
             *result = GetInteger(process->GetProcessLocalRegionAddress());
             R_SUCCEED();
         case InfoType::TotalNonSystemMemorySize:
-            *result = process->GetTotalNonSystemUserPhysicalMemorySize(system.Kernel());
+            *result = process->GetTotalNonSystemUserPhysicalMemorySize(system.Kernel()) -
+                      KSystemControl::Nx2RemoteMemorySize();
             R_SUCCEED();
         case InfoType::UsedNonSystemMemorySize:
             *result = process->GetUsedNonSystemUserPhysicalMemorySize(system.Kernel());
