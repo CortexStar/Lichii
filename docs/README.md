@@ -40,7 +40,8 @@ Standing technical documentation about subsystems, hardware and behaviours:
 - Documented behaviours: **[Game-DLSS replacement](./reference/native-dlss-replacement.md)**,
   **[Overwolf Vulkan startup protection](./reference/overwolf-vulkan.md)**
 - Settings: **[Settings](./Settings.md)**
-- nx2 effort: **[debug tools](./nx2/debug-tools.md)**, **[debug MCP](./nx2/debug-mcp.md)**,
+- nx2 effort: **[AMD GPUs and Switch 2 titles](./nx2/amd.md)**,
+  **[debug tools](./nx2/debug-tools.md)**, **[debug MCP](./nx2/debug-mcp.md)**,
   **[async native pipelines](./nx2/async-native-pipelines.md)**,
   **[microphone](./nx2/microphone.md)**,
   **[Ocarina dynamic fps](./nx2/ocarina-dynamic-fps.md)**
