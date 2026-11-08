@@ -9,7 +9,7 @@ index 69ae460..f0e9761 100644
 +    if (s.nvapi) { FreeLibrary(s.nvapi); s.nvapi = nullptr; }
      s.ready = false;
  }
- 
+
 -}  // namespace dlssnr
 \ No newline at end of file
 +}  // namespace dlssnr
@@ -20,7 +20,7 @@ index c4b57a9..c5f9399 100644
 @@ -2237,7 +2237,11 @@ static bool EnsureNeural(NeuralState& ns, ShmMap& shm, uint32_t w, uint32_t h) {
      if (ns.ready && ns.w == w && ns.h == h && ns.sdr16Built == wantSdr16) return true;
      if (ns.ngx.disabled) return false;
- 
+
 -    if (ns.ngx.snippet) NgxReleaseAllPasses(ns.ngx, ns.vk.device);
 +    // NgxLoadAndInit below owns a fresh runtime initialization, not just a new
 +    // feature. Balance its module loads and restore hooks before loading again.
