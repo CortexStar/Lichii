@@ -836,7 +836,7 @@ SamplerId TextureCache<P>::GetSamplerId(u32 index, bool compute) {
     const bool watched = ArmPoolEntry(table, PoolTableId(compute, true), index);
     auto const [descriptor, is_new] = table.Read(*gpu_memory, index);
     if (is_new) {
-        table.bound_ids[index] = FindSampler(descriptor, compute);
+        table.Bind(index, FindSampler(descriptor, compute));
     }
     if (watched) {
         // Samplers are never deleted and depend on the entry only.
@@ -1590,7 +1590,7 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
                     // No memory for its image: TickFrame invalidates the table after collecting,
                     // and the descriptor's next read makes the image again.
                     channel_state->image_views.erase(pair);
-                    table.bound_ids[index] = NULL_IMAGE_VIEW_ID;
+                    table.Bind(index, NULL_IMAGE_VIEW_ID);
                     return NULL_IMAGE_VIEW_ID;
                 }
                 if (pair->second != NULL_IMAGE_VIEW_ID) {
@@ -1599,14 +1599,14 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
                 }
             }
             PrepareImageView(pair->second, false, false);
-            table.bound_ids[index] = pair->second;
+            table.Bind(index, pair->second);
             NotePoolRef(pair->second, index, compute);
             if (watched) {
                 MakeViewResident(table, index, pair->second);
             }
             return pair->second;
         }
-        table.bound_ids[index] = NULL_IMAGE_VIEW_ID;
+        table.Bind(index, NULL_IMAGE_VIEW_ID);
         return NULL_IMAGE_VIEW_ID;
     }
     const auto id = table.bound_ids[index];
