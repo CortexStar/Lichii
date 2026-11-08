@@ -308,7 +308,9 @@ json Screenshot(ToolState& state, const json& params) {
         throw std::runtime_error{"a screenshot is already pending: no frame was presented since"};
     }
     const u32 height = Param<u32>(params, "height", 720, 144, 2160);
-    const auto layout = Layout::DefaultFrameLayout(height * 16 / 9, height);
+    // A 21:9 frame (Ocarina's Ultrawide Add-On) needs a 21:9 image, e.g. width 1720 at height 720.
+    const u32 width = Param<u32>(params, "width", height * 16 / 9, 144, 5120);
+    const auto layout = Layout::DefaultFrameLayout(width, height);
     const auto pixels = std::make_shared<std::vector<u8>>(size_t{layout.width} * layout.height * 4);
     const auto done = std::make_shared<std::promise<bool>>();
     auto future = done->get_future();

@@ -166,8 +166,8 @@ to 0.1 ms. With fewer than two presents, statistics are zero and the interval li
 Only available samples from the 4096-timestamp ring are used; overflow sets `truncated: true`.
 For example: `{"method":"frame_times","params":{"seconds":5,"refresh_hz":60}}`.
 
-**`screenshot`** `{height?, save?, timeout_s?}`. It requests a 16:9 layout from
-`Layout::DefaultFrameLayout`, and the renderer blits the presented framebuffers into it. The
+**`screenshot`** `{height?, width?, save?, timeout_s?}`. It requests a layout of that size
+(16:9 without `width`; a 21:9 frame wants e.g. 1720x720) from `Layout::DefaultFrameLayout`, and the renderer blits the presented framebuffers into it. The
 BGRA result is turned into RGB and encoded as PNG with stb, which `common` already compiles. The
 pixel buffer is owned by the completion callback, so a request that times out cannot leave the
 renderer writing into freed memory. If the Qt screenshot hotkey has a request pending, the tool

@@ -55,12 +55,14 @@ TOOLS = [
     },
     {
         "name": "screenshot",
-        "description": "PNG of the next presented frame (16:9, default 720 lines). Fails when no "
-                       "frame is presented within timeout_s (paused or loading).",
+        "description": "PNG of the next presented frame (default 16:9 at 720 lines; width sets "
+                       "another shape). Fails when no frame is presented within timeout_s "
+                       "(paused or loading).",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "height": {"type": "integer", "minimum": 144, "maximum": 2160},
+                "width": {"type": "integer", "minimum": 144, "maximum": 5120},
                 "save": {"type": "boolean", "description": "Also write it into the dump directory."},
                 "timeout_s": {"type": "integer", "minimum": 1, "maximum": 30},
             },
