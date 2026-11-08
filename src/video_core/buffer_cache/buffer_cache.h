@@ -1541,7 +1541,98 @@ void BufferCache<P>::BindHostDrawIndirectBuffers() {
 }
 
 template <class P>
+void BufferCache<P>::BeginBankTable(bool compute) {
+    bank_table = nullptr;
+    bank_table_address = 0;
+    if constexpr (requires { runtime.AllocateBankTable(u32{}); }) {
+        using Shader::Backend::SPIRV::BANK_TABLE_BANKS_PER_STAGE;
+        using Shader::Backend::SPIRV::BankTableEntry;
+        size_t stages = 0;
+        if (compute) {
+            stages = compute_uniforms_by_address ? 1 : 0;
+        } else {
+            for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+                if (graphics_uniforms_by_address[stage]) {
+                    stages = stage + 1;
+                }
+            }
+        }
+        if (stages == 0) {
+            return;
+        }
+        const u32 entries = static_cast<u32>(stages * BANK_TABLE_BANKS_PER_STAGE);
+        const auto [bytes, address] = runtime.AllocateBankTable(entries * sizeof(BankTableEntry));
+        bank_table = reinterpret_cast<BankTableEntry*>(bytes.data());
+        bank_table_address = address;
+        // Banks the stage does not bind read zero; a dynamic index may reach any of them.
+        const BankTableEntry unbound{
+            .address = runtime.NullPageAddress(), .size = 0, .reserved = 0};
+        std::fill_n(bank_table, entries, unbound);
+    }
+}
+
+template <class P>
+void BufferCache<P>::TargetBankEntry(size_t table_stage, u32 index) {
+    if constexpr (requires { runtime.SetBankEntry(nullptr); }) {
+        runtime.SetBankEntry(
+            &bank_table[table_stage * Shader::Backend::SPIRV::BANK_TABLE_BANKS_PER_STAGE + index]);
+    }
+}
+
+template <class P>
+void BufferCache<P>::VerifyBankEntry(size_t table_stage, u32 index, DAddr device_addr, u32 size) {
+    if constexpr (requires { runtime.LastBankBytes(); }) {
+        const auto& entry =
+            bank_table[table_stage * Shader::Backend::SPIRV::BANK_TABLE_BANKS_PER_STAGE + index];
+        if (const u8* const bytes = runtime.LastBankBytes(); bytes != nullptr) {
+            // A stream copy: the bytes the shader reads are the guest's.
+            std::vector<u8> guest(size);
+            device_memory.ReadBlockUnsafe(device_addr, guest.data(), size);
+            NativeVerify::Check(NativeVerify::Layer::Uniforms,
+                                entry.size == size && std::memcmp(bytes, guest.data(), size) == 0,
+                                "stage {} bank {} at {:#x}: {} bytes, entry {} bytes, {}",
+                                table_stage, index, device_addr, size, entry.size,
+                                entry.size == size ? "bytes differ" : "size differs");
+        } else {
+            // In place: the buffer holds the guest bytes once synchronized. Hot pages stay
+            // CPU-dirty by design (their syncs compare copies), so they are left out.
+            bool dirty = false;
+            for (DAddr page = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
+                 page < device_addr + size; page += DEVICE_PAGESIZE) {
+                const DAddr begin = (std::max)(page, device_addr);
+                const DAddr end = (std::min)(page + DEVICE_PAGESIZE, device_addr + size);
+                dirty |= !hot_pages.contains(page) &&
+                         memory_tracker.IsRegionCpuModified(begin, end - begin);
+            }
+            NativeVerify::Check(NativeVerify::Layer::Uniforms, !dirty,
+                                "stage {} bank {} at {:#x}+{:#x} read in place while CPU-dirty",
+                                table_stage, index, device_addr, size);
+        }
+        NativeVerify::Report();
+    }
+}
+
+template <class P>
 void BufferCache<P>::BindHostGraphicsUniformBuffers(size_t stage) {
+    if (graphics_uniforms_by_address[stage] && bank_table != nullptr) {
+        // Each bank's address goes into the draw's bank table instead of a descriptor.
+        const bool verify = NativeVerify::Enabled(NativeVerify::Layer::Uniforms);
+        ForEachEnabledBit(channel_state->enabled_uniform_buffer_masks[stage], [&](u32 index) {
+            TargetBankEntry(stage, index);
+            BindHostGraphicsUniformBuffer(stage, index, 0, true);
+            if (verify && !(index == 17 && maxwell3d->root_tables.loaded &&
+                            channel_state->uniform_buffers[stage][index].size == 0)) {
+                const Binding& binding = channel_state->uniform_buffers[stage][index];
+                VerifyBankEntry(
+                    stage, index, binding.device_addr,
+                    (std::min)(binding.size, (*channel_state->uniform_buffer_sizes)[stage][index]));
+            }
+        });
+        if constexpr (requires { runtime.SetBankEntry(nullptr); }) {
+            runtime.SetBankEntry(nullptr);
+        }
+        return;
+    }
     u32 dirty = ~0U;
     if constexpr (HAS_PERSISTENT_UNIFORM_BUFFER_BINDINGS) {
         dirty = std::exchange(channel_state->dirty_uniform_buffers[stage], 0);
@@ -2003,7 +2094,17 @@ void BufferCache<P>::BindHostComputeUniformBuffers() {
         channel_state->fast_bound_uniform_buffers.fill(0);
     }
     u32 binding_index = 0;
+    const bool by_address = compute_uniforms_by_address && bank_table != nullptr;
+    SCOPE_EXIT {
+        if constexpr (requires { runtime.SetBankEntry(nullptr); }) {
+            runtime.SetBankEntry(nullptr);
+        }
+    };
     ForEachEnabledBit(channel_state->enabled_compute_uniform_buffer_mask, [&](u32 index) {
+        if (by_address) {
+            // The address goes into the dispatch's bank table instead of a descriptor.
+            TargetBankEntry(0, index);
+        }
         const Binding& binding = channel_state->compute_uniform_buffers[index];
         Buffer& buffer = slot_buffers[binding.buffer_id];
         TouchBuffer(buffer, binding.buffer_id);

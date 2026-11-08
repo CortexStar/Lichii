@@ -160,7 +160,20 @@ struct Runtime {
         ++host_read_barriers;
         Finish();
     }
-    void BindUniformBuffer(Buffer&, u32, u32) {}
+    void BindUniformBuffer(Buffer& buffer, u32 offset, u32 size) {
+        if (bank_entry != nullptr) {
+            *bank_entry = {.address = buffer.DeviceAddress() + offset, .size = size, .reserved = 0};
+        }
+    }
+    void SetBankEntry(Shader::Backend::SPIRV::BankTableEntry* entry) {
+        bank_entry = entry;
+    }
+    std::pair<std::span<u8>, u64> AllocateBankTable(u32 size) {
+        bank_table.assign(size, 0xcd);
+        return {bank_table, 0x4000'0000};
+    }
+    Shader::Backend::SPIRV::BankTableEntry* bank_entry{};
+    std::vector<u8> bank_table;
     bool SupportsGpuPageTable() const {
         return true;
     }
@@ -177,6 +190,9 @@ struct Runtime {
     u32 page_table_syncs{};
     std::span<u8> BindMappedUniformBuffer(size_t, u32, u32 size) {
         stream.resize(size);
+        if (bank_entry != nullptr) {
+            *bank_entry = {.address = 0x3000'0000, .size = size, .reserved = 0};
+        }
         return stream;
     }
 
@@ -318,6 +334,17 @@ struct BufferCacheTestAccess {
     }
     static BufferId Find(Cache& cache, DAddr address, u32 size) {
         return cache.FindBuffer(address, size, false);
+    }
+    /// One draw's constant buffers through the bank table, vertex (0) and fragment (4) stages.
+    static void BankDraw(Cache& cache, BufferCacheChannelInfo& channel) {
+        cache.channel_state = &channel;
+        cache.maxwell3d = &channel.maxwell3d;
+        cache.gpu_memory = &channel.gpu_memory;
+        cache.SetUniformsByAddress(0, true);
+        cache.SetUniformsByAddress(4, true);
+        cache.BeginBankTable(false);
+        cache.BindHostGraphicsUniformBuffers(0);
+        cache.BindHostGraphicsUniformBuffers(4);
     }
 };
 
@@ -949,4 +976,42 @@ TEST_CASE("Storage through the GPU page table maps each device run to its buffer
     // The next draw makes it resident again in a new buffer.
     Access::Resident(*f.cache, channel, binding, false);
     REQUIRE(table.Translate(base + 0x10010) == host + 0x40010);
+}
+
+TEST_CASE("Constant buffers by device address fill the draw's bank table, not descriptors",
+          "[buffer_ports]") {
+    using Shader::Backend::SPIRV::BankTableEntry;
+    Fixture f;
+    Tegra::Control::ChannelState state{0};
+    state.memory_manager = &*f.memory;
+    state.payload.emplace(f.system, *f.memory, state);
+    VideoCommon::BufferCacheChannelInfo channel{state};
+    VideoCommon::UniformBufferSizes sizes{};
+    sizes[0][2] = 0x100;  // small: streamed
+    sizes[4][0] = 0x2000; // past the stream size: read in place
+    channel.uniform_buffer_sizes = &sizes;
+    channel.enabled_uniform_buffer_masks[0] = 1U << 2;
+    channel.enabled_uniform_buffer_masks[4] = 1U << 0;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    channel.uniform_buffers[0][2] = {.device_addr = 0x20100, .size = 0x100, .buffer_id = id};
+    channel.uniform_buffers[4][0] = {.device_addr = 0x24000, .size = 0x2000, .buffer_id = id};
+    Access::BankDraw(*f.cache, channel);
+    REQUIRE(f.cache->BankTableAddress() == 0x4000'0000);
+    // Vertex through fragment: five stages of 18 banks.
+    REQUIRE(f.runtime.bank_table.size() == 5 * 18 * sizeof(BankTableEntry));
+    const auto entry = [&](u32 stage, u32 index) {
+        BankTableEntry value;
+        std::memcpy(&value, f.runtime.bank_table.data() + (stage * 18 + index) * sizeof(value),
+                    sizeof(value));
+        return value;
+    };
+    REQUIRE(entry(0, 2).address == 0x3000'0000);
+    REQUIRE(entry(0, 2).size == 0x100);
+    REQUIRE(entry(4, 0).address == 0x7000'0000'0000ULL + 0x24000);
+    REQUIRE(entry(4, 0).size == 0x2000);
+    // Banks the stages don't bind read zero from the null page.
+    REQUIRE(entry(0, 0).address == Runtime::NULL_PAGE);
+    REQUIRE(entry(0, 0).size == 0);
+    REQUIRE(entry(3, 17).size == 0);
+    REQUIRE(f.runtime.bank_entry == nullptr);
 }

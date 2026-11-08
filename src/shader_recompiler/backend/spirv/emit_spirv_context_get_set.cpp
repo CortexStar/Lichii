@@ -115,6 +115,20 @@ std::optional<OutAttr> OutputAttrPointer(EmitContext& ctx, IR::Attribute attr) {
 
 Id GetCbuf(EmitContext& ctx, Id result_type, Id UniformDefinitions::*member_ptr, u32 element_size,
            const IR::Value& binding, const IR::Value& offset, const Id indirect_func) {
+    if (ctx.uniforms_by_address) {
+        // Hardware reads the aligned offset (LDC.U32 at 6 reads offset 4), as below.
+        Id byte_offset;
+        if (offset.IsImmediate()) {
+            byte_offset = ctx.Const(offset.U32() / element_size * element_size);
+        } else if (element_size > 1) {
+            byte_offset =
+                ctx.OpBitwiseAnd(ctx.U32[1], ctx.Def(offset), ctx.Const(~(element_size - 1)));
+        } else {
+            byte_offset = ctx.Def(offset);
+        }
+        const Id binding_id{binding.IsImmediate() ? ctx.Const(binding.U32()) : ctx.Def(binding)};
+        return ctx.BankLoad(result_type, element_size, binding_id, byte_offset);
+    }
     Id buffer_offset;
     const Id uniform_type{ctx.uniform_types.*member_ptr};
     if (offset.IsImmediate()) {

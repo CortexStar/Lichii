@@ -54,6 +54,7 @@ namespace {
 using boost::container::small_vector;
 using boost::container::static_vector;
 using Shader::ImageBufferDescriptor;
+using Shader::Backend::SPIRV::BANK_TABLE_OFFSET;
 using Shader::Backend::SPIRV::PAGE_TABLE_OFFSET;
 using Shader::Backend::SPIRV::RENDERAREA_LAYOUT_OFFSET;
 using Shader::Backend::SPIRV::RESCALING_LAYOUT_DOWN_FACTOR_OFFSET;
@@ -385,6 +386,8 @@ GraphicsPipeline::GraphicsPipeline(
     };
     uses_page_table = std::ranges::any_of(
         stage_infos, [](const Shader::Info& info) { return info.storage_by_address; });
+    uses_bank_table = std::ranges::any_of(
+        stage_infos, [](const Shader::Info& info) { return info.uniforms_by_address; });
     writes_storage = std::ranges::any_of(stage_infos, [&](const Shader::Info& info) {
         return info.stores_global_memory || any_written(info.storage_buffers_descriptors) ||
                any_written(info.image_descriptors) || any_written(info.image_buffer_descriptors);
@@ -609,6 +612,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         const Shader::Info& info{stage_infos[stage]};
         buffer_cache.UnbindGraphicsStorageBuffers(stage);
         buffer_cache.SetStorageByAddress(stage, info.storage_by_address);
+        buffer_cache.SetUniformsByAddress(stage, info.uniforms_by_address);
         if constexpr (Spec::has_storage_buffers) {
             size_t ssbo_index{};
             for (const auto& desc : info.storage_buffers_descriptors) {
@@ -930,6 +934,9 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
     }
 
+    if (uses_bank_table) {
+        buffer_cache.BeginBankTable(false);
+    }
     RescalingPushConstant rescaling;
     RenderAreaPushConstant render_area;
     const VideoCommon::SamplerId* samplers_it{samplers.data()};
@@ -976,6 +983,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     // After the stages made their storage resident, before the render pass: the entry copies
     // stay outside it.
     page_table_address = uses_page_table ? buffer_cache.PageTableAddress() : 0;
+    bank_table_address = uses_bank_table ? buffer_cache.BankTableAddress() : 0;
     if (mesh_emulation) {
         if (!mesh_output_buffer) {
             return false;
@@ -1079,8 +1087,8 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                           task_buffers = mesh_task_buffers, rescaling_data = rescaling.Data(),
                           is_rescaling = texture_cache.IsRescaling(),
                           uses_render_area = render_area.uses_render_area,
-                          render_area_data = render_area.words,
-                          page_table = page_table_address](vk::CommandBuffer cmdbuf) {
+                          render_area_data = render_area.words, page_table = page_table_address,
+                          bank_table = bank_table_address](vk::CommandBuffer cmdbuf) {
             mesh_descriptor_set = VK_NULL_HANDLE;
             const bool has_task{mesh_emulation->has_task};
             if (!pipeline || !mesh_compute_pipeline || build->Failed() || groups == 0 ||
@@ -1109,6 +1117,10 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                 if (page_table != 0) {
                     cmdbuf.PushConstants(*pipeline_layout, push_stages, PAGE_TABLE_OFFSET,
                                          sizeof(page_table), &page_table);
+                }
+                if (bank_table != 0) {
+                    cmdbuf.PushConstants(*pipeline_layout, push_stages, BANK_TABLE_OFFSET,
+                                         sizeof(bank_table), &bank_table);
                 }
                 cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline_layout, 0,
                                           descriptor_set, nullptr);
@@ -1253,8 +1265,8 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                       descriptor_buffer_offset, descriptor_buffer_chunk, bind_descriptor_buffer,
                       rescaling_data = rescaling.Data(), is_rescaling, update_rescaling,
                       uses_render_area = render_area.uses_render_area,
-                      render_area_data = render_area.words,
-                      page_table = page_table_address](vk::CommandBuffer cmdbuf) {
+                      render_area_data = render_area.words, page_table = page_table_address,
+                      bank_table = bank_table_address](vk::CommandBuffer cmdbuf) {
         if (bind_descriptor_buffer) {
             const VkDescriptorBufferBindingInfoEXT binding_info{
                 descriptor_buffer_ring.BindingInfo(descriptor_buffer_chunk)};
@@ -1291,6 +1303,10 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         if (page_table != 0) {
             cmdbuf.PushConstants(*pipeline_layout, push_stages, PAGE_TABLE_OFFSET,
                                  sizeof(page_table), &page_table);
+        }
+        if (bank_table != 0) {
+            cmdbuf.PushConstants(*pipeline_layout, push_stages, BANK_TABLE_OFFSET,
+                                 sizeof(bank_table), &bank_table);
         }
         if (has_stage_sets) {
             // Graphics pipeline libraries: one set per stage, at the stage's index.

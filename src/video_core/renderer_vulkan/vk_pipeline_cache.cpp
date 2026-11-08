@@ -685,8 +685,13 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     // the same condition, BufferCacheRuntime::SupportsGpuPageTable).
     profile.gpu_page_table = device.SupportsGpuPageTable();
     host_info.gpu_page_table = profile.gpu_page_table;
-    LOG_INFO(Render_Vulkan, "Storage and global memory through the GPU page table: {}",
-             profile.gpu_page_table ? "yes" : "no");
+    // Constant buffers by device address from each draw's bank table (same requirements).
+    profile.uniforms_by_address = device.SupportsGpuPageTable();
+    host_info.uniforms_by_address = profile.uniforms_by_address;
+    LOG_INFO(Render_Vulkan,
+             "Storage and global memory through the GPU page table: {}, constant buffers by "
+             "device address: {}",
+             profile.gpu_page_table ? "yes" : "no", profile.uniforms_by_address ? "yes" : "no");
 
     LOG_INFO(Render_Vulkan,
              "Bindless handle tables: sampled image arrays indexed per invocation {}, up to {} "
@@ -2173,7 +2178,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                     }
                 }
             };
-            add(info.constant_buffer_descriptors, nullptr);
+            add(Shader::BoundConstantBuffers(info), nullptr);
             add(Shader::BoundStorageBuffers(info), &compute_storage_buffers);
             add(info.texture_buffer_descriptors, &compute_sampled_images);
             add(info.image_buffer_descriptors, nullptr);

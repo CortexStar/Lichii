@@ -36,6 +36,7 @@
 #include "common/settings.h"
 #include "common/slot_vector.h"
 #include "common/spin_recursive_mutex.h"
+#include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/shader_info.h"
 #include "video_core/buffer_cache/buffer_base.h"
 #include "video_core/buffer_cache/nx2_bufcache.h"
@@ -339,6 +340,26 @@ public:
     /// GPU page table: the same for the compute program of the next dispatch.
     void SetComputeStorageByAddress(bool by_address) {
         compute_storage_by_address = by_address;
+    }
+
+    /// Constant buffers by device address: whether graphics stage `stage` reads its constant
+    /// buffers from the draw's bank table (Shader::Info::uniforms_by_address).
+    void SetUniformsByAddress(size_t stage, bool by_address) {
+        graphics_uniforms_by_address[stage] = by_address;
+    }
+
+    /// The same for the compute program of the next dispatch.
+    void SetComputeUniformsByAddress(bool by_address) {
+        compute_uniforms_by_address = by_address;
+    }
+
+    /// Starts the bank table of the next draw (or dispatch): the stages that read constant
+    /// buffers by address get their entries, unbound banks reading zero. Before binding.
+    void BeginBankTable(bool compute);
+
+    /// The device address of the bank table BeginBankTable started, filled by the binds since.
+    [[nodiscard]] u64 BankTableAddress() const noexcept {
+        return bank_table_address;
     }
 
     /// The device address of the current address space's page table, with the entries made
@@ -1162,6 +1183,16 @@ private:
     std::unordered_map<size_t, std::unique_ptr<GpuPageTable>> page_tables;
     std::unordered_set<u32> page_table_buffers; ///< BufferId indices with entries in a table
     std::array<bool, NUM_STAGES> graphics_storage_by_address{};
+    std::array<bool, NUM_STAGES> graphics_uniforms_by_address{};
+    bool compute_uniforms_by_address{};
+    /// The bank table being filled (BeginBankTable), entries by stage * 18 + constant buffer.
+    Shader::Backend::SPIRV::BankTableEntry* bank_table{};
+    u64 bank_table_address{};
+    /// While binding a by-address bank: its entry, which the runtime fills instead of a
+    /// descriptor.
+    void TargetBankEntry(size_t table_stage, u32 index);
+    /// EDEN_NX2_NATIVE_VERIFY=uniforms: a streamed bank's table entry holds the guest bytes.
+    void VerifyBankEntry(size_t table_stage, u32 index, DAddr device_addr, u32 size);
     bool compute_storage_by_address{};
     std::array<std::array<Residency, NUM_STORAGE_BUFFERS>, NUM_STAGES + 1> residencies{};
     bool page_table_full_logged{};

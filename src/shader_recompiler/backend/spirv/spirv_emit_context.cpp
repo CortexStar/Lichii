@@ -489,6 +489,8 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
       image_rescaling_index{bindings.image_scaling_index}, descriptor_set{bindings.descriptor_set},
       storage_by_address{program.info.storage_by_address && profile_.gpu_page_table &&
                          profile_.support_int64},
+      uniforms_by_address{program.info.uniforms_by_address && profile_.uniforms_by_address &&
+                          profile_.support_int64},
       program_info{&program.info} {
     const bool is_unified{profile.unified_descriptor_binding};
     u32& uniform_binding{is_unified ? bindings.unified : bindings.uniform_buffer};
@@ -586,7 +588,8 @@ void EmitContext::DefineCommonTypes(const Info& info) {
         U16 = Name(TypeInt(16, false), "u16");
         S16 = Name(TypeInt(16, true), "s16");
     }
-    if ((info.uses_int64 || info.storage_by_address) && profile.support_int64) {
+    if ((info.uses_int64 || info.storage_by_address || info.uniforms_by_address) &&
+        profile.support_int64) {
         AddCapability(spv::Capability::Int64);
         U64 = Name(TypeInt(64, false), "u64");
     }
@@ -1308,7 +1311,8 @@ void EmitContext::DefinePushConstants(const Info& info) {
     }
     const bool rescaling_block{rescaling && profile.unified_descriptor_binding};
     const bool page_table{storage_by_address && profile.unified_descriptor_binding};
-    if (!rescaling_block && !render_area && !page_table) {
+    const bool bank_table{uniforms_by_address && profile.unified_descriptor_binding};
+    if (!rescaling_block && !render_area && !page_table && !bank_table) {
         return;
     }
     // One block with every member this stage reads, at the offsets of PushConstantLayout.
@@ -1339,6 +1343,9 @@ void EmitContext::DefinePushConstants(const Info& info) {
     if (render_area) {
         render_are_member_index = add_member(F32[4], RENDERAREA_LAYOUT_OFFSET, "render_area");
     }
+    if (bank_table) {
+        bank_table_member_index = add_member(U64, BANK_TABLE_OFFSET, "bank_table");
+    }
     if (page_table) {
         page_table_member_index = add_member(U64, PAGE_TABLE_OFFSET, "page_table");
     }
@@ -1360,6 +1367,9 @@ void EmitContext::DefinePushConstants(const Info& info) {
     }
     if (page_table) {
         page_table_push_constant = variable;
+    }
+    if (bank_table) {
+        bank_table_push_constant = variable;
     }
     if (profile.supported_spirv >= 0x00010400) {
         interfaces.push_back(variable);
@@ -1489,17 +1499,30 @@ void EmitContext::DefineGlobalMemoryFunctionsByAddress(const IR::Program& progra
 }
 
 void EmitContext::DefinePageTable(const Info& info) {
-    if (!storage_by_address) {
+    if (!storage_by_address && !uniforms_by_address) {
         return;
     }
-    if (!Sirit::ValidId(page_table_push_constant)) {
-        throw NotImplementedException("GPU page table without push constants");
+    if ((storage_by_address && !Sirit::ValidId(page_table_push_constant)) ||
+        (uniforms_by_address && !Sirit::ValidId(bank_table_push_constant))) {
+        throw NotImplementedException("Device addresses without push constants");
     }
     AddExtension("SPV_KHR_physical_storage_buffer");
     AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
     SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
     psb_u32_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, U32[1]);
     psb_u64_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, U64);
+    // 8 and 16-bit loads through PhysicalStorageBuffer pointers are storage buffer accesses.
+    if (info.uses_int8 && profile.support_int8 && profile.support_storage_buffer_8bit) {
+        AddExtension("SPV_KHR_8bit_storage");
+        AddCapability(spv::Capability::StorageBuffer8BitAccess);
+    }
+    if (info.uses_int16 && profile.support_int16 && profile.support_storage_buffer_16bit) {
+        AddExtension("SPV_KHR_16bit_storage");
+        AddCapability(spv::Capability::StorageBuffer16BitAccess);
+    }
+    if (!storage_by_address) {
+        return;
+    }
 
     // va -> L1[va >> 21] is the block, its entry (va >> 12) & 511 the page's device address.
     const Id function_type{TypeFunction(U64, U64)};
@@ -1529,7 +1552,6 @@ void EmitContext::DefinePageTable(const Info& info) {
                          spv::MemoryAccessMask::Aligned, 8U)};
     OpReturnValue(OpIAdd(U64, page, OpBitwiseAnd(U64, va, Constant(U64, page_mask))));
     OpFunctionEnd();
-    (void)info;
 }
 
 Id EmitContext::PageTableAddress(Id va) {
@@ -1569,6 +1591,40 @@ Id EmitContext::StorageAddress(u32 binding, Id offset, u32 bias) {
     return address;
 }
 
+Id EmitContext::BankLoad(Id result_type, u32 element_size, Id binding, Id byte_offset) {
+    const Id push_u64{TypePointer(spv::StorageClass::PushConstant, U64)};
+    const Id table{OpLoad(
+        U64, OpAccessChain(push_u64, bank_table_push_constant, Const(bank_table_member_index)))};
+    const Id index{
+        OpIAdd(U32[1], Const(BankTableStage(stage) * BANK_TABLE_BANKS_PER_STAGE), binding)};
+    const Id entry{
+        OpIAdd(U64, table,
+               OpIMul(U64, OpUConvert(U64, index), Constant(U64, u64{sizeof(BankTableEntry)})))};
+    const Id address{
+        OpLoad(U64, OpConvertUToPtr(psb_u64_pointer, entry), spv::MemoryAccessMask::Aligned, 8U)};
+    const Id size_address{OpIAdd(U64, entry, Constant(U64, u64{offsetof(BankTableEntry, size)}))};
+    const Id size{OpLoad(U32[1], OpConvertUToPtr(psb_u32_pointer, size_address),
+                         spv::MemoryAccessMask::Aligned, 4U)};
+    // Past the bank's end reads zero, as past a bound uniform buffer's range; the load itself
+    // stays within the bank (offset 0 then).
+    const Id end{OpIAdd(U32[1], byte_offset, Const(element_size))};
+    const Id inside{OpULessThanEqual(U1, end, size)};
+    const Id safe_offset{OpSelect(U32[1], inside, byte_offset, u32_zero_value)};
+    const Id pointer_type{TypePointer(spv::StorageClass::PhysicalStorageBuffer, result_type)};
+    const Id pointer{
+        OpConvertUToPtr(pointer_type, OpIAdd(U64, address, OpUConvert(U64, safe_offset)))};
+    const Id value{OpLoad(result_type, pointer, spv::MemoryAccessMask::Aligned, element_size)};
+    const u32 components{result_type.value == U32[2].value   ? 2U
+                         : result_type.value == U32[4].value ? 4U
+                                                             : 1U};
+    const std::array<Id, 4> conditions{inside, inside, inside, inside};
+    const Id condition{components == 1
+                           ? inside
+                           : OpCompositeConstruct(TypeVector(U1, static_cast<int>(components)),
+                                                  std::span(conditions.data(), components))};
+    return OpSelect(result_type, condition, value, ConstantNull(result_type));
+}
+
 Id EmitContext::LoadByAddress(Id type, Id pointer, u32 alignment) {
     if (requires_coherent_global_memory) {
         return OpLoad(type, pointer,
@@ -1598,7 +1654,8 @@ void EmitContext::DefineRescalingInputUniformConstant() {
 }
 
 void EmitContext::DefineConstantBuffers(const Info& info, u32& binding) {
-    if (info.constant_buffer_descriptors.empty()) {
+    if (info.constant_buffer_descriptors.empty() || uniforms_by_address) {
+        // Read through the bank table (GetCbuf): no descriptors, no bindings.
         return;
     }
     if (!profile.support_descriptor_aliasing) {
@@ -1644,7 +1701,7 @@ void EmitContext::DefineConstantBuffers(const Info& info, u32& binding) {
 }
 
 void EmitContext::DefineConstantBufferIndirectFunctions(const Info& info) {
-    if (!info.uses_cbuf_indirect) {
+    if (!info.uses_cbuf_indirect || uniforms_by_address) {
         return;
     }
     const auto make_accessor{[&](Id buffer_type, Id UniformDefinitions::*member_ptr) {

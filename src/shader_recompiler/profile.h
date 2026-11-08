@@ -51,6 +51,9 @@ struct Profile {
     /// (VideoCommon::GpuPageTable) instead of descriptors. Programs flagged
     /// Info::storage_by_address use it.
     bool gpu_page_table{};
+    /// Constant buffers are read by device address from the draw's bank table instead of uniform
+    /// buffer descriptors. Programs flagged Info::uniforms_by_address use it.
+    bool uniforms_by_address{};
     bool support_shared_int64_atomics{};
     bool support_derivative_control{};
     bool support_geometry_shader_passthrough{};

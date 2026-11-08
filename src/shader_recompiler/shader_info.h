@@ -368,6 +368,9 @@ struct Info {
     /// Storage buffers and global memory are reached through the GPU page table: the storage
     /// buffer descriptors are not bound, they name the ranges the draw must have resident.
     bool storage_by_address{};
+    /// Constant buffers are read by device address from the draw's bank table: the constant
+    /// buffer descriptors are not bound.
+    bool uniforms_by_address{};
     bool requires_coherent_global_memory{};
     bool requires_coherent_image_memory{};
     /// Set by the SPIR-V backend when HMMA runs on cooperative matrices, which need full subgroups
@@ -414,6 +417,16 @@ u32 NumDescriptors(const Descriptors& descriptors) {
         num += desc.count;
     }
     return num;
+}
+
+/// The constant buffer descriptors bound as uniform buffers: none when the program reads them
+/// from the bank table (Info::uniforms_by_address).
+[[nodiscard]] inline std::span<const ConstantBufferDescriptor> BoundConstantBuffers(
+    const Info& info) {
+    if (info.uniforms_by_address) {
+        return {};
+    }
+    return info.constant_buffer_descriptors;
 }
 
 /// The storage buffer descriptors bound as buffers: none when the program reaches storage

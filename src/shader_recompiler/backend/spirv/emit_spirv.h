@@ -55,6 +55,21 @@ constexpr u32 RENDERAREA_LAYOUT_OFFSET =
     offsetof(PushConstantLayout, render_area) + offsetof(RenderAreaLayout, render_area);
 constexpr u32 PUSH_CONSTANT_LAYOUT_SIZE = sizeof(PushConstantLayout);
 
+/// Constant buffers by device address (Info::uniforms_by_address): the draw's bank table holds one
+/// entry per (stage, constant buffer), at (BankTableStage(stage) * BANK_TABLE_BANKS_PER_STAGE +
+/// index) * sizeof(BankTableEntry). Reads at or past `size` return zero, as past a bound range.
+struct BankTableEntry {
+    u64 address; ///< device address of the bank's first byte (a zero page when unbound)
+    u32 size;
+    u32 reserved;
+};
+static_assert(sizeof(BankTableEntry) == 16);
+constexpr u32 BANK_TABLE_BANKS_PER_STAGE = 18;
+/// Graphics stages index the table by their pipeline slot; a dispatch has its own table.
+[[nodiscard]] constexpr u32 BankTableStage(Stage stage) {
+    return stage == Stage::Compute ? 0U : static_cast<u32>(stage);
+}
+
 /// The GPU page table as shaders read it (VideoCommon::GpuPageTable): L1 holds a u32 block index
 /// per 2^PAGE_TABLE_BLOCK_BITS bytes of guest address space, the L2 blocks after it hold a u64
 /// host device address per 2^PAGE_TABLE_PAGE_BITS bytes.

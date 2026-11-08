@@ -404,6 +404,8 @@ private:
     bool writes_storage{};
     bool uses_page_table{};   ///< a stage reaches storage through the GPU page table
     u64 page_table_address{}; ///< the page table of the draw being configured
+    bool uses_bank_table{};   ///< a stage reads constant buffers by device address
+    u64 bank_table_address{}; ///< the bank table of the draw being configured
 
     /// Graphics pipeline libraries: one descriptor set per stage (set index =
     /// stage index), the shader libraries, and this pipeline's own vertex input and fragment
