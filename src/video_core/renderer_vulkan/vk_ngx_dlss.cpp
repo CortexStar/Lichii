@@ -216,7 +216,11 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
                                 in.render_size.height != render_extent.height ||
                                 in.upscale_size.width != upscale_extent.width ||
                                 in.upscale_size.height != upscale_extent.height;
-    const bool options_changed = extent_changed || in.hdr != hdr_input;
+    // The preset and the depth flag are fixed when the feature is created.
+    const unsigned int preset = Preset();
+    const bool options_changed = extent_changed || in.hdr != hdr_input ||
+                                 in.depth_inverted != depth_inverted_input ||
+                                 preset != preset_input;
     const bool reset = in.reset || options_changed;
     if (options_changed && output_image) {
         // Recorded work may still create (and write ngx_feature) or use the old feature.
@@ -232,6 +236,8 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
         upscale_extent = in.upscale_size;
     }
     hdr_input = in.hdr;
+    depth_inverted_input = in.depth_inverted;
+    preset_input = preset;
 
     const bool hdr = in.hdr && EnvInt("EDEN_NX2_DLSS_HDR", 1) != 0;
     const bool auto_exposure = in.hdr && EnvInt("EDEN_NX2_DLSS_AUTO_EXPOSURE", 1) != 0;
@@ -240,7 +246,6 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
     flags |= auto_exposure ? NVSDK_NGX_DLSS_Feature_Flags_AutoExposure : 0;
     flags |= in.depth_inverted ? NVSDK_NGX_DLSS_Feature_Flags_DepthInverted : 0;
     const NVSDK_NGX_PerfQuality_Value mode = ModeFor(in.render_size, in.upscale_size);
-    const unsigned int preset = Preset();
     if (options_changed) {
         LOG_INFO(Render_Vulkan, "NVIDIA DLSS (NGX): {}x{} -> {}x{}, mode {}, preset {}, {}",
                  in.render_size.width, in.render_size.height, in.upscale_size.width,

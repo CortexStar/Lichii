@@ -600,7 +600,12 @@ if (EGLANTINE_NGX_SDK AND NOT ENABLE_NVIDIA_DLSS AND CMAKE_SYSTEM_NAME STREQUAL 
     option(EGLANTINE_NGX_COPY_MODEL "Copy NVIDIA's libnvidia-ngx-dlss.so.* next to the binary" ON)
     if (EGLANTINE_NGX_COPY_MODEL)
         file(GLOB NGX_DLSS_MODEL "${EGLANTINE_NGX_SDK}/lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.*")
-        file(COPY ${NGX_DLSS_MODEL} DESTINATION "${CMAKE_BINARY_DIR}/bin")
+        if (NGX_DLSS_MODEL)
+            file(COPY ${NGX_DLSS_MODEL} DESTINATION "${CMAKE_BINARY_DIR}/bin")
+        else()
+            message(WARNING "No libnvidia-ngx-dlss.so.* in ${EGLANTINE_NGX_SDK}/lib/Linux_x86_64/rel; "
+                            "DLSS needs it in the streamline folder at run time")
+        endif()
     endif()
     message(STATUS "NVIDIA DLSS through NGX: ${EGLANTINE_NGX_SDK}")
 endif()

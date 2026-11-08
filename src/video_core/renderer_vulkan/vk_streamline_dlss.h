@@ -79,6 +79,8 @@ private:
     VkExtent2D render_extent{};
     VkExtent2D upscale_extent{};
     bool hdr_input = true;
+    bool depth_inverted_input = true; ///< NGX: the feature's DepthInverted flag
+    u32 preset_input{};               ///< NGX: the feature's preset
     u32 frame_index{};
     vk::Image output_image;
     vk::ImageView output_view;
