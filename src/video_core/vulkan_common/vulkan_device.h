@@ -52,7 +52,8 @@ VK_DEFINE_HANDLE(VmaPool)
             shader_demote_to_helper_invocation)                                                    \
     FEATURE(EXT, SubgroupSizeControl, SUBGROUP_SIZE_CONTROL, subgroup_size_control)                \
     FEATURE(KHR, Maintenance4, MAINTENANCE_4, maintenance4)                                        \
-    FEATURE(KHR, Synchronization2, SYNCHRONIZATION_2, synchronization2)
+    FEATURE(KHR, Synchronization2, SYNCHRONIZATION_2, synchronization2)                            \
+    FEATURE(KHR, DynamicRendering, DYNAMIC_RENDERING, dynamic_rendering)
 
 #define FOR_EACH_VK_FEATURE_1_4(FEATURE)
 
@@ -79,6 +80,7 @@ VK_DEFINE_HANDLE(VmaPool)
             primitive_topology_list_restart)                                                       \
     FEATURE(EXT, ProvokingVertex, PROVOKING_VERTEX, provoking_vertex)                              \
     FEATURE(EXT, Robustness2, ROBUSTNESS_2, robustness2)                                           \
+    FEATURE(EXT, ShaderObject, SHADER_OBJECT, shader_object)                                       \
     FEATURE(EXT, TransformFeedback, TRANSFORM_FEEDBACK, transform_feedback)                        \
     FEATURE(EXT, VertexInputDynamicState, VERTEX_INPUT_DYNAMIC_STATE, vertex_input_dynamic_state)  \
     FEATURE(KHR, CooperativeMatrix, COOPERATIVE_MATRIX, cooperative_matrix)                        \
@@ -1105,6 +1107,12 @@ FN_MAX_LIMIT_LIST
     /// Returns true if the device supports VK_EXT_vertex_input_dynamic_state.
     bool IsExtVertexInputDynamicStateSupported() const {
         return extensions.vertex_input_dynamic_state;
+    }
+
+    /// VK_EXT_shader_object with what drawing with it needs: dynamic rendering and every state
+    /// a pipeline holds settable dynamically.
+    bool IsExtShaderObjectSupported() const {
+        return extensions.shader_object;
     }
 
     /// Returns true if the device supports VK_EXT_shader_demote_to_helper_invocation

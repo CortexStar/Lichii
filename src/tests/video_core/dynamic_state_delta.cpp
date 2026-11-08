@@ -164,6 +164,12 @@ struct FakeCmd {
     void SetLineStippleEXT(u32 factor, u16 pattern) const {
         Add(fmt::format("stipple {} {}", factor, pattern));
     }
+    void SetExtraPrimitiveOverestimationSizeEXT(f32 size) const {
+        Add(fmt::format("overestimation {}", size));
+    }
+    void SetRasterizationStreamEXT(u32 stream) const {
+        Add(fmt::format("stream {}", stream));
+    }
 };
 
 std::vector<std::string> Apply(Tracker& tracker, const ApplyOptions& options = {}) {
@@ -362,6 +368,9 @@ TEST_CASE("Shader object state slots record their calls", "[dynamic_state]") {
     (void)tracker.Stage(Slot::PolygonMode, u32{VK_POLYGON_MODE_LINE});
     (void)tracker.Stage(Slot::SampleMask, std::array<u32, 2>{VK_SAMPLE_COUNT_4_BIT, 0xF});
     (void)tracker.Stage(Slot::LineStipple, std::array<u32, 2>{2, 0xF0F0});
-    REQUIRE(Apply(tracker) ==
-            std::vector<std::string>{"polygon 1", "sample mask 4 15", "stipple 2 61680"});
+    (void)tracker.Stage(Slot::ExtraPrimitiveOverestimationSize, FloatWord(0.5f));
+    (void)tracker.Stage(Slot::RasterizationStream, u32{0});
+    REQUIRE(Apply(tracker) == std::vector<std::string>{"polygon 1", "sample mask 4 15",
+                                                       "stipple 2 61680", "overestimation 0.5",
+                                                       "stream 0"});
 }

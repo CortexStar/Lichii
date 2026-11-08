@@ -1992,6 +1992,27 @@ void Device::RemoveUnsuitableExtensions() {
     extensions.synchronization2 = features.synchronization2.synchronization2;
     RemoveExtensionFeatureIfUnsuitable(extensions.synchronization2, features.synchronization2,
                                        VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+
+    // VK_EXT_shader_object: graphics shaders bound per stage, with every state a pipeline would
+    // hold set dynamically. Shader objects draw only in render pass instances begun with
+    // vkCmdBeginRendering (VUID-vkCmdDraw-None-08876). Tilers stay on pipelines: their MSAA
+    // resolve shadows are render pass resolve attachments.
+    extensions.shader_object =
+        instance_version >= VK_API_VERSION_1_3 && features.shader_object.shaderObject &&
+        features.dynamic_rendering.dynamicRendering && extensions.extended_dynamic_state &&
+        extensions.extended_dynamic_state2 && dynamic_state3_blending &&
+        dynamic_state3_depth_clamp_enable && dynamic_state3_logic_op_enable &&
+        dynamic_state3_alpha_to_coverage &&
+        (!extensions.line_rasterization ||
+         (dynamic_state3_line_raster_mode && dynamic_state3_line_stipple_enable)) &&
+        (!extensions.conservative_rasterization || dynamic_state3_conservative_raster_mode) &&
+        extensions.vertex_input_dynamic_state && !extensions.viewport_swizzle && !IsTiler() &&
+        // The mesh emulation draws with pipelines, whose static
+        // viewport counts don't take the counted viewports.
+        extensions.mesh_shader && features.mesh_shader.meshShader &&
+        features.mesh_shader.taskShader;
+    RemoveExtensionFeatureIfUnsuitable(extensions.shader_object, features.shader_object,
+                                       VK_EXT_SHADER_OBJECT_EXTENSION_NAME);
 }
 
 void Device::SetupFamilies(VkSurfaceKHR surface) {

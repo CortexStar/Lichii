@@ -68,7 +68,9 @@ enum class Slot : u32 {
     DepthClipEnable,
     DepthClipNegativeOneToOne,
     ProvokingVertexMode,
-    LineStipple, ///< factor, pattern
+    LineStipple,                      ///< factor, pattern
+    ExtraPrimitiveOverestimationSize, ///< f32
+    RasterizationStream,
     Count,
 };
 
@@ -505,6 +507,12 @@ void ApplyPacket(std::span<const u32> packet, const Cmd& cmd, const ApplyOptions
             break;
         case Slot::LineStipple:
             cmd.SetLineStippleEXT(w[0], static_cast<u16>(w[1]));
+            break;
+        case Slot::ExtraPrimitiveOverestimationSize:
+            cmd.SetExtraPrimitiveOverestimationSizeEXT(WordFloat(w[0]));
+            break;
+        case Slot::RasterizationStream:
+            cmd.SetRasterizationStreamEXT(w[0]);
             break;
         case Slot::Count:
             UNREACHABLE();
