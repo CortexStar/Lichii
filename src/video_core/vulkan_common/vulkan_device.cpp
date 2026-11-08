@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <array>
-#include <bitset>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -24,7 +23,6 @@
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/literals.h"
-#include <ranges>
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "video_core/vulkan_common/nsight_aftermath_tracker.h"

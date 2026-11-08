@@ -10,7 +10,6 @@
 #include <chrono>
 #include <cstddef>
 #include <fstream>
-#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
