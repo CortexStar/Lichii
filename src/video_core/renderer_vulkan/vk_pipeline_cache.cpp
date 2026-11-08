@@ -760,7 +760,12 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     dynamic_features.has_dynamic_vertex_input =
         device.IsExtVertexInputDynamicStateSupported() &&
         Settings::values.vertex_input_dynamic_state.GetValue() &&
-        device.GetDriverID() != VK_DRIVER_ID_AMD_PROPRIETARY;
+        (device.GetDriverID() != VK_DRIVER_ID_AMD_PROPRIETARY ||
+         // EXPERIMENT (do not merge): EDEN_NX2_EXP_VERTEX_INPUT=dynamic for the A/B.
+         [] {
+             const char* value = std::getenv("EDEN_NX2_EXP_VERTEX_INPUT");
+             return value != nullptr && std::string_view{value} == "dynamic";
+         }());
     dynamic_features.has_static_vertex_repack =
         StaticVertexRepackEnabled(device.GetMinVertexInputBindingStrideAlignment());
 
