@@ -86,6 +86,7 @@ add_library(
     hex_util.h
     host_memory.cpp
     host_memory.h
+    input_watch.h
     input.h
     input_latency.cpp
     input_latency.h

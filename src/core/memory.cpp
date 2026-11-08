@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
@@ -22,6 +23,7 @@
 #include "common/atomic_ops.h"
 #include "common/common_types.h"
 #include "common/heap_tracker.h"
+#include "common/input_watch.h"
 #include "common/logging.h"
 #include "common/page_table.h"
 #include "common/scope_exit.h"
@@ -967,6 +969,20 @@ struct Memory::Impl {
             }
         };
         const auto on_device_address = [&](DAddr address) {
+            // Every write, before the per-page short cut below: the GPU thread's draw input
+            // watch must see each one (common/input_watch.h).
+            const bool watched = Common::InputWatch::NoteWrite(address, size);
+            const auto watch_start = watched ? std::chrono::steady_clock::now()
+                                             : std::chrono::steady_clock::time_point{};
+            SCOPE_EXIT {
+                if (watched) {
+                    Common::InputWatch::GetTable().handler_ns.fetch_add(
+                        static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                             std::chrono::steady_clock::now() - watch_start)
+                                             .count()),
+                        std::memory_order_relaxed);
+                }
+            };
             auto& current_area = rasterizer_write_areas[core];
             PAddr subaddress = address >> YUZU_PAGEBITS;
             // Performance note:
@@ -1036,7 +1052,10 @@ struct Memory::Impl {
         };
         auto& gpu = system.GPU();
         gpu_device_memory->ApplyOpOnPointer(
-            p, scratch_buffers[core], [&](DAddr address) { gpu.InvalidateRegion(address, size, true); });
+            p, scratch_buffers[core], [&](DAddr address) {
+                Common::InputWatch::NoteWrite(address, size);
+                gpu.InvalidateRegion(address, size, true);
+            });
     }
 
     Core::System& system;

@@ -40,6 +40,8 @@ add_library(video_core STATIC
     dirty_flags.h
     draw_class_stats.cpp
     draw_class_stats.h
+    draw_input_watch.cpp
+    draw_input_watch.h
     dma_pusher.cpp
     dma_pusher.h
     engines/sw_blitter/blitter.cpp

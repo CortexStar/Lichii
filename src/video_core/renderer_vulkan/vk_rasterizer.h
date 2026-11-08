@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string_view>
@@ -378,6 +379,9 @@ private:
     u64 nx2_dispatch_serial = 0;     ///< Compute dispatches recorded (WaitForIdle)
     u64 nx2_wfi_dispatch_serial = 0; ///< nx2_dispatch_serial at the last real wait for idle
     u64 render_trace_frame = 0;
+    /// Frames for the draw input watch's re-arm delays, and its last report.
+    u64 draw_watch_frame = 0;
+    std::chrono::steady_clock::time_point draw_watch_report = std::chrono::steady_clock::now();
     u32 render_trace_draws = 0;
     /// Any of VideoCommon::DrawDebugSwitches is set: run the per-draw debug hooks.
     const bool draw_debug_hooks;
