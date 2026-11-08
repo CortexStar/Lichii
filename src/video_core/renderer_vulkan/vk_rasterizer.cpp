@@ -2026,9 +2026,14 @@ void Vulkan::RasterizerVulkan::DisableGraphicsUniformBuffer(size_t stage, u32 in
 void RasterizerVulkan::FlushAll() {}
 
 void RasterizerVulkan::SubmitNx2ListCopies() {
-    // Submitted at once: ReadGpuWrittenCommands waits on these copies, so they can't sit out
-    // the longer DeferFlush interval (#161).
+    // ReadGpuWrittenCommands waits on these copies, so they can't sit out the longer DeferFlush
+    // interval (#161). The front reads few of the lists (Ocarina: ~150 dispatches a frame, a
+    // submission each): they are submitted when it waits for one (IsGpuTickDone and
+    // WaitSubmittedTick ask the back), or with the next submission.
     if (buffer_cache.Nx2CopyListPages(scheduler.CurrentTick())) {
+        if (scheduler.DeferFlushUntilWanted()) {
+            return;
+        }
         scheduler.Flush();
     }
 }
