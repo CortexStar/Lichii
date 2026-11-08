@@ -125,6 +125,16 @@ inline float UpscaleLodBias() {
     return std::log2(1.0f / (ratio > 0.0f ? ratio : 1.0f)) - 1.0f;
 }
 
+/// Whether the upscaler's LOD bias applies to a sampled image of this format. It is for the
+/// game's authored textures, which the jittered frames resolve finer than one frame does. Vulkan
+/// adds a sampler's bias to explicit LODs too, so on images the game renders itself (bloom, fog
+/// and reflection mip chains it reads with textureLod) it would pick a finer level than the game
+/// asked for. Rendered images are never block compressed; the authored textures are (ASTC, BCn).
+inline bool UpscaleLodBiasApplies(VideoCore::Surface::PixelFormat format) {
+    return VideoCore::Surface::IsPixelFormatASTC(format) ||
+           VideoCore::Surface::IsPixelFormatBCn(format);
+}
+
 /// The 3D's images are rescaled (DLAA at 4K).
 inline bool SceneRescaled() {
     return Settings::values.resolution_info.active && !OutputOnlyRescale();

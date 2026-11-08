@@ -15,3 +15,18 @@ TEST_CASE("OoT AMD upscaler: FSR 4 first, FSR 3.1 on the tonemapped image only",
     CHECK(PickAmdUpscaler(false, true, true) == AmdUpscaler::None);
     CHECK(PickAmdUpscaler(false, false, false) == AmdUpscaler::None);
 }
+
+TEST_CASE("OoT upscaler LOD bias: authored textures only", "[video_core][oot]") {
+    using VideoCommon::OotDlss::UpscaleLodBiasApplies;
+    using VideoCore::Surface::PixelFormat;
+    // Authored textures: ASTC (re-compressed or not on the host) and BCn.
+    CHECK(UpscaleLodBiasApplies(PixelFormat::ASTC_2D_4X4_UNORM));
+    CHECK(UpscaleLodBiasApplies(PixelFormat::ASTC_2D_8X8_SRGB));
+    CHECK(UpscaleLodBiasApplies(PixelFormat::BC7_UNORM));
+    CHECK(UpscaleLodBiasApplies(PixelFormat::BC1_RGBA_UNORM));
+    // Images the game renders and reads back with explicit LODs (bloom, fog, scene colour).
+    CHECK_FALSE(UpscaleLodBiasApplies(PixelFormat::B10G11R11_FLOAT));
+    CHECK_FALSE(UpscaleLodBiasApplies(PixelFormat::R16G16B16A16_FLOAT));
+    CHECK_FALSE(UpscaleLodBiasApplies(PixelFormat::A8B8G8R8_UNORM));
+    CHECK_FALSE(UpscaleLodBiasApplies(PixelFormat::D32_FLOAT));
+}

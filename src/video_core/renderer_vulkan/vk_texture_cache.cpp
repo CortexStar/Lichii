@@ -5255,6 +5255,9 @@ Sampler::Sampler(TextureCacheRuntime& runtime, const Tegra::Texture::TSCEntry& t
                  static_cast<u32>(tsc.min_filter.Value()), static_cast<u32>(tsc.reduction_filter.Value()),
                  static_cast<u32>(tsc.min_lod_clamp.Value()), static_cast<u32>(tsc.max_lod_clamp.Value()));
     }
+    if (tsc.mipmap_filter != TextureMipmapFilter::None) {
+        upscale_lod_bias = ::VideoCommon::OotDlss::UpscaleLodBias();
+    }
     f32 min_lod = 0.0f;
     f32 max_lod = 0.25f;
     if (tsc.mipmap_filter != TextureMipmapFilter::None) {
@@ -5276,9 +5279,7 @@ Sampler::Sampler(TextureCacheRuntime& runtime, const Tegra::Texture::TSCEntry& t
         .addressModeU = wrap_u,
         .addressModeV = wrap_v,
         .addressModeW = wrap_p,
-        .mipLodBias = tsc.LodBias() + (tsc.mipmap_filter != TextureMipmapFilter::None
-                                           ? ::VideoCommon::OotDlss::UpscaleLodBias()
-                                           : 0.0f),
+        .mipLodBias = tsc.LodBias() + upscale_lod_bias,
         .anisotropyEnable = static_cast<VkBool32>(max_anisotropy > 1.0f),
         .maxAnisotropy = max_anisotropy,
         .compareEnable = static_cast<VkBool32>(tsc.depth_compare_enabled),
@@ -5299,6 +5300,7 @@ u64 ImageView::SamplerClassKey() const noexcept {
         .minmax = SupportsMinmaxFilter(),
         .border_format = RequiresBorderColorFormat(),
         .srgb = IsPixelFormatSRGB(format),
+        .authored = ::VideoCommon::OotDlss::UpscaleLodBiasApplies(format),
         .identity_swizzle = HasIdentitySwizzle(),
     };
     if (!traits.identity_swizzle) {
@@ -5334,6 +5336,7 @@ Sampler::VariantKey Sampler::MakeKey(u64 view_key, bool is_depth) const noexcept
     // Vulkan leaves it undefined and AMD returns the 0/1 compare result (Ocarina forest fog
     // composite read alpha 0 -> black screen). Use a variant without comparison.
     key.drop_compare = has_depth_comparison && !is_depth;
+    key.drop_upscale_bias = upscale_lod_bias != 0.0f && !view.authored;
     if (needs_swizzle_mapping && !key.drop_custom_border && !view.identity_swizzle) {
         for (size_t i = 0; i < key.swizzle.size(); ++i) {
             key.swizzle[i] = static_cast<VkComponentSwizzle>(view.swizzle[i]);
@@ -5400,6 +5403,9 @@ VkSampler Sampler::Emplace(VariantKey key) {
     VkSamplerCreateInfo create_info = base_ci;
     if (key.drop_compare) {
         create_info.compareEnable = VK_FALSE;
+    }
+    if (key.drop_upscale_bias) {
+        create_info.mipLodBias -= upscale_lod_bias;
     }
     if (key.force_nearest) {
         create_info.magFilter = VK_FILTER_NEAREST;

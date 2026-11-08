@@ -20,6 +20,7 @@ TEST_CASE("Sampler class keys keep every trait the variant reads", "[video_core]
             .minmax = (random() & 1) != 0,
             .border_format = (random() & 1) != 0,
             .srgb = (random() & 1) != 0,
+            .authored = (random() & 1) != 0,
             .identity_swizzle = (random() & 1) != 0,
         };
         if (!traits.identity_swizzle) {

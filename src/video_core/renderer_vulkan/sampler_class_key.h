@@ -18,6 +18,7 @@ struct SamplerViewTraits {
     bool minmax{};        ///< SupportsMinmaxFilter
     bool border_format{}; ///< RequiresBorderColorFormat
     bool srgb{};          ///< sRGB format: sRGB border color
+    bool authored{};      ///< Block-compressed: an upscaler's LOD bias applies (OotDlss)
     bool identity_swizzle{};
     std::array<u8, 4> swizzle{}; ///< VkComponentSwizzle values when not identity
 
@@ -31,6 +32,7 @@ constexpr u64 MINMAX = 1ULL << 2;
 constexpr u64 BORDER_FORMAT = 1ULL << 3;
 constexpr u64 SRGB = 1ULL << 4;
 constexpr u64 IDENTITY_SWIZZLE = 1ULL << 5;
+constexpr u64 AUTHORED = 1ULL << 6;
 constexpr u32 SWIZZLE_SHIFT = 8;
 } // namespace SamplerClassKeyBits
 
@@ -42,6 +44,7 @@ constexpr u32 SWIZZLE_SHIFT = 8;
     key |= traits.minmax ? Bits::MINMAX : 0;
     key |= traits.border_format ? Bits::BORDER_FORMAT : 0;
     key |= traits.srgb ? Bits::SRGB : 0;
+    key |= traits.authored ? Bits::AUTHORED : 0;
     if (traits.identity_swizzle) {
         // The components do not matter then: one class for every identity view.
         return key | Bits::IDENTITY_SWIZZLE;
@@ -60,6 +63,7 @@ constexpr u32 SWIZZLE_SHIFT = 8;
         .minmax = (key & Bits::MINMAX) != 0,
         .border_format = (key & Bits::BORDER_FORMAT) != 0,
         .srgb = (key & Bits::SRGB) != 0,
+        .authored = (key & Bits::AUTHORED) != 0,
         .identity_swizzle = (key & Bits::IDENTITY_SWIZZLE) != 0,
     };
     if (!traits.identity_swizzle) {

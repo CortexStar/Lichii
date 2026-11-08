@@ -961,6 +961,7 @@ private:
         bool drop_custom_border;
         bool srgb_border;
         bool drop_compare;
+        bool drop_upscale_bias;
         std::array<VkComponentSwizzle, 4> swizzle;
 
         bool operator==(const VariantKey&) const noexcept = default;
@@ -1029,6 +1030,9 @@ private:
     bool has_minmax_reduction{};
     bool has_custom_border_colors{};
     bool has_srgb_border_color{};
+    /// Ocarina's upscaler LOD bias is in base_ci (OotDlss::UpscaleLodBias); the variant without
+    /// it samples the game's own rendered images.
+    f32 upscale_lod_bias{};
     bool needs_swizzle_mapping{};
 };
 
