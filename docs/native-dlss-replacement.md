@@ -65,10 +65,18 @@ enabled and the runtime is available; otherwise an enabled temporal selection us
   Its shaders use `HDR_COLOR_INPUT=0` and `INVERTED_DEPTH=0`. Camera reconstruction alone
   converts the stored [0,1] depth to GL [-1,1] clip coordinates. Motion is previous minus
   current in render pixels, with screen-down Y, so FSR's scale is `(1,1)` before normalization.
-- Jitter is zero: the game has no subpixel sample sequence. Adding host jitter only to the
-  upscaler cannot recover detail and corrupts reprojection. Safe host jitter would require
-  changing the raster projection plus unjittered motion/depth handling (cf. #253), out of scope.
-  Consequently this is temporal stabilization/upscaling, not full jittered supersampling.
+- Jitter (FSR only, on by default): the game has no subpixel sample sequence, so the host adds
+  one. While FSR replaced the previous frame's upscale, every draw that tests or writes the
+  scene depth at the scene size has its viewport offset by a Halton (2,3) sub-pixel amount
+  (AMD's phase count, 8 x (output / render width)^2: 18 for 1440p -> 4K, 8 for native AA), and
+  FSR gets the same offset as the frame's jitter. Motion stays reconstructed from the
+  unjittered matrices. Shadow maps, half-size passes, full-screen passes and frames the game
+  upscales itself are not offset. DLSS gets no jitter. `EDEN_NX2_OOT_JITTER=0` turns it off;
+  `-1` negates the offset given to FSR (a sign check: the image gets worse).
+- Texture LOD bias (FSR only): when the session's upscaler is FSR, mipmapped samplers get
+  AMD's recommended bias log2(render / output) - 1 = -1.58 in docked mode (none in handheld).
+  Images the GPU wrote (render targets: bloom, blur, reflections, fog) keep the game's own bias.
+  `EDEN_NX2_OOT_LOD_BIAS=<bias>` replaces the default, also in handheld; `0` turns it off.
 - #644 (`82494c4820`, `74a2d20c90`, `4352c06bbf`) supplies the backend-neutral effects capture.
   FSR uses its R16F current/history bias as both reactive and transparency/composition masks;
   missing capture uses zero masks, not stale history. The DLSS preset changes were not imported.
