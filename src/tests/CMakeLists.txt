@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 add_executable(tests
+    video_core/neural_rendering_model.cpp
     common/addon_config.cpp
     video_core/vulkan_overlay_filter.cpp
     video_core/buffer_cache_ports.cpp
@@ -195,6 +196,12 @@ if (TARGET dynarmic::dynarmic)
 endif()
 
 add_test(NAME tests COMMAND tests)
+
+if (ENABLE_NVIDIA_DLSS AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ngx_smoke EXCLUDE_FROM_ALL video_core/ngx_smoke.cpp)
+    target_link_libraries(ngx_smoke PRIVATE video_core core common frontend_common ${PLATFORM_LIBRARIES})
+    target_include_directories(ngx_smoke PRIVATE $<TARGET_PROPERTY:video_core,INCLUDE_DIRECTORIES>)
+endif()
 
 if (TARGET SDL3::SDL3)
     add_executable(sdl_window_state_tests yuzu_cmd/sdl_window_state.cpp)

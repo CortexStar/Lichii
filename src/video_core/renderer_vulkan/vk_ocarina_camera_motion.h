@@ -27,7 +27,7 @@ struct OcarinaActorMesh {
     std::array<f32, 280 * 12> previous_bones;
 };
 
-#ifdef EGLANTINE_STREAMLINE
+#ifdef EGLANTINE_NVIDIA_DLSS
 class OcarinaLiveDlss {
 public:
     OcarinaLiveDlss(const Device& device, Scheduler& scheduler, DescriptorPool& pool,
