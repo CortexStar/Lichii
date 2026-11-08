@@ -921,12 +921,20 @@ struct Memory::Impl {
         });
     }
 
+    /// The write tracking slot of the calling thread, and whether it is shared (sys_core_guard).
+    std::pair<size_t, bool> WriteSlot() const {
+        constexpr size_t num_cores = Core::Hardware::NUM_CPU_CORES;
+        const size_t thread_id = system.GetCurrentHostThreadID();
+        // Threads that are not guest cores share the slot after the cores' (sys_core_guard).
+        return {(std::min)(thread_id, num_cores), thread_id >= num_cores};
+    }
+
     void HandleRasterizerWrite(VAddr v_address, size_t size) {
         const auto* p = GetPointerImpl(
             v_address, []() {}, []() {});
-        constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
-        const size_t core = (std::min)(system.GetCurrentHostThreadID(),
-                                     sys_core); // any other calls threads go to syscore.
+        const std::pair<size_t, bool> slot = WriteSlot();
+        const size_t core = slot.first;
+        const bool shared = slot.second;
         if (!gpu_device_memory) [[unlikely]] {
             gpu_device_memory = &system.Host1x().MemoryManager();
         }
@@ -934,12 +942,11 @@ struct Memory::Impl {
             ReportForeignPointer(v_address, p);
             return;
         }
-        // Guard on sys_core;
-        if (core == sys_core) [[unlikely]] {
+        if (shared) [[unlikely]] {
             sys_core_guard.lock();
         }
         SCOPE_EXIT {
-            if (core == sys_core) [[unlikely]] {
+            if (shared) [[unlikely]] {
                 sys_core_guard.unlock();
             }
         };
@@ -969,18 +976,17 @@ struct Memory::Impl {
     };
 
     void InvalidateGPUMemory(u8* p, size_t size) {
-        constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
-        const size_t core = (std::min)(system.GetCurrentHostThreadID(),
-                                     sys_core); // any other calls threads go to syscore.
+        const std::pair<size_t, bool> slot = WriteSlot();
+        const size_t core = slot.first;
+        const bool shared = slot.second;
         if (!gpu_device_memory) [[unlikely]] {
             gpu_device_memory = &system.Host1x().MemoryManager();
         }
-        // Guard on sys_core;
-        if (core == sys_core) [[unlikely]] {
+        if (shared) [[unlikely]] {
             sys_core_guard.lock();
         }
         SCOPE_EXIT {
-            if (core == sys_core) [[unlikely]] {
+            if (shared) [[unlikely]] {
                 sys_core_guard.unlock();
             }
         };
@@ -999,8 +1005,9 @@ struct Memory::Impl {
     std::set<u64> armed_read_traps;
     std::atomic<size_t> armed_read_trap_count{};
     std::mutex read_trap_mutex;
-    std::array<GPUDirtyState, Core::Hardware::NUM_CPU_CORES> rasterizer_write_areas{};
-    std::array<Common::ScratchBuffer<u32>, Core::Hardware::NUM_CPU_CORES> scratch_buffers{};
+    // One slot per guest core and one for every other thread.
+    std::array<GPUDirtyState, Core::Hardware::NUM_CPU_CORES + 1> rasterizer_write_areas{};
+    std::array<Common::ScratchBuffer<u32>, Core::Hardware::NUM_CPU_CORES + 1> scratch_buffers{};
     std::span<Core::GPUDirtyMemoryManager> gpu_dirty_managers;
     std::mutex sys_core_guard;
 #ifdef __ANDROID__
