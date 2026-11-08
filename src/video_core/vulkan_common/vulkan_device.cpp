@@ -801,7 +801,10 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     // game's work on the graphics queue, so presents reach the display on time.
     std::optional<u32> present_thread_index;
     std::vector<float> present_thread_priorities;
-    if (graphics_family == present_family) {
+    // EXPERIMENT (do not merge): EDEN_NX2_PRESENT_QUEUE=0 presents on the game's queue.
+    const char* present_queue_env = std::getenv("EDEN_NX2_PRESENT_QUEUE");
+    if (graphics_family == present_family &&
+        (present_queue_env == nullptr || present_queue_env[0] != '0')) {
         const auto families = physical.GetQueueFamilyProperties();
         present_thread_index = PresentThreadQueueIndex(frame_gen_queues, graphics_family,
                                                        families[graphics_family].queueCount);
