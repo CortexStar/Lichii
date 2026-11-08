@@ -15,6 +15,7 @@
 #include "common/logging.h"
 #include "common/nx2_sampler.h"
 #include "common/adpf.h"
+#include "common/game_presets.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "common/string_util.h"
@@ -399,6 +400,10 @@ struct System::Impl {
             LOG_INFO(Core, "Switch 2 program: using the 12 GiB memory layout");
             Settings::values.memory_layout_mode.SetGlobal(false);
             Settings::values.memory_layout_mode.SetValue(Settings::MemoryLayout::Memory_12Gb);
+        }
+
+        if (Settings::ApplySwitch2ConsoleMode(Settings::values, switch2_program)) {
+            LOG_INFO(Core, "Switch 2 program: running docked");
         }
 
         // The Switch 2 counter runs at 31.25 MHz and its SDK converts ticks with that constant

@@ -109,3 +109,33 @@ TEST_CASE("Declining the MKW preset preserves global and per-game preferences", 
         CHECK(settings->resolution_setup.UsingGlobal() == !per_game);
     }
 }
+
+TEST_CASE("Switch 2 programs run docked unless configured otherwise", "[game_presets]") {
+    auto settings = std::make_unique<Settings::Values>();
+    REQUIRE(settings->use_docked_mode.GetValue() == Settings::ConsoleMode::Handheld);
+
+    CHECK_FALSE(Settings::ApplySwitch2ConsoleMode(*settings, false));
+    CHECK(settings->use_docked_mode.GetValue() == Settings::ConsoleMode::Handheld);
+
+    CHECK(Settings::ApplySwitch2ConsoleMode(*settings, true));
+    CHECK(settings->use_docked_mode.GetValue() == Settings::ConsoleMode::Docked);
+    CHECK(settings->use_docked_mode.GetValue(true) == Settings::ConsoleMode::Handheld);
+}
+
+TEST_CASE("Switch 2 console mode keeps per-game and handheld controller choices", "[game_presets]") {
+    auto per_game = std::make_unique<Settings::Values>();
+    per_game->use_docked_mode.SetGlobal(false);
+    per_game->use_docked_mode.SetValue(Settings::ConsoleMode::Handheld);
+    CHECK_FALSE(Settings::ApplySwitch2ConsoleMode(*per_game, true));
+    CHECK(per_game->use_docked_mode.GetValue() == Settings::ConsoleMode::Handheld);
+
+    auto handheld = std::make_unique<Settings::Values>();
+    handheld->players.GetValue()[0].controller_type = Settings::ControllerType::Handheld;
+    CHECK_FALSE(Settings::ApplySwitch2ConsoleMode(*handheld, true));
+    CHECK(handheld->use_docked_mode.GetValue() == Settings::ConsoleMode::Handheld);
+
+    auto docked = std::make_unique<Settings::Values>();
+    docked->use_docked_mode.SetValue(Settings::ConsoleMode::Docked);
+    CHECK_FALSE(Settings::ApplySwitch2ConsoleMode(*docked, true));
+    CHECK(docked->use_docked_mode.UsingGlobal());
+}
