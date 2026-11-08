@@ -135,6 +135,7 @@ add_library(video_core STATIC
     nx2_debug_control.cpp
     nx2_debug_control.h
     host_logic_op.h
+    oot_camera.h
     oot_dlss.h
     nx2_profile.h
     nx2_query_fast.h
