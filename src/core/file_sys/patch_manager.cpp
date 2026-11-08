@@ -173,6 +173,20 @@ constexpr std::array OOT_OCCLUSION_OFF_RECORDS{
     BuiltinPatchRecord{0x11B82F4, OOT_MOV_W8_WZR, OOT_LDRB_W8_X0},
 };
 
+// The three `bl ZSTD_decompressMultiFrame` (main+0xEB380) become svc 0xF0-0xF2, decompressed by
+// the host (core/hle/kernel/svc/svc_nx2_zstd.cpp, which needs these exact sites).
+constexpr std::array<u8, 4> OOT_ZSTD_CALL_1{0x28, 0xD0, 0xD3, 0x97}; // bl 0xeb380
+constexpr std::array<u8, 4> OOT_ZSTD_CALL_2{0x87, 0x6C, 0xC6, 0x97}; // bl 0xeb380
+constexpr std::array<u8, 4> OOT_ZSTD_CALL_3{0x9D, 0x08, 0x00, 0x94}; // bl 0xeb380
+constexpr std::array<u8, 4> OOT_ZSTD_SVC_F0{0x01, 0x1E, 0x00, 0xD4}; // svc #0xf0
+constexpr std::array<u8, 4> OOT_ZSTD_SVC_F1{0x21, 0x1E, 0x00, 0xD4}; // svc #0xf1
+constexpr std::array<u8, 4> OOT_ZSTD_SVC_F2{0x41, 0x1E, 0x00, 0xD4}; // svc #0xf2
+constexpr std::array OOT_NATIVE_ZSTD_RECORDS{
+    BuiltinPatchRecord{0xBF72E0, OOT_ZSTD_SVC_F0, OOT_ZSTD_CALL_1},
+    BuiltinPatchRecord{0xF50164, OOT_ZSTD_SVC_F1, OOT_ZSTD_CALL_2},
+    BuiltinPatchRecord{0xE910C, OOT_ZSTD_SVC_F2, OOT_ZSTD_CALL_3},
+};
+
 constexpr std::array BUILTIN_PATCHES{
     // Ocarina of Time takes its "dynamic resolution disabled" path, so the 3D renders at full scale
     // instead of following the GPU-time controller down to its 480p floor.
@@ -220,6 +234,14 @@ constexpr std::array BUILTIN_PATCHES{
         .module = "main",
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
         .records = OOT_OCCLUSION_OFF_RECORDS,
+    },
+    // Ocarina of Time's asset streaming decompresses with the host's libzstd.
+    BuiltinPatch{
+        .name = "Native zstd (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = OOT_NATIVE_ZSTD_RECORDS,
     },
 };
 
