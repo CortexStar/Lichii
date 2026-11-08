@@ -1514,7 +1514,12 @@ void RasterizerVulkan::DrawTexture() {
 bool RasterizerVulkan::ClearVolumeSlice(const Framebuffer* framebuffer, u32 slice) {
     const auto& regs = maxwell3d->regs;
     const u32 target_index = regs.clear_surface.RT;
-    const auto view_id = texture_cache.GetRenderTargets().color_buffer_ids[target_index];
+    const auto& color_buffer_ids = texture_cache.GetRenderTargets().color_buffer_ids;
+    // Depth and stencil clears take the normal path, so only a colour-only clear qualifies.
+    if (target_index >= color_buffer_ids.size() || regs.clear_surface.Z || regs.clear_surface.S) {
+        return false;
+    }
+    const auto view_id = color_buffer_ids[target_index];
     if (!view_id || regs.rt[target_index].depth <= framebuffer->Layers()) {
         return false;
     }
@@ -1524,16 +1529,18 @@ bool RasterizerVulkan::ClearVolumeSlice(const Framebuffer* framebuffer, u32 slic
                                      regs.clear_surface.B && regs.clear_surface.A;
     const bool clears_to_zero =
         std::ranges::all_of(regs.clear_color, [](f32 value) { return value == 0.0f; });
-    if (!is_volume || !clears_all_channels || !clears_to_zero) {
+    const bool clears_whole_slice = texture_cache.ClearCovers(view.size.width, view.size.height);
+    if (!is_volume || !clears_all_channels || !clears_to_zero || !clears_whole_slice) {
         return false;
     }
     if (slice != 0) {
         return true;
     }
     const VkImage image = view.ImageHandle();
+    const u32 level = view.range.base.level;
     scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([image](vk::CommandBuffer cmdbuf) {
-        constexpr VkImageSubresourceRange whole_image{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    scheduler.Record([image, level](vk::CommandBuffer cmdbuf) {
+        const VkImageSubresourceRange whole_image{VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1};
         constexpr VkClearColorValue zero{};
         cmdbuf.ClearColorImage(image, VK_IMAGE_LAYOUT_GENERAL, zero, whole_image);
         constexpr VkMemoryBarrier clear_finished{
