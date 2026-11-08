@@ -435,11 +435,15 @@ inline void MaybeReport() {
         const u64 by_memory = take(state.view_passes[base]);
         const u64 by_queued = take(state.view_passes[base + 1]);
         const u64 waited = take(state.view_passes[base + 2]);
-        const u64 wrong = take(state.view_wrong[base]) + take(state.view_wrong[base + 1]) +
-                          take(state.view_wrong[base + 2]);
+        const u64 wrong_memory = take(state.view_wrong[base]);
+        const u64 wrong_queued = take(state.view_wrong[base + 1]);
+        const u64 wrong_waited = take(state.view_wrong[base + 2]);
         return fmt::format("{} (by memory {}, by a release still queued {}, after a positioned "
-                           "wait {}), not met after the drain {}",
-                           by_memory + by_queued + waited, by_memory, by_queued, waited, wrong);
+                           "wait {}), not met after the drain {} (of those by memory {}, queued "
+                           "{}, after a wait {})",
+                           by_memory + by_queued + waited, by_memory, by_queued, waited,
+                           wrong_memory + wrong_queued + wrong_waited, wrong_memory, wrong_queued,
+                           wrong_waited);
     };
     const auto waits = [&](bool poll) {
         const u64 count = take(state.view_waits[poll ? 1 : 0]);

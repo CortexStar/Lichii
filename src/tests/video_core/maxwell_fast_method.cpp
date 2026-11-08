@@ -1035,6 +1035,65 @@ TEST_CASE("Split remembers the semaphore writes its back has not run yet",
     REQUIRE_FALSE(split.QueuedSemaphoreWriteAt(0x2000).has_value());
 }
 
+TEST_CASE("Split counts a fenced semaphore write in memory once its fence ran, not before",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    using Landing = VideoCommon::GpuSplit::Landing;
+    Fixture f;
+    f.system.Initialize();
+    VideoCommon::GpuSplit split;
+    Access::Start(split, f.system);
+    SCOPE_EXIT {
+        split.Stop();
+    };
+    // A fence-flagged report lands once the fence after it ran (QueryCacheBase::CounterReport),
+    // which tells with the entry the back gave it.
+    split.Defer([] {});
+    std::optional<u64> entry;
+    split.Defer([&split, &entry] { entry = split.BackEntry(); });
+    split.NoteSemaphoreWrite(0x1000, 21, true, false, Landing::Fenced);
+    split.Drain(VideoCommon::DrainSite::Other);
+    REQUIRE(entry.has_value());
+    REQUIRE(*entry > 0);
+    REQUIRE_FALSE(split.BackEntry().has_value());
+    auto queued = split.QueuedSemaphoreWriteAt(0x1000);
+    REQUIRE(queued.has_value());
+    REQUIRE(queued->fenced);
+    REQUIRE(queued->payload == 21);
+    // A write that lands as the back runs it, sent before that fence ran: the word holds either.
+    split.Defer([] {});
+    split.NoteSemaphoreWrite(0x1000, 22, true);
+    split.Drain(VideoCommon::DrainSite::Other);
+    queued = split.QueuedSemaphoreWriteAt(0x1000);
+    REQUIRE(queued.has_value());
+    REQUIRE(queued->fenced);
+    REQUIRE_FALSE(queued->known);
+    // A fence of an entry before it lands nothing of it; its own lands it.
+    split.NoteFencedWrite(*entry - 1);
+    REQUIRE(split.QueuedSemaphoreWriteAt(0x1000).has_value());
+    split.NoteFencedWrite(*entry);
+    REQUIRE_FALSE(split.QueuedSemaphoreWriteAt(0x1000).has_value());
+    // Once it landed, a write after it holds the word once the back ran it.
+    split.Defer([] {});
+    split.NoteSemaphoreWrite(0x1000, 23, true);
+    queued = split.QueuedSemaphoreWriteAt(0x1000);
+    REQUIRE(queued.has_value());
+    REQUIRE_FALSE(queued->fenced);
+    REQUIRE(queued->payload == 23);
+    split.Drain(VideoCommon::DrainSite::Other);
+    REQUIRE_FALSE(split.QueuedSemaphoreWriteAt(0x1000).has_value());
+    // A later entry's fence lands the fenced writes of the entries before it.
+    split.Defer([] {});
+    split.NoteSemaphoreWrite(0x2000, 24, true, false, Landing::Fenced);
+    std::optional<u64> later;
+    split.Defer([&split, &later] { later = split.BackEntry(); });
+    split.Drain(VideoCommon::DrainSite::Other);
+    REQUIRE(split.QueuedSemaphoreWriteAt(0x2000).has_value());
+    REQUIRE(later.has_value());
+    split.NoteFencedWrite(*later);
+    REQUIRE_FALSE(split.QueuedSemaphoreWriteAt(0x2000).has_value());
+}
+
 TEST_CASE("Split waits for a semaphore write's position, not for the work sent after it",
           "[video_core][gpu_split_dependencies]") {
     using Access = VideoCommon::GpuSplitTestAccess;

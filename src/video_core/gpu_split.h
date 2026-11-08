@@ -112,6 +112,23 @@ public:
     [[nodiscard]] static bool OnBackThread() {
         return on_back_thread;
     }
+    /// Back thread: the entry it runs, as NoteFencedWrite takes it; elsewhere nothing.
+    [[nodiscard]] std::optional<u64> BackEntry() const {
+        if (!on_back_thread) {
+            return std::nullopt;
+        }
+        return EntryTag(back_entry_start);
+    }
+    /// Any thread: the operation of a report the back sent in `entry` (BackEntry) ran with its
+    /// fence, so the report is in memory, and those of the entries before it: fences run their
+    /// operations in order (QueryCacheBase::CounterReport).
+    void NoteFencedWrite(u64 entry) {
+        u64 landed = fenced_landed.load(std::memory_order_relaxed);
+        while (landed <= entry &&
+               !fenced_landed.compare_exchange_weak(landed, entry + 1, std::memory_order_release,
+                                                    std::memory_order_relaxed)) {
+        }
+    }
     /// Called on the back before it sleeps waiting for work (the rasterizer submits deferred work).
     void SetIdleHook(void (*hook)(void*), void* argument) {
         idle_hook = hook;
@@ -326,18 +343,29 @@ public:
     /// the writers a command list fetched now is ordered after. Returns whether any of it was
     /// still queued. `site`: whose wait it is, for EDEN_NX2_GPU_PROFILE.
     bool WaitForSyncedWriters(DrainSite site = DrainSite::ListWriters);
-    /// A semaphore release was just sent: once the back ran it, the word at `device_address` holds
-    /// `payload`, or a value the front can't tell (`known` false: a reduction, a counter report),
-    /// or `payload` at least (`at_least`: a maximum with a value the front can't tell).
-    void NoteSemaphoreWrite(u64 device_address, u32 payload, bool known, bool at_least = false);
+    /// When a release the back runs reaches memory.
+    enum class Landing : u8 {
+        AtRun,  ///< As the back runs it: payload reports without a fence, reductions, maxima
+        Fenced, ///< Once the fence signaled after it ran (QueryCacheBase::CounterReport):
+                ///< fence-flagged reports, counter reports
+    };
+    /// A semaphore release was just sent: once it landed (`landing`), the word at
+    /// `device_address` holds `payload`, or a value the front can't tell (`known` false: a
+    /// reduction, a counter report), or `payload` at least (`at_least`: a maximum with a value the
+    /// front can't tell).
+    void NoteSemaphoreWrite(u64 device_address, u32 payload, bool known, bool at_least = false,
+                            Landing landing = Landing::AtRun);
     struct QueuedSemaphoreWrite {
         u32 payload;
         bool known;
         bool at_least; ///< Known only as a lower bound (unsigned)
-        u64 position;  ///< Once the back ran this (Ran), the word holds the write
+        /// It lands once a fence ran, at no position the front can wait for; or an earlier write
+        /// that does may still land after it.
+        bool fenced;
+        u64 position; ///< Once the back ran this (Ran), the word holds the write, unless `fenced`
     };
-    /// The last write sent to the semaphore word at `device_address`, if the back may not have run
-    /// it yet.
+    /// The last write sent to the semaphore word at `device_address`, if it may not be in memory
+    /// yet.
     [[nodiscard]] std::optional<QueuedSemaphoreWrite> QueuedSemaphoreWriteAt(
         u64 device_address) const;
     /// Whether compute or copy work sent so far is still queued (EDEN_NX2_DRAIN_CHECK).
@@ -523,6 +551,7 @@ private:
         if (profile_publishes && write_position == published_local) [[unlikely]] {
             NoteFirstUnpublished(); // TEST
         }
+        last_entry_start = write_position;
         write_position += words;
         if (PublishDue() && !publish_held) {
             PublishNow();
@@ -609,11 +638,15 @@ private:
     u64 write_position{};
     u64 last_writer_position{};
     u64 last_sync_position{};
+    u64 last_entry_start{}; ///< Where the last entry sent starts
     struct SemaphoreWrite {
         u64 position; ///< write_position once it was sent
+        /// `fenced`: the entry (EntryTag) whose fenced write must have landed (NoteFencedWrite)
+        u64 entry;
         u32 payload;
         bool known;
         bool at_least;
+        bool fenced;
     };
     /// The front's NoteSemaphoreWrite, by word address.
     std::unordered_map<u64, SemaphoreWrite> semaphore_writes;
@@ -645,6 +678,20 @@ private:
 
     // Back side.
     Tegra::Engines::EngineInterface* back_engine{};
+    u64 back_entry_start{}; ///< Where the entry the back runs starts (BackEntry)
+
+    /// An entry's position as fenced writes name it: with this start of the split in the high
+    /// bits, so a fence of an earlier start that runs late lands nothing of this one (positions
+    /// stay far below 2^48).
+    [[nodiscard]] u64 EntryTag(u64 position) const {
+        return (u64{starts} << 48) | position;
+    }
+    /// Whether the word holds `write` (as far as no other write changed it since): the back ran
+    /// it, and a fenced one landed.
+    [[nodiscard]] bool InMemory(const SemaphoreWrite& write) const {
+        return write.position <= consumed.load(std::memory_order_acquire) &&
+               (!write.fenced || fenced_landed.load(std::memory_order_acquire) > write.entry);
+    }
 
     static GpuSplit instance;
     static inline thread_local bool on_back_thread{};
@@ -660,6 +707,9 @@ private:
     // always touched together by both threads, so they share a block.
     alignas(128) std::atomic<u64> published{};
     alignas(128) std::atomic<u64> consumed{};
+    /// One past the last entry (EntryTag) whose fenced writes landed (NoteFencedWrite): the
+    /// fencing thread writes it, the front reads it.
+    alignas(128) std::atomic<u64> fenced_landed{};
     /// A position the front waits for (WaitFor): the back stores `consumed` once past it.
     alignas(128) std::atomic<u64> wait_target{~u64{0}};
     alignas(128) std::atomic<bool> back_waiting{};

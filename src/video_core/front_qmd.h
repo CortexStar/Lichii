@@ -572,9 +572,10 @@ private:
             split.NoteSemaphoreWrite(*device, value, base.has_value());
             check(*device, value, base.has_value(), false);
         } else if (four_words) {
-            // The payload as 64 bits, a timestamp after it.
-            split.NoteSemaphoreWrite(*device, payload, true);
-            split.NoteSemaphoreWrite(*device + 4, 0, true);
+            // The payload as 64 bits, a timestamp after it. Fence-flagged reports, like the plain
+            // release below: they land once their fence ran.
+            split.NoteSemaphoreWrite(*device, payload, true, false, GpuSplit::Landing::Fenced);
+            split.NoteSemaphoreWrite(*device + 4, 0, true, false, GpuSplit::Landing::Fenced);
             check(*device, payload, true, false);
             check(*device + 4, 0, true, false);
         } else if (maximum) {
@@ -583,7 +584,7 @@ private:
             split.NoteSemaphoreWrite(*device, value, true, !base.has_value());
             check(*device, value, true, !base.has_value());
         } else {
-            split.NoteSemaphoreWrite(*device, payload, true);
+            split.NoteSemaphoreWrite(*device, payload, true, false, GpuSplit::Landing::Fenced);
             check(*device, payload, true, false);
         }
     }
@@ -603,7 +604,9 @@ private:
         // The last write sent to the word's granule, placed or not.
         const u64 target = memory.WritesTarget(split, address, sizeof(u32));
         if (const auto queued = split.QueuedSemaphoreWriteAt(device)) {
-            if (queued->known && !queued->at_least && queued->position >= target) {
+            // A fenced one lands once its fence ran, before or after the back reads the word.
+            if (queued->known && !queued->at_least && !queued->fenced &&
+                queued->position >= target) {
                 return queued->payload;
             }
             return std::nullopt;

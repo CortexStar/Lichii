@@ -143,9 +143,9 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     profile_publishes = Nx2Profile::Enabled();                      // TEST
     log_methods = std::getenv("EDEN_NX2_ACQUIRE_STATS") != nullptr; // TEST
     ring = std::make_unique<u64[]>(RingWords);
+    ++starts; // Before the back starts: it tags the entries of fenced writes with it (EntryTag)
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
-    ++starts;
     const char* jit = std::getenv("EDEN_NX2_MME_JIT");
     front_macros = mode == '2' && (jit == nullptr || jit[0] != '0');
     LOG_INFO(HW_GPU, "GPU thread split: engine methods run on a second thread{}",
@@ -169,6 +169,8 @@ void GpuSplit::Stop() {
     write_position = 0;
     last_writer_position = 0;
     last_sync_position = 0;
+    last_entry_start = 0;
+    back_entry_start = 0;
     semaphore_writes.clear();
     semaphore_writes_limit = 1024;
     last_any_write = 0;
@@ -297,27 +299,39 @@ bool GpuSplit::WaitForSyncedWriters(DrainSite site) {
     return WaitFor(std::min({last_writer_position, last_sync_position, write_position}), site);
 }
 
-void GpuSplit::NoteSemaphoreWrite(u64 device_address, u32 payload, bool known, bool at_least) {
+void GpuSplit::NoteSemaphoreWrite(u64 device_address, u32 payload, bool known, bool at_least,
+                                  Landing landing) {
     if (semaphore_writes.size() >= semaphore_writes_limit) {
-        // The words of releases the back ran hold their values in memory.
-        const u64 done = consumed.load(std::memory_order_acquire);
+        // The words of releases in memory hold their values.
         std::erase_if(semaphore_writes,
-                      [done](const auto& entry) { return entry.second.position <= done; });
+                      [this](const auto& entry) { return InMemory(entry.second); });
         semaphore_writes_limit = std::max<size_t>(1024, semaphore_writes.size() * 2);
     }
-    semaphore_writes.insert_or_assign(device_address & ~u64{3},
-                                      SemaphoreWrite{write_position, payload, known, at_least});
+    // The release is in the last entry sent, or one before (a QMD signal valued late).
+    SemaphoreWrite write{write_position, EntryTag(last_entry_start), payload,
+                         known,          at_least,                   landing == Landing::Fenced};
+    const u64 word = device_address & ~u64{3};
+    if (const auto it = semaphore_writes.find(word);
+        !write.fenced && it != semaphore_writes.end() && it->second.fenced &&
+        fenced_landed.load(std::memory_order_acquire) <= it->second.entry) {
+        // A fenced write sent before may land after this one: until it did, the word holds
+        // either.
+        write.entry = it->second.entry;
+        write.known = false;
+        write.at_least = false;
+        write.fenced = true;
+    }
+    semaphore_writes.insert_or_assign(word, write);
 }
 
 std::optional<GpuSplit::QueuedSemaphoreWrite> GpuSplit::QueuedSemaphoreWriteAt(
     u64 device_address) const {
     const auto it = semaphore_writes.find(device_address & ~u64{3});
-    if (it == semaphore_writes.end() ||
-        it->second.position <= consumed.load(std::memory_order_acquire)) {
+    if (it == semaphore_writes.end() || InMemory(it->second)) {
         return std::nullopt;
     }
     return QueuedSemaphoreWrite{it->second.payload, it->second.known, it->second.at_least,
-                                it->second.position};
+                                it->second.fenced, it->second.position};
 }
 
 bool GpuSplit::WritersPending() const {
@@ -746,6 +760,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         u64 last_store = read_position;
         while (read_position != available) {
             const size_t index = read_position & RingMask;
+            back_entry_start = read_position;
             const size_t size =
                 Execute(&ring[index], std::min<u64>(available - read_position, RingWords - index));
             read_position += size != 0 ? size : RingWords - index;

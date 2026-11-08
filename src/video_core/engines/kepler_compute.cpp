@@ -1881,8 +1881,9 @@ void KeplerCompute::FrontNoteReport(VideoCommon::GpuSplit& split, const FrontSta
         const u32 op = (control >> 9) & 7;
         std::optional<u32> base;
         if (!from_macro) {
+            // A fenced release lands once its fence ran, before or after the reduction.
             if (const auto queued = split.QueuedSemaphoreWriteAt(*device)) {
-                if (queued->known && !queued->at_least &&
+                if (queued->known && !queued->at_least && !queued->fenced &&
                     queued->position >= split.LastWriterPosition()) {
                     base = queued->payload;
                 }
@@ -1894,10 +1895,15 @@ void KeplerCompute::FrontNoteReport(VideoCommon::GpuSplit& split, const FrontSta
                                  base.has_value());
         return;
     }
-    split.NoteSemaphoreWrite(*device, fs.registers[0x6c2], true);
-    if (((control >> 28) & 1) == 0) {
+    // One word: a fence-flagged report, which lands once its fence ran. Else a payload report
+    // with a timestamp, written as the back runs it.
+    const bool one_word = ((control >> 28) & 1) != 0;
+    const auto landing =
+        one_word ? VideoCommon::GpuSplit::Landing::Fenced : VideoCommon::GpuSplit::Landing::AtRun;
+    split.NoteSemaphoreWrite(*device, fs.registers[0x6c2], true, false, landing);
+    if (!one_word) {
         // 64 bits (a timestamp follows).
-        split.NoteSemaphoreWrite(*device + 4, 0, true);
+        split.NoteSemaphoreWrite(*device + 4, 0, true, false, landing);
     }
 }
 

@@ -86,29 +86,37 @@ void ReleaseFences(DmaPusher& dma_pusher) {
         VideoCommon::DrainSite::FenceRelease);
 }
 
-// A release was just sent to the back (as Writes::Noted): tell the front what it writes
-// (CheckWithoutDrain).
-void NoteRelease(DmaPusher& dma_pusher, GPUVAddr address, u32 payload, bool four_words) {
+// A release with `properties` was just sent to the back (as Writes::Noted): tell the front what
+// it writes (CheckWithoutDrain).
+void NoteRelease(DmaPusher& dma_pusher, GPUVAddr address, u32 payload,
+                 VideoCommon::QueryPropertiesFlags properties) {
     auto& split = VideoCommon::GpuSplit::Get();
     if (!split.Active()) {
         return;
     }
+    const bool four_words = True(properties & VideoCommon::QueryPropertiesFlags::HasTimeout);
+    // A fence-flagged report lands once the fence after it ran (QueryCacheBase::CounterReport).
+    const auto landing = True(properties & VideoCommon::QueryPropertiesFlags::IsAFence)
+                             ? VideoCommon::GpuSplit::Landing::Fenced
+                             : VideoCommon::GpuSplit::Landing::AtRun;
     split.NoteWrite(dma_pusher.memory_manager, address, four_words ? 16 : sizeof(u32));
     const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address);
     if (!device) {
         return;
     }
-    split.NoteSemaphoreWrite(*device, payload, true);
+    split.NoteSemaphoreWrite(*device, payload, true, false, landing);
     VideoCommon::Nx2AcquireStats::NoteRelease(*device,
                                               VideoCommon::Nx2AcquireStats::Releaser::Puller);
     if (four_words) {
         // The payload as 64 bits (a timestamp follows).
-        split.NoteSemaphoreWrite(*device + 4, 0, true);
+        split.NoteSemaphoreWrite(*device + 4, 0, true, false, landing);
     }
 }
 
-// Whether the back writes a payload release to memory when it runs it (CounterReport): below
-// High GPU accuracy, with fences that run their operations at once (FenceManager::SignalFence).
+// Whether the back writes a payload report without a fence flag to memory when it runs it
+// (CounterReport): below High GPU accuracy, with fences that run their operations at once
+// (FenceManager::SignalFence). Fence-flagged reports land once their fence ran
+// (GpuSplit::Landing::Fenced).
 bool ReleasesLandAtOnce() {
     const bool delay_fence =
         Settings::IsGPUFenceBehaviorDefault()
@@ -118,8 +126,9 @@ bool ReleasesLandAtOnce() {
 }
 
 // Whether the front decides Switch 2 acquires from its view of the semaphore words (AskView)
-// instead of draining the split: the back writes each release to memory as it runs it, and the
-// front sees every release it sends, its macros' included.
+// instead of draining the split: the back writes each release to memory as it runs it, or once
+// its fence ran (GpuSplit::Landing), and the front sees every release it sends, its macros'
+// included.
 bool ViewApplies() {
     const auto& split = VideoCommon::GpuSplit::Get();
     return split.Active() && split.FrontMacros() && ReleasesLandAtOnce();
@@ -154,8 +163,16 @@ ViewAnswer AskView(DmaPusher& dma_pusher, const Puller::PendingAcquire& acquire,
     // and copy work sent before it may still release the word without the front's knowing (QMD
     // releases): a value that meets it stands once the back ran that work.
     const bool settled = acquire.WaitsToReach() || split.Ran(acquire.writers_before);
-    // The last release the front sent to the word decides while the back hasn't run it.
+    // The last release the front sent to the word decides while it may not be in memory.
     if (const auto queued = split.QueuedSemaphoreWriteAt(device)) {
+        if (queued->fenced) {
+            // It lands once a fence ran, at no position the front can wait for. A greater-or-equal
+            // acquire the word meets now and once it landed stands either way (the words only
+            // advance); else the landing latches the waiter, or a poll finds it in memory.
+            const bool landed_meets =
+                queued->known && acquire.WaitsToReach() && acquire.Matches(queued->payload);
+            return {landed_meets && acquire.Matches(memory()) ? Kind::Met : Kind::NotMet};
+        }
         if (!queued->known) {
             return {Kind::Unknown, queued->position};
         }
@@ -352,8 +369,8 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     // With delayed fence operations (Balanced or Accurate fences, accurate GPU), a release
     // queued after the acquire released the fences waits in the caches for the next fence. With
     // every channel waiting none comes: release them again now and then while waiting. (The
-    // semaphore view, PollWithoutDrain, applies only while releases land at once: never with
-    // delayed fence operations.)
+    // semaphore view, PollWithoutDrain, applies only while releases without a fence flag land at
+    // once: never with delayed fence operations. Fence-flagged ones signal their own fence.)
     const bool delayed = Settings::IsGPUFenceBehaviorDefault()
                              ? Settings::IsGPULevelHigh()
                              : Settings::IsGPUFenceBehaviorBalanced() ||
@@ -550,8 +567,7 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
                                   payload, 0);
             },
             VideoCommon::GpuSplit::Writes::Noted);
-        NoteRelease(dma_pusher, sequence_address, payload,
-                    properties == VideoCommon::QueryPropertiesFlags::HasTimeout);
+        NoteRelease(dma_pusher, sequence_address, payload, properties);
     } else if (g_nx2_ampere) {
         // Switch 2 waits on semaphores the CPU (or another channel) releases, e.g. once it has
         // written the commands this channel runs next: suspend the channel until the value is
@@ -690,7 +706,8 @@ void Puller::ProcessSemaphoreRelease(DmaPusher& dma_pusher) {
                               VideoCommon::QueryPropertiesFlags::IsAFence, payload, 0);
         },
         VideoCommon::GpuSplit::Writes::Noted);
-    NoteRelease(dma_pusher, sequence_address, payload, false);
+    NoteRelease(dma_pusher, sequence_address, payload,
+                VideoCommon::QueryPropertiesFlags::IsAFence);
 }
 
 void Puller::ProcessSemaphoreAcquire(DmaPusher& dma_pusher) {
@@ -722,7 +739,7 @@ void Puller::ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument) {
                                   VideoCommon::QueryPropertiesFlags::IsAFence, payload, 0);
             },
             VideoCommon::GpuSplit::Writes::Noted);
-        NoteRelease(dma_pusher, address, payload, false);
+        NoteRelease(dma_pusher, address, payload, VideoCommon::QueryPropertiesFlags::IsAFence);
         return;
     }
     // Acquires: never block the GPU thread on them; they are checked for the warning below only.
