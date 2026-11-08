@@ -4645,6 +4645,21 @@ void CustomBorderColorBudget::Release() noexcept {
     held = 0;
 }
 
+f32 TextureCacheRuntime::OcarinaFsrLodBias() {
+    if (!ocarina_fsr_lod_bias) {
+        std::optional<f32> override;
+        if (const char* const value = std::getenv("EDEN_NX2_OOT_LOD_BIAS")) {
+            override = std::strtof(value, nullptr);
+        }
+        const bool ocarina = Settings::GetCurrentProgramID() == 0x0400486024DEC000ULL;
+        ocarina_fsr_lod_bias = ocarina ? VideoCommon::OcarinaFsrLodBias(
+                                             ResolveOcarinaUpscaler(device),
+                                             Settings::IsDockedMode(), override)
+                                       : 0.0f;
+    }
+    return *ocarina_fsr_lod_bias;
+}
+
 Sampler::Sampler(TextureCacheRuntime& runtime, const Tegra::Texture::TSCEntry& tsc) {
     const auto& device = runtime.device;
     device_ptr = &device;
@@ -4705,18 +4720,11 @@ Sampler::Sampler(TextureCacheRuntime& runtime, const Tegra::Texture::TSCEntry& t
         }
     }
     // Ocarina with FSR: FSR renders below the output size, so textures would pick the render
-    // size's mips. AMD recommends a mip bias of log2(render / output) - 1, -1.58 for docked
-    // 1440p -> 4K, added to mipmapped samplers so textures keep the output's detail. Only when
-    // the session's upscaler is FSR (not DLSS or native). EDEN_NX2_OOT_LOD_BIAS=<bias> replaces
-    // it (0 turns it off, also applies handheld).
+    // size's mips; the bias keeps the output's detail (VideoCommon::OcarinaFsrLodBias).
     f32 lod_bias = tsc.LodBias();
-    if (tsc.mipmap_filter != TextureMipmapFilter::None &&
-        Settings::GetCurrentProgramID() == 0x0400486024DEC000ULL &&
-        ResolveOcarinaUpscaler(runtime.device) == VideoCommon::OcarinaUpscaleBackend::Fsr) {
-        static const char* const lod_bias_env = std::getenv("EDEN_NX2_OOT_LOD_BIAS");
-        const f32 fsr_lod_bias = lod_bias_env
-            ? std::clamp(std::strtof(lod_bias_env, nullptr), -4.0f, 0.0f)
-            : Settings::IsDockedMode() ? -1.58f : 0.0f;
+    ocarina_fsr_failed = &runtime.ocarina_fsr_failed;
+    if (const f32 fsr_lod_bias = runtime.OcarinaFsrLodBias();
+        fsr_lod_bias != 0.0f && tsc.mipmap_filter != TextureMipmapFilter::None) {
         const f32 biased = std::clamp(lod_bias + fsr_lod_bias, -15.0f, 15.0f);
         added_lod_bias = biased - lod_bias;
         lod_bias = biased;
@@ -4758,9 +4766,11 @@ Sampler::VariantKey Sampler::MakeKey(const ImageView& image_view, bool is_depth)
     key.drop_compare = has_depth_comparison && !is_depth;
     // The FSR bias is for the game's textures. Images the GPU wrote (render targets: bloom and
     // blur chains, reflections, fog) keep the game's own bias, or they'd read a mip too sharp.
+    // After the upscaler failed this session every image does (the game's pass runs again).
     if (added_lod_bias != 0.0f) {
         const Image* const image = image_view.BackingImage();
-        key.drop_lod_bias = image != nullptr && True(image->flags & ImageFlagBits::GpuModified);
+        key.drop_lod_bias = !VideoCommon::KeepOcarinaFsrLodBias(
+            *ocarina_fsr_failed, image != nullptr && True(image->flags & ImageFlagBits::GpuModified));
     }
     if (needs_swizzle_mapping && !key.drop_custom_border && !image_view.HasIdentitySwizzle()) {
         const VkComponentMapping& mapping = image_view.Swizzle();
