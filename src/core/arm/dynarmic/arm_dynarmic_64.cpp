@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <thread>
 #if defined(_M_X64) || defined(__x86_64__)
 #ifdef _MSC_VER
@@ -750,6 +751,17 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
         // Code reads the per-core callbacks, TPIDR pointers and monitor slots from the JIT state,
         // so one compiled block is valid on every core (for one code cache per process).
         config.core_independent_code = true;
+        // EXPERIMENT (do not merge): EDEN_JIT_OFF=hcr,ibc turns host_call_return /
+        // indirect_branch_cache off for the integration A/B.
+        if (const char* off = std::getenv("EDEN_JIT_OFF")) {
+            const std::string list = std::string{","} + off + ",";
+            if (list.find(",hcr,") != std::string::npos) {
+                config.host_call_return = false;
+            }
+            if (list.find(",ibc,") != std::string::npos) {
+                config.indirect_branch_cache = false;
+            }
+        }
     }
 #endif
     m_jit.emplace(config);
