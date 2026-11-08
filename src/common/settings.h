@@ -650,6 +650,9 @@ struct Values {
         linkage, true, "use_vulkan_driver_pipeline_cache", Category::RendererAdvanced,
         Specialization::Default};
 
+    SwitchableSetting<bool> experimental_pr777_optimizations{
+        linkage, false, "experimental_pr777_optimizations", Category::RendererAdvanced};
+
     SwitchableSetting<NativeAsyncDraws> native_async_draws{linkage,
                                                            NativeAsyncDraws::Wait,
                                                            "native_async_draws",
