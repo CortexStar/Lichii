@@ -182,6 +182,11 @@ public:
 
     std::filesystem::path GetShortcutPath(QtCommon::Game::ShortcutTarget target);
 
+    /// Frames per second frame generation added since the last status bar update.
+    [[nodiscard]] double FrameGenFps() const {
+        return frame_gen_fps;
+    }
+
 signals:
 
     /**
@@ -546,6 +551,8 @@ private:
     VideoCore::FrameGenState frame_gen_state{};
     u64 frame_gen_frames = 0;
     bool frame_gen_generating = false;
+    double frame_gen_fps = 0.0;
+    QElapsedTimer frame_gen_fps_timer;
     VolumeButton* volume_button = nullptr;
     QWidget* volume_popup = nullptr;
     QSlider* volume_slider = nullptr;
