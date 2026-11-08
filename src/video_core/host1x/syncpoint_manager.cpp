@@ -62,14 +62,16 @@ void SyncpointManager::IncrementGuest(u32 syncpoint_id) {
         LOG_ERROR(HW_GPU, "Ignoring increment of invalid syncpoint {:#x}", syncpoint_id);
         return;
     }
-    Increment(syncpoints_guest[syncpoint_id], wait_guest_cv, guest_action_storage[syncpoint_id]);
+    Increment(syncpoint_id, syncpoints_guest[syncpoint_id], wait_guest_cv,
+              guest_action_storage[syncpoint_id], true);
 }
 
 void SyncpointManager::IncrementHost(u32 syncpoint_id) {
     if (syncpoint_id >= NUM_MAX_SYNCPOINTS) {
         return;
     }
-    Increment(syncpoints_host[syncpoint_id], wait_host_cv, host_action_storage[syncpoint_id]);
+    Increment(syncpoint_id, syncpoints_host[syncpoint_id], wait_host_cv,
+              host_action_storage[syncpoint_id], false);
 }
 
 void SyncpointManager::WaitGuest(u32 syncpoint_id, u32 expected_value) {
@@ -80,11 +82,29 @@ void SyncpointManager::WaitHost(u32 syncpoint_id, u32 expected_value) {
     Wait(syncpoints_host[syncpoint_id], wait_host_cv, expected_value);
 }
 
-void SyncpointManager::Increment(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
-                                 std::list<RegisteredAction>& action_storage) {
-    auto new_value{syncpoint.fetch_add(1, std::memory_order_acq_rel) + 1};
-
+SyncpointManager::ActionHandle SyncpointManager::AddGuestIncrementObserver(
+    IncrementObserver&& observer) {
     std::scoped_lock lk(guard);
+    return guest_increment_observers.emplace_back(++last_action_id, std::move(observer)).first;
+}
+
+void SyncpointManager::RemoveGuestIncrementObserver(const ActionHandle& handle) {
+    std::scoped_lock lk(guard);
+    std::erase_if(guest_increment_observers,
+                  [handle](const auto& observer) { return observer.first == handle; });
+}
+
+void SyncpointManager::Increment(u32 syncpoint_id, std::atomic<u32>& syncpoint,
+                                 std::condition_variable& wait_cv,
+                                 std::list<RegisteredAction>& action_storage, bool guest) {
+    std::scoped_lock lk(guard);
+    // Incremented under the lock, so observers get each syncpoint's values in order.
+    const u32 new_value{syncpoint.fetch_add(1, std::memory_order_acq_rel) + 1};
+    if (guest) {
+        for (const auto& [handle, observer] : guest_increment_observers) {
+            observer(syncpoint_id, new_value);
+        }
+    }
     auto it = action_storage.begin();
     while (it != action_storage.end()) {
         if (it->expected_value > new_value) {

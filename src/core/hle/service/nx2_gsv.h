@@ -3595,6 +3595,9 @@ public:
     }
 
     ~INx2GraphicsSystemSession() override {
+        if (m_syncpt_observer != 0) {
+            system.Host1x().GetSyncpointManager().RemoveGuestIncrementObserver(m_syncpt_observer);
+        }
         if (m_syncpt_poll) {
             system.CoreTiming().UnscheduleEvent(m_syncpt_poll);
         }
@@ -3745,9 +3748,15 @@ private:
         LOG_WARNING(Service, "(STUBBED) nx2:gsv TIPC 204, version={} max_syncpoints={:#x}",
                     version_requested, max_syncpoints);
 
+        // Created first: the increment observer and the poll signal the notify event.
+        if (m_syncpt_events[0] == nullptr) {
+            m_syncpt_events[0] = m_context.CreateEvent("nx2:gsv:SyncptRequest");
+            m_syncpt_events[1] = m_context.CreateEvent("nx2:gsv:SyncptNotify");
+        }
         auto rw = ctx.GetObjectFromHandle<Kernel::KTransferMemory>(ctx.GetCopyHandle(0));
         auto ro = ctx.GetObjectFromHandle<Kernel::KTransferMemory>(ctx.GetCopyHandle(1));
         if (rw.IsNotNull() && ro.IsNotNull() && ro->GetSize() >= 0x2000) {
+            std::unique_lock lk{m_syncpt_mutex};
             m_syncpt_memory = &ro->GetOwner()->GetMemory();
             m_syncpt_rw = GetInteger(rw->GetSourceAddress());
             m_syncpt_ro = GetInteger(ro->GetSourceAddress());
@@ -3762,9 +3771,14 @@ private:
             memory.Write32(m_syncpt_ro + 0x18, SyncptRwBitsOffset);
             memory.Write32(m_syncpt_ro + 0x1c, SyncptRoBitsOffset);
             UpdateSyncptValues();
+            lk.unlock();
             if (!m_syncpt_poll) {
-                // A poll, not a deadline: relaxed, so the timer thread sleeps in the OS for it
-                // instead of spending its 500 us intervals in a monitor wait.
+                // Each guest increment updates its value and answers armed waits at once.
+                m_syncpt_observer =
+                    system.Host1x().GetSyncpointManager().AddGuestIncrementObserver(
+                        [this](u32 id, u32 value) { OnSyncptIncrement(id, value); });
+                // The poll is only a fallback, not a deadline: relaxed, so the timer thread
+                // sleeps in the OS for it instead of spending its interval in a monitor wait.
                 m_syncpt_poll = Core::Timing::CreateRelaxedEvent(
                     "nx2:gsv:SyncptPoll",
                     [this](s64,
@@ -3779,10 +3793,6 @@ private:
             LOG_ERROR(Service, "nx2:gsv TIPC 204: missing syncpt transfer memory");
         }
 
-        if (m_syncpt_events[0] == nullptr) {
-            m_syncpt_events[0] = m_context.CreateEvent("nx2:gsv:SyncptRequest");
-            m_syncpt_events[1] = m_context.CreateEvent("nx2:gsv:SyncptNotify");
-        }
         IPC::ResponseBuilder rb{ctx, 2, 2, 0};
         rb.Push(ResultSuccess);
         rb.PushCopyObjects(ctx, *m_syncpt_events[0]); // signalled by the client
@@ -3804,19 +3814,37 @@ private:
         return changed;
     }
 
-    // Answers every armed wait: the value page is current, so the client rechecks its threshold
-    // and rearms if it still has to wait. Acknowledging without a value change costs the client a
-    // wakeup per poll, which keeps waits whose syncpoint we never see from hanging.
+    // Runs on the GPU thread that incremented the syncpoint, under the syncpoint manager's lock.
+    // Polling alone made a waiter see its value up to 500 us late.
+    void OnSyncptIncrement(u32 id, u32 value) {
+        std::scoped_lock lk{m_syncpt_mutex};
+        if (id >= std::min(m_syncpt_count, HostSyncpoints)) {
+            return;
+        }
+        m_syncpt_memory->Write64(m_syncpt_ro + SyncptValuesOffset + id * 8, value);
+        AckArmedSyncptWaits();
+    }
+
+    // The poll stays for waits armed just after the increment that satisfied them, which no later
+    // increment answers, and for syncpoints whose waits we never see an increment of.
     void PollSyncpts() {
+        std::scoped_lock lk{m_syncpt_mutex};
         if (m_syncpt_memory == nullptr) {
             return;
         }
+        UpdateSyncptValues();
+        AckArmedSyncptWaits();
+    }
+
+    // Answers every armed wait: the value page is current, so the client rechecks its threshold
+    // and rearms if it still has to wait. Acknowledging without a value change costs the client a
+    // wakeup, which keeps waits whose syncpoint we never see from hanging.
+    void AckArmedSyncptWaits() {
         const u32 words = (m_syncpt_count + 63) / 64;
         std::array<u64, 0x40> armed{};
         for (u32 w = 0; w < words; ++w) {
             armed[w] = m_syncpt_memory->Read64(m_syncpt_rw + SyncptRwBitsOffset + w * 8);
         }
-        UpdateSyncptValues();
         bool acked = false;
         for (u32 w = 0; w < words; ++w) {
             const u64 ro_address = m_syncpt_ro + SyncptRoBitsOffset + w * 8;
@@ -4315,6 +4343,8 @@ private:
     u64 m_syncpt_ro{};
     u32 m_syncpt_count{};
     std::shared_ptr<Core::Timing::EventType> m_syncpt_poll;
+    Tegra::Host1x::SyncpointManager::ActionHandle m_syncpt_observer{};
+    std::mutex m_syncpt_mutex; ///< Orders page writes from GPU threads and the poll
 };
 
 } // namespace Service

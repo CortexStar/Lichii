@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <thread>
+#include <utility>
+#include <vector>
 #include <catch2/catch_test_macros.hpp>
 
 #include "video_core/host1x/syncpoint_manager.h"
@@ -114,4 +117,48 @@ TEST_CASE("Syncpoint action IDs stay distinct across counters and host guest ban
     manager.IncrementHost(1);
     REQUIRE(guest_calls == 1);
     REQUIRE(host_calls == 1);
+}
+
+TEST_CASE("Guest increment observers see every guest increment in order",
+          "[video_core][syncpoint_actions]") {
+    SyncpointManager manager;
+    std::vector<std::pair<u32, u32>> seen;
+    const auto handle = manager.AddGuestIncrementObserver(
+        [&](u32 id, u32 value) { seen.emplace_back(id, value); });
+    REQUIRE(handle != 0);
+    manager.IncrementGuest(3);
+    manager.IncrementHost(3);
+    manager.IncrementGuest(3);
+    manager.IncrementGuest(5);
+    REQUIRE(seen == std::vector<std::pair<u32, u32>>{{3, 1}, {3, 2}, {5, 1}});
+
+    manager.RemoveGuestIncrementObserver(handle);
+    manager.IncrementGuest(3);
+    REQUIRE(seen.size() == 3);
+    REQUIRE(manager.GetGuestSyncpointValue(3) == 3);
+}
+
+TEST_CASE("Concurrent guest increments reach observers with rising values",
+          "[video_core][syncpoint_actions]") {
+    SyncpointManager manager;
+    u32 last{};
+    bool rising = true;
+    const auto handle = manager.AddGuestIncrementObserver([&](u32, u32 value) {
+        rising = rising && value == last + 1;
+        last = value;
+    });
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 4; ++t) {
+        threads.emplace_back([&] {
+            for (int i = 0; i < 1000; ++i) {
+                manager.IncrementGuest(7);
+            }
+        });
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    manager.RemoveGuestIncrementObserver(handle);
+    REQUIRE(rising);
+    REQUIRE(last == 4000);
 }
