@@ -503,8 +503,10 @@ public:
     /// Set once a range went into gpu_modified_ranges without marking its pages in
     /// Tegra::g_nx2_gpu_written_pages (outside Switch 2 sessions): the bitmap no longer bounds it.
     bool nx2_gpu_ranges_unmarked = false;
-    /// Indirectly read banks of native programs already uploaded this frame.
-    Nx2BufCache::FrameAddressSet native_indirect_uniforms_this_frame;
+    /// Bytes of native uniform banks compared or uploaded this frame. Ocarina of Time binds
+    /// overlapping 64 KiB windows at a different start for most draws: keyed by start address,
+    /// every window uploaded again.
+    Common::RangeSet<DAddr> native_bank_ranges_this_frame;
 
     /// RasterizerInterface::QueueFlushRegion: queues the GPU-written parts of a range for download
     /// at the next fence instead of flushing them now. Returns whether anything was queued.
@@ -712,18 +714,24 @@ private:
     void InlineMemoryImplementation(DAddr dest_address, size_t copy_size,
                                     std::span<const u8> inlined_buffer);
 
-    /// The guest bytes of a native 64 KiB uniform bank at its last once-a-frame upload
-    ///. Bit k of `valid`: device page k of the bank still holds
-    /// what the host buffer holds there; other host writes over the page clear it.
+    /// The guest bytes of a device page of native uniform banks at their last upload by
+    /// UploadNativeBank. Bit k of `valid`: granule k of the page still holds what the host buffer
+    /// holds there; other host writes over the granule clear it.
     struct BankShadow {
-        std::array<u8, 0x10000> bytes{};
-        u32 valid{};
+        std::array<u8, Core::DEVICE_PAGESIZE> bytes{};
+        u16 valid{};
         u64 compared_frame{}; ///< frame_tick of the last compare
     };
+    static constexpr u64 BANK_GRANULE = Core::DEVICE_PAGESIZE / 16;
+    static constexpr size_t MAX_BANK_SHADOWS = 4096;
 
-    /// The once-a-frame upload of a native uniform bank: only the pages whose guest bytes
-    /// differ from what was uploaded last time.
+    /// The once-a-frame upload of part of a native uniform bank: only the granules whose guest
+    /// bytes differ from what was uploaded last time.
     void UploadNativeBank(Buffer& buffer, DAddr device_addr, u64 upload_size);
+
+    /// The shadow of the device page `page`, created if missing; nullptr at the cap when every
+    /// shadow was compared this frame.
+    BankShadow* BankShadowOf(DAddr page);
 
     /// Host buffer writes other than UploadNativeBank over [device_addr, device_addr + size).
     void InvalidateBankShadows(DAddr device_addr, u64 size);
@@ -751,10 +759,9 @@ private:
     void MappedUploadMemoryRefreshingBanks(Buffer& buffer, u64 total_size_bytes,
                                            std::span<BufferCopy> copies);
 
+    /// Keyed by device page.
     std::map<DAddr, std::unique_ptr<BankShadow>> bank_shadows;
     std::vector<u8> bank_refresh_scratch;
-    /// Device pages a bank compare read this frame (EDEN_NX2_GPU_PROFILE only: overlap count).
-    Nx2BufCache::FrameAddressSet bank_pages_this_frame;
 
     /// A range SynchronizeBuffer left clean: clean while no CPU-dirty mark
     /// fell in it (the 256 KiB regions it covers when it covers at most MAX_SKIP_REGIONS of them,
