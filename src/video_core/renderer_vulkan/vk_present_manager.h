@@ -77,6 +77,8 @@ public:
     [[nodiscard]] VkFormat SwapchainImageFormat() const { return swapchain_image_format; }
 
 private:
+    void StartPresentThread();
+
     void PresentThread(std::stop_token token);
 
     void CopyToSwapchain(Frame* frame);
