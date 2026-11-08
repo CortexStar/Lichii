@@ -128,6 +128,12 @@ public:
     /// Quick magic check without a full parse.
     static bool IsNupFile(const VirtualFile& file);
 
+    /// Parses the container of `file`, or hands over the one KeepParsed kept for the same host
+    /// file. System::Load reads the program's NPDM from the container before the loader opens it,
+    /// and each parse reads and hashes the whole TOC (Ocarina of Time: 36.8 MB, 372,587 files).
+    static std::unique_ptr<NupContainer> Open(VirtualFile file);
+    static void KeepParsed(std::unique_ptr<NupContainer> container);
+
     /// Recursively merges overlay into a copy of base; overlay paths win.
     static VirtualDir MergeShadowDirs(const VirtualDir& base, const VirtualDir& overlay);
 
@@ -201,6 +207,7 @@ private:
     VirtualFile file;
     Loader::ResultStatus status{Loader::ResultStatus::ErrorNullFile};
 
+    std::array<u8, 0x80> superblock{}; ///< As read; Open compares it to find a kept container.
     u64 toc_offset{};
     u64 toc_size{};
     u64 blob_offset{};

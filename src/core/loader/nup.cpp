@@ -103,7 +103,7 @@ std::string DecodeVersion(u32 version) {
 } // namespace
 
 AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
-    : AppLoader(std::move(file_)), nup(std::make_unique<NupContainer>(file)) {
+    : AppLoader(std::move(file_)), nup(NupContainer::Open(file)) {
     if (nup->GetStatus() != ResultStatus::Success) {
         return;
     }

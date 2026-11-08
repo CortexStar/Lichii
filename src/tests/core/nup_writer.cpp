@@ -366,6 +366,38 @@ TEST_CASE("NUP merges the update RomFS over the base straight from the TOC", "[n
     REQUIRE(nup.GetMergedRomFSDir(std::nullopt, std::nullopt) == nullptr);
 }
 
+TEST_CASE("NUP hands a kept container to the next Open of the same file only", "[nup]") {
+    TempDir t;
+    const auto root = t.path / "Game";
+    MakeDump(root);
+    const auto archive = t.path / "Game.nup";
+    const auto other = t.path / "Other.nup";
+    FileSys::Nup::PackOptions options{.raw_threshold = 16 * 1024};
+    REQUIRE(FileSys::Nup::PackDump(root, archive, options) == FileSys::Nup::PackResult::Success);
+    Put(root / "Base/RomFS/other.bin", "other");
+    REQUIRE(FileSys::Nup::PackDump(root, other, options) == FileSys::Nup::PackResult::Success);
+
+    FileSys::RealVfsFilesystem real;
+    const auto open = [&](const fs::path& path) {
+        return real.OpenFile(path.string(), FileSys::OpenMode::Read);
+    };
+    auto first = NupContainer::Open(open(archive));
+    REQUIRE(first->GetStatus() == Loader::ResultStatus::Success);
+    const NupContainer* const kept = first.get();
+    NupContainer::KeepParsed(std::move(first));
+
+    // Another container is parsed, and the kept one stays for its own file.
+    const auto unrelated = NupContainer::Open(open(other));
+    REQUIRE(unrelated.get() != kept);
+    REQUIRE(unrelated->GetStatus() == Loader::ResultStatus::Success);
+
+    const auto taken = NupContainer::Open(open(archive));
+    REQUIRE(taken.get() == kept);
+    const auto again = NupContainer::Open(open(archive));
+    REQUIRE(again.get() != kept);
+    REQUIRE(again->GetStatus() == Loader::ResultStatus::Success);
+}
+
 TEST_CASE("NUP reads zstd members above the memory cache through a temporary file", "[nup]") {
     TempDir t;
     const auto root = t.path / "Game";

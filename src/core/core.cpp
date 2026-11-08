@@ -130,7 +130,8 @@ namespace {
 bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id, std::size_t program_index) {
     FileSys::ProgramMetadata metadata;
     if (FileSys::NupContainer::IsNupFile(file)) {
-        FileSys::NupContainer nup{file};
+        auto container = FileSys::NupContainer::Open(file);
+        auto& nup = *container;
         if (nup.GetStatus() != Loader::ResultStatus::Success) {
             return false;
         }
@@ -144,8 +145,12 @@ bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id, std::siz
         }
         const auto exefs = program ? nup.GetExeFSDir(*program) : nullptr;
         const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
-        return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
-               metadata.IsSwitch2();
+        const bool switch2 = npdm != nullptr &&
+                             metadata.Load(npdm) == Loader::ResultStatus::Success &&
+                             metadata.IsSwitch2();
+        // The loader takes this container instead of parsing the file again.
+        FileSys::NupContainer::KeepParsed(std::move(container));
+        return switch2;
     }
     const auto type = file != nullptr ? Loader::IdentifyFile(file) : Loader::FileType::Unknown;
     if (type == Loader::FileType::XCI || type == Loader::FileType::XCZ) {

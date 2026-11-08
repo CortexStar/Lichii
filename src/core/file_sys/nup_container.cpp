@@ -8,6 +8,8 @@
 #include <cstring>
 #include <list>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <random>
 #include <span>
 #include <string_view>
@@ -360,6 +362,44 @@ bool NupContainer::IsNupFile(const VirtualFile& file) {
     return magic == HeaderMagic;
 }
 
+namespace {
+
+struct KeptContainer {
+    std::mutex mutex;
+    std::unique_ptr<NupContainer> container;
+};
+
+KeptContainer& Kept() {
+    static KeptContainer kept;
+    return kept;
+}
+
+} // Anonymous namespace
+
+std::unique_ptr<NupContainer> NupContainer::Open(VirtualFile file_) {
+    // The same container: the same size and the same superblock (it holds the TOC's SHA-256).
+    Superblock super{};
+    if (file_ != nullptr && file_->GetSize() >= SuperblockSize &&
+        file_->ReadObject(&super, 0) == sizeof(Superblock)) {
+        auto& kept = Kept();
+        std::scoped_lock lock{kept.mutex};
+        if (kept.container && kept.container->file_size == file_->GetSize() &&
+            std::memcmp(&kept.container->superblock, &super, sizeof(Superblock)) == 0) {
+            return std::move(kept.container);
+        }
+    }
+    return std::make_unique<NupContainer>(std::move(file_));
+}
+
+void NupContainer::KeepParsed(std::unique_ptr<NupContainer> container) {
+    auto& kept = Kept();
+    std::scoped_lock lock{kept.mutex};
+    kept.container.reset();
+    if (container != nullptr && container->status == Loader::ResultStatus::Success) {
+        kept.container = std::move(container);
+    }
+}
+
 NupContainer::NupContainer(VirtualFile file_, std::size_t memory_cache_cap,
                            std::filesystem::path spill_dir_)
     : file(std::move(file_)), cache(std::make_shared<NupDecompressCache>()) {
@@ -393,6 +433,8 @@ bool NupContainer::Parse() {
         status = Loader::ResultStatus::ErrorNUPBadFormat;
         return false;
     }
+    static_assert(sizeof(superblock) == sizeof(Superblock));
+    std::memcpy(superblock.data(), &super, sizeof(super));
     toc_offset = super.toc_offset;
     toc_size = super.toc_size;
     blob_offset = super.blob_offset;
