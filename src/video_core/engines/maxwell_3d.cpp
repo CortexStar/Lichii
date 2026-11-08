@@ -58,8 +58,10 @@ Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)
     execution_mask.reset();
     for (size_t i = 0; i < execution_mask.size(); i++)
         execution_mask[i] = IsMethodExecutable(u32(i));
-    fast_maxwell3d = !record_write_history &&
-                     !trace_first_method_writes && !VideoCommon::Nx2Profile::Enabled();
+    engine_type = EngineTypes::Maxwell3D;
+    // EDEN_NX2_GPU_PROFILE keeps the fast path: it times the split back's entries around it
+    // (GpuSplit::Execute) and counts in CallMethodFast, so it measures the program that runs.
+    fast_maxwell3d = !record_write_history && !trace_first_method_writes;
 }
 
 Maxwell3D::~Maxwell3D() {
@@ -522,12 +524,27 @@ bool IsStoreOnlyExecutable(u32 method) {
     }
 }
 
+// EDEN_NX2_GPU_PROFILE's register write counters, as CallMethodSlow counts them.
+void CountProfiledWrite(const Maxwell3D::Regs& regs, u32 method, u32 method_argument) {
+    namespace Profile = VideoCommon::Nx2Profile;
+    Profile::Add(Profile::Counter::MethodWrites, 1);
+    const bool same = regs.reg_array[method] == method_argument;
+    if (same) {
+        Profile::Add(Profile::Counter::SameValueWrites, 1);
+    }
+    Profile::CountMethod(method, same);
+}
+
 } // Anonymous namespace
 
 // CallMethodSlow without the checks that cannot apply (CallMethod): no macro collects parameters,
-// no write history, trace or profile, not a macro call or SET_SHADOW_RAM_CONTROL. The hot
+// no write history or trace (the profile counts here too), not a macro call or
+// SET_SHADOW_RAM_CONTROL. The hot
 // executable methods go straight to their handler.
 void Maxwell3D::CallMethodFast(u32 method, u32 method_argument, bool is_last_call) {
+    if (VideoCommon::Nx2Profile::Enabled()) [[unlikely]] {
+        CountProfiledWrite(regs, method, method_argument);
+    }
     const u32 argument = ProcessShadowRam(method, method_argument);
     if (!execution_mask[method]) {
         if (!SkipSameValueWrites() || regs.reg_array[method] != argument) {
@@ -648,6 +665,11 @@ void Maxwell3D::CallConstBufferWords(Core::System& system, const u32* methods,
             }
         }
         return;
+    }
+    if (VideoCommon::Nx2Profile::Enabled()) [[unlikely]] {
+        for (u32 i = 0; i < count; ++i) {
+            CountProfiledWrite(regs, methods[i], arguments[i]);
+        }
     }
     // As CallMethodFast for each word: the first may issue a deferred draw, before any upload.
     for (u32 i = 0; i < count; ++i) {
@@ -2790,6 +2812,9 @@ void Maxwell3D::BackCbBind(Core::System& system, u32 stage, u32 argument) {
         return;
     }
     // CallMethodFast for a bind group: shadow RAM, the register and its dirty flags, the bind.
+    if (VideoCommon::Nx2Profile::Enabled()) [[unlikely]] {
+        CountProfiledWrite(regs, method, argument);
+    }
     ProcessDirtyRegisters(method, ProcessShadowRam(method, argument));
     ProcessCBBind(stage);
 }
