@@ -3602,7 +3602,7 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
                 }
             });
         if (!hot_promote_pages.empty() || !hot_demote_pages.empty()) {
-            // Promotions mark CPU-dirty and demoted pages are still dirty: walk next time.
+            // Promoted pages are CPU-dirty from now on: walk next time.
             hot_skip_ok = false;
             ApplyHotPageChanges();
         }
@@ -3927,7 +3927,7 @@ std::optional<bool> BufferCache<P>::SyncSkippedHotPages(Buffer& buffer, DAddr de
         }
     }
     if (!hot_demote_pages.empty()) {
-        // Unchanged long enough: protected again, and still CPU-dirty for the next sync's walk.
+        // Unchanged long enough: clean and protected again.
         ApplyHotPageChanges();
     }
     if (hot_changed_pages.empty()) {
@@ -4006,8 +4006,12 @@ void BufferCache<P>::ApplyHotPageChanges() {
     for (const DAddr page : hot_demote_pages) {
         if (hot_pages.erase(page) != 0) {
             memory_tracker.MarkRegionHot(page, DEVICE_PAGESIZE, false);
-            // Still CPU-dirty, now as a plain page: SYNC_SKIP entries over it must walk again.
-            NoteCpuDirty(page, DEVICE_PAGESIZE);
+            // The sync that demotes the page brings the host up to date with it: its bytes
+            // compared equal to the uploaded copy, or the walk uploads it (a GPU-written page).
+            // So it is clean now, as after any walk, and protected again: the guest's next write
+            // traps. Left CPU-dirty, it was read in place as dirty (native verify uniforms) and
+            // uploaded again, unchanged, by the next sync.
+            memory_tracker.UnmarkRegionAsCpuModified(page, DEVICE_PAGESIZE);
             Nx2BufCache::Note(Nx2BufCache::Stat::HotDemote);
         }
     }

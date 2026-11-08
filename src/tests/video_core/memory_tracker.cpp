@@ -742,3 +742,46 @@ TEST_CASE("DeviceMemoryManager: UpdatePagesCachedBatch basic") {
     manager.UpdatePagesCachedBatch(ranges, 1);
     SUCCEED("UpdatePagesCachedBatch executed without error");
 }
+
+TEST_CASE("MemoryTracker: Demoted hot page is clean and protected", "[video_core]") {
+    // BufferCache::ApplyHotPageChanges: a hot page stays CPU-dirty and unprotected while hot;
+    // the sync that demotes it has the host up to date, so it unmarks it.
+    RasterizerInterface rasterizer;
+    std::optional<MemoryTracker> memory_track(rasterizer);
+    memory_track->UnmarkRegionAsCpuModified(c, WORD);
+    REQUIRE(rasterizer.Count(c + PAGE) == 1);
+
+    // Promotion: hot, unprotected and dirty.
+    memory_track->MarkRegionHot(c + PAGE, PAGE, true);
+    memory_track->MarkRegionAsCpuModified(c + PAGE, PAGE);
+    REQUIRE(rasterizer.Count(c + PAGE) == 0);
+
+    // A sync's walk reports the hot page apart and leaves it dirty.
+    int regular = 0;
+    int hot = 0;
+    memory_track->ForEachUploadRange(
+        c, WORD, true, [&](u64, u64) { ++regular; }, [&](u64 addr, u64 size) {
+            REQUIRE(addr == c + PAGE);
+            REQUIRE(size == PAGE);
+            ++hot;
+        });
+    REQUIRE(regular == 0);
+    REQUIRE(hot == 1);
+    REQUIRE(memory_track->IsRegionCpuModified(c + PAGE, PAGE));
+
+    // Demotion in that sync.
+    memory_track->MarkRegionHot(c + PAGE, PAGE, false);
+    memory_track->UnmarkRegionAsCpuModified(c + PAGE, PAGE);
+    REQUIRE_FALSE(memory_track->IsRegionCpuModified(c, WORD));
+    REQUIRE_FALSE(memory_track->IsRegionUploadDirty(c, WORD));
+    REQUIRE(rasterizer.Count(c + PAGE) == 1);
+
+    // The next walk finds nothing; a guest write marks it dirty again.
+    memory_track->ForEachUploadRange(
+        c, WORD, true, [&](u64, u64) { ++regular; }, [&](u64, u64) { ++hot; });
+    REQUIRE(regular == 0);
+    REQUIRE(hot == 1);
+    memory_track->MarkRegionAsCpuModified(c + PAGE, 1);
+    REQUIRE(memory_track->IsRegionCpuModified(c + PAGE, PAGE));
+    REQUIRE(rasterizer.Count(c + PAGE) == 0);
+}
