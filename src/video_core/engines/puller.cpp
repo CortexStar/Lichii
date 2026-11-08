@@ -104,6 +104,26 @@ std::optional<u32> NarrowSemaphoreRead(DmaPusher& dma_pusher, GPUVAddr address) 
     return dma_pusher.memory_manager.Read<u32>(address);
 }
 
+// The semaphore word once nothing queued for the back can still write it: the narrowed read
+// (`narrowed`, not met) when there is one, else after a full drain from guest memory and the
+// buffer cache. The narrowed read already waited for every queued write that may land there
+// (the recorded writes over the word, every unbounded guest write and dispatch); without a
+// GPU-written page under the word (MemoryManager::Nx2ReadNeedsDrain) the buffer cache holds no
+// newer word, so a drain reads the same word and only holds the front until the back ran work
+// that cannot write it. EDEN_NX2_NARROW_VERIFY=1 drains anyway and compares the two reads.
+u32 WordAfterQueuedWrites(DmaPusher& dma_pusher, GPUVAddr address, std::optional<u32> narrowed) {
+    if (narrowed && !VideoCommon::GpuSplit::NarrowVerify()) {
+        return *narrowed;
+    }
+    DrainBack();
+    const u32 current = ReadSemaphoreWord(dma_pusher, address);
+    if (narrowed) {
+        VideoCommon::GpuSplit::ReportNarrowCheck(VideoCommon::DrainSite::NarrowAcquire,
+                                                 *narrowed != current ? 1U : 0U, 0, address);
+    }
+    return current;
+}
+
 // Met by a release still queued for the back (GpuSplit::NoteRelease). The work after the
 // acquire is queued behind the release, as the hardware would run it once the release lands,
 // and command list reads wait for the work before the release (NoteSyncAt). `matches` checks a
@@ -203,25 +223,15 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     // the drain returns at once, so an acquire the CPU releases costs no wait on the back.
     // Met without waiting for all queued work: the work after it is queued behind the work
     // before it, and command list reads wait for that work (NoteSync).
-    std::optional<u32> narrowed = NarrowSemaphoreRead(dma_pusher, pending_acquire->address);
-    if (narrowed && pending_acquire->Matches(*narrowed)) {
-        if (!VideoCommon::GpuSplit::NarrowVerify()) {
-            VideoCommon::GpuSplit::Get().NoteSyncDone();
-            pending_acquire->met_by = static_cast<u8>(Outcome::Narrowed);
-            return true;
-        }
-    } else {
-        narrowed.reset();
+    const std::optional<u32> narrowed = NarrowSemaphoreRead(dma_pusher, pending_acquire->address);
+    if (narrowed && pending_acquire->Matches(*narrowed) && !VideoCommon::GpuSplit::NarrowVerify()) {
+        VideoCommon::GpuSplit::Get().NoteSyncDone();
+        pending_acquire->met_by = static_cast<u8>(Outcome::Narrowed);
+        return true;
     }
-    // The release may still be queued for the split GPU thread's back half (and the caches
-    // ReadSemaphoreWord asks are its state).
-    DrainBack();
-    const u32 current = ReadSemaphoreWord(dma_pusher, pending_acquire->address);
-    if (narrowed) {
-        VideoCommon::GpuSplit::ReportNarrowCheck(VideoCommon::DrainSite::NarrowAcquire,
-                                                 *narrowed != current ? 1U : 0U, 0,
-                                                 pending_acquire->address);
-    }
+    // The release may still be queued for the split GPU thread's back half where the narrowed
+    // read can't tell (GPU-written pages: the caches ReadSemaphoreWord asks are its state).
+    const u32 current = WordAfterQueuedWrites(dma_pusher, pending_acquire->address, narrowed);
     if (Nx2SemaphoreWaiters::Get().Latched(this)) {
         if (static std::atomic<u32> rescued{};
             !pending_acquire->Matches(current) && rescued.fetch_add(1) < 64) {
@@ -233,7 +243,10 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
         return true;
     }
     if (pending_acquire->Matches(current)) {
-        pending_acquire->met_by = static_cast<u8>(Outcome::Drained);
+        if (narrowed) {
+            VideoCommon::GpuSplit::Get().NoteSyncDone();
+        }
+        pending_acquire->met_by = static_cast<u8>(narrowed ? Outcome::Narrowed : Outcome::Drained);
         return true;
     }
     // With delayed fence operations (Balanced or Accurate fences, accurate GPU), a release
@@ -432,25 +445,15 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         }
         // Not met in guest memory: the release may still be queued for the back, so check it
         // with the narrowed and drained reads below before suspending (see CanResumeAcquire).
-        std::optional<u32> narrowed = NarrowSemaphoreRead(dma_pusher, acquire.address);
-        if (narrowed && acquire.Matches(*narrowed)) {
-            if (!VideoCommon::GpuSplit::NarrowVerify()) {
-                VideoCommon::GpuSplit::Get().NoteSyncDone();
-                VideoCommon::Nx2Profile::CountAcquire(Outcome::Narrowed);
-                return;
-            }
-        } else {
-            narrowed.reset();
+        const std::optional<u32> narrowed = NarrowSemaphoreRead(dma_pusher, acquire.address);
+        if (narrowed && acquire.Matches(*narrowed) && !VideoCommon::GpuSplit::NarrowVerify()) {
+            VideoCommon::GpuSplit::Get().NoteSyncDone();
+            VideoCommon::Nx2Profile::CountAcquire(Outcome::Narrowed);
+            return;
         }
-        DrainBack();
-        const u32 current = ReadSemaphoreWord(dma_pusher, acquire.address);
-        if (narrowed) {
-            VideoCommon::GpuSplit::ReportNarrowCheck(VideoCommon::DrainSite::NarrowAcquire,
-                                                     *narrowed != current ? 1U : 0U, 0,
-                                                     acquire.address);
-        }
+        const u32 current = WordAfterQueuedWrites(dma_pusher, acquire.address, narrowed);
         if (acquire.Matches(current)) {
-            VideoCommon::Nx2Profile::CountAcquire(Outcome::Drained);
+            VideoCommon::Nx2Profile::CountAcquire(narrowed ? Outcome::Narrowed : Outcome::Drained);
             return;
         }
         // Registered before the fences run, so a release among them that meets the value counts
