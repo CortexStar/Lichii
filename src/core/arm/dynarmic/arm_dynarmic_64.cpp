@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <thread>
 #if defined(_M_X64) || defined(__x86_64__)
 #ifdef _MSC_VER
@@ -17,6 +18,7 @@
 #endif
 #include "common/x64/monitor_wait.h"
 #endif
+#include "common/page_table.h"
 #include "common/settings.h"
 #include "core/arm/dynarmic/arm_dynarmic.h"
 #include "core/arm/dynarmic/arm_dynarmic_64.h"
@@ -290,6 +292,90 @@ bool DynarmicCallbacks64::WaitForPolledWord(u64 pc) {
 #endif
 }
 
+std::optional<Dynarmic::A64::HostFunctionEntry> DynarmicCallbacks64::GetHostFunction(u64 vaddr) {
+    if (m_page_table == nullptr) {
+        return std::nullopt;
+    }
+    const GuestFunctionSite* const site = m_process->FindGuestFunction(vaddr);
+    if (site == nullptr) {
+        return std::nullopt;
+    }
+    for (size_t i = 0; i < site->head.size(); ++i) {
+        if (MemoryReadCode(vaddr + 4 * i) != site->head[i]) {
+            return std::nullopt; // patched code
+        }
+    }
+    Dynarmic::A64::HostFunction function{};
+    switch (site->function) {
+    case GuestFunction::Memmove:
+        function = &HostMemmove;
+        break;
+    case GuestFunction::Memset:
+        function = &HostMemset;
+        break;
+    }
+    return Dynarmic::A64::HostFunctionEntry{function, this};
+}
+
+u8* DynarmicCallbacks64::HostSpan(u64 vaddr, u64 size) const {
+    const u64 last = vaddr + size - 1;
+    if (size == 0 || last < vaddr) {
+        return nullptr;
+    }
+    const u64 first_page = vaddr >> Memory::YUZU_PAGEBITS;
+    const u64 last_page = last >> Memory::YUZU_PAGEBITS;
+    if (last_page >= m_page_table->entries.size()) {
+        return nullptr;
+    }
+    // Pages are contiguous on the host when their entries hold the same absolute offset; a
+    // marked page reads as a null pointer.
+    const auto [pointer, type, block] = m_page_table->entries[first_page].PointerTypeBlock();
+    if (type != Common::PageType::Memory || pointer == 0) {
+        return nullptr;
+    }
+    for (u64 page = first_page + 1; page <= last_page; ++page) {
+        const auto [next_pointer, next_type, next_block] =
+            m_page_table->entries[page].PointerTypeBlock();
+        if (next_type != Common::PageType::Memory || next_pointer != pointer) {
+            return nullptr;
+        }
+    }
+    return reinterpret_cast<u8*>(pointer + vaddr);
+}
+
+// The host functions decline (the guest's own code then runs, through the JIT's memory paths)
+// when a buffer is not plain contiguous memory: rasterizer-cached, debug or unmapped pages.
+
+bool DynarmicCallbacks64::HostMemmove(void* user, const Dynarmic::A64::HostFunctionState& state) {
+    const auto& self = *static_cast<const DynarmicCallbacks64*>(user);
+    const u64 size = state.x[2];
+    if (size == 0) {
+        return true;
+    }
+    u8* const dst = self.HostSpan(state.x[0], size);
+    const u8* const src = self.HostSpan(state.x[1], size);
+    if (dst == nullptr || src == nullptr) {
+        return false;
+    }
+    // x0 (the destination) is the result and stays.
+    std::memmove(dst, src, size);
+    return true;
+}
+
+bool DynarmicCallbacks64::HostMemset(void* user, const Dynarmic::A64::HostFunctionState& state) {
+    const auto& self = *static_cast<const DynarmicCallbacks64*>(user);
+    const u64 size = state.x[2];
+    if (size == 0) {
+        return true;
+    }
+    u8* const dst = self.HostSpan(state.x[0], size);
+    if (dst == nullptr) {
+        return false;
+    }
+    std::memset(dst, static_cast<u8>(state.x[1]), size);
+    return true;
+}
+
 void DynarmicCallbacks64::CallSVC(u32 svc) {
     m_parent.m_svc = svc;
     m_parent.m_jit->HaltExecution(SupervisorCall);
@@ -451,6 +537,11 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
     // Allow memory fault handling to work
     if (m_system.DebuggerEnabled()) {
         config.check_halt_on_memory_access = true;
+    }
+
+    // Small hot guest functions as host code (GetHostFunction) when memory needs no checks.
+    if (page_table != nullptr && !m_cb->m_check_memory_access) {
+        m_cb->m_page_table = page_table;
     }
 
     // null_jit

@@ -133,6 +133,7 @@ add_library(dynarmic STATIC
     frontend/A64/translate/a64_translate.h
     interface/A64/a64.h
     interface/A64/config.h
+    interface/A64/host_function.h
 )
 
 if ("x86_64" IN_LIST ARCHITECTURE)

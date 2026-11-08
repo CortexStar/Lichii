@@ -148,7 +148,8 @@ public:
     }
 
     u64 GetPC() const {
-        return jit_state.pc;
+        // Between a declined host function and its fallback block the PC carries the marker.
+        return A64::LocationDescriptor::GuestPC(jit_state.pc);
     }
 
     void SetPC(u64 value) {
@@ -270,7 +271,8 @@ private:
         // LocationDescriptor ctor() does important ops (like tflags) do not skip
         auto const arch_descriptor = A64::LocationDescriptor{descriptor};
         ir_block.Reset(arch_descriptor);
-        A64::Translate(ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct, true, conf.elide_ld_st_barriers, conf.native_lse_atomics});
+        const auto get_host_function = [this](u64 vaddr) { return conf.callbacks->GetHostFunction(vaddr); };
+        A64::Translate(ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct, true, conf.elide_ld_st_barriers, conf.native_lse_atomics}, get_host_function);
         Optimization::Optimize(ir_block, conf, polyfill_options);
         const CodePtr entrypoint = emitter.Emit(ir_block).entrypoint;
         compile_statistics.blocks.fetch_add(1, std::memory_order_relaxed);

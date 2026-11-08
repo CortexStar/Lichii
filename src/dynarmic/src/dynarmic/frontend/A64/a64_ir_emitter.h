@@ -45,6 +45,12 @@ public:
         return static_cast<u64>(pc - pc % alignment);
     }
 
+    /// Calls a UserCallbacks::GetHostFunction entry with the guest state; true if it ran.
+    IR::U1 CallHostFunction(HostFunctionEntry entry) noexcept {
+        return Inst<IR::U1>(Opcode::A64CallHostFunction, Imm64(std::bit_cast<u64>(entry.function)),
+                            Imm64(std::bit_cast<u64>(entry.user)));
+    }
+
     void SetCheckBit(const IR::U1& value) noexcept {
         Inst(Opcode::A64SetCheckBit, value);
     }

@@ -171,6 +171,11 @@ void EmitIR<IR::Opcode::A64GetCNTFRQ>(biscuit::Assembler&, EmitContext&, IR::Ins
 }
 
 template<>
+void EmitIR<IR::Opcode::A64CallHostFunction>(biscuit::Assembler&, EmitContext&, IR::Inst*) {
+    ASSERT(false && "Unimplemented instruction");
+}
+
+template<>
 void EmitIR<IR::Opcode::A64GetCNTPCT>(biscuit::Assembler&, EmitContext&, IR::Inst*) {
     ASSERT(false && "Unimplemented instruction");
 }

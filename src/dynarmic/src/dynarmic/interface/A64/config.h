@@ -14,6 +14,7 @@
 #include <optional>
 
 #include "dynarmic/interface/halt_reason.h"
+#include "dynarmic/interface/A64/host_function.h"
 #include "dynarmic/interface/optimization_flags.h"
 
 namespace Dynarmic {
@@ -91,6 +92,14 @@ struct UserCallbacks {
     // Memory must be interpreted as little endian.
     virtual std::optional<std::uint32_t> MemoryReadCode(VAddr vaddr) {
         return std::uint32_t(MemoryRead(vaddr, sizeof(std::uint32_t)));
+    }
+
+    /// x64 backend: a host function that replaces the guest function starting at vaddr, asked
+    /// when a block starting there is translated. The block calls it and returns to X30; if it
+    /// declines, the guest's code runs. Not used while single-stepping.
+    virtual std::optional<HostFunctionEntry> GetHostFunction(VAddr vaddr) {
+        (void)vaddr;
+        return std::nullopt;
     }
 
     // Reads through these callbacks may not be aligned.

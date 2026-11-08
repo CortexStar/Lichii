@@ -34,6 +34,10 @@ public:
     static constexpr size_t fpcr_shift = 37;
     static constexpr size_t single_stepping_bit = 57;
     static_assert((pc_mask & (u64(fpcr_mask) << fpcr_shift) & (u64(1) << single_stepping_bit)) == 0);
+    /// Set in the PC of the block that runs a guest function's own code after its host function
+    /// (UserCallbacks::GetHostFunction) declined. Guest code addresses never have it: they are
+    /// at most 48 bits, or sign-extended kernel addresses with bit 55 set, which this excludes.
+    static constexpr u64 host_function_fallback_bit = u64(1) << 54;
 
     LocationDescriptor(u64 pc, FP::FPCR fpcr, bool single_stepping = false)
             : pc(pc & pc_mask), fpcr(fpcr.Value() & fpcr_mask), single_stepping(single_stepping) {}
@@ -46,6 +50,15 @@ public:
     u64 PC() const { return mcl::bit::sign_extend<pc_bit_count>(pc); }
     FP::FPCR FPCR() const { return fpcr; }
     bool SingleStepping() const { return single_stepping; }
+    static constexpr bool IsHostFunctionFallback(u64 pc) {
+        return (pc & host_function_fallback_bit) != 0 && (pc & (u64(1) << 55)) == 0;
+    }
+    /// A PC (of a descriptor or the JIT state) without host_function_fallback_bit.
+    static constexpr u64 GuestPC(u64 pc) {
+        return IsHostFunctionFallback(pc) ? pc & ~host_function_fallback_bit : pc;
+    }
+    bool HostFunctionFallback() const { return IsHostFunctionFallback(pc); }
+    u64 GuestPC() const { return GuestPC(PC()); }
 
     bool operator==(const LocationDescriptor& o) const {
         return std::tie(pc, fpcr, single_stepping) == std::tie(o.pc, o.fpcr, o.single_stepping);

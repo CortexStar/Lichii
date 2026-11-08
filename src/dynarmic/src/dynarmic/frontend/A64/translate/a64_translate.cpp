@@ -16,8 +16,26 @@
 
 namespace Dynarmic::A64 {
 
-void Translate(IR::Block& block, LocationDescriptor descriptor, MemoryReadCodeFuncType memory_read_code, TranslationOptions options) {
+void Translate(IR::Block& block, LocationDescriptor descriptor, MemoryReadCodeFuncType memory_read_code, TranslationOptions options, const GetHostFunctionFuncType& get_host_function) {
     const bool single_step = descriptor.SingleStepping();
+    if (descriptor.HostFunctionFallback()) {
+        // The guest's own code of a function whose host function declined: translate it at its
+        // real PC. The block keeps its own location, so the hook's link reaches it.
+        descriptor = descriptor.SetPC(descriptor.GuestPC());
+    } else if (get_host_function && !single_step) {
+        if (const auto entry = get_host_function(descriptor.PC())) {
+            // handled = host function(); PC = X30; handled ? return : run the guest's code.
+            IREmitter ir{block, descriptor};
+            const IR::U1 handled = ir.CallHostFunction(*entry);
+            ir.SetPC(ir.GetX(Reg::R30));
+            ir.SetCheckBit(handled);
+            const auto fallback = descriptor.SetPC(descriptor.PC() | LocationDescriptor::host_function_fallback_bit);
+            ir.SetTerm(IR::Term::CheckBit{IR::Term::PopRSBHint{}, IR::Term::LinkBlock{fallback}});
+            block.CycleCount()++;
+            block.SetEndLocation(descriptor.AdvancePC(4));
+            return;
+        }
+    }
     TranslatorVisitor visitor{block, descriptor, std::move(options)};
 
     bool should_continue = true;
