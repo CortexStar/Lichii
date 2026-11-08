@@ -132,18 +132,27 @@ constexpr std::array FPS_UNLOCK_RECORDS{
 // read only by main+0x112C5E0. Its 1440p entry becomes 3440x1440. main+0x1087F40 and main+0x1087E70
 // turn a size back into the table index; without the width check any 1440-high size stays index 5.
 // The camera parameters' DefaultAspect (default DefaultNear 0.1, DefaultFar 25000, DefaultFovy 50
-// at main+0x3EF5DC0) becomes 43:18 with the same vertical field of view (Hor+).
+// at main+0x3EF5DC0) becomes 43:18 with the same vertical field of view (Hor+), and so does the
+// value the parameters' constructor stores inline (main+0xEF3834: aspect at +0x38, far 25000,
+// fovy 50, near 0.1). The camera hands it on to the projection (+0xB0, main+0x4C533C), the render
+// view (main+0x6545F4) and the culling frustum (main+0x33AB94).
 constexpr std::array<u8, 8> ULTRAWIDE_SIZE_ORIGINAL{0x00, 0x0A, 0x00, 0x00, 0xA0, 0x05, 0x00, 0x00};
 constexpr std::array<u8, 8> ULTRAWIDE_SIZE{0x70, 0x0D, 0x00, 0x00, 0xA0, 0x05, 0x00, 0x00};
 constexpr std::array<u8, 4> ULTRAWIDE_WIDTH_BRANCH{0x61, 0x00, 0x00, 0x54}; // b.ne, skips 1440p
 constexpr std::array<u8, 4> ULTRAWIDE_NOP{0x1F, 0x20, 0x03, 0xD5};
 constexpr std::array<u8, 4> ULTRAWIDE_ASPECT_ORIGINAL{0x3B, 0x8E, 0xE3, 0x3F}; // 1.777778f
 constexpr std::array<u8, 4> ULTRAWIDE_ASPECT{0x8E, 0xE3, 0x18, 0x40};          // 43 / 18
+constexpr std::array<u8, 4> ULTRAWIDE_CTOR_LOW_ORIGINAL{0x68, 0xC7, 0x91, 0xD2};  // mov x8, #0x8e3b
+constexpr std::array<u8, 4> ULTRAWIDE_CTOR_LOW{0xC8, 0x71, 0x9C, 0xD2};           // mov x8, #0xe38e
+constexpr std::array<u8, 4> ULTRAWIDE_CTOR_HIGH_ORIGINAL{0x68, 0xFC, 0xA7, 0xF2}; // movk #0x3fe3
+constexpr std::array<u8, 4> ULTRAWIDE_CTOR_HIGH{0x08, 0x03, 0xA8, 0xF2};          // movk #0x4018
 constexpr std::array ULTRAWIDE_RECORDS{
     BuiltinPatchRecord{0x3F58568, ULTRAWIDE_SIZE, ULTRAWIDE_SIZE_ORIGINAL},
     BuiltinPatchRecord{0x1087FC0, ULTRAWIDE_NOP, ULTRAWIDE_WIDTH_BRANCH},
     BuiltinPatchRecord{0x1087EE0, ULTRAWIDE_NOP, ULTRAWIDE_WIDTH_BRANCH},
     BuiltinPatchRecord{0x3EF5DCC, ULTRAWIDE_ASPECT, ULTRAWIDE_ASPECT_ORIGINAL},
+    BuiltinPatchRecord{0xEF3834, ULTRAWIDE_CTOR_LOW, ULTRAWIDE_CTOR_LOW_ORIGINAL},
+    BuiltinPatchRecord{0xEF383C, ULTRAWIDE_CTOR_HIGH, ULTRAWIDE_CTOR_HIGH_ORIGINAL},
 };
 
 constexpr std::array BUILTIN_PATCHES{
