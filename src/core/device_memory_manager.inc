@@ -143,8 +143,8 @@ struct EmptyAllocator {
 
 } // namespace
 
-// An unmapped read returns zeros. The first 16 are logged with their caller, every one with
-// EDEN_NX2_READBLOCK_TRACE=1.
+// An unmapped read returns zeros. The first 16 outside zero-read ranges are logged with their
+// caller, every one with EDEN_NX2_READBLOCK_TRACE=1.
 inline void ReportUnmappedRead(DAddr first_unmapped, DAddr address, size_t size,
                                size_t unmapped_bytes, const std::source_location& caller) {
     static const bool trace = [] {
@@ -271,7 +271,28 @@ void DeviceMemoryManager<Traits>::AllocateFixed(DAddr start, size_t size) {
 
 template <typename Traits>
 void DeviceMemoryManager<Traits>::Free(DAddr start, size_t size) {
+    {
+        std::scoped_lock lk(zero_read_guard);
+        zero_read_ranges.erase(start);
+    }
     impl->Free(start, size);
+}
+
+template <typename Traits>
+void DeviceMemoryManager<Traits>::AddZeroReadRange(DAddr address, size_t size) {
+    std::scoped_lock lk(zero_read_guard);
+    zero_read_ranges[address] = size;
+}
+
+template <typename Traits>
+bool DeviceMemoryManager<Traits>::IsZeroReadRange(DAddr address) const {
+    std::scoped_lock lk(zero_read_guard);
+    auto it = zero_read_ranges.upper_bound(address);
+    if (it == zero_read_ranges.begin()) {
+        return false;
+    }
+    --it;
+    return address - it->first < it->second;
 }
 
 template <typename Traits>
@@ -530,7 +551,7 @@ void DeviceMemoryManager<Traits>::ReadBlock(DAddr address, void* dest_pointer, s
         [&](const std::size_t copy_amount) {
             dest_pointer = static_cast<u8*>(dest_pointer) + copy_amount;
         });
-    if (unmapped_bytes != 0) {
+    if (unmapped_bytes != 0 && !IsZeroReadRange(first_unmapped)) {
         ReportUnmappedRead(first_unmapped, address, size, unmapped_bytes, caller);
     }
 }
@@ -598,7 +619,7 @@ void DeviceMemoryManager<Traits>::ReadBlockUnsafe(DAddr address, void* dest_poin
         [&](const std::size_t copy_amount) {
             dest_pointer = static_cast<u8*>(dest_pointer) + copy_amount;
         });
-    if (unmapped_bytes != 0) {
+    if (unmapped_bytes != 0 && !IsZeroReadRange(first_unmapped)) {
         ReportUnmappedRead(first_unmapped, address, size, unmapped_bytes, caller);
     }
 }

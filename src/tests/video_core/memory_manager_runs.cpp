@@ -289,3 +289,28 @@ TEST_CASE("A texture header with format 0 is not a valid entry", "[memory_manage
     REQUIRE_FALSE(entry.HasNoFormat());
     REQUIRE(VideoCommon::IsValidEntry(memory, entry));
 }
+
+TEST_CASE("Zero-read device ranges cover their bytes until freed", "[memory_manager]") {
+    Core::DeviceMemory physical;
+    Tegra::MaxwellDeviceMemoryManager device_memory{physical};
+
+    // A Switch 2 sparse or GPU-only region: its device range is allocated whole, unbacked.
+    constexpr size_t size = 0x60000;
+    const DAddr range = device_memory.Allocate(size);
+    REQUIRE(range != 0);
+    REQUIRE_FALSE(device_memory.IsZeroReadRange(range));
+
+    device_memory.AddZeroReadRange(range, size);
+    REQUIRE(device_memory.IsZeroReadRange(range));
+    REQUIRE(device_memory.IsZeroReadRange(range + size - 1));
+    REQUIRE_FALSE(device_memory.IsZeroReadRange(range + size));
+    REQUIRE_FALSE(device_memory.IsZeroReadRange(range - 1));
+
+    // Reads there still return zeros.
+    std::vector<u8> bytes(0x2000, 0xcd);
+    device_memory.ReadBlockUnsafe(range + 0x1000, bytes.data(), bytes.size());
+    REQUIRE(std::ranges::all_of(bytes, [](u8 value) { return value == 0; }));
+
+    device_memory.Free(range, size);
+    REQUIRE_FALSE(device_memory.IsZeroReadRange(range));
+}

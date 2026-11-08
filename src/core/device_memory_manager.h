@@ -10,6 +10,7 @@
 #include <atomic>
 #include <bit>
 #include <deque>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <source_location>
@@ -62,6 +63,12 @@ public:
     DAddr Allocate(size_t size);
     void AllocateFixed(DAddr start, size_t size);
     void Free(DAddr start, size_t size);
+
+    /// [address, +size) reads zero where nothing backs it, by design: Switch 2 sparse and GPU-only
+    /// regions get memory a block at a time as they are written. Unmapped reads there are not
+    /// reported. Free of the range forgets it.
+    void AddZeroReadRange(DAddr address, size_t size);
+    [[nodiscard]] bool IsZeroReadRange(DAddr address) const;
 
     void Map(DAddr address, VAddr virtual_address, size_t size, Asid asid, bool track = false);
 
@@ -276,6 +283,8 @@ private:
     std::unique_ptr<CachedPages> cached_pages;
     Common::RangeMutex counter_guard;
     std::mutex mapping_guard;
+    mutable std::mutex zero_read_guard;
+    std::map<DAddr, size_t> zero_read_ranges; ///< Start -> size (AddZeroReadRange)
 
 
 };
