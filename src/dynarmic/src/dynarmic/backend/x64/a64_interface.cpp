@@ -22,6 +22,7 @@
 #include "dynarmic/backend/x64/a64_jitstate.h"
 #include "dynarmic/backend/x64/block_of_code.h"
 #include "dynarmic/backend/x64/devirtualize.h"
+#include "dynarmic/backend/x64/exclusive_monitor_friend.h"
 #include "dynarmic/backend/x64/jitstate_info.h"
 #include "dynarmic/common/atomic.h"
 #include "dynarmic/frontend/A64/translate/a64_translate.h"
@@ -89,6 +90,20 @@ public:
     {
         ASSERT(conf.page_table_address_space_bits >= 12 && conf.page_table_address_space_bits <= 64);
         emitter.SetAtomicFallbackHaltReason(&jit_state.halt_reason);
+        SetJitStatePointers();
+    }
+
+    // The per-Jit values that core-independent code reads through the JIT state.
+    void SetJitStatePointers() {
+        jit_state.callbacks = conf.callbacks;
+        jit_state.user_config = &conf;
+        jit_state.tpidrro_el0 = conf.tpidrro_el0;
+        jit_state.tpidr_el0 = conf.tpidr_el0;
+        if (conf.global_monitor) {
+            jit_state.exclusive_address_slot = GetExclusiveMonitorAddressPointer(conf.global_monitor, conf.processor_id);
+            jit_state.exclusive_value_slot = GetExclusiveMonitorValuePointer(conf.global_monitor, conf.processor_id);
+        }
+        jit_state.atomic_fallback_context = AtomicFallbackContext{&conf, &jit_state.halt_reason};
     }
 
     ~Impl() = default;
@@ -140,6 +155,7 @@ public:
     void Reset() {
         ASSERT(!is_executing);
         jit_state = {};
+        SetJitStatePointers();
     }
 
     void HaltExecution(HaltReason hr) {

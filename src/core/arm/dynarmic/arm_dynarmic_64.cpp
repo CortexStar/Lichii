@@ -739,6 +739,9 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
         // own indirect jump for the branch predictor (virtual calls) instead of all sharing the
         // fast dispatcher's; sites that keep changing target are patched to the dispatcher.
         config.indirect_branch_cache = true;
+        // Code reads the per-core callbacks, TPIDR pointers and monitor slots from the JIT state,
+        // so one compiled block is valid on every core (for one code cache per process).
+        config.core_independent_code = true;
     }
 #endif
     m_jit.emplace(config);
