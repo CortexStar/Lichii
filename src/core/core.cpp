@@ -647,8 +647,9 @@ struct System::Impl {
     std::optional<Tools::RenderdocAPI> renderdoc_api;
     std::optional<Tegra::GPU> gpu_core;
 
-    // One per guest core and one for the other threads (core/memory.cpp).
-    std::array<Core::GPUDirtyMemoryManager, Core::Hardware::NUM_CPU_CORES + 1>
+    // One per guest core, one for the other threads (core/memory.cpp) and the last for the
+    // buffer cache's write handoff (GPU::CollectHandoffWrite).
+    std::array<Core::GPUDirtyMemoryManager, Core::Hardware::NUM_CPU_CORES + 2>
         gpu_dirty_memory_managers;
     std::vector<std::vector<u8>> user_channel;
     std::vector<std::vector<u8>> general_channel;

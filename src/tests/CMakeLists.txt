@@ -98,6 +98,7 @@ add_executable(tests
     video_core/gpu_written_pages.cpp
     video_core/async_report_wait.cpp
     video_core/nx2_bufcache.cpp
+    video_core/nx2_write_handoff.cpp
     video_core/command_writer.cpp
     video_core/split_fence_wait.cpp
     video_core/command_snapshot_suspensions.cpp
