@@ -333,6 +333,8 @@ struct Info {
     bool uses_sparse_residency{};
     bool uses_demote_to_helper_invocation{};
     bool uses_subgroup_vote{};
+    /// Set when a barrier in conditional control flow was dropped, see ConditionalBarrierPass.
+    bool removed_conditional_barrier{};
     bool uses_subgroup_mask{};
     bool uses_fswzadd{};
     bool uses_derivatives{};
@@ -391,6 +393,16 @@ struct Info {
     /// and storage buffer words (see EvaluateHandleProgram), evaluated for each draw.
     std::vector<std::vector<u32>> handle_programs;
     ImageDescriptors image_descriptors;
+
+    /// True when the shader only runs correctly if a subgroup spans a whole guest warp.
+    /// Cooperative matrices multiply whole warps lane-coherently, so they count too (the HMMA
+    /// upscaler network) - compute already forced the guest warp size for them before this
+    /// helper existed; including them here keeps that and extends it to mesh/task stages.
+    [[nodiscard]] bool UsesWarpOps() const noexcept {
+        return removed_conditional_barrier || uses_subgroup_vote || uses_subgroup_invocation_id ||
+               uses_subgroup_shuffles || uses_subgroup_mask || uses_quad_shuffles ||
+               uses_fswzadd || uses_cooperative_matrix;
+    }
 };
 
 template <typename Descriptors>

@@ -4,12 +4,16 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
 #define SPV_ENABLE_UTILITY_CODE
+#include <spirv/unified1/GLSL.std.450.h>
 #include <spirv/unified1/spirv.hpp11>
 
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
@@ -130,7 +134,8 @@ Profile MakeProfile() {
 // A one-triangle mesh program (or the task program launching it), as the frontend lowers them.
 // With lane_id the mesh program writes its lane as the vertex's first attribute word.
 std::vector<u32> EmitProgram(Stage stage, bool as_compute, bool with_task,
-                             Profile profile = MakeProfile(), bool lane_id = false) {
+                             Profile profile = MakeProfile(), bool lane_id = false,
+                             bool culled = false) {
     ObjectPool<IR::Inst> pool;
     IR::Block block{pool};
     IR::Program program;
@@ -154,7 +159,9 @@ std::vector<u32> EmitProgram(Stage stage, bool as_compute, bool with_task,
         ir.IsbeWriteMapU8(ir.Imm32(4), ir.Imm32(0));
         ir.IsbeWriteMapU32(ir.Imm32(3), ir.Imm32(1));
     } else {
-        ir.IsbeWriteAttribute(ir.Imm32(4), ir.Imm32(1)); // one mesh workgroup
+        if (!culled) {
+            ir.IsbeWriteAttribute(ir.Imm32(4), ir.Imm32(1)); // one mesh workgroup
+        }
     }
     ir.Epilogue();
 
@@ -178,6 +185,96 @@ void RequireNoMeshShading(const std::vector<u32>& code) {
     REQUIRE_FALSE(UsesStorageClass(code, spv::StorageClass::TaskPayloadWorkgroupEXT));
     REQUIRE_FALSE(HasVariable(code, spv::StorageClass::Output));
 }
+// Result-id tables for the store checks below.
+struct ModuleData {
+    std::vector<Instruction> ops;
+    std::unordered_map<u32, u32> constants;                    // id -> value
+    std::unordered_map<u32, spv::StorageClass> variables;      // id -> storage class
+    std::unordered_map<u32, std::vector<u32>> chains;          // id -> [base, indexes...]
+    std::unordered_map<u32, std::pair<u32, u32>> umins;        // id -> (operand a, operand b)
+    std::unordered_map<u32, std::pair<u32, u32>> shifts;       // id -> (base, shift)
+};
+
+ModuleData Analyze(const std::vector<u32>& code) {
+    ModuleData data;
+    for (const Instruction& inst : Instructions(code)) {
+        switch (inst.op) {
+        case spv::Op::OpConstant:
+            data.constants[inst.operands[1]] = inst.operands[2];
+            break;
+        case spv::Op::OpVariable:
+            data.variables[inst.operands[1]] = static_cast<spv::StorageClass>(inst.operands[2]);
+            break;
+        case spv::Op::OpAccessChain:
+        case spv::Op::OpInBoundsAccessChain:
+            data.chains[inst.operands[1]] = {inst.operands.begin() + 2, inst.operands.end()};
+            break;
+        case spv::Op::OpShiftRightLogical:
+            data.shifts[inst.operands[1]] = {inst.operands[2], inst.operands[3]};
+            break;
+        case spv::Op::OpExtInst:
+            // The emitter lowers integer min/max to the GLSL.std.450 extended instruction set.
+            if (inst.operands[3] == GLSLstd450UMin) {
+                data.umins[inst.operands[1]] = {inst.operands[4], inst.operands[5]};
+            }
+            break;
+        default:
+            break;
+        }
+        data.ops.push_back(inst);
+    }
+    return data;
+}
+
+// Resolves an id to a constant value, folding OpUMin of constants (the payload pointer clamps
+// its index that way) and OpShiftRightLogical (the guest's byte address to word index).
+std::optional<u32> ConstValue(const ModuleData& data, u32 id) {
+    if (const auto it{data.constants.find(id)}; it != data.constants.end()) {
+        return it->second;
+    }
+    if (const auto it{data.umins.find(id)}; it != data.umins.end()) {
+        const std::optional<u32> a{ConstValue(data, it->second.first)};
+        const std::optional<u32> b{ConstValue(data, it->second.second)};
+        if (a && b) {
+            return (std::min)(*a, *b);
+        }
+    }
+    if (const auto it{data.shifts.find(id)}; it != data.shifts.end()) {
+        const std::optional<u32> a{ConstValue(data, it->second.first)};
+        const std::optional<u32> b{ConstValue(data, it->second.second)};
+        if (a && b) {
+            return *a >> *b;
+        }
+    }
+    return std::nullopt;
+}
+
+// The word index when a pointer is an access chain into the TaskPayloadWorkgroupEXT variable.
+std::optional<u32> PayloadWordIndex(const ModuleData& data, u32 pointer) {
+    const auto it{data.chains.find(pointer)};
+    if (it == data.chains.end() || it->second.size() != 2) {
+        return std::nullopt;
+    }
+    const auto var{data.variables.find(it->second[0])};
+    if (var == data.variables.end() || var->second != spv::StorageClass::TaskPayloadWorkgroupEXT) {
+        return std::nullopt;
+    }
+    return ConstValue(data, it->second[1]);
+}
+
+constexpr u32 WORKGROUP{static_cast<u32>(spv::Scope::Workgroup)};
+constexpr u32 BARRIER_SEMANTICS{static_cast<u32>(spv::MemorySemanticsMask::AcquireRelease |
+                                                 spv::MemorySemanticsMask::WorkgroupMemory)};
+
+// A fully checked OpControlBarrier: Workgroup execution and memory scope, AcquireRelease |
+// WorkgroupMemory semantics.
+bool IsPayloadBarrier(const ModuleData& data, const Instruction& inst) {
+    return inst.op == spv::Op::OpControlBarrier &&
+           ConstValue(data, inst.operands[0]) == std::optional<u32>{WORKGROUP} &&
+           ConstValue(data, inst.operands[1]) == std::optional<u32>{WORKGROUP} &&
+           ConstValue(data, inst.operands[2]) == std::optional<u32>{BARRIER_SEMANTICS};
+}
+
 } // Anonymous namespace
 
 TEST_CASE("Mesh fallback leaves native task and mesh programs as mesh shaders",
@@ -192,6 +289,130 @@ TEST_CASE("Mesh fallback leaves native task and mesh programs as mesh shaders",
     Dump(task, "native-task");
     REQUIRE(Model(task) == spv::ExecutionModel::TaskEXT);
     REQUIRE(UsesStorageClass(task, spv::StorageClass::TaskPayloadWorkgroupEXT));
+}
+
+TEST_CASE("Mesh fallback native task initializes the mesh workgroup count with an elected store",
+          "[video_core][spirv][mesh_fallback]") {
+    // A task that culls every thread never writes the mesh workgroup count, and the payload
+    // starts undefined. Intel's garbage there launches enough workgroups to lose the device, so
+    // the prologue initializes the count to zero. Every invocation writing the same word would
+    // race (the Vulkan memory model has no same-value exception) and #615's reporter bisected
+    // an NVIDIA driver-compiler crash to the atomic-plus-barrier block, so a branch elects one
+    // invocation to store the zero.
+    const std::vector<u32> culled{EmitProgram(Stage::Task, false, false, MakeProfile(), false,
+                                              true)};
+    Dump(culled, "native-task-culled");
+    REQUIRE(Model(culled) == spv::ExecutionModel::TaskEXT);
+    const ModuleData data{Analyze(culled)};
+    size_t atomics{0};
+    size_t elected_stores{0};
+    size_t store_position{data.ops.size()};
+    size_t first_barrier{data.ops.size()};
+    size_t last_branch_conditional{data.ops.size()};
+    for (size_t i = 0; i < data.ops.size(); ++i) {
+        const Instruction& inst{data.ops[i]};
+        if (inst.op == spv::Op::OpAtomicStore) {
+            ++atomics;
+        }
+        if (inst.op == spv::Op::OpBranchConditional) {
+            last_branch_conditional = i;
+        }
+        // OpStore: pointer, object.
+        if (inst.op == spv::Op::OpStore &&
+            PayloadWordIndex(data, inst.operands[0]) == std::optional<u32>{1}) {
+            ++elected_stores;
+            store_position = i;
+            // The initialized value is zero.
+            REQUIRE(ConstValue(data, inst.operands[1]) == std::optional<u32>{0});
+        }
+        if (IsPayloadBarrier(data, inst) && first_barrier == data.ops.size()) {
+            first_barrier = i;
+        }
+    }
+    REQUIRE(atomics == 0);
+    // A culled task never writes the count itself; the elected init is the only write.
+    REQUIRE(elected_stores == 1);
+    // The single store is guarded by the election branch, and the barrier after the join
+    // orders it for every reader.
+    REQUIRE(last_branch_conditional < store_position);
+    REQUIRE(first_barrier < data.ops.size());
+    REQUIRE(store_position < first_barrier);
+}
+
+TEST_CASE("Mesh fallback native task keeps the guest's count path after the elected init",
+          "[video_core][spirv][mesh_fallback]") {
+    // A task that launches meshes writes the count itself after the prologue, and the epilogue
+    // reads word 1 back for OpEmitMeshTasksEXT. Both must survive the init.
+    const std::vector<u32> task{EmitProgram(Stage::Task, false, false)};
+    Dump(task, "native-task-count");
+    const ModuleData data{Analyze(task)};
+    size_t atomics{0};
+    size_t init_stores{0};
+    size_t init_position{0};
+    size_t guest_stores{0};
+    size_t guest_position{0};
+    size_t count_reads{0};
+    size_t read_position{0};
+    u32 loaded_count{0};
+    size_t emitted{0};
+    std::vector<size_t> barriers;
+    for (size_t i = 0; i < data.ops.size(); ++i) {
+        const Instruction& inst{data.ops[i]};
+        if (inst.op == spv::Op::OpAtomicStore) {
+            ++atomics;
+        }
+        // The elected zero init and the guest's own count write (storing 1) are the only
+        // plain stores to word 1.
+        if (inst.op == spv::Op::OpStore &&
+            PayloadWordIndex(data, inst.operands[0]) == std::optional<u32>{1}) {
+            if (ConstValue(data, inst.operands[1]) == std::optional<u32>{0}) {
+                ++init_stores;
+                init_position = i;
+            } else {
+                REQUIRE(ConstValue(data, inst.operands[1]) == std::optional<u32>{1});
+                ++guest_stores;
+                guest_position = i;
+            }
+        }
+        // OpLoad: result type, result id, pointer.
+        if (inst.op == spv::Op::OpLoad &&
+            PayloadWordIndex(data, inst.operands[2]) == std::optional<u32>{1}) {
+            ++count_reads;
+            read_position = i;
+            loaded_count = inst.operands[1];
+        }
+        // The loaded count must feed OpEmitMeshTasksEXT as GroupCountX.
+        if (inst.op == spv::Op::OpEmitMeshTasksEXT) {
+            REQUIRE(inst.operands[0] == loaded_count);
+            REQUIRE(count_reads >= 1);
+            ++emitted;
+        }
+        if (IsPayloadBarrier(data, inst)) {
+            barriers.push_back(i);
+        }
+    }
+    REQUIRE(atomics == 0);
+    REQUIRE(init_stores == 1);
+    REQUIRE(guest_stores == 1);
+    REQUIRE(count_reads == 1);
+    REQUIRE(emitted == 1);
+    // init, prologue barrier, guest write, epilogue barrier, count read.
+    REQUIRE(barriers.size() >= 2);
+    REQUIRE(init_position < barriers.front());
+    REQUIRE(barriers.front() < guest_position);
+    REQUIRE(guest_position < barriers.back());
+    REQUIRE(barriers.back() < read_position);
+
+    // The as-compute path zeroes the whole payload region in its prologue instead, with
+    // per-word strided plain stores, so it needs no atomic.
+    const std::vector<u32> compute{EmitProgram(Stage::Task, true, true)};
+    Dump(compute, "fallback-task-count");
+    const ModuleData compute_data{Analyze(compute)};
+    const size_t compute_atomics{static_cast<size_t>(
+        std::ranges::count_if(compute_data.ops, [](const Instruction& inst) {
+            return inst.op == spv::Op::OpAtomicStore;
+        }))};
+    REQUIRE(compute_atomics == 0);
 }
 
 TEST_CASE("Mesh fallback emits mesh programs as compute shaders writing storage buffers",
