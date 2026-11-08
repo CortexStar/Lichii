@@ -75,6 +75,17 @@ CodePtr AddressSpace::GetOrEmit(IR::LocationDescriptor descriptor) {
     return block_info.entry_point;
 }
 
+CodePtr AddressSpace::GetOrEmitFromDispatcher(IR::LocationDescriptor descriptor, StackLayout& stack) {
+    const u64 generation = cache_generation;
+    const CodePtr entry_point = GetOrEmit(descriptor);
+    if (generation != cache_generation) {
+        for (RSBEntry& entry : stack.rsb) {
+            entry.code_ptr = std::bit_cast<u64>(prelude_info.return_to_dispatcher);
+        }
+    }
+    return entry_point;
+}
+
 void AddressSpace::InvalidateBasicBlocks(const ::Common::unordered_set<IR::LocationDescriptor>& descriptors) {
     UnprotectCodeMemory();
 
@@ -100,6 +111,7 @@ void AddressSpace::ClearCache() {
     block_infos.clear();
     block_references.clear();
     code.set_offset(prelude_info.end_of_prelude);
+    ++cache_generation;
 }
 
 std::size_t AddressSpace::GetRemainingSize() {
