@@ -136,6 +136,16 @@ public:
         return return_from_run_code[FORCE_RETURN];
     }
 
+    /// Full memory barrier for guest DMB/DSB. A locked read-modify-write orders all earlier
+    /// loads and stores before all later ones for write-back memory, which is all guest memory
+    /// is; mfence additionally orders non-temporal stores and WC memory, which the JIT never
+    /// emits or maps, and is slower. The RMW leaves the stack slot's value alone but changes
+    /// the flags.
+    void FullBarrier() {
+        lock();
+        or_(dword[rsp], 0);
+    }
+
     void int3() { db(0xCC); }
 
     /// Allocate memory of `size` bytes from the same block of memory the code is in.
