@@ -707,6 +707,39 @@ void BufferCache<P>::UpdateComputeBuffers() {
 }
 
 template <class P>
+u64 BufferCache<P>::KeptGraphicsBindingsHash(bool vertex, bool storage, bool texture) const {
+    u64 hash = 0xcbf29ce484222325ULL;
+    const auto mix = [&](u64 value) { hash = (hash ^ value) * 0x100000001b3ULL; };
+    const auto mix_binding = [&](const Binding& binding) {
+        mix(binding.device_addr);
+        mix(binding.size);
+    };
+    if (vertex) {
+        for (const Binding& binding : channel_state->vertex_buffers) {
+            mix_binding(binding);
+        }
+    }
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        if (storage) {
+            mix(channel_state->enabled_storage_buffers[stage]);
+            mix(channel_state->written_storage_buffers[stage]);
+            ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
+                mix_binding(channel_state->storage_buffers[stage][index]);
+            });
+        }
+        if (texture) {
+            mix(channel_state->enabled_texture_buffers[stage]);
+            ForEachEnabledBit(channel_state->enabled_texture_buffers[stage], [&](u32 index) {
+                const TextureBufferBinding& binding = channel_state->texture_buffers[stage][index];
+                mix_binding(binding);
+                mix(static_cast<u64>(binding.format));
+            });
+        }
+    }
+    return hash;
+}
+
+template <class P>
 void BufferCache<P>::BindHostGeometryBuffers(bool is_indexed) {
     if (is_indexed) {
         BindHostIndexBuffer();

@@ -24,6 +24,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace Tegra::Engines {
@@ -494,6 +495,8 @@ void Puller::ProcessSemaphoreRelease(DmaPusher& dma_pusher) {
 
 void Puller::ProcessSemaphoreAcquire(DmaPusher& dma_pusher) {
     DrainBack();
+    // The CPU may rewrite what the next draws read once it sees the release this waits for.
+    VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
     u32 word = dma_pusher.memory_manager.Read<u32>(regs.semaphore_address.SemaphoreAddress());
     const auto value = regs.semaphore_acquire;
     while (word != value) {
@@ -536,6 +539,9 @@ void Puller::ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument) {
     }
     // Acquires: check once after flushing pending fences; never block the GPU thread on them.
     // EDEN_NX2_ACQUIRE_POLL: only the warning below reads a word not met, so it doesn't drain.
+    // Fast draw: the CPU may rewrite what the next draws read once it sees the release this waits
+    // for, so draw reuse ends here, in stream order on the back (the poll doesn't drain it).
+    OnBack([] { VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence); });
     u32 word{};
     if (const std::optional<u32> polled = PollSemaphoreRead(dma_pusher, address)) {
         word = *polled;

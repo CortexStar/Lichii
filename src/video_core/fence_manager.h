@@ -28,6 +28,7 @@
 #include "video_core/gpu.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2_query_fast.h"
 #include "video_core/nx2_reactive.h"
@@ -209,6 +210,7 @@ public:
             }
             pending_operations.emplace_back(std::move(uncommitted_operations));
             uncommitted_operations.clear(); // moved-from: make it empty explicitly
+            uncommitted_operations.reserve(64);
         }
         pending_flushes.push_back(committed_flushes);
         if constexpr (can_async_check) {
@@ -332,6 +334,7 @@ private:
                     return;
                 }
             }
+            VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
             PopAsyncFlushes(pending_flushes.front());
             pending_flushes.pop_front();
             auto operations = std::move(pending_operations.front());
@@ -363,7 +366,7 @@ private:
         }();
         struct Released {
             TFence fence;
-            std::deque<std::function<void()>> operations;
+            OperationList operations;
             u8 flushes;
             u32 query_pops; ///< Query cache entries: one per fence, folded ones included
         };
@@ -401,6 +404,9 @@ private:
                     take_front();
                 }
             }
+            if (!batch.empty()) {
+                VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
+            }
             size_t texture_pops = 0;
             size_t buffer_pops = 0;
             for (const Released& released : batch) {
@@ -427,6 +433,9 @@ private:
                 for (auto& operation : released.operations) {
                     operation();
                 }
+            }
+            if (!batch.empty()) {
+                VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
             }
             {
                 std::unique_lock lock(ring_guard);
@@ -482,16 +491,20 @@ private:
         }
         if (!fence_thread_busy && !inline_running && GpuSplit::OnBackThread()) {
             inline_running = true;
-            std::deque<std::function<void()>> operations;
+            OperationList operations;
             {
                 std::scoped_lock ops_lock{uncommitted_guard};
                 operations.swap(uncommitted_operations);
             }
             lock.unlock();
+            // As the fence thread's release (fast draw, nx2_fast_draw.h): what the operations and
+            // the flushes write ends draw reuse.
+            VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
             query_cache.PopAsyncFlushes();
             for (auto& operation : operations) {
                 operation();
             }
+            VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
             if (delay_fence) {
                 func();
             }
@@ -651,8 +664,11 @@ private:
     }
 
     std::queue<TFence> fences;
-    std::deque<std::function<void()>> uncommitted_operations;
-    std::deque<std::deque<std::function<void()>>> pending_operations;
+    // Vectors, not deques: MSVC's deque of std::function holds one element per block, so every
+    // queued operation (one per query report, about 1000 a frame in busy scenes) allocated a block.
+    using OperationList = std::vector<std::function<void()>>;
+    OperationList uncommitted_operations;
+    std::deque<OperationList> pending_operations;
     std::deque<u8> pending_flushes; ///< Per fence: the caches that committed downloads
     std::deque<u32> pending_query_pops; ///< Async check, per fence: query cache entries to pop
     u32 skipped_fences{}; ///< Empty fences skipped since the last one made (GPU thread only)

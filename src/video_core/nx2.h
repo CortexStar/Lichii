@@ -45,18 +45,18 @@ inline void Nx2MarkGpuWritten(u64 device_address, u64 size) {
     if (size == 0) {
         return;
     }
-    const u64 first = device_address >> Nx2WrittenPageBits;
     const u64 last = std::min<u64>((device_address + size - 1) >> Nx2WrittenPageBits,
                                    g_nx2_gpu_written_pages.size() * 64 - 1);
-    // A word (64 pages) at a time: storage bindings span up to 64 MiB.
-    for (u64 word_index = first / 64; first <= last && word_index <= last / 64; ++word_index) {
-        const u64 low = word_index == first / 64 ? first % 64 : 0;
-        const u64 high = word_index == last / 64 ? last % 64 : 63;
-        const u64 bits = (~u64{0} >> (63 - (high - low))) << low;
-        auto& word = g_nx2_gpu_written_pages[word_index];
-        if ((word.load(std::memory_order_relaxed) & bits) != bits) {
-            word.fetch_or(bits, std::memory_order_relaxed);
+    // A word at a time: storage buffers of several MiB are marked on every draw that binds them.
+    for (u64 page = device_address >> Nx2WrittenPageBits; page <= last;) {
+        const u64 first_bit = page % 64;
+        const u64 bits = (std::min<u64>)(64 - first_bit, last - page + 1);
+        const u64 mask = (bits == 64 ? ~u64{0} : (u64{1} << bits) - 1) << first_bit;
+        auto& word = g_nx2_gpu_written_pages[page / 64];
+        if ((word.load(std::memory_order_relaxed) & mask) != mask) {
+            word.fetch_or(mask, std::memory_order_relaxed);
         }
+        page += bits;
     }
 }
 

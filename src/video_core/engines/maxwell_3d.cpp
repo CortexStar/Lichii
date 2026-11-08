@@ -29,6 +29,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2_query_fast.h"
@@ -75,6 +76,7 @@ Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)
 {
     dirty.flags.flip();
     InitializeRegisterDefaults();
+    reports_fast_draw_breaks = true;
     execution_mask.reset();
     for (size_t i = 0; i < execution_mask.size(); i++)
         execution_mask[i] = IsMethodExecutable(u32(i));
@@ -394,12 +396,70 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
     if (draw_manager.HasDeferredDraw() && !DrawManager::IsInstanceLoopMethod(method)) [[unlikely]] {
         draw_manager.DrawDeferred(*this, true);
     }
+    if (VideoCommon::Nx2FastDraw::Enabled() && regs.reg_array[method] != argument &&
+        !IsFastDrawParameter(method)) {
+        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Register, method);
+    }
     regs.reg_array[method] = argument;
     for (auto const& table : dirty.tables)
         dirty.flags[table[method]] = true;
 }
 
+bool Maxwell3D::IsFastDrawParameter(u32 method) {
+    switch (method) {
+    case MAXWELL3D_REG_INDEX(const_buffer.size):
+    case MAXWELL3D_REG_INDEX(const_buffer.address_high):
+    case MAXWELL3D_REG_INDEX(const_buffer.address_low):
+    case MAXWELL3D_REG_INDEX(const_buffer.offset):
+    case MAXWELL3D_REG_INDEX(global_base_vertex_index):
+    case MAXWELL3D_REG_INDEX(global_base_instance_index):
+    case MAXWELL3D_REG_INDEX(index_buffer.start_addr_high):
+    case MAXWELL3D_REG_INDEX(index_buffer.start_addr_low):
+    case MAXWELL3D_REG_INDEX(index_buffer.limit_addr_high):
+    case MAXWELL3D_REG_INDEX(index_buffer.limit_addr_low):
+    case MAXWELL3D_REG_INDEX(index_buffer.format):
+        return true;
+    default:
+        return DrawManager::IsInstanceLoopMethod(method) || IsFastDrawDeltaMethod(method) ||
+               IsFastDrawVertexBuffer(method);
+    }
+}
+
+bool Maxwell3D::IsFastDrawVertexBuffer(u32 method) {
+    constexpr u32 streams = MAXWELL3D_REG_INDEX(vertex_streams);
+    constexpr u32 stream_words = sizeof(Regs::VertexStream) / sizeof(u32);
+    if (method >= streams && method < streams + Regs::NumVertexArrays * stream_words) {
+        const u32 word = (method - streams) % stream_words;
+        return word == 1 || word == 2; // address_high, address_low
+    }
+    constexpr u32 sizes = 0x600 / sizeof(u32); // SET_VERTEX_STREAM_SIZE_A/B (NativeVertexStreamSize)
+    constexpr u32 limits = MAXWELL3D_REG_INDEX(vertex_stream_limits);
+    constexpr u32 limit_words = sizeof(Regs::VertexStreamLimit) / sizeof(u32);
+    return (method >= sizes && method < sizes + Regs::NumVertexArrays * 2) ||
+           (method >= limits && method < limits + Regs::NumVertexArrays * limit_words);
+}
+
+bool Maxwell3D::IsFastDrawDeltaMethod(u32 method) {
+    constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
+    if (method >= cb_data && method < cb_data + Regs::NumCBData) {
+        return true;
+    }
+    switch (method) {
+    case MAXWELL3D_REG_INDEX(bind_groups[0].raw_config):
+    case MAXWELL3D_REG_INDEX(bind_groups[1].raw_config):
+    case MAXWELL3D_REG_INDEX(bind_groups[2].raw_config):
+    case MAXWELL3D_REG_INDEX(bind_groups[3].raw_config):
+    case MAXWELL3D_REG_INDEX(bind_groups[4].raw_config):
+        return true;
+    default:
+        return false;
+    }
+}
+
 void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argument, bool is_last_call) {
+    if (!DrawManager::IsInstanceLoopMethod(method) && !IsFastDrawDeltaMethod(method)) {
+        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Method, method);
+    }
     if (GetNativeMacroEngine().native_turing && method == MAXWELL3D_REG_INDEX(clear_surface)) {
         LOG_DEBUG(HW_GPU, "Native GPU surface clear: value={:#x}", argument);
     }
@@ -686,6 +746,9 @@ void Maxwell3D::CallConstBufferWords(Core::System& system, const u32* methods,
         ProcessDirtyRegisters(methods[i], ProcessShadowRam(methods[i], arguments[i]));
     }
     const GPUVAddr destination = address + offset;
+    if (VideoCommon::Nx2FastDraw::Enabled()) {
+        NoteFastDrawConstantData(destination, destination + bytes);
+    }
     // EDEN_NX2_CB_DIRECT: what WriteWordsCached does for words within one device page outside
     // Switch 2 sparse memory, with one translation (as MemoryManager::Write) instead of the page
     // walk: the words, then the invalidation accumulated word by word. Unmapped: the walk.
@@ -816,6 +879,7 @@ void Maxwell3D::CallMultiMethod(Core::System& system, u32 method, const u32* bas
     }
     case MAXWELL3D_REG_INDEX(inline_data): {
         ASSERT(methods_pending == amount);
+        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::InlineData);
         upload_state.ProcessData(base_start, amount);
         return;
     }
@@ -1231,6 +1295,11 @@ void Maxwell3D::ProcessCBBind(size_t stage_index) {
         return; // slot field is 5 bits; the state array holds 18
     }
     auto& buffer = state.shader_stages[stage_index].const_buffers[bind_data.shader_slot];
+    if (VideoCommon::Nx2FastDraw::Enabled() &&
+        (buffer.enabled != (bind_data.valid.Value() != 0) ||
+         buffer.address != regs.const_buffer.Address() || buffer.size != regs.const_buffer.size)) {
+        VideoCommon::Nx2FastDraw::NoteBind(stage_index, bind_data.shader_slot);
+    }
     buffer.enabled = bind_data.valid.Value() != 0;
     buffer.address = regs.const_buffer.Address();
     buffer.size = regs.const_buffer.size;
@@ -1243,6 +1312,43 @@ void Maxwell3D::ProcessCBBind(size_t stage_index) {
     const GPUVAddr gpu_addr = regs.const_buffer.Address();
     const u32 size = regs.const_buffer.size;
     rasterizer->BindGraphicsUniformBuffer(stage_index, bind_data.shader_slot, gpu_addr, size);
+}
+
+void Maxwell3D::NoteFastDrawConstantData(GPUVAddr begin, GPUVAddr end) {
+    namespace FastDraw = VideoCommon::Nx2FastDraw;
+    // Texture and sampler headers are read when image views are resolved, which delta draws skip.
+    constexpr u64 HeaderSize = 0x20;
+    const GPUVAddr tic = regs.tex_header.Address();
+    const u64 tic_size = (u64{regs.tex_header.limit} + 1) * HeaderSize;
+    // As TextureCache::SynchronizeDescriptors sizes the sampler table.
+    const GPUVAddr tsc = regs.tex_sampler.Address();
+    const u64 tsc_size = (u64{regs.sampler_binding == Regs::SamplerBinding::ViaHeaderBinding
+                                  ? regs.tex_header.limit
+                                  : regs.tex_sampler.limit} +
+                          1) *
+                         HeaderSize;
+    if ((begin < tic + tic_size && tic < end) || (begin < tsc + tsc_size && tsc < end)) {
+        FastDraw::Break(FastDraw::Reason::TextureHeaders);
+        return;
+    }
+    FastDraw::NoteConstantData(begin, end);
+    // The same device memory can be mapped at other GPU addresses: compare where it lands.
+    fast_draw_header_spans.Update(memory_manager, tic, tic_size);
+    fast_draw_sampler_spans.Update(memory_manager, tsc, tsc_size);
+    constexpr u64 PageSize = 0x1000; // the smallest GPU page
+    for (GPUVAddr page = begin; page < end;) {
+        const GPUVAddr page_end = (std::min)(end, (page & ~(PageSize - 1)) + PageSize);
+        if (const std::optional<DAddr> device = memory_manager.GpuToCpuAddress(page)) {
+            const DAddr device_end = *device + (page_end - page);
+            if (fast_draw_header_spans.Intersects(*device, device_end) ||
+                fast_draw_sampler_spans.Intersects(*device, device_end)) {
+                FastDraw::Break(FastDraw::Reason::TextureHeaders);
+                return;
+            }
+            FastDraw::NoteDeviceData(*device, device_end);
+        }
+        page = page_end;
+    }
 }
 
 void Maxwell3D::ProcessCBMultiData(const u32* start_base, u32 amount) {
@@ -1258,6 +1364,9 @@ void Maxwell3D::ProcessCBMultiData(const u32* start_base, u32 amount) {
     const size_t write_size = std::min(copy_size, room / sizeof(u32) * sizeof(u32));
     if (write_size != 0) {
         const GPUVAddr address{buffer_address + regs.const_buffer.offset};
+        if (VideoCommon::Nx2FastDraw::Enabled()) {
+            NoteFastDrawConstantData(address, address + write_size);
+        }
         memory_manager.WriteBlockCached(address, start_base, write_size);
     }
     if (write_size != copy_size) {
@@ -1999,7 +2108,8 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     fs.parameters.clear();
     if (fs.draw_pending) {
         fs.draw_pending = false;
-        split.Defer([this, system_ptr = &system] { FinishFrontMacro(*system_ptr); });
+        split.Defer([this, system_ptr = &system] { FinishFrontMacro(*system_ptr); },
+                    VideoCommon::GpuSplit::FastDrawNeutral);
         split.NoteDraw();
     }
     if (FrontVerifyEnabled() && (++fs.calls & 4095) == 0) [[unlikely]] {
@@ -2327,6 +2437,10 @@ void Maxwell3D::ApplyFrontDelta(Core::System& system, const u64* entries, u32 co
     u32* const reg_array = regs.reg_array.data();
     u32* const shadow_array = shadow_state.reg_array.data();
     DirtyState::Flags raised;
+    // Fast draw (nx2_fast_draw.h): as ProcessDirtyRegisters, a changed register that isn't a draw
+    // parameter ends draw reuse (once for the delta).
+    const bool fast_draw = VideoCommon::Nx2FastDraw::Enabled();
+    u32 fast_draw_break = ~0U;
     const auto apply = [&]<bool Track, bool SkipSame>() {
         for (; i < count; ++i) {
             const u64 word = entries[i];
@@ -2340,6 +2454,10 @@ void Maxwell3D::ApplyFrontDelta(Core::System& system, const u64* entries, u32 co
                     ++same;
                     continue;
                 }
+            }
+            if (fast_draw && fast_draw_break == ~0U && reg_array[method] != value &&
+                !IsFastDrawParameter(method)) [[unlikely]] {
+                fast_draw_break = method;
             }
             reg_array[method] = value;
             raised[table0[method]] = true;
@@ -2358,6 +2476,10 @@ void Maxwell3D::ApplyFrontDelta(Core::System& system, const u64* entries, u32 co
         apply.template operator()<false, false>();
     }
     dirty.flags |= raised;
+    if (fast_draw_break != ~0U) {
+        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Register,
+                                        fast_draw_break);
+    }
     if (VideoCommon::Nx2Profile::Enabled()) [[unlikely]] {
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DeltaWords, count);
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DeltaSameWords, same);

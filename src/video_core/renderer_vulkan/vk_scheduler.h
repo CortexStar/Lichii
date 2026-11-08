@@ -153,6 +153,15 @@ public:
 
     /// Whether the active render pass is the one RequestRenderpass(framebuffer) would keep.
     bool RenderPassMatches(const Framebuffer* framebuffer) const;
+    /// Changes whenever a render pass begins or ends.
+    u64 RenderPassSerial() const {
+        return render_pass_serial;
+    }
+
+    /// The graphics pipeline bound in the current command buffer, if the scheduler knows it.
+    const GraphicsPipeline* BoundGraphicsPipeline() const {
+        return state.graphics_pipeline;
+    }
 
     /// Update the pipeline to the current execution context.
     bool UpdateGraphicsPipeline(GraphicsPipeline* pipeline);
@@ -459,6 +468,7 @@ private:
     bool render_pass_has_stores{};
     bool compute_writes_pending{};
     bool graphics_pipeline_missing{};
+    u64 render_pass_serial{};
     std::unique_ptr<CommandPool> command_pool;
 
     vk::QueryPool trace_query_pool;

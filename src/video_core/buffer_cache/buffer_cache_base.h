@@ -478,6 +478,9 @@ public:
 
     [[nodiscard]] std::pair<Buffer*, u32> GetDrawIndirectBuffer();
 
+    /// Fast draw verify (nx2_fast_draw.h): a hash of the bindings a delta draw keeps.
+    [[nodiscard]] u64 KeptGraphicsBindingsHash(bool vertex, bool storage, bool texture) const;
+
     template <typename Func>
     void BufferOperations(Func&& func) {
         do {

@@ -29,6 +29,7 @@
 #include "common/slot_vector.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dirty_flags.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
@@ -1593,6 +1594,7 @@ void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
             // Each branch below leaves it CPU modified: binding memos of it need the upload.
             BumpBindingSerial(image_id);
         }
+        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
         if (True(image.flags & ImageFlagBits::UnwrittenSparse)) {
             // Written at last: a backed image replaces it where it is used next.
             image.flags |= ImageFlagBits::CpuModified | ImageFlagBits::Remapped;
@@ -1734,6 +1736,9 @@ void TextureCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t siz
     boost::container::small_vector<ImageId, 16> deleted_images;
     ForEachImageInRegionGPU(as_id, gpu_addr, size,
                             [&](ImageId id, Image&) { deleted_images.push_back(id); });
+    if (!deleted_images.empty()) {
+        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Map);
+    }
     for (const ImageId id : deleted_images) {
         Image& image = slot_images[id];
         ++bindings_epoch;
@@ -3601,7 +3606,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
                 continue;
             }
             CopyImage(new_image_id, aliased->id, aliased->copies);
-            new_image.modification_tick = overlap.modification_tick;
+            SetModificationTick(slot_images, new_image, overlap.modification_tick);
             continue;
         }
         if (True(overlap.flags & ImageFlagBits::GpuModified)) {
@@ -3617,7 +3622,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             } else {
                 runtime.CopyImage(new_image, overlap, copies);
             }
-            new_image.modification_tick = overlap.modification_tick;
+            SetModificationTick(slot_images, new_image, overlap.modification_tick);
         }
         if (True(overlap.flags & ImageFlagBits::Tracked)) {
             UntrackImage(overlap, copy_object.id);
@@ -4336,6 +4341,7 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     ++images_deleted;
     ++bindings_epoch;
     BumpBindingSerial(image_id);
+    VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
     // Drop every decode still queued for it, whatever IsDecoding says: an image re-decoded while
     // a decode was in flight has two, and the first to finish clears the flag. A decode left
     // behind was uploaded into the next image to take this slot (another texture's data: garbage
@@ -4494,7 +4500,7 @@ template <class P>
 void TextureCache<P>::MarkModification(ImageBase& image) noexcept {
     NoteGpuModified(image);
     image.flags |= ImageFlagBits::GpuModified;
-    image.modification_tick = ++modification_tick;
+    SetModificationTick(slot_images, image, ++modification_tick);
 }
 
 template <class P>
@@ -4513,6 +4519,14 @@ template <class P>
 void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
     boost::container::small_vector<const AliasedImage*, 8> aliased_images;
     Image& image = slot_images[image_id];
+    // Nothing aliased was modified after this image: skip walking its (possibly long) alias list
+    // for every draw that samples it (~7% of the GPU back thread in DK Bananza's open areas).
+    if (image.newest_alias_tick <= image.modification_tick) {
+        DEBUG_ASSERT(std::ranges::none_of(image.aliased_images, [&](const AliasedImage& alias) {
+            return slot_images[alias.id].modification_tick > image.modification_tick;
+        }));
+        return;
+    }
     bool any_rescaled = True(image.flags & ImageFlagBits::Rescaled);
     bool any_modified = True(image.flags & ImageFlagBits::GpuModified);
     u64 most_recent_tick = image.modification_tick;
@@ -4526,6 +4540,8 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
         }
     }
     if (aliased_images.empty()) {
+        // Newer aliases were deleted since: skip the walk until one is modified again.
+        image.newest_alias_tick = image.modification_tick;
         return;
     }
     const bool can_rescale = ImageCanRescale(image);
@@ -4536,7 +4552,8 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
             ScaleDown(image);
         }
     }
-    image.modification_tick = most_recent_tick;
+    SetModificationTick(slot_images, image, most_recent_tick);
+    image.newest_alias_tick = most_recent_tick;
     if (any_modified) {
         NoteGpuModified(image);
         image.flags |= ImageFlagBits::GpuModified;
@@ -4612,6 +4629,7 @@ void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool 
             image.flags |= ImageFlagBits::CpuModified | ImageFlagBits::Remapped;
             ++bindings_epoch;
             BumpBindingSerial(image_id);
+            VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
         }
         MarkModification(image);
     }
