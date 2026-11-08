@@ -3364,8 +3364,14 @@ std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
     info.scaled_width = scaled ? resolution.ScaleUp(info.width) : info.width;
     info.scaled_height = scaled ? resolution.ScaleUp(info.height) : info.height;
     // Ocarina of Time's scene comes from DLSS or FSR: FXAA or SMAA on top only blurs it.
-    info.anti_aliased =
-        VideoCommon::OotDlss::Targets().output_upscaled.load(std::memory_order_relaxed);
+    // EXPERIMENT (do not merge): EDEN_NX2_EXP_PRESENT_FILTERS=1 keeps FXAA/SMAA and the scaling
+    // filter on the upscaled image (the A/B of skipping them).
+    static const bool keep_filters = [] {
+        const char* const value = std::getenv("EDEN_NX2_EXP_PRESENT_FILTERS");
+        return value != nullptr && value[0] == '1';
+    }();
+    info.anti_aliased = !keep_filters && VideoCommon::OotDlss::Targets().output_upscaled.load(
+                                             std::memory_order_relaxed);
     return info;
 }
 

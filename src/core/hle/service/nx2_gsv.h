@@ -1695,6 +1695,16 @@ inline void Nx2RelayoutDecoderImage(Core::System& system, u64 address,
 // shapes read from the SDK: TIPC 1 -> u32 < 0x400, TIPC 3 -> u32 < 8, TIPC 11/31(u32) and
 // 32(handle, u32) -> one handle at word 3 then the result. Handles returned here are events (a
 // guess); everything else is auto-stubbed through the nx2: prefix.
+/// EXPERIMENT (do not merge): EDEN_NX2_EXP_START_RATE=console holds the display's frame starts
+/// to the console's vsync rate even with the frame rate unlocked (the A/B of DisplayStartRate).
+inline bool ExpConsoleStartRate() {
+    static const bool on = [] {
+        const char* const value = std::getenv("EDEN_NX2_EXP_START_RATE");
+        return value != nullptr && value[0] == 'c';
+    }();
+    return on;
+}
+
 /// Rate of the nx2:vi2 vsync event the game starts frames on (Settings frame_rate_limit).
 inline u32 Nx2VsyncRateHz() {
     return (std::max<u32>)(Settings::values.frame_rate_limit.GetValue(), 1);
@@ -2034,7 +2044,9 @@ private:
         // The display starts the game's frames (HostVsync) no faster than this limit, and no
         // faster than the console's vsync unless the game's frame rate is unlocked.
         VideoCore::HostVsync::SetRate(DisplayStartRate(
-            FileSys::FrameRateUnlocked(system.GetApplicationProcessProgramID()), Nx2VsyncRateHz(),
+            FileSys::FrameRateUnlocked(system.GetApplicationProcessProgramID()) &&
+                !ExpConsoleStartRate(),
+            Nx2VsyncRateHz(),
             forced_fps_limit != 0 ? forced_fps_limit : Settings::values.fps_limit.GetValue(),
             system.GPU().Renderer().HostFrameCap(),
             m_objects->movie_rate.load(std::memory_order_relaxed)));

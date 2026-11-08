@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdlib>
 #include <mutex>
 
 #include "common/common_types.h"
@@ -37,6 +38,16 @@ constexpr u64 HeavyDispatchShaderHash = 0xd9ee412f00ce399aULL;
 constexpr bool FeedsOutputPass(u64 native_key, u64 shader_hash) {
     return native_key == PrepassProgramKey || native_key == NetworkProgramKey ||
            shader_hash == HeavyDispatchShaderHash;
+}
+
+/// EXPERIMENT (do not merge): EDEN_NX2_EXP_HEAVY_DISPATCH=1 runs the heavy dispatch while the
+/// output pass is replaced (the A/B of skipping it).
+inline bool ExpRunHeavyDispatch() {
+    static const bool on = [] {
+        const char* const value = std::getenv("EDEN_NX2_EXP_HEAVY_DISPATCH");
+        return value != nullptr && value[0] == '1';
+    }();
+    return on;
 }
 
 /// Logs once that the heavy dispatch is skipped, so a log shows the hash still matches.

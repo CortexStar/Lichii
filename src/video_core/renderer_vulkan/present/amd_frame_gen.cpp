@@ -5,6 +5,7 @@
 #include <atomic>
 #include <charconv>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -578,8 +579,14 @@ void AmdFrameGen::ComposeHudless(MemoryAllocator& allocator, VkImage frame_image
                                  VkFormat frame_format, VkExtent2D frame_extent, VkImage scene,
                                  VkExtent2D scene_extent, bool scene_fresh, VkRect2D rect) {
     auto& state = *impl;
+    // EXPERIMENT (do not merge): EDEN_NX2_EXP_FG_HUDLESS=0 gives frame generation no HUD-less
+    // image (the A/B of it).
+    static const bool hudless_off = [] {
+        const char* const value = std::getenv("EDEN_NX2_EXP_FG_HUDLESS");
+        return value != nullptr && value[0] == '0';
+    }();
     // The frame is copied to the back buffer as it is only when they match (CopyToSwapchain).
-    if (state.frame_gen_context == nullptr || frame_format != state.format ||
+    if (hudless_off || state.frame_gen_context == nullptr || frame_format != state.format ||
         frame_extent.width != state.display_size.width ||
         frame_extent.height != state.display_size.height) {
         state.hudless_ready = false;

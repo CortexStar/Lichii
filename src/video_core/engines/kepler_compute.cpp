@@ -1360,7 +1360,7 @@ bool KeplerCompute::BypassOotNetwork(u64 program_id, u64 native_key, u64 shader_
     if (tonemapped.Address() == 0) {
         return false;
     }
-    if (FeedsOutputPass(native_key, shader_hash)) {
+    if (FeedsOutputPass(native_key, ExpRunHeavyDispatch() ? 0 : shader_hash)) {
         const bool skipped = bypass->output_replaced.load(std::memory_order_relaxed);
         if (skipped && shader_hash == HeavyDispatchShaderHash) {
             NoteHeavyDispatchSkipped();
@@ -1685,7 +1685,8 @@ bool KeplerCompute::ReplaceOotNetwork(u64 program_id, u64 native_key, u64 shader
     }
     constexpr u64 OutputKey = VideoCommon::OotNetwork::OutputProgramKey;
     const u64 tonemapped = Targets().tonemapped_gpu.load(std::memory_order_relaxed);
-    if (VideoCommon::OotNetwork::FeedsOutputPass(native_key, shader_hash)) {
+    if (VideoCommon::OotNetwork::FeedsOutputPass(
+            native_key, VideoCommon::OotNetwork::ExpRunHeavyDispatch() ? 0 : shader_hash)) {
         if (tonemapped != 0 && shader_hash == VideoCommon::OotNetwork::HeavyDispatchShaderHash) {
             VideoCommon::OotNetwork::NoteHeavyDispatchSkipped();
         }
