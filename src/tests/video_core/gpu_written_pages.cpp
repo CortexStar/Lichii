@@ -51,3 +51,22 @@ TEST_CASE("Nx2MarkGpuWritten marks a range over several bitmap words exactly",
     CHECK_FALSE(Tegra::Nx2IsGpuWritten(base + 4 * page));
     Tegra::Nx2ClearGpuWrittenPages();
 }
+
+TEST_CASE("Nx2MarkGpuWritten moves the generation only for new pages", "[video_core][nx2]") {
+    constexpr u64 page = u64{1} << Tegra::Nx2WrittenPageBits;
+    constexpr u64 base = 0x20000000;
+    Tegra::Nx2ClearGpuWrittenPages();
+    const u64 start = Tegra::g_nx2_gpu_written_generation.load();
+
+    Tegra::Nx2MarkGpuWritten(base, 2 * page);
+    const u64 first = Tegra::g_nx2_gpu_written_generation.load();
+    CHECK(first != start);
+
+    Tegra::Nx2MarkGpuWritten(base + page, 8);
+    Tegra::Nx2MarkGpuWritten(base, 0);
+    CHECK(Tegra::g_nx2_gpu_written_generation.load() == first);
+
+    Tegra::Nx2MarkGpuWritten(base + page, page + 1);
+    CHECK(Tegra::g_nx2_gpu_written_generation.load() != first);
+    Tegra::Nx2ClearGpuWrittenPages();
+}
