@@ -250,6 +250,9 @@ struct BufferCacheTestAccess {
     static bool TrapArmed(Cache& cache, DAddr address, u64 size) {
         return cache.read_trapped_ranges.IsArmed(address, size);
     }
+    static void ArmTrap(Cache& cache, DAddr address, u64 size) {
+        cache.ArmReadTraps(address, size);
+    }
 };
 
 } // namespace VideoCommon
@@ -781,4 +784,21 @@ TEST_CASE("Other titles' GPU writes to preflushable pages arm no read traps", "[
     Access::GpuWrite(*f.cache, id, 0x20000, 0x100);
     REQUIRE_FALSE(Access::TrapArmed(*f.cache, 0x20000, 0x1000));
     Tegra::g_nx2_ampere.store(was_native);
+}
+
+TEST_CASE("A native page's first read forgets its trap so the next write arms it again",
+          "[buffer_ports]") {
+    Fixture f;
+    NativeTitle native;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    // A GPU write to a page that is not Preflushable yet arms its trap.
+    Access::GpuWrite(*f.cache, id, 0x20000, 0x100);
+    Access::ArmTrap(*f.cache, 0x20000, 0x100);
+    REQUIRE(Access::TrapArmed(*f.cache, 0x20000, 0x1000));
+    // The first read flushes, marks the page Preflushable and consumed the trap.
+    REQUIRE_FALSE(f.cache->GetFlushArea(0x20010, 4)->preemtive);
+    REQUIRE_FALSE(Access::TrapArmed(*f.cache, 0x20000, 0x1000));
+    // The next write must reach the core again, not be skipped as still armed.
+    Access::GpuWrite(*f.cache, id, 0x20000, 0x100);
+    REQUIRE(Access::TrapArmed(*f.cache, 0x20000, 0x1000));
 }

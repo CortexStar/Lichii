@@ -311,29 +311,20 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
         return value == nullptr || value[0] != '0';
     }();
     const bool preflush = !native || native_preflush;
+    // The core consumed this read's trap before GetFlushArea (or keeps an area with no mark).
+    // Forget it either way, so the next GPU write here really arms the core again instead of
+    // being skipped by the deduplication cache, also once the read marks the page Preflushable.
+    read_trapped_ranges.Subtract(device_addr_start_aligned, aligned_size);
     if (!area->preemtive) {
         if (Nx2DownloadTrace::g_enabled) [[unlikely]] {
-            Nx2DownloadTrace::Marked(device_addr_start_aligned,
-                                     device_addr_end_aligned - device_addr_start_aligned, preflush);
+            Nx2DownloadTrace::Marked(device_addr_start_aligned, aligned_size, preflush);
         }
         if (preflush) {
-            memory_tracker.MarkRegionAsPreflushable(
-                device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
-        } else {
-            if constexpr (USE_MEMORY_MAPS) {
-                cpu_read_ranges.Add(area->start_address, area->end_address - area->start_address);
-                download_cpu_read_ranges = true;
-            }
-            // The core consumed this trap before GetFlushArea. Forget it so the next GPU write
-            // really rearms the core instead of being skipped by the deduplication cache.
-            read_trapped_ranges.Subtract(
-                device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
+            memory_tracker.MarkRegionAsPreflushable(device_addr_start_aligned, aligned_size);
+        } else if constexpr (USE_MEMORY_MAPS) {
+            cpu_read_ranges.Add(area->start_address, area->end_address - area->start_address);
+            download_cpu_read_ranges = true;
         }
-    } else {
-        // The core keeps this area and has no mark. The next GPU write here must arm the range
-        // again, which ends the area and sets the trap.
-        read_trapped_ranges.Subtract(device_addr_start_aligned,
-                                     device_addr_end_aligned - device_addr_start_aligned);
     }
     return area;
 }
