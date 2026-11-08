@@ -40,6 +40,7 @@ add_executable(tests
     audio_core/hardware_audio_codec.cpp
     core/gpu_dirty_memory.cpp
     core/load_timing.cpp
+    core/nso_image_size.cpp
     core/memory_acquire.cpp
     core/builtin_patches.cpp
     core/builtin_font_glyphs.cpp

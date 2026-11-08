@@ -57,6 +57,13 @@ bool NSOHeader::IsSegmentCompressed(size_t segment_num) const {
 
 AppLoader_NSO::AppLoader_NSO(FileSys::VirtualFile file_) : AppLoader(std::move(file_)) {}
 
+u32 AppLoader_NSO::ImageSize(const NSOHeader& header, bool pass_arguments) {
+    const auto& last_segment = header.segments.back();
+    const u32 arguments = pass_arguments ? NSO_ARGUMENT_DATA_ALLOCATION_SIZE : 0;
+    return PageAlignSize(last_segment.location + last_segment.size + arguments +
+                         header.segments[2].bss_size);
+}
+
 FileType AppLoader_NSO::IdentifyType(const FileSys::VirtualFile& in_file) {
     u32 magic = 0;
     if (in_file->ReadObject(&magic) != sizeof(magic)) {
@@ -80,6 +87,19 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         return std::nullopt;
     if (nso_header.segments.empty())
         return std::nullopt;
+
+    // The layout pass only needs the module's size, unless an NCE patcher has to see its code.
+    // Decompressing a module for that took as long as loading it (Ocarina of Time: 170 ms).
+#ifdef HAS_NCE
+    const bool needs_code = load_into_process || patches != nullptr;
+#else
+    const bool needs_code = load_into_process;
+#endif
+    if (!needs_code) {
+        return load_base +
+               ImageSize(nso_header, should_pass_arguments &&
+                                         !Settings::values.program_args.GetValue().empty());
+    }
 
     // Allocate some space at the beginning if we are patching in PreText mode.
     const size_t module_start = [&]() -> size_t {
