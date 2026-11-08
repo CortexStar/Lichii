@@ -90,6 +90,14 @@ public:
         (*flags) |= invalidation_flags;
         current_topology = INVALID_TOPOLOGY;
         stencil_reset = true;
+        ++command_buffer_epoch;
+    }
+
+    /// Changes whenever the dynamic state recorded so far may no longer be what the command
+    /// buffer holds (a new command buffer, another pipeline's static state), so values cached
+    /// against it must be recorded again. Not on channel changes: the command buffer is shared.
+    [[nodiscard]] u64 CommandBufferEpoch() const noexcept {
+        return command_buffer_epoch;
     }
 
     void InvalidateInputState() {
@@ -100,6 +108,8 @@ public:
             (*flags)[index] = true;
         }
         current_topology = INVALID_TOPOLOGY;
+        // The mesh emulation pipeline's static state replaced what was recorded.
+        ++command_buffer_epoch;
     }
 
     void InvalidateViewports() {
@@ -112,6 +122,7 @@ public:
 
     void InvalidateStateEnableFlag() {
         (*flags)[Dirty::StateEnable] = true;
+        ++command_buffer_epoch;
     }
 
     bool TouchViewports() {
@@ -127,8 +138,10 @@ public:
     }
 
     bool TouchDepthBias() {
-        return Exchange(Dirty::DepthBias, false) ||
-               Exchange(VideoCommon::Dirty::DepthBiasGlobal, false);
+        // Both cleared: a flag left raised would keep UpdateDynamicStates from skipping.
+        const bool dirty_bias = Exchange(Dirty::DepthBias, false);
+        const bool dirty_global = Exchange(VideoCommon::Dirty::DepthBiasGlobal, false);
+        return dirty_bias || dirty_global;
     }
 
     bool TouchBlendConstants() {
@@ -328,6 +341,7 @@ private:
     StencilProperties front{};
     StencilProperties back{};
     bool stencil_reset = false;
+    u64 command_buffer_epoch = 1;
 };
 
 } // namespace Vulkan
