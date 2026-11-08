@@ -149,6 +149,7 @@ public:
 #endif
 
     struct Event;
+    struct TimingTrace;
 
     void Reset();
 
@@ -165,13 +166,15 @@ public:
     struct NextWait {
         s64 until{};
         bool blocks{};
+        std::string name; ///< The event it waits for (EDEN_NX2_TIMING_TRACE only)
     } next_wait;
     /// When the timer thread looks at the queue next: the minimum while it is in Advance, the
     /// maximum while it waits on an empty queue (basic_lock).
     s64 planned_wake{(std::numeric_limits<s64>::min)()};
     /// How late an OS wait of the timer thread can end (Advance; see Common::OsWakeTime).
     s64 os_wake_guard{};
-
+    /// EDEN_NX2_TIMING_TRACE=1: what the timer thread waits for and runs, logged every 2 s.
+    std::unique_ptr<TimingTrace> trace;
     u64 event_fifo_id = 0;
     std::atomic<s64> pause_end_time{};
     /// Cycle timing

@@ -5,12 +5,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <string>
 #include <tuple>
 #include "common/cpu_features.h"
 #include "common/event_wait.h"
+#include "common/logging.h"
 
 #ifdef _WIN32
 #include "common/windows/timer_resolution.h"
@@ -80,6 +83,105 @@ struct CoreTiming::Event {
     }
 };
 
+struct CoreTiming::TimingTrace {
+    struct EventCounters {
+        u64 callbacks{};
+        s64 callback_ns{};
+        s64 late_ns{};
+        u64 schedules{};
+        u64 wakes{};
+    };
+    struct WaitCounters {
+        u64 count{};
+        s64 ns{};
+        u64 woken{}; ///< Ended by Set, not by the timeout
+    };
+
+    void NoteCallback(std::string_view name, s64 late, s64 ns) {
+        std::scoped_lock lk{mutex};
+        auto& counters = Find(events, name);
+        ++counters.callbacks;
+        counters.callback_ns += ns;
+        counters.late_ns += late;
+    }
+
+    void NoteSchedule(std::string_view name, bool wake) {
+        std::scoped_lock lk{mutex};
+        auto& counters = Find(events, name);
+        ++counters.schedules;
+        counters.wakes += wake ? 1 : 0;
+    }
+
+    void NoteWait(bool blocks, bool woken, std::string_view name, s64 ns) {
+        std::scoped_lock lk{mutex};
+        auto& total = blocks ? blocked : precise;
+        ++total.count;
+        total.ns += ns;
+        total.woken += woken ? 1 : 0;
+        if (!blocks) {
+            auto& by_event = Find(precise_by_event, name);
+            ++by_event.count;
+            by_event.ns += ns;
+            by_event.woken += woken ? 1 : 0;
+        }
+    }
+
+    /// From the timer thread: logs and clears the counters every 2 s.
+    void MaybeReport(s64 now) {
+        constexpr s64 Window = 2'000'000'000;
+        if (window_start == 0) {
+            window_start = now;
+        }
+        if (now - window_start < Window) {
+            return;
+        }
+        std::scoped_lock lk{mutex};
+        const double seconds = static_cast<double>(now - window_start) / 1e9;
+        const auto ms = [](s64 ns) { return static_cast<double>(ns) / 1e6; };
+        LOG_INFO(Core_Timing,
+                 "Timing trace {:.2f} s: OS waits {} ({:.1f} ms, {} ended by Set), precise waits "
+                 "{} ({:.1f} ms, {} ended by Set)",
+                 seconds, blocked.count, ms(blocked.ns), blocked.woken, precise.count,
+                 ms(precise.ns), precise.woken);
+        for (const auto& [name, counters] : precise_by_event) {
+            LOG_INFO(Core_Timing, "  precise wait for {}: {} ({:.1f} ms, {} ended by Set)", name,
+                     counters.count, ms(counters.ns), counters.woken);
+        }
+        for (const auto& [name, counters] : events) {
+            LOG_INFO(Core_Timing,
+                     "  event {}: {} callbacks ({:.2f} ms, {:.1f} us late on average), {} "
+                     "scheduled, {} woke the timer thread",
+                     name, counters.callbacks, ms(counters.callback_ns),
+                     counters.callbacks != 0 ? static_cast<double>(counters.late_ns) / 1e3 /
+                                                   static_cast<double>(counters.callbacks)
+                                             : 0.0,
+                     counters.schedules, counters.wakes);
+        }
+        events.clear();
+        precise_by_event.clear();
+        blocked = {};
+        precise = {};
+        window_start = now;
+    }
+
+private:
+    template <typename Counters>
+    static Counters& Find(std::map<std::string, Counters, std::less<>>& map,
+                          std::string_view name) {
+        if (const auto it = map.find(name); it != map.end()) {
+            return it->second;
+        }
+        return map.emplace(std::string{name}, Counters{}).first->second;
+    }
+
+    std::mutex mutex;
+    std::map<std::string, EventCounters, std::less<>> events;
+    std::map<std::string, WaitCounters, std::less<>> precise_by_event;
+    WaitCounters blocked;
+    WaitCounters precise;
+    s64 window_start{};
+};
+
 CoreTiming::CoreTiming() = default;
 CoreTiming::~CoreTiming() {
     Reset();
@@ -90,6 +192,9 @@ void CoreTiming::Initialize(std::function<void()>&& on_thread_init_) {
     on_thread_init = std::move(on_thread_init_);
     event_fifo_id = 0;
     cpu_ticks = 0;
+    if (std::getenv("EDEN_NX2_TIMING_TRACE") != nullptr && !trace) {
+        trace = std::make_unique<TimingTrace>();
+    }
     if (is_multicore) {
         timer_thread = std::jthread([this](std::stop_token stop_token) {
             Common::SetCurrentThreadName("HostTiming");
@@ -109,10 +214,16 @@ void CoreTiming::Initialize(std::function<void()>&& on_thread_init_) {
                         // chose which (next_wait) and told ScheduleEvent when to wake us.
                         auto const remaining = next_wait.until - GetGlobalTimeNs().count();
                         if (remaining > 0) {
-                            if (next_wait.blocks) {
-                                event.BlockFor(std::chrono::nanoseconds(remaining));
-                            } else {
-                                event.WaitFor(std::chrono::nanoseconds(remaining));
+                            const auto begin = trace ? GetGlobalTimeNs().count() : 0;
+                            const bool woken =
+                                next_wait.blocks
+                                    ? event.BlockFor(std::chrono::nanoseconds(remaining))
+                                    : event.WaitFor(std::chrono::nanoseconds(remaining));
+                            if (trace) {
+                                const s64 end = GetGlobalTimeNs().count();
+                                trace->NoteWait(next_wait.blocks, woken, next_wait.name,
+                                                end - begin);
+                                trace->MaybeReport(end);
                             }
                         }
                     } else {
@@ -186,6 +297,9 @@ void CoreTiming::ScheduleEvent(std::chrono::nanoseconds ns_into_future,
         (*h).handle = h;
         wake = NeedsWake(next_time.count(), event_type->relaxed);
     }
+    if (trace) {
+        trace->NoteSchedule(event_type->name, wake);
+    }
     if (wake) {
         event.Set();
     }
@@ -205,6 +319,9 @@ void CoreTiming::ScheduleLoopingEvent(std::chrono::nanoseconds start_time,
                                          event_type->relaxed})};
         (*h).handle = h;
         wake = NeedsWake(next_time.count(), event_type->relaxed);
+    }
+    if (trace) {
+        trace->NoteSchedule(event_type->name, wake);
     }
     if (wake) {
         event.Set();
@@ -313,15 +430,24 @@ std::optional<s64> CoreTiming::Advance() {
 
                 basic_lock.unlock();
 
-                event_type->callback(
-                    evt_time, std::chrono::nanoseconds{GetGlobalTimeNs().count() - evt_time});
+                const s64 begin = GetGlobalTimeNs().count();
+                event_type->callback(evt_time, std::chrono::nanoseconds{begin - evt_time});
+                if (trace) {
+                    trace->NoteCallback(event_type->name, begin - evt_time,
+                                        GetGlobalTimeNs().count() - begin);
+                }
 
                 basic_lock.lock();
             } else {
                 basic_lock.unlock();
 
-                const auto new_schedule_time{event_type->callback(
-                    evt_time, std::chrono::nanoseconds{GetGlobalTimeNs().count() - evt_time})};
+                const s64 begin = GetGlobalTimeNs().count();
+                const auto new_schedule_time{
+                    event_type->callback(evt_time, std::chrono::nanoseconds{begin - evt_time})};
+                if (trace) {
+                    trace->NoteCallback(event_type->name, begin - evt_time,
+                                        GetGlobalTimeNs().count() - begin);
+                }
 
                 basic_lock.lock();
 
@@ -352,14 +478,24 @@ std::optional<s64> CoreTiming::Advance() {
     if (!event_queue.empty()) {
         os_wake_guard = OsWakeGuardNs();
         s64 os_wake = std::numeric_limits<s64>::max();
+        const EventType* os_wake_type{};
         for (const Event& queued : event_queue) {
-            os_wake =
-                (std::min)(os_wake, Common::OsWakeTime(queued.time, queued.relaxed, os_wake_guard));
+            const s64 wake = Common::OsWakeTime(queued.time, queued.relaxed, os_wake_guard);
+            if (wake < os_wake) {
+                os_wake = wake;
+                if (trace) {
+                    const auto type = queued.type.lock();
+                    os_wake_type = type.get();
+                }
+            }
         }
         const s64 top = event_queue.top().time;
         // Decided here, under the lock, so ScheduleEvent compares against what the thread does.
         next_wait.blocks = os_wake > GetGlobalTimeNs().count();
         next_wait.until = next_wait.blocks ? os_wake : top;
+        if (trace) {
+            next_wait.name = os_wake_type != nullptr ? os_wake_type->name : std::string{"?"};
+        }
         planned_wake = next_wait.until;
         return top;
     } else {
