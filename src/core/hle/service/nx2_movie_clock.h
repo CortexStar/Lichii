@@ -10,6 +10,10 @@ namespace Service {
 
 // The clock a video decoder session (nx2:vdecsvc) drops late frames by: the pts the movie's
 // audio has reached. Times are host microseconds; pause_end is when emulation last resumed.
+// Games such as Ocarina of Time take one decoded frame per frame they draw while the movie's audio
+// plays in real time: below the movie's rate frames are dropped against this clock, above it
+// frames are held back until it reaches them (HoldUs), before they are written: the decoder's
+// syncpoint counts written frames, and the client acquires an image once its fence has passed.
 class Nx2MovieClock {
 public:
     // A longer gap between acquires is a pause, a longer lag a jump in the stream; both restart
@@ -46,6 +50,16 @@ public:
             return std::nullopt;
         }
         return static_cast<u64>(due);
+    }
+
+    // How long (us) the frame at pts must wait until it is within `tolerance` of the clock, or
+    // nothing when it may go now (or the clock isn't running).
+    std::optional<u64> HoldUs(s64 now, u64 pts, s64 pause_end, u64 tolerance) const {
+        const auto due = Due(now, pause_end);
+        if (!due || pts <= *due + tolerance) {
+            return std::nullopt;
+        }
+        return pts - *due - tolerance;
     }
 
 private:
