@@ -474,6 +474,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             read_position += size != 0 ? size : RingWords - index;
             if (hook_requested.load(std::memory_order_relaxed) &&
                 idle_hook != nullptr) [[unlikely]] {
+                Nx2Profile::Scope hook_scope{Nx2Profile::Zone::FlushWork};
                 hook_requested.store(false, std::memory_order_seq_cst);
                 idle_hook(idle_argument);
             }
