@@ -59,6 +59,7 @@ public:
     bool MemoryWriteExclusive128(u64 vaddr, Dynarmic::A64::Vector value, Dynarmic::A64::Vector expected) override;
     void InstructionCacheOperationRaised(Dynarmic::A64::InstructionCacheOperation op, u64 value) override;
     void ExceptionRaised(u64 pc, Dynarmic::A64::Exception exception) override;
+    std::optional<Dynarmic::A64::HostFunctionEntry> GetHostFunction(u64 vaddr) override;
     void CallSVC(u32 svc) override;
     void AddTicks(u64 ticks) override;
     u64 GetTicksRemaining() override;
@@ -67,6 +68,11 @@ public:
     void ReturnException(u64 pc, Dynarmic::HaltReason hr);
     void OnSpinHint(u64 pc);
     bool WaitForPolledWord(u64 pc);
+    /// Host pointer to [vaddr, vaddr + size) if every page of it is plain memory, contiguous on
+    /// the host: what the JIT's fast path would access. nullptr otherwise.
+    u8* HostSpan(u64 vaddr, u64 size) const;
+    static bool HostMemmove(void* user, const Dynarmic::A64::HostFunctionState& state);
+    static bool HostMemset(void* user, const Dynarmic::A64::HostFunctionState& state);
 
     Dynarmic::CodePage cached_code_page;
     u64 last_code_addr = u64(-1);
@@ -85,6 +91,7 @@ public:
     };
     std::array<SpinSite, 16> m_spin_sites{}; ///< DecodeSpinWatch results by YIELD address
     Kernel::KProcess* m_process{};
+    const Common::PageTable* m_page_table{}; ///< Set when guest functions may run as host code
     std::shared_ptr<WindowTrace::Session> m_window_trace;
     const bool m_debugger_enabled{};
     const bool m_check_memory_access{};

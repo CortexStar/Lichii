@@ -184,6 +184,13 @@ void EmitA64CheckMemoryAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::
 }
 
 template<>
+void EmitIR<IR::Opcode::A64CallHostFunction>(oaknut::CodeGenerator&, EmitContext&, IR::Inst*) {
+    // The translator emits it only for UserCallbacks::GetHostFunction, which only the x64
+    // backend asks.
+    UNREACHABLE();
+}
+
+template<>
 void EmitIR<IR::Opcode::A64SetCheckBit>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
 

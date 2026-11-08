@@ -242,7 +242,7 @@ finish_this_inst:
     const A64::LocationDescriptor descriptor{block.Location()};
     const A64::LocationDescriptor end_location{block.EndLocation()};
 
-    const auto range = boost::icl::discrete_interval<u64>::closed(descriptor.PC(), end_location.PC() - 1);
+    const auto range = boost::icl::discrete_interval<u64>::closed(descriptor.GuestPC(), end_location.PC() - 1);
     block_ranges.AddRange(range, descriptor);
 
     auto bdesc = RegisterBlock(descriptor, entrypoint, size);
@@ -372,6 +372,28 @@ void A64EmitX64::EmitPushRSB(EmitContext& ctx, IR::Inst* inst) {
     }
 
     EmitX64::EmitPushRSB(ctx, inst);
+}
+
+namespace {
+bool CallHostFunctionThunk(u64 function, u64 user, A64JitState* state) {
+    const A64::HostFunctionState guest{state->reg.data(), &state->sp, state->vec.data(),
+                                       state->fpcr, &state->fpsr_exc};
+    return std::bit_cast<A64::HostFunction>(function)(std::bit_cast<void*>(user), guest);
+}
+} // namespace
+
+void A64EmitX64::EmitA64CallHostFunction(A64EmitContext& ctx, IR::Inst* inst) {
+    // The block holds nothing else: guest registers are in the JIT state, which the function
+    // reads and writes directly. It runs with the guest's MXCSR, so it uses no FP arithmetic.
+    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+    const u64 function = args[0].GetImmediateU64();
+    const u64 user = args[1].GetImmediateU64();
+    ctx.reg_alloc.HostCall(code, inst);
+    code.mov(code.ABI_PARAM1, function);
+    code.mov(code.ABI_PARAM2, user);
+    code.mov(code.ABI_PARAM3, code.ABI_JIT_PTR);
+    code.CallFunction(&CallHostFunctionThunk);
+    code.movzx(code.ABI_RETURN.cvt32(), code.ABI_RETURN.cvt8());
 }
 
 void A64EmitX64::EmitA64SetCheckBit(A64EmitContext& ctx, IR::Inst* inst) {

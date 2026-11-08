@@ -611,6 +611,7 @@ constexpr bool IsSetCheckBitOperation(const Opcode op) noexcept {
 constexpr bool MayHaveSideEffects(const Opcode op) noexcept {
     return op == Opcode::PushRSB
         || op == Opcode::CallHostFunction
+        || op == Opcode::A64CallHostFunction
         || op == Opcode::A64DataCacheOperationRaised
         || op == Opcode::A64InstructionCacheOperationRaised
         || IsSetCheckBitOperation(op)

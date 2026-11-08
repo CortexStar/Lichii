@@ -359,7 +359,10 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
                      matching_sdk, matching_sdk ? load_base : 0, session ? session->id : 0);
         }
     }
-    LOG_INFO(Loader, "Module {} loaded at {:#x} (size {:#x})", nso_file.GetName(), load_base, image_size);
+    const std::string build_id = Common::HexToString(std::span{nso_header.build_id}.first(20));
+    process.AddGuestFunctions(build_id, load_base);
+    LOG_INFO(Loader, "Module {} loaded at {:#x} (size {:#x}, build id {})", nso_file.GetName(),
+             load_base, image_size, build_id);
     process.LoadModule(system.Kernel(), std::move(codeset), load_base);
     if (name == "main" && process.GetProgramId() == Settings::MarioKartWorldProgramId) {
         process.SetMkwDynamicFpsPatchApplied(mkw_dynamic_fps_patch_applied);

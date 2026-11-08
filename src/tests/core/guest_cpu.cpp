@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
 #include <map>
 #include <optional>
+#include <span>
 #include <catch2/catch_test_macros.hpp>
 #include "common/common_types.h"
 #include "dynarmic/interface/A64/a64.h"
@@ -24,6 +26,9 @@ public:
     std::map<u64, u32> code;
     std::map<u64, u8> data;
     u64 callback_counter_reads{};
+    u64 host_function_pc{~u64{0}};
+    std::optional<Dynarmic::A64::HostFunctionEntry> host_function;
+    u32 host_function_queries{};
 
     std::optional<u32> MemoryReadCode(u64 address) override {
         const auto it = code.find(address);
@@ -64,8 +69,21 @@ public:
         return 0;
     }
 
-    void Load(std::initializer_list<u32> instructions) {
-        u64 address = Entry;
+    std::optional<Dynarmic::A64::HostFunctionEntry> GetHostFunction(u64 address) override {
+        if (address != host_function_pc) {
+            return std::nullopt;
+        }
+        ++host_function_queries;
+        return host_function;
+    }
+
+    void Load(std::initializer_list<u32> instructions, u64 address = Entry) {
+        for (const u32 instruction : instructions) {
+            code[address] = instruction;
+            address += 4;
+        }
+    }
+    void Load(std::span<const u32> instructions, u64 address) {
         for (const u32 instruction : instructions) {
             code[address] = instruction;
             address += 4;
@@ -130,3 +148,75 @@ TEST_CASE("CNTPCT_EL0 without a factor uses the callback", "[guest_cpu]") {
     CHECK(jit.GetRegister(0) == 0);
 }
 #endif
+
+namespace {
+
+constexpr u64 Function = Entry + 0x1000;
+constexpr u64 Stop = Entry + 0x2000;
+
+struct XorShift {
+    u64 state;
+    u64 Next() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return state;
+    }
+};
+
+} // namespace
+
+namespace {
+
+struct HostCalls {
+    bool handle{};
+    u32 calls{};
+};
+
+bool AnswerFortyTwo(void* user, const Dynarmic::A64::HostFunctionState& state) {
+    auto& host = *static_cast<HostCalls*>(user);
+    ++host.calls;
+    if (!host.handle) {
+        return false;
+    }
+    state.x[0] = 42;
+    return true;
+}
+
+} // namespace
+
+TEST_CASE("A host function replaces a guest function and its guest code runs if it declines",
+          "[guest_cpu]") {
+    GuestEnvironment env;
+    // bl Function; svc #0. Function: movz x0, #1; ret
+    env.Load({0x94000400, Svc0});
+    env.Load({0xD2800020, 0xD65F03C0}, Function);
+    HostCalls host;
+    env.host_function_pc = Function;
+    env.host_function = Dynarmic::A64::HostFunctionEntry{&AnswerFortyTwo, &host};
+    Dynarmic::A64::Jit jit{BaseConfig(env)};
+    env.jit = &jit;
+
+    const auto call = [&](bool handle) {
+        host.handle = handle;
+        jit.SetRegister(0, 0);
+        jit.SetPC(Entry);
+        jit.Run();
+        return jit.GetRegister(0);
+    };
+    CHECK(call(true) == 42);
+    CHECK(jit.GetPC() == Entry + 8);
+    CHECK(call(false) == 1);
+    CHECK(jit.GetPC() == Entry + 8);
+    CHECK(call(false) == 1);
+    CHECK(call(true) == 42);
+    CHECK(host.calls == 4);
+    // Translated once, the fallback block included.
+    CHECK(env.host_function_queries == 1);
+
+    // Invalidating the function's code drops both blocks.
+    jit.InvalidateCacheRange(Function, 4);
+    CHECK(call(false) == 1);
+    CHECK(env.host_function_queries == 2);
+    CHECK(host.calls == 5);
+}
