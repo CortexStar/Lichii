@@ -8,12 +8,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdio>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <thread>
 #include <utility>
@@ -90,7 +92,15 @@ public:
     /// safe to touch worker resources.
     void WaitWorker();
 
+    /// Ends frame `frame` (counted by the caller): about once a second the next frame's
+    /// submissions are timed, for EDEN_DKB_FRAME_TRACE and GpuFrameMs.
     void MarkFrameEnd(u64 frame);
+
+    /// GPU time of the last timed frame (the sum of its submissions), or nullopt before one.
+    [[nodiscard]] std::optional<float> GpuFrameMs() const {
+        const float ms = gpu_frame_ms.load(std::memory_order_relaxed);
+        return ms >= 0.0f ? std::optional{ms} : std::nullopt;
+    }
     void TraceGraphicsPipeline(const std::array<u64, 6>& hashes);
     void TraceComputePipeline(u64 hash);
     /// Worker thread, inside a recorded command: timestamps one draw or dispatch of a sampled
@@ -587,6 +597,8 @@ private:
     /// Records the reordered uploads into the upload command buffer as one command.
     void FlushReorderedUploads();
 
+    const bool trace_details = Common::DkbFrameTrace::Enabled();
+    std::atomic<float> gpu_frame_ms{-1.0f};
     vk::QueryPool trace_query_pool;
     static constexpr u32 TraceMaxSubmissions = 512;
     struct SubmissionTrace {
