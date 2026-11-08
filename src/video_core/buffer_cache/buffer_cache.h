@@ -1503,6 +1503,22 @@ bool BufferCache<P>::DMAClear(GPUVAddr dst_address, u64 amount, u32 value) {
 }
 
 template <class P>
+void BufferCache<P>::MarkUsed(DAddr device_addr, u64 size) {
+    const u64 page = device_addr >> CACHING_PAGEBITS;
+    if (device_addr == 0 || size == 0 || page >= page_table.size()) {
+        return;
+    }
+    const BufferId buffer_id = page_table[page];
+    if (!buffer_id) {
+        return;
+    }
+    Buffer& buffer = slot_buffers[buffer_id];
+    if (buffer.IsInBounds(device_addr, size)) {
+        buffer.MarkUsage(buffer.Offset(device_addr), size);
+    }
+}
+
+template <class P>
 std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainBuffer(GPUVAddr gpu_addr, u32 size,
                                                                  ObtainBufferSynchronize sync_info,
                                                                  ObtainBufferOperation post_op) {
@@ -1528,11 +1544,14 @@ std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainCPUBuffer(
         break;
     }
 
+    // Each caller records GPU work that reads or writes these bytes now (indirect dispatches, DMA
+    // copies between images and buffers, query results, conditional rendering): an upload of them
+    // later in this submission must run after it.
+    buffer.MarkUsage(buffer.Offset(device_addr), size);
     switch (post_op) {
     case ObtainBufferOperation::MarkAsWritten:
         MarkWrittenBuffer(buffer_id, device_addr, size, false,
                           GpuWaitStats::WriteSite::ImageToBuffer);
-        buffer.MarkUsage(buffer.Offset(device_addr), size);
         break;
     case ObtainBufferOperation::DiscardWrite: {
         ClearDownload(device_addr, size);
@@ -2319,6 +2338,10 @@ void BufferCache<P>::BindHostDrawIndirectBuffers() {
         Buffer& buffer = slot_buffers[binding.buffer_id];
         TouchBuffer(buffer, binding.buffer_id);
         SynchronizeBuffer(buffer, binding.device_addr, binding.size);
+        // The draw reads the arguments (GetDrawIndirectBuffer, GetDrawIndirectCount).
+        if (binding.buffer_id != NULL_BUFFER_ID) {
+            buffer.MarkUsage(buffer.Offset(binding.device_addr), binding.size);
+        }
     };
     if (current_draw_indirect->include_count) {
         bind_buffer(channel_state->count_buffer_binding);
