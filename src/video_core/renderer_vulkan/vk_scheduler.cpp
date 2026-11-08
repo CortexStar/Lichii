@@ -356,6 +356,13 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
             cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                    VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, 0, COMPUTE_TO_GRAPHICS);
         }
+        if (GpuMarkers::Enabled()) {
+            std::array<char, 32> label{};
+            std::snprintf(label.data(), label.size(), "pass %ux%u", render_area.width,
+                          render_area.height);
+            std::array<float, 4> color{1.0f, 0.5f, 0.1f, 1.0f};
+            cmdbuf.BeginDebugUtilsLabelEXT(label.data(), color);
+        }
         cmdbuf.BeginRenderPass(renderpass_bi, VK_SUBPASS_CONTENTS_INLINE);
     });
     num_renderpass_images = framebuffer->NumImages();
@@ -956,6 +963,9 @@ void Scheduler::EndRenderPass()
         Record([has_transform_feedback = std::exchange(render_pass_has_xfb, false)](
                    vk::CommandBuffer cmdbuf) {
             cmdbuf.EndRenderPass();
+            if (GpuMarkers::Enabled()) {
+                cmdbuf.EndDebugUtilsLabelEXT();
+            }
             if (has_transform_feedback) {
                 static constexpr VkMemoryBarrier XFB_OUTPUT_BARRIER{
                     .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
