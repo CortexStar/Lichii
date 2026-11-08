@@ -21,6 +21,7 @@
 #include "core/frontend/emu_window.h"
 #include "core/frontend/graphics_context.h"
 #include "core/hle/service/nvdrv/nvdata.h"
+#include "core/load_timing.h"
 #include "core/perf_stats.h"
 #include "video_core/cdma_pusher.h"
 #include "video_core/control/channel_state.h"
@@ -324,6 +325,12 @@ struct GPU::Impl {
             }
         }
         raster_area.preemtive = true;
+        struct WaitTimer {
+            Core::LoadTiming::Clock::time_point start = Core::LoadTiming::Clock::now();
+            ~WaitTimer() {
+                Core::LoadTiming::CountGpuReadWait(Core::LoadTiming::Clock::now() - start);
+            }
+        } const wait_timer;
         // A guest CPU read of GPU-written memory (reactive flushing): count them, they decide
         // whether buffer data must be copied back at every fence (EDEN_NX2_BUFFER_DOWNLOADS).
         if (static std::atomic<u64> reads{}; (reads.fetch_add(1, std::memory_order_relaxed) & 63) == 0) {

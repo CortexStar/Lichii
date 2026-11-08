@@ -108,4 +108,8 @@ TEST_CASE("Counters subtract field by field", "[core][load_timing]") {
     const Counters e{.host_decompressions = 3, .host_decompressed_bytes = 100};
     REQUIRE((c - e).host_decompressions == 4);
     REQUIRE((c - e).host_decompressed_bytes == 800);
+    const Counters f{.gpu_read_waits = 10, .gpu_read_wait_ns = 5000};
+    const Counters g{.gpu_read_waits = 4, .gpu_read_wait_ns = 1000};
+    REQUIRE((f - g).gpu_read_waits == 6);
+    REQUIRE((f - g).gpu_read_wait_ns == 4000);
 }
