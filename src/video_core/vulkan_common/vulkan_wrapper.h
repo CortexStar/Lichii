@@ -891,6 +891,10 @@ public:
     constexpr Queue(VkQueue queue_, const DeviceDispatch& dld_) noexcept
         : queue{queue_}, dld{&dld_} {}
 
+    VkQueue operator*() const noexcept {
+        return queue;
+    }
+
     VkResult Submit(Span<VkSubmitInfo> submit_infos,
                     VkFence fence = VK_NULL_HANDLE) const noexcept {
         return dld->vkQueueSubmit(queue, submit_infos.size(), submit_infos.data(), fence);

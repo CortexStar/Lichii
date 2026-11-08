@@ -13,4 +13,8 @@ namespace Common {
 /// Returns nullopt when the platform has no such query or the window is on no known monitor.
 std::optional<u32> QueryDisplayRefreshRate(void* window);
 
+/// Whether the window (its top-level window) covers its whole monitor: exclusive or borderless
+/// fullscreen. False when the platform has no such query.
+bool WindowCoversMonitor(void* window);
+
 } // namespace Common

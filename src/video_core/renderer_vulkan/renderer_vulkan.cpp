@@ -15,6 +15,7 @@
 #include <fmt/ranges.h>
 
 #include "common/display_hdr.h"
+#include "common/display_refresh.h"
 #include "common/dkb_cpu_trace.h"
 #include "common/logging.h"
 #include <ranges>
@@ -31,9 +32,11 @@
 #include "video_core/post_processing/fx_chain.h"
 #endif
 #include "video_core/hdr_capture.h"
+#include "video_core/guest_frame_timing.h"
 #include "video_core/oot_dlss.h"
 #include "video_core/vulkan_common/amd_ffx.h"
 #ifdef _WIN32
+#include "video_core/renderer_vulkan/present/amd_frame_gen.h"
 #include "video_core/renderer_vulkan/vk_amd_fsr4_upscaler.h"
 #endif
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
@@ -208,6 +211,10 @@ try
     VideoCore::FxChain::Instance().LoadFromSettings();
 #endif
 
+    present_manager.SetBeforePresent([](const Frame& frame) {
+        VideoCore::GuestFrameTiming::RecordPresent({frame.guest_frame, frame.guest_start_ns});
+    });
+
 #ifdef _WIN32
     // Ocarina of Time's AMD modes run on the HDR image only with FSR 4 (oot_dlss.h HdrInput).
     if (VideoCommon::OotDlss::UsesAmd()) {
@@ -232,6 +239,60 @@ try
 RendererVulkan::~RendererVulkan() {
     scheduler.RegisterOnSubmit([] {});
     void(device.GetLogical().WaitIdle());
+}
+
+void RendererVulkan::UpdatePacing() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - display_checked < std::chrono::milliseconds{500}) {
+        return;
+    }
+    display_checked = now;
+    void* const window = render_window.GetWindowInfo().render_surface;
+    covers_monitor = Common::WindowCoversMonitor(window);
+    refresh_hz = Common::QueryDisplayRefreshRate(window).value_or(0);
+    SCOPE_EXIT {
+        // The status the debug server reads, gathered here on the presenting thread.
+        VideoCore::PresentStatus status{
+            .refresh_hz = refresh_hz,
+            .frame_cap = swapchain.GetFrameCap(),
+        };
+#ifdef _WIN32
+        if (const AmdFrameGen* const amd_frame_gen = swapchain.GetAmdFrameGen()) {
+            const AmdFrameGenPacing pacing = amd_frame_gen->Pacing();
+            status.amd_frame_gen = true;
+            status.fg_swapchain = pacing.swapchain_provider;
+            status.fg_generation = pacing.frame_gen_provider;
+            status.driver = pacing.driver;
+            status.fg_rdna4 = pacing.rdna4;
+            status.fg_driver_26_10_1 = pacing.driver_26_10_1;
+            status.fg_swapchain_4 = pacing.swapchain_4;
+            status.fg_vsync_off = pacing.vsync_off;
+            status.fg_covers_monitor = pacing.covers_monitor;
+            status.fg_hags = pacing.hags;
+            status.fg_generating = pacing.frame_generation;
+            status.fg_driver_pacing_expected = pacing.DriverPacingExpected();
+            status.fg_presents = pacing.presents;
+            if (status.fg_driver_pacing_expected != logged_driver_pacing) {
+                logged_driver_pacing = status.fg_driver_pacing_expected;
+                LOG_INFO(Render_Vulkan,
+                         "AMD FSR frame generation: {} ({}, {}; RDNA 4 {}, driver {} {}, VSync "
+                         "off {}, fullscreen {}, HAGS {})",
+                         *logged_driver_pacing ? "AMD's driver paces the flips"
+                                              : "AMD's swapchain paces in software",
+                         status.fg_swapchain, status.fg_generation, status.fg_rdna4,
+                         status.driver, status.fg_driver_26_10_1, status.fg_vsync_off,
+                         status.fg_covers_monitor, status.fg_hags);
+            }
+        }
+#endif
+        std::scoped_lock lock{present_status_mutex};
+        present_status = std::move(status);
+    };
+}
+
+VideoCore::PresentStatus RendererVulkan::GetPresentStatus() const {
+    std::scoped_lock lock{present_status_mutex};
+    return present_status;
 }
 
 void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebuffers) {
@@ -302,6 +363,31 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
                                render_window.GetFramebufferLayout(),
                                present_manager.SwapchainImageCount(), output_format, hdr_output,
                                overlay_input ? &*overlay_input : nullptr);
+
+    if (!framebuffers.empty()) {
+        frame->guest_frame = framebuffers.front().guest_frame;
+        frame->guest_start_ns = framebuffers.front().guest_start_ns;
+    }
+    UpdatePacing();
+#ifdef _WIN32
+    if (AmdFrameGen* const amd_frame_gen = swapchain.GetAmdFrameGen()) {
+        // The game's area of the presented image, in the swapchain's pixels.
+        const auto& layout = render_window.GetFramebufferLayout();
+        const VkExtent2D size = swapchain.GetExtent();
+        const f32 sx = layout.width ? static_cast<f32>(size.width) / static_cast<f32>(layout.width)
+                                    : 1.0f;
+        const f32 sy = layout.height
+                           ? static_cast<f32>(size.height) / static_cast<f32>(layout.height)
+                           : 1.0f;
+        amd_frame_gen->SetGenerationRect(
+            static_cast<s32>(static_cast<f32>(layout.screen.left) * sx),
+            static_cast<s32>(static_cast<f32>(layout.screen.top) * sy),
+            static_cast<s32>(static_cast<f32>(layout.screen.GetWidth()) * sx),
+            static_cast<s32>(static_cast<f32>(layout.screen.GetHeight()) * sy));
+        amd_frame_gen->SetPresentationState(
+            covers_monitor, swapchain.GetPresentMode() == VK_PRESENT_MODE_IMMEDIATE_KHR);
+    }
+#endif
 
 #ifdef HAS_LSFG
     if (hdr_output) {

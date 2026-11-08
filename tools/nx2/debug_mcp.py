@@ -54,6 +54,14 @@ TOOLS = [
         },
     },
     {
+        "name": "present_status",
+        "description": "Presentation for the bench: guest frame start to host present latency "
+                       "(last 1024 frames: mean, p50, p99, max), the VRR frame cap (shown and "
+                       "rendered fps), Anti-Lag 2, and AMD FSR frame generation's driver-pacing "
+                       "prerequisites (swapchain version, driver, VSync off, fullscreen, HAGS).",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "screenshot",
         "description": "PNG of the next presented frame (default 16:9 at 720 lines; width sets "
                        "another shape). Fails when no frame is presented within timeout_s "

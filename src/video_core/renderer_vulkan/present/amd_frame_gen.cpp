@@ -1,0 +1,473 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#include <atomic>
+#include <charconv>
+#include <cstdio>
+#include <mutex>
+
+#include <windows.h>
+
+#include "common/logging.h"
+#include "common/settings.h"
+#include "video_core/renderer_vulkan/present/amd_frame_gen.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/vulkan_common/amd_ffx.h"
+#include "video_core/vulkan_common/amd_ffx_api.h"
+#include "video_core/vulkan_common/vulkan_device.h"
+
+namespace Vulkan {
+
+namespace {
+
+std::atomic<AmdFrameGen*> g_active{};
+
+/// AMD's swapchain submits to the game queue from its own threads; Lichii's threads submit to
+/// it under the scheduler's submit mutex. VkQueueInfoFFXAPI::submitFunc has no queue argument,
+/// so the one game queue lives here.
+struct GameQueue {
+    VkQueue queue{};
+    PFN_vkQueueSubmit submit{};
+    std::mutex* mutex{};
+} g_game_queue;
+
+VkResult SubmitToGameQueue(uint32_t count, const VkSubmitInfo* submits, VkFence fence) {
+    std::scoped_lock lock{*g_game_queue.mutex};
+    return g_game_queue.submit(g_game_queue.queue, count, submits, fence);
+}
+
+VkDeviceContext DeviceContext(const Device& device) {
+    return VkDeviceContext{
+        .vkDevice = *device.GetLogical(),
+        .vkPhysicalDevice = device.GetPhysical(),
+        .vkDeviceProcAddr = device.GetDispatchLoader().vkGetDeviceProcAddr,
+    };
+}
+
+/// Adrenalin's version from driverInfo ("26.10.2 (LLPC)"), as year * 10000 + month * 100 + minor.
+u32 AdrenalinVersion(std::string_view info) {
+    std::array<u32, 3> parts{};
+    const char* it = info.data();
+    const char* const end = info.data() + info.size();
+    for (u32& part : parts) {
+        const auto result = std::from_chars(it, end, part);
+        if (result.ec != std::errc{}) {
+            return 0;
+        }
+        it = result.ptr;
+        if (it == end || *it != '.') {
+            break;
+        }
+        ++it;
+    }
+    return parts[0] * 10000 + parts[1] * 100 + parts[2];
+}
+
+bool HagsEnabled() {
+    DWORD value{};
+    DWORD size = sizeof(value);
+    return RegGetValueW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers",
+                        L"HwSchMode", RRF_RT_REG_DWORD, nullptr, &value, &size) == ERROR_SUCCESS &&
+           value == 2;
+}
+
+} // Anonymous namespace
+
+struct AmdFrameGen::Impl {
+    const Device& device;
+    Scheduler& scheduler;
+    ffxContext swapchain_context{};
+    ffxContext frame_gen_context{};
+    ffxQueryDescSwapchainReplacementFunctionsVK functions{};
+    VkSwapchainKHR swapchain{};
+    VkExtent2D display_size{};
+    VkFormat format{};
+    bool hdr{};
+    u64 frame_id{};
+    std::optional<u64> configured;
+    FfxApiRect2D generation_rect{};
+    bool covers_monitor{};
+    bool vsync_off{};
+    bool generating{};
+    bool logged_generation{};
+    std::optional<std::chrono::steady_clock::time_point> last_prepare;
+
+    explicit Impl(const Device& device_, Scheduler& scheduler_)
+        : device{device_}, scheduler{scheduler_} {}
+
+    void Configure(bool enabled) {
+        ffxConfigureDescFrameGeneration config{};
+        config.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
+        config.swapChain = swapchain;
+        config.frameGenerationCallback = &Generate;
+        config.frameGenerationCallbackUserContext = this;
+        config.frameGenerationEnabled = enabled;
+        config.allowAsyncWorkloads = true;
+        config.generationRect = generation_rect;
+        config.frameID = frame_id;
+        if (const auto result = AmdFfx::Api().configure(&frame_gen_context, &config.header);
+            result != FFX_API_RETURN_OK) {
+            LOG_ERROR(Render_Vulkan, "AMD FSR frame generation: ffxConfigure returned {}", result);
+        }
+        configured = frame_id;
+        generating = enabled;
+    }
+
+    /// AMD's swapchain calls this inside present to record frame generation.
+    static ffxReturnCode_t Generate(ffxDispatchDescFrameGeneration* params, void* context) {
+        auto* const self = static_cast<Impl*>(context);
+        params->backbufferTransferFunction = self->hdr ? FFX_API_BACKBUFFER_TRANSFER_FUNCTION_PQ
+                                                       : FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
+        if (self->hdr) {
+            params->minMaxLuminance[0] = 0.0f;
+            params->minMaxLuminance[1] = 10000.0f;
+        }
+        if (!std::exchange(self->logged_generation, true)) {
+            LOG_INFO(Render_Vulkan,
+                     "AMD FSR frame generation: AMD's swapchain asks for {} generated frame(s) per "
+                     "real frame",
+                     params->numGeneratedFrames);
+        }
+        return AmdFfx::Api().dispatch(&self->frame_gen_context, &params->header);
+    }
+
+    void DestroyFrameGenContext() {
+        if (frame_gen_context == nullptr) {
+            return;
+        }
+        ffxDispatchDescFrameGenerationSwapChainWaitForPresentsVK wait{};
+        wait.header.type = FFX_API_DISPATCH_DESC_TYPE_FGSWAPCHAIN_WAIT_FOR_PRESENTS_VK;
+        AmdFfx::Api().dispatch(&swapchain_context, &wait.header);
+        scheduler.Finish();
+        AmdFfx::Api().destroy_context(&frame_gen_context, nullptr);
+        frame_gen_context = nullptr;
+    }
+
+    bool CreateFrameGenContext() {
+        VkDeviceContext device_context = DeviceContext(device);
+        ffxCreateBackendVKDesc backend{};
+        backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
+        backend.deviceContext = device_context;
+        ffxCreateContextDescFrameGenerationVersion version{};
+        version.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_VERSION;
+        version.version = FFX_FRAMEGENERATION_VERSION;
+        ffxCreateContextDescFrameGeneration desc{};
+        desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
+        // Ocarina's depth is [0,1], finite and not inverted; the motion is at the render size.
+        desc.flags = FFX_FRAMEGENERATION_ENABLE_ASYNC_WORKLOAD_SUPPORT |
+                     (hdr ? FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE : 0U);
+        desc.displaySize = {display_size.width, display_size.height};
+        // The 3D is at most the display or the game's 4K output at a 1.5x scale.
+        desc.maxRenderSize = {(std::max)(display_size.width, 3840U),
+                              (std::max)(display_size.height, 2160U)};
+        desc.backBufferFormat = ffxApiGetSurfaceFormatVK(format);
+        desc.header.pNext = &backend.header;
+        backend.header.pNext = &version.header;
+        if (const auto result =
+                AmdFfx::Api().create_context(&frame_gen_context, &desc.header, nullptr);
+            result != FFX_API_RETURN_OK) {
+            LOG_ERROR(Render_Vulkan, "AMD FSR frame generation: ffxCreateContext returned {}",
+                      result);
+            frame_gen_context = nullptr;
+            return false;
+        }
+        LOG_INFO(Render_Vulkan, "AMD FSR frame generation: {} for {}x{} {}",
+                 AmdFfx::ProviderName(frame_gen_context), display_size.width,
+                 display_size.height, hdr ? "HDR10" : "SDR");
+        configured.reset();
+        return true;
+    }
+};
+
+AmdFrameGen::AmdFrameGen(const Device& device, Scheduler& scheduler)
+    : impl{std::make_unique<Impl>(device, scheduler)} {
+    g_game_queue = {
+        .queue = *device.GetGraphicsQueue(),
+        .submit = device.GetDispatchLoader().vkQueueSubmit,
+        .mutex = &scheduler.submit_mutex,
+    };
+}
+
+AmdFrameGen::~AmdFrameGen() {
+    AmdFrameGen* self = this;
+    g_active.compare_exchange_strong(self, nullptr);
+    auto& state = *impl;
+    if (state.swapchain_context == nullptr) {
+        return;
+    }
+    state.DestroyFrameGenContext();
+    AmdFfx::Api().destroy_context(&state.swapchain_context, nullptr);
+    // After the context, as the header asks; pContext is the frame generation swapchain.
+    if (state.functions.pOutDestroySwapchainFFXAPI != nullptr && state.swapchain != nullptr) {
+        state.functions.pOutDestroySwapchainFFXAPI(*state.device.GetLogical(), state.swapchain,
+                                                   nullptr, state.swapchain);
+    }
+}
+
+bool AmdFrameGen::Wanted() {
+    return Settings::values.frame_gen.GetValue() &&
+           Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::AmdFsr;
+}
+
+bool AmdFrameGen::IsAvailable(const Device& device) {
+    static const bool available = [&device] {
+        if (!AmdFfx::HasFrameGeneration() || !device.HasFrameGenQueues()) {
+            return false;
+        }
+        VkDeviceContext context = DeviceContext(device);
+        std::string list;
+        for (const auto& version :
+             AmdFfx::QueryVersions(FFX_API_CREATE_CONTEXT_DESC_TYPE_FGSWAPCHAIN_VK, context)) {
+            list += (list.empty() ? "" : ", ") + version.name;
+        }
+        std::string fg;
+        for (const auto& version :
+             AmdFfx::QueryVersions(FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION, context)) {
+            fg += (fg.empty() ? "" : ", ") + version.name;
+        }
+        LOG_INFO(Render_Vulkan, "AMD FSR frame generation versions: swapchain {}; generation {}",
+                 list.empty() ? "none" : list, fg.empty() ? "none" : fg);
+        return !list.empty() && !fg.empty();
+    }();
+    return available;
+}
+
+AmdFrameGen* AmdFrameGen::Active() {
+    return g_active.load(std::memory_order_acquire);
+}
+
+VkResult AmdFrameGen::CreateSwapchain(const VkSwapchainCreateInfoKHR& ci,
+                                      VkSwapchainKHR& swapchain) {
+    auto& state = *impl;
+    const bool resized = state.display_size.width != ci.imageExtent.width ||
+                         state.display_size.height != ci.imageExtent.height ||
+                         state.format != ci.imageFormat;
+    state.display_size = ci.imageExtent;
+    state.format = ci.imageFormat;
+    if (state.generation_rect.width == 0 || resized) {
+        // The whole image until the renderer sets the game's area (SetGenerationRect).
+        state.generation_rect = {0, 0, static_cast<s32>(ci.imageExtent.width),
+                                 static_cast<s32>(ci.imageExtent.height)};
+    }
+    state.hdr = ci.imageColorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT;
+    if (state.swapchain_context != nullptr) {
+        // In place: the frame generation swapchain stays (ffx_api_framegeneration_vk.h:129).
+        if (resized) {
+            state.DestroyFrameGenContext();
+        }
+        VkSwapchainCreateInfoKHR info = ci;
+        info.oldSwapchain = VK_NULL_HANDLE;
+        const VkResult result = state.functions.pOutCreateSwapchainFFXAPI(
+            *state.device.GetLogical(), &info, nullptr, &state.swapchain, state.swapchain);
+        if (result != VK_SUCCESS) {
+            return result;
+        }
+        swapchain = state.swapchain;
+        if (state.frame_gen_context == nullptr && !state.CreateFrameGenContext()) {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        g_active.store(this, std::memory_order_release);
+        return VK_SUCCESS;
+    }
+    const auto& device = state.device;
+    const auto queue = [](const Device::FrameGenQueue& queue) {
+        return VkQueueInfoFFXAPI{.queue = *queue.queue, .familyIndex = queue.family,
+                                 .submitFunc = nullptr};
+    };
+    ffxCreateContextDescFrameGenerationSwapChainVersionVK version{};
+    version.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_VERSION_VK;
+    version.version = FFX_FRAMEGENERATION_SWAPCHAIN_VK_VERSION;
+    ffxCreateContextDescFrameGenerationSwapChainVK desc{};
+    desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FGSWAPCHAIN_VK;
+    desc.physicalDevice = device.GetPhysical();
+    desc.device = *device.GetLogical();
+    state.swapchain = VK_NULL_HANDLE;
+    desc.swapchain = &state.swapchain;
+    desc.allocator = nullptr;
+    desc.createInfo = ci;
+    desc.createInfo.oldSwapchain = VK_NULL_HANDLE;
+    desc.gameQueue = {.queue = *device.GetGraphicsQueue(),
+                      .familyIndex = device.GetGraphicsFamily(),
+                      .submitFunc = &SubmitToGameQueue};
+    desc.asyncComputeQueue = queue(device.GetFrameGenComputeQueue());
+    desc.presentQueue = queue(device.GetFrameGenPresentQueue());
+    desc.imageAcquireQueue = queue(device.GetFrameGenAcquireQueue());
+    desc.header.pNext = &version.header;
+    if (const auto result =
+            AmdFfx::Api().create_context(&state.swapchain_context, &desc.header, nullptr);
+        result != FFX_API_RETURN_OK) {
+        LOG_ERROR(Render_Vulkan, "AMD FSR frame generation swapchain: ffxCreateContext returned {}",
+                  result);
+        state.swapchain_context = nullptr;
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    state.functions.header.type = FFX_API_QUERY_DESC_TYPE_FGSWAPCHAIN_FUNCTIONS_VK;
+    if (AmdFfx::Api().query(&state.swapchain_context, &state.functions.header) !=
+            FFX_API_RETURN_OK ||
+        state.functions.pOutQueuePresentKHR == nullptr) {
+        LOG_ERROR(Render_Vulkan, "AMD FSR frame generation swapchain: no replacement functions");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    LOG_INFO(Render_Vulkan, "AMD FSR frame generation swapchain: {} ({}x{}, {} images)",
+             AmdFfx::ProviderName(state.swapchain_context), ci.imageExtent.width,
+             ci.imageExtent.height, ci.minImageCount);
+    swapchain = state.swapchain;
+    if (!state.CreateFrameGenContext()) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    g_active.store(this, std::memory_order_release);
+    return VK_SUCCESS;
+}
+
+std::vector<VkImage> AmdFrameGen::GetImages(VkSwapchainKHR swapchain) const {
+    const auto& state = *impl;
+    u32 count = 0;
+    state.functions.pOutGetSwapchainImagesKHR(*state.device.GetLogical(), swapchain, &count,
+                                              nullptr);
+    std::vector<VkImage> images(count);
+    state.functions.pOutGetSwapchainImagesKHR(*state.device.GetLogical(), swapchain, &count,
+                                              images.data());
+    images.resize(count);
+    return images;
+}
+
+VkResult AmdFrameGen::AcquireNextImage(VkSwapchainKHR swapchain, u64 timeout,
+                                       VkSemaphore semaphore, u32* image_index) const {
+    return impl->functions.pOutAcquireNextImageKHR(*impl->device.GetLogical(), swapchain, timeout,
+                                                   semaphore, VK_NULL_HANDLE, image_index);
+}
+
+void AmdFrameGen::WaitForPresents() {
+    if (impl->swapchain_context == nullptr) {
+        return;
+    }
+    ffxDispatchDescFrameGenerationSwapChainWaitForPresentsVK wait{};
+    wait.header.type = FFX_API_DISPATCH_DESC_TYPE_FGSWAPCHAIN_WAIT_FOR_PRESENTS_VK;
+    AmdFfx::Api().dispatch(&impl->swapchain_context, &wait.header);
+}
+
+void AmdFrameGen::SetHdrMetadata(VkSwapchainKHR swapchain,
+                                 const VkHdrMetadataEXT& metadata) const {
+    if (impl->functions.pOutSetHdrMetadataEXT != nullptr) {
+        impl->functions.pOutSetHdrMetadataEXT(*impl->device.GetLogical(), 1, &swapchain,
+                                              &metadata);
+    }
+}
+
+VkResult AmdFrameGen::Present(VkQueue game_queue, const VkPresentInfoKHR& present_info) {
+    auto& state = *impl;
+    if (state.frame_gen_context != nullptr && state.configured != state.frame_id) {
+        // No inputs this frame (a menu, a load, the game's own image): present it as rendered.
+        state.Configure(false);
+    }
+    const VkResult result = state.functions.pOutQueuePresentKHR(game_queue, &present_info);
+    ++state.frame_id;
+    return result;
+}
+
+void AmdFrameGen::SetGenerationRect(s32 left, s32 top, s32 width, s32 height) {
+    impl->generation_rect = {left, top, width, height};
+}
+
+void AmdFrameGen::SetPresentationState(bool covers_monitor, bool vsync_off) {
+    impl->covers_monitor = covers_monitor;
+    impl->vsync_off = vsync_off;
+}
+
+void AmdFrameGen::Prepare(Scheduler& scheduler, const PrepareInputs& in) {
+    auto& state = *impl;
+    if (state.frame_gen_context == nullptr || state.configured == state.frame_id || !in.camera) {
+        return;
+    }
+    if (in.depth_layer != 0) {
+        // FFX takes whole images: a depth in another array layer leaves the frame ungenerated.
+        static bool logged{};
+        if (!std::exchange(logged, true)) {
+            LOG_WARNING(Render_Vulkan, "AMD FSR frame generation: scene depth in array layer {}",
+                        in.depth_layer);
+        }
+        return;
+    }
+    // FG 4.0.2's mandatory order: configure, prepare, then generate in present.
+    state.Configure(true);
+    const auto now = std::chrono::steady_clock::now();
+    const f32 frame_time_ms =
+        state.last_prepare
+            ? std::chrono::duration<f32, std::milli>(now - *state.last_prepare).count()
+            : 1000.0f / 60.0f;
+    state.last_prepare = now;
+
+    constexpr u32 read = FFX_API_RESOURCE_STATE_GENERIC_READ; // GENERAL layout
+    ffxDispatchDescFrameGenerationPrepareV2 prepare{};
+    prepare.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2;
+    prepare.frameID = state.frame_id;
+    prepare.flags = 0;
+    prepare.renderSize = {in.render_size.width, in.render_size.height};
+    prepare.jitterOffset = {in.jitter[0], in.jitter[1]};
+    prepare.motionVectorScale = {in.motion_vector_scale[0], in.motion_vector_scale[1]};
+    prepare.frameTimeDelta = frame_time_ms;
+    prepare.reset = in.reset;
+    prepare.cameraNear = in.camera_near;
+    prepare.cameraFar = in.camera_far;
+    prepare.cameraFovAngleVertical = in.vertical_fov;
+    prepare.viewSpaceToMetersFactor = 1.0f;
+    prepare.depth = AmdFfx::Image2D(in.depth, in.depth_format, in.render_size.width,
+                                    in.render_size.height, false, read);
+    prepare.motionVectors = AmdFfx::Image2D(in.motion_vectors, in.motion_format,
+                                            in.render_size.width, in.render_size.height, false,
+                                            read);
+    const auto copy3 = [](const std::array<f32, 3>& from, float* to) {
+        to[0] = from[0];
+        to[1] = from[1];
+        to[2] = from[2];
+    };
+    copy3(in.camera->position, prepare.cameraPosition);
+    copy3(in.camera->up, prepare.cameraUp);
+    copy3(in.camera->right, prepare.cameraRight);
+    copy3(in.camera->forward, prepare.cameraForward);
+
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([prepare, context = &state.frame_gen_context](vk::CommandBuffer cmdbuf) {
+        const VkMemoryBarrier inputs{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, inputs);
+        ffxDispatchDescFrameGenerationPrepareV2 dispatch = prepare;
+        dispatch.commandList = *cmdbuf;
+        if (const auto result = AmdFfx::Api().dispatch(context, &dispatch.header);
+            result != FFX_API_RETURN_OK) {
+            LOG_ERROR(Render_Vulkan, "AMD FSR frame generation: prepare returned {}", result);
+        }
+    });
+    // AMD's backend bound its own pipelines and descriptor sets.
+    scheduler.InvalidateState();
+}
+
+AmdFrameGenPacing AmdFrameGen::Pacing() const {
+    auto& state = *impl;
+    AmdFrameGenPacing pacing{};
+    if (state.swapchain_context != nullptr) {
+        pacing.swapchain_provider = AmdFfx::ProviderName(state.swapchain_context);
+    }
+    if (state.frame_gen_context != nullptr) {
+        pacing.frame_gen_provider = AmdFfx::ProviderName(state.frame_gen_context);
+    }
+    pacing.driver = std::string{state.device.GetDriverInfo()};
+    pacing.rdna4 = state.device.GetModelName().find("RX 9") != std::string_view::npos;
+    pacing.driver_26_10_1 = AdrenalinVersion(state.device.GetDriverInfo()) >= 261001;
+    pacing.swapchain_4 = AmdFfx::IsVersion4OrNewer(pacing.swapchain_provider);
+    pacing.vsync_off = state.vsync_off;
+    pacing.covers_monitor = state.covers_monitor;
+    static const bool hags = HagsEnabled();
+    pacing.hags = hags;
+    pacing.frame_generation = state.generating;
+    if (state.functions.pOutGetLastPresentCountFFXAPI != nullptr && state.swapchain != nullptr) {
+        pacing.presents = state.functions.pOutGetLastPresentCountFFXAPI(state.swapchain);
+    }
+    return pacing;
+}
+
+} // namespace Vulkan

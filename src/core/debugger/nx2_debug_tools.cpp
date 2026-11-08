@@ -33,6 +33,7 @@
 #include "core/memory.h"
 #include "hid_core/hid_core.h"
 #include "video_core/gpu.h"
+#include "video_core/guest_frame_timing.h"
 #include "video_core/nx2_debug_control.h"
 #include "video_core/renderer_base.h"
 
@@ -220,6 +221,37 @@ json Status(ToolState& state, const json& params) {
                               {"p50_ms", input.p50_ms},
                               {"p99_ms", input.p99_ms},
                               {"max_ms", input.max_ms}}},
+    };
+}
+
+/// Presentation for the bench: guest frame start to host present (Lichii's latency), the frame
+/// cap, Anti-Lag 2, and AMD frame generation's pacing prerequisites (notes/fg-hwflip.md).
+json PresentStatus(ToolState& state, const json&) {
+    const auto latency = VideoCore::GuestFrameTiming::Recent();
+    const auto status = state.system.GPU().Renderer().GetPresentStatus();
+    return {
+        {"input_to_present",
+         {{"samples", latency.samples},
+          {"mean_ms", latency.mean_ms},
+          {"p50_ms", latency.p50_ms},
+          {"p99_ms", latency.p99_ms},
+          {"max_ms", latency.max_ms}}},
+        {"refresh_hz", status.refresh_hz},
+        {"frame_cap", status.frame_cap},
+        {"frame_gen_pacing",
+         {{"amd_swapchain", status.amd_frame_gen},
+          {"swapchain", status.fg_swapchain},
+          {"generation", status.fg_generation},
+          {"driver", status.driver},
+          {"rdna4", status.fg_rdna4},
+          {"driver_26_10_1", status.fg_driver_26_10_1},
+          {"swapchain_4", status.fg_swapchain_4},
+          {"vsync_off", status.fg_vsync_off},
+          {"covers_monitor", status.fg_covers_monitor},
+          {"hags", status.fg_hags},
+          {"generating", status.fg_generating},
+          {"driver_pacing_expected", status.fg_driver_pacing_expected},
+          {"presents", status.fg_presents}}},
     };
 }
 
@@ -721,6 +753,7 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
     return {
         {"status", handler(Status)},
         {"frame_times", handler(FrameTimes)},
+        {"present_status", handler(PresentStatus)},
         {"screenshot", handler(Screenshot)},
         {"log_tail", handler(LogTail)},
         {"log_filter", handler(LogFilter)},

@@ -88,3 +88,17 @@ TEST_CASE("Frame generation keeps FIFO and no cap", "[video_core][present_policy
                 VK_PRESENT_MODE_FIFO_KHR);
     }
 }
+
+TEST_CASE("AMD frame generation: VSync off, game held at half the VRR cap",
+          "[video_core][present_policy]") {
+    using Vulkan::ChooseAmdFrameGenPolicy;
+    const auto vrr = ChooseAmdFrameGenPolicy(true, 240, Amd);
+    REQUIRE(vrr.mode == VK_PRESENT_MODE_IMMEDIATE_KHR);
+    REQUIRE(vrr.frame_cap == 112);
+    REQUIRE(ChooseAmdFrameGenPolicy(true, 144, Amd).frame_cap == 69);
+    const auto fixed = ChooseAmdFrameGenPolicy(false, 240, Amd);
+    REQUIRE(fixed.mode == VK_PRESENT_MODE_IMMEDIATE_KHR);
+    REQUIRE(fixed.frame_cap == 0);
+    REQUIRE(ChooseAmdFrameGenPolicy(true, 0, Amd).frame_cap == 0);
+    REQUIRE(ChooseAmdFrameGenPolicy(true, 240, FifoOnly).mode == VK_PRESENT_MODE_FIFO_KHR);
+}

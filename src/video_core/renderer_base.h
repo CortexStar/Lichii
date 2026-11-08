@@ -45,6 +45,24 @@ struct FrameGenStatus {
     u64 generated_frames{};
 };
 
+struct PresentStatus {
+    u32 refresh_hz{};             ///< of the window's monitor; 0 when unknown
+    u32 frame_cap{};              ///< game frames per second held (HostFrameCap); 0: none
+    bool amd_frame_gen{};         ///< AMD's frame generation swapchain presents
+    std::string fg_swapchain;     ///< its provider version
+    std::string fg_generation;    ///< the frame generation provider version
+    std::string driver;           ///< driverInfo
+    bool fg_rdna4{};
+    bool fg_driver_26_10_1{};
+    bool fg_swapchain_4{};
+    bool fg_vsync_off{};
+    bool fg_covers_monitor{};
+    bool fg_hags{};
+    bool fg_generating{};
+    bool fg_driver_pacing_expected{};
+    u64 fg_presents{};
+};
+
 struct RendererSettings {
     // Screenshot
     std::atomic<bool> screenshot_requested{false};
@@ -87,6 +105,10 @@ public:
     /// The rate the guest's presents are paced at (PaceToVblank), 0 when they are not paced: the
     /// present cadence follows it. Safe to call from any thread.
     virtual void SetGuestPresentRate([[maybe_unused]] u32 hz) {}
+    /// Presentation state for diagnostics (debug server, bench).
+    [[nodiscard]] virtual PresentStatus GetPresentStatus() const {
+        return {};
+    }
 
     [[nodiscard]] const RendererDeviceInfo& GetDeviceInfo() const {
         return device_info;

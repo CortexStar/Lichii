@@ -20,6 +20,9 @@
 #include "video_core/renderer_vulkan/present_mode_policy.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
+#ifdef _WIN32
+#include "video_core/renderer_vulkan/present/amd_frame_gen.h"
+#endif
 #include "video_core/vulkan_common/vk_enum_string_helper.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -70,6 +73,11 @@ VkSurfaceFormatKHR ChooseSwapSurfaceFormat(vk::Span<VkSurfaceFormatKHR> formats,
 }
 
 PresentPolicy ChoosePresentPolicyForSettings(u32 refresh_hz, PresentModeSupport support) {
+    if (Settings::values.frame_gen.GetValue() &&
+        Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::AmdFsr) {
+        return ChooseAmdFrameGenPolicy(Settings::values.variable_refresh_rate.GetValue(),
+                                       refresh_hz, support);
+    }
     const bool locked = Settings::values.use_speed_limit.GetValue() &&
                         Settings::values.current_speed_mode.GetValue() != Settings::SpeedMode::Turbo;
     return ChoosePresentPolicy(Settings::values.vsync_mode.GetValue(), !locked,
@@ -154,7 +162,13 @@ bool Swapchain::Create(
 
     // Submitted work may still wait on the old acquire/present semaphores; destroying them under
     // it loses the device on MoltenVK (window moved to a display with a different scale).
-    if (swapchain) {
+#ifdef _WIN32
+    // AMD's present threads still hold presents that wait on the semaphores destroyed below.
+    if (amd_swapchain != VK_NULL_HANDLE) {
+        amd_frame_gen->WaitForPresents();
+    }
+#endif
+    if (IsCreated()) {
         std::scoped_lock lock{scheduler.submit_mutex};
         const VkResult result = device.GetLogical().WaitIdle();
         if (result == VK_ERROR_DEVICE_LOST) {
@@ -176,7 +190,7 @@ bool Swapchain::Create(
 bool Swapchain::AcquireNextImage(bool may_flush) {
     // Hold at most one present between the GPU and the display: the frame acquired now waits until
     // the one before the last present is on screen, so presents never queue up behind the display.
-    if (present_wait && present_id > 1) {
+    if (present_wait && present_id > 1 && IsNativeSwapchain()) {
         const VkResult wait = device.GetLogical().WaitForPresent2KHR(*swapchain, present_id - 1,
                                                                     PresentWaitTimeoutNs);
         switch (wait) {
@@ -199,9 +213,19 @@ bool Swapchain::AcquireNextImage(bool may_flush) {
             break;
         }
     }
+#ifdef _WIN32
+    const VkResult result =
+        amd_swapchain != VK_NULL_HANDLE
+            ? amd_frame_gen->AcquireNextImage(amd_swapchain, (std::numeric_limits<u64>::max)(),
+                                              *present_semaphores[frame_index], &image_index)
+            : device.GetLogical().AcquireNextImageKHR(
+                  *swapchain, (std::numeric_limits<u64>::max)(), *present_semaphores[frame_index],
+                  VK_NULL_HANDLE, &image_index);
+#else
     const VkResult result = device.GetLogical().AcquireNextImageKHR(
         *swapchain, (std::numeric_limits<u64>::max)(), *present_semaphores[frame_index],
         VK_NULL_HANDLE, &image_index);
+#endif
     switch (result) {
     case VK_SUCCESS:
         break;
@@ -282,16 +306,30 @@ void Swapchain::Present(VkSemaphore render_semaphore) {
         .waitSemaphoreCount = render_semaphore ? 1U : 0U,
         .pWaitSemaphores = &render_semaphore,
         .swapchainCount = 1,
+#ifdef _WIN32
+        .pSwapchains = amd_swapchain != VK_NULL_HANDLE ? &amd_swapchain : swapchain.address(),
+#else
         .pSwapchains = swapchain.address(),
+#endif
         .pImageIndices = &image_index,
         .pResults = nullptr,
     };
-    std::scoped_lock lock{scheduler.submit_mutex};
     if (present_wait) {
         // The id belongs to this present whatever it returns.
         present_id = next_present_id;
     }
-    switch (const VkResult result = present_queue.Present(present_info)) {
+    const VkResult present_result = [&] {
+#ifdef _WIN32
+        if (amd_swapchain != VK_NULL_HANDLE) {
+            // AMD's present submits to the game queue through its submit callback, which takes
+            // the submit mutex itself (present/amd_frame_gen.cpp).
+            return amd_frame_gen->Present(*device.GetGraphicsQueue(), present_info);
+        }
+#endif
+        std::scoped_lock lock{scheduler.submit_mutex};
+        return present_queue.Present(present_info);
+    }();
+    switch (const VkResult result = present_result) {
     case VK_SUCCESS:
         break;
     case VK_SUBOPTIMAL_KHR:
@@ -414,6 +452,37 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
     // Request the size again to reduce the possibility of a TOCTOU race condition.
     const auto updated_capabilities = physical_device.GetSurfaceCapabilitiesKHR(VkSurfaceKHR(surface));
     swapchain_ci.imageExtent = ChooseSwapExtent(updated_capabilities, width, height);
+#ifdef _WIN32
+    // AMD FSR frame generation: AMD's swapchain takes this create info (it presents through its
+    // own present queue and copies from the images, hence the extra usages).
+    if (AmdFrameGen::Wanted() && AmdFrameGen::IsAvailable(device) && !amd_failed) {
+        swapchain_ci.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        // AMD's swapchain paces its own presents (no present ids or waits) and gets no chain of
+        // this function's locals (a mutable-format list), which it may keep for recreations.
+        swapchain_ci.flags &= ~static_cast<VkSwapchainCreateFlagsKHR>(
+            VK_SWAPCHAIN_CREATE_PRESENT_ID_2_BIT_KHR | VK_SWAPCHAIN_CREATE_PRESENT_WAIT_2_BIT_KHR |
+            VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR);
+        swapchain_ci.pNext = nullptr;
+        if (!amd_frame_gen) {
+            amd_frame_gen = std::make_unique<AmdFrameGen>(device, scheduler);
+        }
+        if (amd_frame_gen->CreateSwapchain(swapchain_ci, amd_swapchain) == VK_SUCCESS) {
+            present_wait = false;
+            extent = swapchain_ci.imageExtent;
+            images = amd_frame_gen->GetImages(amd_swapchain);
+            image_count = static_cast<u32>(images.size());
+            image_view_format = surface_format.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
+                                    ? surface_format.format
+                                    : VK_FORMAT_B8G8R8A8_UNORM;
+            return;
+        }
+        LOG_ERROR(Render_Vulkan, "AMD FSR frame generation swapchain unavailable; presenting "
+                                 "without it");
+        amd_frame_gen.reset();
+        amd_swapchain = VK_NULL_HANDLE;
+        amd_failed = true;
+    }
+#endif
     // Don't add code within this and the swapchain creation.
     swapchain = device.GetLogical().CreateSwapchainKHR(swapchain_ci);
 
@@ -452,6 +521,13 @@ void Swapchain::Destroy() {
     present_semaphores.clear();
     render_semaphores.clear();
     swapchain.reset();
+#ifdef _WIN32
+    // AMD's swapchain is recreated in place while frame generation stays on (CreateSwapchain).
+    if (amd_frame_gen && !AmdFrameGen::Wanted()) {
+        amd_frame_gen.reset();
+        amd_swapchain = VK_NULL_HANDLE;
+    }
+#endif
 }
 
 void Swapchain::SetHdrMetadata(u16 peak_luminance, u16 reference_white) const {
@@ -474,7 +550,16 @@ void Swapchain::SetHdrMetadata(u16 peak_luminance, u16 reference_white) const {
         .maxContentLightLevel = static_cast<float>(peak_luminance),
         .maxFrameAverageLightLevel = 0.0f,
     };
+#ifdef _WIN32
+    if (amd_swapchain != VK_NULL_HANDLE) {
+        // AMD's swapchain replaces vkSetHdrMetadataEXT too.
+        amd_frame_gen->SetHdrMetadata(amd_swapchain, metadata);
+    } else {
+        device.GetLogical().SetHdrMetadataEXT(*swapchain, metadata);
+    }
+#else
     device.GetLogical().SetHdrMetadataEXT(*swapchain, metadata);
+#endif
     LOG_INFO(Render_Vulkan, "HDR10 metadata: peak {} nits (reference white {} nits)",
              peak_luminance, reference_white);
 }
@@ -512,6 +597,13 @@ bool Swapchain::SurfaceSupportsPresentWait() const {
 }
 
 bool Swapchain::NeedsPresentModeUpdate() const {
+#ifdef _WIN32
+    // AMD FSR frame generation turned on or off: AMD's swapchain comes or goes.
+    if ((AmdFrameGen::Wanted() && AmdFrameGen::IsAvailable(device) && !amd_failed) !=
+        (amd_swapchain != VK_NULL_HANDLE)) {
+        return true;
+    }
+#endif
     return present_mode != ChoosePresentPolicyForSettings(refresh_hz, PresentModes()).mode;
 }
 

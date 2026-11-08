@@ -30,9 +30,32 @@ std::optional<u32> QueryDisplayRefreshRate(void* window) {
     }
     return static_cast<u32>(mode.dmDisplayFrequency);
 }
+
+bool WindowCoversMonitor(void* window) {
+    if (window == nullptr) {
+        return false;
+    }
+    // The render surface may be a child of the top-level window: compare the top level's area.
+    const HWND top = GetAncestor(static_cast<HWND>(window), GA_ROOT);
+    const HWND target = top != nullptr ? top : static_cast<HWND>(window);
+    const HMONITOR monitor = MonitorFromWindow(target, MONITOR_DEFAULTTONULL);
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    RECT rect{};
+    if (monitor == nullptr || !GetMonitorInfoW(monitor, &info) || !GetWindowRect(target, &rect)) {
+        return false;
+    }
+    const RECT& m = info.rcMonitor;
+    return rect.left <= m.left && rect.top <= m.top && rect.right >= m.right &&
+           rect.bottom >= m.bottom;
+}
 #else
 std::optional<u32> QueryDisplayRefreshRate(void*) {
     return std::nullopt;
+}
+
+bool WindowCoversMonitor(void*) {
+    return false;
 }
 #endif
 

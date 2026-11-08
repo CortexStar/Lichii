@@ -7,6 +7,7 @@
 #pragma once
 
 #include <atomic>
+#include <memory>
 #include <vector>
 
 #include "common/common_types.h"
@@ -19,6 +20,7 @@ struct FramebufferLayout;
 
 namespace Vulkan {
 
+class AmdFrameGen;
 class Device;
 class Scheduler;
 
@@ -55,11 +57,24 @@ public:
 
     /// Returns true when the swapchain needs to be recreated.
     bool NeedsRecreation() const {
-        return !swapchain || IsSubOptimal() || NeedsPresentModeUpdate();
+        return Handle() == VK_NULL_HANDLE || IsSubOptimal() || NeedsPresentModeUpdate();
     }
 
     bool IsCreated() const {
-        return static_cast<bool>(swapchain);
+        return Handle() != VK_NULL_HANDLE;
+    }
+
+    /// AMD's frame generation swapchain while it presents (null otherwise).
+    [[nodiscard]] AmdFrameGen* GetAmdFrameGen() const noexcept {
+#ifdef _WIN32
+        return amd_swapchain != VK_NULL_HANDLE ? amd_frame_gen.get() : nullptr;
+#else
+        return nullptr;
+#endif
+    }
+
+    [[nodiscard]] VkPresentModeKHR GetPresentMode() const noexcept {
+        return present_mode;
     }
 
     /// Returns true when the swapchain is outdated.
@@ -88,10 +103,14 @@ public:
         return frame_index;
     }
 
-    /// Whether Lichii's own VkSwapchainKHR presents, rather than a frame generation swapchain
-    /// that owns presentation and its pacing.
+    /// Lichii's own swapchain, not AMD's (which has no present ids or waits and
+    /// paces its own presents).
     [[nodiscard]] bool IsNativeSwapchain() const noexcept {
+#ifdef _WIN32
+        return amd_swapchain == VK_NULL_HANDLE;
+#else
         return true;
+#endif
     }
 
     VkImage GetImageIndex(std::size_t index) const {
@@ -160,6 +179,14 @@ private:
 
     void Destroy();
 
+    [[nodiscard]] VkSwapchainKHR Handle() const noexcept {
+#ifdef _WIN32
+        return amd_swapchain != VK_NULL_HANDLE ? amd_swapchain : *swapchain;
+#else
+        return *swapchain;
+#endif
+    }
+
     bool NeedsPresentModeUpdate() const;
     PresentModeSupport PresentModes() const;
     bool SurfaceSupportsPresentWait() const;
@@ -171,6 +198,12 @@ private:
     Scheduler& scheduler;
 
     vk::SwapchainKHR swapchain;
+#ifdef _WIN32
+    /// AMD's frame generation swapchain (present/amd_frame_gen.h) in place of `swapchain`.
+    std::unique_ptr<AmdFrameGen> amd_frame_gen;
+    VkSwapchainKHR amd_swapchain{};
+    bool amd_failed{}; ///< AMD's swapchain could not be made: not tried again
+#endif
 
     std::size_t image_count{};
     std::vector<VkImage> images;

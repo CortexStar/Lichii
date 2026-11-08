@@ -237,6 +237,9 @@ public:
 
     void WaitForComposite();
 
+    /// The guest is about to start its next frame: numbers it and takes its start time.
+    void GuestFrameBoundary();
+
     std::vector<u8> GetAppletCaptureBuffer();
 
     /// Performs any additional setup necessary in order to begin GPU emulation.

@@ -37,6 +37,9 @@
 #include "video_core/render_trace.h"
 #include "video_core/renderer_vulkan/sampler_class_key.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
+#ifdef _WIN32
+#include "video_core/renderer_vulkan/present/amd_frame_gen.h"
+#endif
 #include "video_core/texture_cache/host_mip_limits.h"
 
 #include "video_core/dlss_contract.h"
@@ -2218,6 +2221,34 @@ bool TextureCacheRuntime::OotDlss(Framebuffer* dst_framebuffer, ImageView& input
         std::scoped_lock lock{current.mutex};
         return current.view_projection;
     }();
+
+#ifdef _WIN32
+    // AMD FSR frame generation takes this frame's depth, motion and camera (its prepare pass)
+    // before the frame is presented through AMD's swapchain.
+    if (AmdFrameGen* const amd_frame_gen = AmdFrameGen::Active();
+        amd_frame_gen != nullptr && AmdFrameGen::Wanted()) {
+        const auto camera = ::VideoCommon::OotCamera::FromViewProjection(view_projection);
+        amd_frame_gen->Prepare(scheduler, {
+            .depth = depth.ImageHandle(),
+            .depth_format =
+                MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, depth.format)
+                    .format,
+            .depth_layer = static_cast<u32>(depth.range.base.layer),
+            .motion_vectors = oot_motion_vectors->Image(),
+            .motion_format = VK_FORMAT_R16G16_SFLOAT,
+            .render_size = size,
+            .jitter = jitter,
+            // UV offsets; FG takes render pixels.
+            .motion_vector_scale = {static_cast<f32>(size.width),
+                                    static_cast<f32>(size.height)},
+            .reset = reset,
+            .camera_near = 0.1f,
+            .camera_far = 25000.0f,
+            .vertical_fov = camera ? camera->vertical_fov : 0.8726646f,
+            .camera = camera,
+        });
+    }
+#endif
 
     VkImageView output_view{};
     VkImage output_image{};

@@ -165,6 +165,11 @@ u32 HardwareComposer::ComposeLocked(f32* out_speed_scale, Display& display,
     // Advance by 1 frame (60 FPS compositing)
     m_frame_number += 1;
 
+    // The producer starts its next frame once its buffer comes back.
+    if (has_acquired_buffer && !composition_stack.empty()) {
+        nvdisp.GuestFrameBoundary();
+    }
+
     // Release framebuffers once the frame has been handed to the compositor. This happens
     // within the same vsync period as the acquire (release_frame_number is checked against
     // the advanced counter), so the producer gets its buffers back immediately instead of

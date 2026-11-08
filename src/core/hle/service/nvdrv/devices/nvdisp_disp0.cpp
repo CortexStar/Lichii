@@ -16,6 +16,7 @@
 #include "core/hle/service/nvdrv/devices/nvdisp_disp0.h"
 #include "core/perf_stats.h"
 #include "video_core/gpu.h"
+#include "video_core/guest_frame_timing.h"
 
 namespace Service::Nvidia::Devices {
 
@@ -78,6 +79,8 @@ void nvdisp_disp0::Composite(std::span<const Nvnflinger::HwcLayer> sorted_layers
             .crop_rect = layer.crop_rect,
             .blending = ConvertBlending(layer.blending),
             .layer_stack_mask = layer.layer_stack_mask,
+            .guest_frame = VideoCore::GuestFrameTiming::Current().id,
+            .guest_start_ns = VideoCore::GuestFrameTiming::Current().start_ns,
         });
 
         for (size_t i = 0; i < layer.acquire_fence.num_fences; i++) {
@@ -92,6 +95,10 @@ void nvdisp_disp0::Composite(std::span<const Nvnflinger::HwcLayer> sorted_layers
     system.SpeedLimiter().DoSpeedLimiting(system.CoreTiming().GetGlobalTimeUs());
     system.GetPerfStats().EndSystemFrame();
     system.GetPerfStats().BeginSystemFrame();
+}
+
+void nvdisp_disp0::GuestFrameBoundary() {
+    system.GPU().GuestFrameBoundary();
 }
 
 void nvdisp_disp0::WaitForComposite() {

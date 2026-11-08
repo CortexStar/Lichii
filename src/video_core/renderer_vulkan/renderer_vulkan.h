@@ -6,7 +6,11 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <variant>
 
@@ -77,6 +81,8 @@ public:
 #endif
     }
 
+    [[nodiscard]] VideoCore::PresentStatus GetPresentStatus() const override;
+
     // Enhanced platform-specific initialization
     void InitializePlatformSpecific();
 
@@ -94,6 +100,8 @@ private:
     VkCommandBuffer BeginSingleTimeCommands();
     void EndSingleTimeCommands(VkCommandBuffer command_buffer);
     void Report() const;
+    /// Every half second: the window's monitor (refresh rate, fullscreen) and the status.
+    void UpdatePacing();
 
     vk::Buffer RenderToBuffer(std::span<const Tegra::FramebufferConfig> framebuffers,
                               const Layout::FramebufferLayout& layout, VkFormat format,
@@ -136,6 +144,13 @@ private:
     std::optional<TurboMode> turbo_mode;
 
     Frame applet_frame;
+
+    bool covers_monitor{};
+    u32 refresh_hz{};
+    std::chrono::steady_clock::time_point display_checked{};
+    mutable std::mutex present_status_mutex;
+    VideoCore::PresentStatus present_status;
+    std::optional<bool> logged_driver_pacing;
 };
 
 } // namespace Vulkan

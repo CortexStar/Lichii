@@ -1205,6 +1205,11 @@ FN_MAX_LIMIT_LIST
     }
 
     /// Returns the vendor name reported from Vulkan.
+    /// VkPhysicalDeviceDriverProperties::driverInfo (AMD: the Adrenalin version, "26.10.2 (LLPC)").
+    std::string_view GetDriverInfo() const {
+        return properties.driver.driverInfo;
+    }
+
     std::string_view GetVendorName() const {
         return properties.driver.driverName;
     }

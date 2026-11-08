@@ -41,6 +41,8 @@ public:
     void Composite(std::span<const Nvnflinger::HwcLayer> sorted_layers);
 
     void WaitForComposite();
+    /// The guest's next frame starts (GPU::GuestFrameBoundary).
+    void GuestFrameBoundary();
 
     Kernel::KEvent* QueryEvent(u32 event_id) override;
 

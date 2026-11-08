@@ -89,4 +89,17 @@ constexpr PresentPolicy ChoosePresentPolicy(Settings::VSyncMode requested, bool 
     }
 }
 
+/// Present mode and game frame cap for AMD's frame generation swapchain. Its driver pacing needs
+/// VSync off (frame-interpolation-swap-chain.md:222), so IMMEDIATE where the surface has it; with
+/// VRR the shown frames are held at VrrFrameCap, and AMD shows one generated frame per game
+/// frame, so the game is held at half of it (112 at 240 Hz).
+constexpr PresentPolicy ChooseAmdFrameGenPolicy(bool vrr, u32 refresh_hz,
+                                                PresentModeSupport support) {
+    const u32 cap = vrr ? VrrFrameCap(refresh_hz) / 2 : 0;
+    if (support.immediate) {
+        return {VK_PRESENT_MODE_IMMEDIATE_KHR, cap};
+    }
+    return {support.mailbox ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR, cap};
+}
+
 } // namespace Vulkan

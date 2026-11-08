@@ -101,6 +101,27 @@ AMD's upscalers instead of DLSS, on any vendor's build (no Streamline):
 - **HUD:** the game draws its HUD after the network, on the upscaler's output, so text never goes
   through FSR.
 
+### AMD FSR frame generation and the frame cap
+
+- **Frame generation** "AMD FSR Frame Generation" (`frame_gen_type` AmdFsr) presents through
+  AMD's frame generation swapchain for Vulkan (`present/amd_frame_gen.cpp`): AMD's runtime
+  generates one frame per real frame inside present, on its own async compute queue, and paces
+  the presents itself. On RDNA 4 with Adrenalin 26.10.1+, borderless/exclusive fullscreen, VSync
+  off (the swapchain is IMMEDIATE) and presents inside the VRR window, AMD's driver meters the
+  flips (Driver-Assisted Frame Pacing, OptiScaler's "Mode 2"; notes/fg-hwflip.md). It takes its
+  inputs (depth, motion, jitter, camera from the view-projection, `video_core/oot_camera.h`)
+  from Ocarina of Time's upscaler path, so it needs one of the DLSS/AMD anti-aliasing modes;
+  other frames are presented without generation. Lichii presents on the GPU thread then, in
+  FG 4.0.2's configure, prepare, present order. The log says which pacing applies and why;
+  the debug server's `present_status` reports the same.
+- **Frame cap:** with "Variable Refresh Rate Display" on, AMD frame generation holds the game at
+  half of floor(R - R^2/3600) (112 at 240 Hz, so 224 shown, inside the VRR window that driver
+  pacing needs) through the nx2:vi2 present pacer (`ChooseAmdFrameGenPolicy`, `HostFrameCap`).
+- **Latency:** guest frame start to host present is logged every 600 frames and reported by
+  `present_status` (mean, p50, p99, max). Judge pacing on PresentMon's MsBetweenDisplayChange:
+  with the driver metering flips, present-call intervals alternate (OptiScaler's "thick" graph)
+  while display intervals are flat. PresentMon can't tell generated from real frames on Vulkan.
+
 What to look for in captures, A/B against Game and NVIDIA DLAA where available: shimmer on
 Kokiri Forest's grass and leaves during a slow pan; ghosting behind Link when he runs across a
 textured wall; trails behind Navi and the fireflies at night; stability of thin fences and
