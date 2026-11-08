@@ -1766,6 +1766,27 @@ void TextureCache<P>::ClearPoolResidency(ImageId image_id) {
 }
 
 template <class P>
+void TextureCache<P>::ForgetPoolRefs(ImageId image_id) {
+    const auto it = image_pool_refs.find(image_id);
+    if (it == image_pool_refs.end()) {
+        return;
+    }
+    for (const PoolRef& ref : it->second) {
+        if (std::ranges::find(active_channel_ids, ref.channel) == active_channel_ids.end()) {
+            continue;
+        }
+        VisitPoolTable(ref.channel * 4 + (ref.compute ? POOL_COMPUTE_TIC : POOL_GRAPHICS_TIC),
+                       [&](auto& table) {
+                           // A ref whose entry was re-pointed since only makes it resolve again.
+                           table.Forget(ref.index);
+                       });
+        ++pool_stats.forgets;
+    }
+    image_pool_refs.erase(it);
+    ++pool_generation;
+}
+
+template <class P>
 FramebufferId TextureCache<P>::GetFramebufferId(const RenderTargets& key) {
     const auto [pair, is_new] = framebuffers.try_emplace(key);
     FramebufferId& framebuffer_id = pair->second;
@@ -3197,6 +3218,9 @@ void TextureCache<P>::InvalidateScale(Image& image) {
         image.scale_tick = frame_tick + 1;
     }
     const std::span<const ImageViewId> image_view_ids = image.image_view_ids;
+    // Pool entries are bound to views, so an image without views has none.
+    const ImageId image_id =
+        image_view_ids.empty() ? ImageId{} : slot_image_views[image_view_ids.front()].image_id;
     auto& dirty = maxwell3d->dirty.flags;
     dirty[Dirty::RenderTargets] = true;
     dirty[Dirty::ZetaBuffer] = true;
@@ -3217,17 +3241,8 @@ void TextureCache<P>::InvalidateScale(Image& image) {
     }
     image.image_view_ids.clear();
     image.image_view_infos.clear();
-    for (size_t c : active_channel_ids) {
-        auto& channel_info = channel_storage[c];
-
-#ifndef NDEBUG
-        if constexpr (ENABLE_VALIDATION) {
-            std::ranges::fill(channel_info.graphics_image_table.LiveBoundIds(), CORRUPT_ID);
-            std::ranges::fill(channel_info.compute_image_table.LiveBoundIds(), CORRUPT_ID);
-        }
-#endif
-        channel_info.graphics_image_table.Invalidate();
-        channel_info.compute_image_table.Invalidate();
+    if (image_id) {
+        ForgetPoolRefs(image_id);
     }
     has_deleted_images = true;
 }
@@ -4666,19 +4681,7 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
         image_allocs_table.erase(alloc_it);
         slot_image_allocs.erase(alloc_id);
     }
-    for (size_t c : active_channel_ids) {
-        auto& channel_info = channel_storage[c];
-#ifndef NDEBUG
-        if constexpr (ENABLE_VALIDATION) {
-            std::ranges::fill(channel_info.graphics_image_table.LiveBoundIds(), CORRUPT_ID);
-            std::ranges::fill(channel_info.compute_image_table.LiveBoundIds(), CORRUPT_ID);
-        }
-#endif
-        channel_info.graphics_image_table.Invalidate();
-        channel_info.compute_image_table.Invalidate();
-    }
-    image_pool_refs.erase(image_id);
-    ++pool_generation;
+    ForgetPoolRefs(image_id);
     has_deleted_images = true;
 }
 
