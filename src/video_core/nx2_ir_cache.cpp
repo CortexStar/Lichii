@@ -571,6 +571,10 @@ bool StageCache::Open(const std::filesystem::path& path_, u64 build_tag, bool cr
     path = path_;
     is_open = false;
     index.clear();
+    parsed.clear();
+    program_lru.clear();
+    program_lookup.clear();
+    program_cache_bytes = 0;
     num_records = 0;
     std::error_code error;
     const bool exists = std::filesystem::exists(path, error);
@@ -642,6 +646,9 @@ std::vector<Record> StageCache::Find(u64 unique_hash) {
     if (!is_open || it == index.end()) {
         return result;
     }
+    if (const auto cached = parsed.find(unique_hash); cached != parsed.end()) {
+        return cached->second;
+    }
     std::vector<u8> bytes;
     for (const u64 offset : it->second) {
         file.clear();
@@ -706,10 +713,14 @@ std::vector<Record> StageCache::Find(u64 unique_hash) {
             }
         }
     }
+    parsed.emplace(unique_hash, result);
     return result;
 }
 
 bool StageCache::LoadProgram(Record& record) {
+    // A few hundred MiB of decompressed programs (OoT: ~50 KB each) keep the stages of the
+    // area being played; the file holds GBs.
+    constexpr size_t ProgramCacheBytes = 256ULL << 20;
     if (!record.program.empty()) {
         return true;
     }
@@ -721,6 +732,12 @@ bool StageCache::LoadProgram(Record& record) {
         std::scoped_lock lock{mutex};
         if (!is_open) {
             return false;
+        }
+        if (const auto hit = program_lookup.find(record.program_offset);
+            hit != program_lookup.end()) {
+            program_lru.splice(program_lru.begin(), program_lru, hit->second);
+            record.program = *hit->second->second;
+            return true;
         }
         file.clear();
         file.seekg(static_cast<std::streamoff>(record.program_offset));
@@ -735,6 +752,18 @@ bool StageCache::LoadProgram(Record& record) {
     if (record.program.size() != record.raw_program_size) {
         record.program.clear();
         return false;
+    }
+    std::scoped_lock lock{mutex};
+    if (!program_lookup.contains(record.program_offset)) {
+        program_lru.emplace_front(record.program_offset,
+                                  std::make_shared<const std::vector<u8>>(record.program));
+        program_lookup.emplace(record.program_offset, program_lru.begin());
+        program_cache_bytes += record.program.size();
+        while (program_cache_bytes > ProgramCacheBytes && program_lru.size() > 1) {
+            program_cache_bytes -= program_lru.back().second->size();
+            program_lookup.erase(program_lru.back().first);
+            program_lru.pop_back();
+        }
     }
     return true;
 }
@@ -782,6 +811,7 @@ void StageCache::Append(const Record& record) {
         return;
     }
     index[record.unique_hash].push_back(end_offset);
+    parsed.erase(record.unique_hash); // the next Find reads the new record too
     end_offset += size;
     ++num_records;
 }

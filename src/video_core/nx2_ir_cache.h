@@ -4,6 +4,8 @@
 #pragma once
 
 #include <filesystem>
+#include <list>
+#include <memory>
 #include <fstream>
 #include <mutex>
 #include <optional>
@@ -99,6 +101,16 @@ private:
     std::filesystem::path path;
     std::fstream file;
     std::unordered_map<u64, std::vector<u64>> index; ///< unique hash -> record offsets
+    /// Find's parsed records (checks and answers, no program) per unique hash, so a stage that
+    /// several pipelines use reads its records from the file once per session. Append drops the
+    /// hash's entry (a new record).
+    std::unordered_map<u64, std::vector<Record>> parsed;
+    /// Recently decompressed programs by file offset, least recently used last, up to
+    /// ProgramCacheBytes: the stage's program for the next pipeline that uses it.
+    using CachedProgram = std::pair<u64, std::shared_ptr<const std::vector<u8>>>;
+    std::list<CachedProgram> program_lru;
+    std::unordered_map<u64, std::list<CachedProgram>::iterator> program_lookup;
+    size_t program_cache_bytes{};
     size_t num_records{};
     u64 end_offset{};
     bool is_open{};
