@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <span>
@@ -41,6 +42,7 @@ public:
      */
     bool EndPass(std::span<const VkImage> attachments, bool reads_known) {
         pending = true;
+        ++epoch;
         for (const VkImage image : attachments) {
             writes.Insert(image);
         }
@@ -87,11 +89,34 @@ public:
         }
     }
 
+    /**
+     * Whether DrawNeedsBarrier and NoteDraw can be skipped for a draw with `images`: the last draw
+     * checked them, and no pass ended and no barrier was recorded since. DrawNeedsBarrier then
+     * gives the same answer (no barrier, or one would have cleared the sets) and NoteDraw has
+     * nothing to add. Draws mostly sample what the draw before them sampled.
+     */
+    [[nodiscard]] bool SameAsCheckedDraw(std::span<const VkImage> images) const {
+        return checked_epoch == epoch && images.size() == checked_count &&
+               std::equal(images.begin(), images.end(), checked_images.begin());
+    }
+
+    /// The draw with `images` was checked and noted; NoteCheckedDraw's images if they all fit.
+    void NoteCheckedDraw(std::span<const VkImage> images) {
+        if (images.size() > checked_images.size()) {
+            checked_epoch = ~u64{0};
+            return;
+        }
+        std::copy(images.begin(), images.end(), checked_images.begin());
+        checked_count = images.size();
+        checked_epoch = epoch;
+    }
+
     /// The barrier was recorded: everything before it is ordered.
     void Clear() {
         pending = false;
         writes.Clear();
         reads.Clear();
+        ++epoch;
     }
 
 private:
@@ -167,6 +192,11 @@ private:
     ImageSet writes;
     ImageSet reads;
     bool pending{};
+    /// Moves whenever the sets or `pending` can change (EndPass, Clear).
+    u64 epoch{};
+    std::array<VkImage, 32> checked_images{};
+    size_t checked_count{};
+    u64 checked_epoch{~u64{0}};
 };
 
 } // namespace Vulkan
