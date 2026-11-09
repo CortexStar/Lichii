@@ -312,7 +312,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
                          trace, asid, addr, cpu_addr, static_cast<u32>(counter_type),
                          static_cast<u32>(query_base->flags));
             }
-            if (!is_synced) [[likely]] {
+            if (!is_synced) {
                 impl->pending_unregister.push_back(query_location);
             }
             return;
@@ -327,7 +327,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
             }
             LOG_ERROR(HW_GPU,
                       "Query report value not synchronized. Consider increasing GPU accuracy.");
-            if (!is_synced) [[likely]] {
+            if (!is_synced) {
                 impl->pending_unregister.push_back(query_location);
             }
             return;
@@ -356,7 +356,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
                      wide ? query_base->value : static_cast<u32>(query_base->value),
                      static_cast<u32>(query_base->flags));
         }
-        if (!is_synced) [[likely]] {
+        if (!is_synced) {
             impl->pending_unregister.push_back(query_location);
         }
     });
