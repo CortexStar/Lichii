@@ -2897,14 +2897,13 @@ void RasterizerVulkan::UpdateOcarinaJitter() {
     }
     std::array<f32, 2> want{};
     // Only while FSR replaced the previous frame's upscale: a frame the game upscales itself
-    // would show the offset as a shake. Only draws that test or write the scene depth at the
-    // scene size, so a depth pre-pass and the colour passes move together; shadow maps,
+    // would show the offset as a shake. Only draws that depth-test against the scene depth at
+    // the scene size, so a depth pre-pass and the colour passes move together; shadow maps,
     // half-size passes and full-screen passes (which keep the depth bound without using it, as
-    // #678 found) stay put.
+    // #678 found, some with depth writes on: with the test off nothing writes depth) stay put.
     const auto& regs = maxwell3d->regs;
     if (oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr && oot_motion.extent.width != 0 &&
-        oot_dlss_frame && *oot_dlss_frame + 1 >= render_trace_frame &&
-        (regs.depth_test_enable || regs.depth_write_enabled)) {
+        oot_dlss_frame && *oot_dlss_frame + 1 >= render_trace_frame && regs.depth_test_enable) {
         const auto& targets = texture_cache.GetRenderTargets();
         if (targets.depth_buffer_id) {
             const auto& depth = texture_cache.GetImageView(targets.depth_buffer_id);
@@ -3160,14 +3159,14 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
         // The offset this frame's scene was drawn with (none when no scene draw was offset).
         std::array<f32, 2> jitter{};
         if (oot_jitter_frame == render_trace_frame) {
-            const f32 sign = OcarinaJitterMode() < 0 ? -1.0f : 1.0f;
-            jitter = {sign * oot_jitter_offset[0], sign * oot_jitter_offset[1]};
+            jitter = oot_jitter_offset;
         }
         const VkExtent2D output_extent = upscale_4k ? VkExtent2D{3840, 2160} : target_extent;
         const bool recorded = oot_live_dlss->Record(color_view, depth.DepthView(), target_view,
                                                    extent, output_extent, target_extent, oot_motion.current,
                                                    oot_motion.previous, mesh, depth.ImageHandle(),
-                                                   render_trace_frame, jitter);
+                                                   render_trace_frame, jitter,
+                                                   OcarinaJitterMode() < 0);
         if (!recorded) {
             return fail("temporal upscaler declined the frame");
         }

@@ -107,7 +107,8 @@ struct ActorTransforms {
     std::array<f32, 16> previous;
     std::array<f32, 4> current_origin;
     std::array<f32, 4> previous_origin;
-    std::array<f32, 4> extent;
+    std::array<f32, 2> extent;
+    std::array<f32, 2> jitter; ///< the scene's viewport offset this frame (render pixels)
 };
 
 vk::Buffer UploadActorData(MemoryAllocator& allocator, std::span<const std::byte> data,
@@ -128,7 +129,8 @@ public:
     ActorOverlay(const Device& device, MemoryAllocator& allocator, const OcarinaActorMesh& mesh,
                  const ActorTransforms& transforms, VkImageView depth_view, VkSampler sampler,
                  VkImageView motion_view, VkExtent2D extent_)
-        : extent{extent_}, index_count{static_cast<u32>(mesh.indices.size())}, vertex_bytes{mesh.vertices.size()},
+        : extent{extent_}, jitter{transforms.jitter},
+          index_count{static_cast<u32>(mesh.indices.size())}, vertex_bytes{mesh.vertices.size()},
           vertices{UploadActorData(allocator, std::as_bytes(std::span{mesh.vertices}),
                                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)},
           indices{UploadActorData(allocator, std::as_bytes(std::span{mesh.indices}),
@@ -233,6 +235,7 @@ public:
         upload(current, std::as_bytes(std::span{mesh.current_bones}));
         upload(previous, std::as_bytes(std::span{mesh.previous_bones}));
         upload(uniform, std::as_bytes(std::span{&transforms, 1}));
+        jitter = transforms.jitter;
         const VkDescriptorImageInfo depth{sampler, depth_view, VK_IMAGE_LAYOUT_GENERAL};
         const VkWriteDescriptorSet write{
             VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, sets[0], 3, 0, 1,
@@ -251,6 +254,12 @@ public:
         }, VK_SUBPASS_CONTENTS_INLINE);
         cmd.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline);
         cmd.BindDescriptorSets(VK_PIPELINE_BIND_POINT_GRAPHICS, *layout, 0, sets[0], {});
+        // Offset like the game's jittered draws, so the replay rasterizes the same samples and its
+        // depth matches the scene depth (unjittered, the depth test below dropped most of Link).
+        const VkViewport viewport{jitter[0], static_cast<f32>(extent.height) + jitter[1],
+                                  static_cast<f32>(extent.width), -static_cast<f32>(extent.height),
+                                  0, 1};
+        cmd.SetViewport(0, viewport);
         // Depth matches in the captured replay leveled off at this tolerance.
         constexpr u32 depth_tolerance = 16;
         cmd.PushConstants(*layout, VK_SHADER_STAGE_FRAGMENT_BIT, depth_tolerance);
@@ -294,12 +303,15 @@ private:
             .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
             .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         };
-        const VkViewport viewport{0, static_cast<f32>(extent.height), static_cast<f32>(extent.width),
-                                  -static_cast<f32>(extent.height), 0, 1};
         const VkRect2D scissor{{0, 0}, extent};
         const VkPipelineViewportStateCreateInfo viewport_state{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-            .viewportCount = 1, .pViewports = &viewport, .scissorCount = 1, .pScissors = &scissor,
+            .viewportCount = 1, .pViewports = nullptr, .scissorCount = 1, .pScissors = &scissor,
+        };
+        const VkDynamicState dynamic_viewport = VK_DYNAMIC_STATE_VIEWPORT; // Draw: + jitter
+        const VkPipelineDynamicStateCreateInfo dynamic{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+            .dynamicStateCount = 1, .pDynamicStates = &dynamic_viewport,
         };
         const VkPipelineRasterizationStateCreateInfo raster{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
@@ -322,12 +334,13 @@ private:
             .stageCount = static_cast<u32>(stages.size()), .pStages = stages.data(),
             .pVertexInputState = &vertex_input, .pInputAssemblyState = &assembly,
             .pViewportState = &viewport_state, .pRasterizationState = &raster,
-            .pMultisampleState = &samples, .pColorBlendState = &blend,
+            .pMultisampleState = &samples, .pColorBlendState = &blend, .pDynamicState = &dynamic,
             .layout = *layout, .renderPass = *render_pass, .basePipelineIndex = -1,
         });
     }
 
     VkExtent2D extent;
+    std::array<f32, 2> jitter; ///< ActorTransforms::jitter of the last upload
     u32 index_count;
     size_t vertex_bytes;
     vk::Buffer vertices, indices, current, previous, uniform;
@@ -892,8 +905,12 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
                             VkExtent2D output_extent, VkExtent2D target_extent,
                             const Matrix& current, const Matrix& previous,
                             const OcarinaActorMesh& mesh, VkImage depth_image, u64 frame,
-                            std::array<f32, 2> jitter) {
+                            std::array<f32, 2> scene_jitter, bool negate_jitter) {
     auto& state = *impl;
+    // What FSR is told; negated only for the EDEN_NX2_OOT_JITTER=-1 sign check. The motion
+    // replay below always follows the offset the scene was drawn with.
+    const std::array<f32, 2> jitter = negate_jitter
+        ? std::array<f32, 2>{-scene_jitter[0], -scene_jitter[1]} : scene_jitter;
     if (state.last_frame == frame || state.Failed()) {
         return false;
     }
@@ -916,7 +933,7 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
     const VkSampler sampler = state.PointSampler();
     const ActorTransforms actor_transforms{
         current, previous, mesh.current_origin, mesh.previous_origin,
-        {static_cast<f32>(extent.width), static_cast<f32>(extent.height), 0, 0},
+        {static_cast<f32>(extent.width), static_cast<f32>(extent.height)}, scene_jitter,
     };
     // Without Link's pose (dialogue, cutscenes, first person) the motion comes from the camera alone.
     if (mesh.indices.empty()) {
