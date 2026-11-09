@@ -66,15 +66,17 @@ void DrainBack() {
     VideoCommon::GpuSplit::Get().Drain(VideoCommon::DrainSite::Acquire);
 }
 
-/// With the GPU thread split: whether the semaphore word at `address`, as the back will see it
-/// once it ran what is queued, is known without draining it and meets `met`. Most acquires are
-/// met already; the drained path decides the others. EDEN_NX2_PERF_VERIFY drains anyway and
-/// reports an acquire the drained read doesn't meet.
+enum class QueuedAcquire { Unknown, NotMet, Met };
+
+/// With the GPU thread split: the semaphore word at `address` as the back will see it once it
+/// ran what is queued, read without draining it, against `met`. Unknown when it can't be read
+/// that way: the drained path decides. Most acquires are met already. EDEN_NX2_PERF_VERIFY
+/// drains anyway and reports a met acquire the drained read doesn't meet.
 template <typename Met>
-bool AcquireMetQueued(DmaPusher& dma_pusher, GPUVAddr address, const Met& met) {
+QueuedAcquire AcquireMetQueued(DmaPusher& dma_pusher, GPUVAddr address, const Met& met) {
     auto& split = VideoCommon::GpuSplit::Get();
     if (!split.Active()) {
-        return false;
+        return QueuedAcquire::Unknown;
     }
     using VideoCommon::Nx2Profile::Counter;
     u32 word{};
@@ -87,11 +89,11 @@ bool AcquireMetQueued(DmaPusher& dma_pusher, GPUVAddr address, const Met& met) {
                                          ? Counter::AcquirePending
                                          : Counter::AcquireNotReport,
                                      1);
-        return false;
+        return QueuedAcquire::Unknown;
     }
     if (!met(word)) {
         VideoCommon::Nx2Profile::Add(Counter::AcquireQueuedNotMet, 1);
-        return false;
+        return QueuedAcquire::NotMet;
     }
     VideoCommon::Nx2Profile::Add(Counter::AcquireQueuedMet, 1);
     // A drain would have run the work queued before the acquire: GPU-written command lists
@@ -107,10 +109,10 @@ bool AcquireMetQueued(DmaPusher& dma_pusher, GPUVAddr address, const Met& met) {
                           "drained",
                           address, word, drained);
             }
-            return false;
+            return QueuedAcquire::Unknown;
         }
     }
-    return true;
+    return QueuedAcquire::Met;
 }
 
 // The fence manager records into the scheduler and downloads the CPU's writes over GPU data:
@@ -140,9 +142,44 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     if (!pending_acquire) {
         return true;
     }
-    if (AcquireMetQueued(dma_pusher, pending_acquire->address,
-                         [&](u32 word) { return pending_acquire->Matches(word); })) {
+    const auto matches = [&](u32 word) { return pending_acquire->Matches(word); };
+    const QueuedAcquire queued = AcquireMetQueued(dma_pusher, pending_acquire->address, matches);
+    if (queued == QueuedAcquire::Met) {
         return true;
+    }
+    // With delayed fence operations (Balanced or Accurate fences, accurate GPU), a release
+    // queued after the acquire released the fences waits in the caches for the next fence. With
+    // every channel waiting none comes: release them again now and then while waiting.
+    const bool delayed = Settings::IsGPUFenceBehaviorDefault()
+                             ? Settings::IsGPULevelHigh()
+                             : Settings::IsGPUFenceBehaviorBalanced() ||
+                                   Settings::IsGPUFenceBehaviorAccurate();
+    // A parked channel asks again and again (tens of thousands of times a second in Ocarina of
+    // Time). When the word is known not to meet the value, nothing a drain would show can: wait
+    // without draining until the fences are due again or the wait is reported.
+    if (queued == QueuedAcquire::NotMet && !Nx2SemaphoreWaiters::Get().Latched(this)) {
+        const auto now = std::chrono::steady_clock::now();
+        const bool fences_due =
+            delayed && now - pending_acquire->last_fences >= std::chrono::milliseconds{1};
+        const bool report_due =
+            !pending_acquire->reported && now - pending_acquire->since > std::chrono::seconds{2};
+        if (!fences_due && !report_due) {
+            if (VideoCommon::Nx2Perf::Verify()) {
+                DrainBack();
+                if (const u32 drained = ReadSemaphoreWord(dma_pusher, pending_acquire->address);
+                    matches(drained)) {
+                    static std::atomic<u32> reports{};
+                    if (reports.fetch_add(1, std::memory_order_relaxed) < 16) {
+                        LOG_ERROR(HW_GPU,
+                                  "Nx2Perf acquire: semaphore {:#x} not met without draining, "
+                                  "{:#x} drained meets it",
+                                  pending_acquire->address, drained);
+                    }
+                    return true;
+                }
+            }
+            return false;
+        }
     }
     // The release may still be queued for the split GPU thread's back half (and the caches
     // ReadSemaphoreWord asks are its state).
@@ -160,13 +197,6 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     if (pending_acquire->Matches(current)) {
         return true;
     }
-    // With delayed fence operations (Balanced or Accurate fences, accurate GPU), a release
-    // queued after the acquire released the fences waits in the caches for the next fence. With
-    // every channel waiting none comes: release them again now and then while waiting.
-    const bool delayed = Settings::IsGPUFenceBehaviorDefault()
-                             ? Settings::IsGPULevelHigh()
-                             : Settings::IsGPUFenceBehaviorBalanced() ||
-                                   Settings::IsGPUFenceBehaviorAccurate();
     if (const auto now = std::chrono::steady_clock::now();
         delayed && now - pending_acquire->last_fences >= std::chrono::milliseconds{1}) {
         pending_acquire->last_fences = now;
@@ -329,7 +359,8 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         }
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireChecks, 1);
         if (AcquireMetQueued(dma_pusher, acquire.address,
-                             [&](u32 word) { return acquire.Matches(word); })) {
+                             [&](u32 word) { return acquire.Matches(word); }) ==
+            QueuedAcquire::Met) {
             return;
         }
         DrainBack();
