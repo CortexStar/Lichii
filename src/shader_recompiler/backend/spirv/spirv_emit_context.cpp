@@ -1011,15 +1011,14 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
                 U32[2], load_word(word_index), load_word(OpIAdd(U32[1], word_index, Const(1U))))};
             return OpBitwiseAnd(U64, OpBitcast(U64, pointer_words), Constant(U64, ssbo_align_mask));
         }};
-        const auto access{[&](size_t index, Id ssbo_addr, Id cond) {
+        const auto access{[&](size_t index, Id byte_offset, Id cond) {
             const Id then_label{OpLabel()};
             const Id else_label{OpLabel()};
             OpSelectionMerge(else_label, spv::SelectionControlMask::MaskNone);
             OpBranchConditional(cond, then_label, else_label);
             AddLabel(then_label);
             const Id ssbo_id{ssbos[index].*ssbo_member};
-            const Id ssbo_offset{OpUConvert(U32[1], OpISub(U64, addr, ssbo_addr))};
-            const Id ssbo_index{OpShiftRightLogical(U32[1], ssbo_offset, Const(shift))};
+            const Id ssbo_index{OpShiftRightLogical(U32[1], byte_offset, Const(shift))};
             const Id ssbo_pointer{OpAccessChain(element_pointer, ssbo_id, zero, ssbo_index)};
             callback(ssbo_pointer, ssbo_id, ssbo_index);
             AddLabel(else_label);
@@ -1027,19 +1026,20 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
         if (info.native_global_bounds) {
             // Native pointers carry no NVN size word. The address belongs to the candidate buffer
             // whose base is the closest one at or below it (bounds come from the binding).
-            std::vector<Id> bases(num_buffers);
             Id best_index{Const(~0U)};
             Id best_distance{Constant(U64, ~u64{0})};
             for (size_t index = 0; index < num_buffers; ++index) {
-                bases[index] = base_address(index);
-                const Id distance{OpISub(U64, addr, bases[index])};
-                const Id better{OpLogicalAnd(U1, OpUGreaterThanEqual(U1, addr, bases[index]),
+                const Id base{base_address(index)};
+                const Id distance{OpISub(U64, addr, base)};
+                const Id better{OpLogicalAnd(U1, OpUGreaterThanEqual(U1, addr, base),
                                              OpULessThan(U1, distance, best_distance))};
                 best_distance = OpSelect(U64, better, distance, best_distance);
                 best_index = OpSelect(U32[1], better, Const(static_cast<u32>(index)), best_index);
             }
+            // Reuse the selected distance instead of keeping every base live through dispatch.
+            const Id byte_offset{OpUConvert(U32[1], best_distance)};
             for (size_t index = 0; index < num_buffers; ++index) {
-                access(index, bases[index],
+                access(index, byte_offset,
                        OpIEqual(U1, best_index, Const(static_cast<u32>(index))));
             }
             return;
@@ -1056,7 +1056,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
             const Id ssbo_end{OpIAdd(U64, ssbo_addr, ssbo_size)};
             const Id cond{OpLogicalAnd(U1, OpUGreaterThanEqual(U1, addr, ssbo_addr),
                                        OpULessThan(U1, addr, ssbo_end))};
-            access(index, ssbo_addr, cond);
+            access(index, OpUConvert(U32[1], OpISub(U64, addr, ssbo_addr)), cond);
         }
     }};
     const auto define_load{[&](DefPtr ssbo_member, Id element_pointer, Id type, u32 shift) {

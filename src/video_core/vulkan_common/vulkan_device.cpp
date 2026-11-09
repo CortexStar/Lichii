@@ -660,8 +660,11 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         }
     }
 
-    if (features.shader_float16_int8.shaderFloat16 && is_intel_windows) {
-        // Intel's compiler crashes when using fp16 on Astral Chain, disable it for the time being.
+    const bool is_intel_discrete =
+        is_intel_windows &&
+        properties.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+    if (features.shader_float16_int8.shaderFloat16 && is_intel_windows && !is_intel_discrete) {
+        // Keep the Astral Chain workaround for Intel integrated GPUs, but allow FP16 on Arc.
         LOG_WARNING(Render_Vulkan, "Intel has broken float16 math");
         features.shader_float16_int8.shaderFloat16 = false;
     }
@@ -1498,13 +1501,22 @@ bool Device::GetSuitability(bool requires_swapchain) {
         features.extended_dynamic_state3.extendedDynamicState3ColorBlendEquation = false;
     }
 
-    // Intel Windows < 27.20.100.0: Broken VertexInputDynamicState
-    // Same for NVIDIA Proprietary < 580.119.02, unknown when VIDS was first NOT broken
-    // Disable VertexInputDynamicState on old Intel Windows drivers
+    // Intel Windows uses (major << 14) | minor, not Vulkan API-version encoding.
+    // Test the advertised feature on modern discrete GPUs; retain the legacy/iGPU fallback.
     if (extensions.vertex_input_dynamic_state) {
-        const u32 version = (properties.properties.driverVersion << 3) >> 3;
-        if ((driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS && version < VK_MAKE_API_VERSION(27, 20, 100, 0))
-        || (driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY && properties.properties.driverVersion < NvidiaDriverVersion(580, 119, 2))) {
+        const bool modern_intel_discrete =
+            driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS &&
+            properties.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU &&
+            (properties.properties.driverVersion >> 14) >= 101;
+        if (modern_intel_discrete) {
+            LOG_INFO(Render_Vulkan,
+                     "Using advertised dynamic vertex input on modern discrete Intel driver {}.{}",
+                     properties.properties.driverVersion >> 14,
+                     properties.properties.driverVersion & 0x3fff);
+        }
+        if ((driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS && !modern_intel_discrete) ||
+            (driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY &&
+             properties.properties.driverVersion < NvidiaDriverVersion(580, 119, 2))) {
             LOG_WARNING(Render_Vulkan, "Disabling broken VK_EXT_vertex_input_dynamic_state");
             RemoveExtensionFeature(extensions.vertex_input_dynamic_state, features.vertex_input_dynamic_state, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
         }

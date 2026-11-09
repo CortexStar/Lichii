@@ -348,6 +348,12 @@ void EmitMeshPrologue(EmitContext& ctx) {
     const bool as_compute{ctx.runtime_info.mesh_as_compute};
     if (ctx.stage == Stage::Task) {
         if (!as_compute) {
+            // A fully culled task leaves the mesh count unwritten. Initialize it without
+            // introducing a branch that changes the entry block's phi predecessor.
+            ctx.OpAtomicExchange(ctx.U32[1], PayloadWord(ctx, ctx.Const(1U)),
+                                 ctx.Const(static_cast<u32>(spv::Scope::Workgroup)),
+                                 ctx.u32_zero_value, ctx.u32_zero_value);
+            Barrier(ctx);
             return;
         }
     } else if (ctx.stage != Stage::Mesh) {

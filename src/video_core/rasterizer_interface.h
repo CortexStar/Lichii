@@ -255,6 +255,11 @@ public:
         return false;
     }
 
+    /// Whether native tensor programs (matrix multiplies) should be emulated in software here.
+    [[nodiscard]] virtual bool EmulatesNativeTensorPrograms() const {
+        return true;
+    }
+
     /// Whether NVIDIA DLSS (the "Use NVIDIA DLSS" setting) would draw a game's DLSS evaluation.
     [[nodiscard]] virtual bool UsesNvidiaDlss() const {
         return false;

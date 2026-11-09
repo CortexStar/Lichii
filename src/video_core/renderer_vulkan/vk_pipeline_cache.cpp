@@ -1170,6 +1170,10 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             return;
         }
 
+        // Captures are portable; the key must identify the driver compiling them now.
+        key.state.driver_id = dynamic_features.driver_id;
+        key.state.driver_version = dynamic_features.driver_version;
+
         const u64 hash = key.Hash();
         if (!disk_pipelines.insert(hash).second) {
             return;
@@ -1499,7 +1503,8 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
 }
 
 void PipelineCache::QueueVulkanPipelineCacheFlush() {
-    if (!use_vulkan_pipeline_cache || vulkan_pipeline_cache_filename.empty()) {
+    if (!use_vulkan_pipeline_cache || vulkan_pipeline_cache_filename.empty() ||
+        device.GetDriverID() == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS) {
         return;
     }
     if (++pipelines_since_flush < VULKAN_CACHE_FLUSH_PIPELINES) {
@@ -2425,6 +2430,21 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
 
     auto program{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
     const VkDriverIdKHR driver_id = device.GetDriverID();
+    // Portable caches already contain lowered native code, bypassing the SASS rejection policy.
+    // Cache loading precedes engine binding; use the same device/title policy without an engine.
+    const bool uses_tensor_stand_in =
+        Settings::GetCurrentProgramID() != 0x040074A01BF12000ULL &&
+        (driver_id == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA ||
+         driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS);
+    if (env.IsNativeProgram() && uses_tensor_stand_in) {
+        for (const auto* block : program.blocks) {
+            for (const auto& inst : block->Instructions()) {
+                if (inst.GetOpcode() == Shader::IR::Opcode::TensorMulAdd) {
+                    return {.failure = "Native tensor program uses this host's upscale stand-in"};
+                }
+            }
+        }
+    }
     const bool needs_shared_mem_clamp =
         driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
         driver_id == VK_DRIVER_ID_ARM_PROPRIETARY || driver_id == VK_DRIVER_ID_MOLTENVK;

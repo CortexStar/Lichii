@@ -253,6 +253,8 @@ public:
 
     bool IsNativeMode() const { return native_mode; }
     bool ProcessGameDlss(u64 program_id, u64 native_key);
+    [[nodiscard]] bool UpscaleInsteadOfNativeProgram();
+    [[nodiscard]] bool EmulatesNativeTensorPrograms() const;
     /// Ocarina of Time with anti-aliasing at No sharpening (oot_network.h): true when this
     /// dispatch of the game's network is skipped, or its output pass replaced by a copy of the
     /// tonemapped image.

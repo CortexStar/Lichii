@@ -15,6 +15,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <boost/container/small_vector.hpp>
 #include "common/assert.h"
 #include "common/dkb_frame_trace.h"
 #include "common/logging.h"
@@ -754,7 +755,8 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
         } else if (std::string_view{error.what()}.find("matrix multiply") !=
                    std::string_view::npos) {
             DescribeNativeResources(qmd);
-            LOG_ERROR(HW_GPU, "Native tensor dispatch is unsupported; no validated replacement was available");
+            // The console runs this on tensor cores; stand in with a plain upscale of its input.
+            return UpscaleInsteadOfNativeProgram();
         }
     }
     if (dlss_chain.output_pass) {
@@ -1016,6 +1018,212 @@ bool KeplerCompute::FinishDlssEvaluation() {
         return false;
     }
     return TryFireEmblemUpscale();
+}
+
+bool KeplerCompute::EmulatesNativeTensorPrograms() const {
+    // Donkey Kong Bananza's programs must run: rejected, they write nothing and the screen is
+    // purple from its mode select on.
+    constexpr u64 DonkeyKongBananzaProgramId = 0x040074A01BF12000ULL;
+    return Settings::GetCurrentProgramID() == DonkeyKongBananzaProgramId ||
+           rasterizer->EmulatesNativeTensorPrograms();
+}
+
+// Title 4's upscaler reads the tonemapped frame through the texture handle at cbuf0+0x90 and
+// writes the output resolution image through the surface handle at cbuf0+0xa0 (from its
+// TLD/SUST operands). Kirby Air Riders' reads a 2048x1152 image at cbuf0+0x80 and writes a
+// 2560x1440 one at +0x90; Fire Emblem: Fortune's Weave's DLSS network ends with a pass that reads
+// the input colour through cbuf0+0x328 and writes the DLSS output through cbuf0+0x348 (B10G11R11;
+// 720p to 1440p docked). Blit one to the other with bilinear filtering when both are plain 2D
+// images of the same format and the output is larger: title 4's slots first, then Fortune's
+// Weave's, else the first two handles in cbuf0+0x80..0x11c that form such a pair.
+bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
+    const auto& cbuf = launch_description.const_buffer_config[0];
+    const GPUVAddr cbuf_address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
+    const auto image = [&](u32 offset) -> std::optional<Texture::TICEntry> {
+        const u32 tic_index = memory_manager.Read<u32>(cbuf_address + offset) & 0xfffff;
+        if (tic_index > regs.tic.limit) return std::nullopt;
+        return GetTICEntry(tic_index);
+    };
+    const auto upscale_pair = [](const std::optional<Texture::TICEntry>& from,
+                                 const std::optional<Texture::TICEntry>& to) {
+        return from && to && from->format == to->format && from->Address() != 0 &&
+               to->Address() != 0 && to->Width() > from->Width() && from->IsBlockLinear() &&
+               to->IsBlockLinear();
+    };
+    std::optional<Texture::TICEntry> input, output;
+    bool rgb9e5_pair = false;
+    // Ocarina's pair is looked for first: its constant buffer can hold stale handles at title 4's
+    // and Fortune's Weave's slots (a 128x72 B10G11R11 image at +0x328 with a 1920x1080 one at
+    // +0x348), which those checks took for an upscale and blitted a near-black frame.
+    {
+        // Ocarina of Time's gameplay network reads the frame packed as RGB9E5, each channel the
+        // square root of the tonemapped value, and writes a B10G11R11 image at least as wide. Its constant buffer keeps stale handles (a bloom level
+        // at +0xa0) that the scan below pairs with the output, so this pair goes first: the widest
+        // B10G11R11 image when nothing in the pass is wider, from the widest RGB9E5 image of the
+        // same aspect at most 4x narrower.
+        const u32 limit = (std::min)(cbuf.size.Value(), 0x200U);
+        u32 widest = 0;
+        boost::container::small_vector<Texture::TICEntry, 8> outputs;
+        for (u32 offset = 0; offset + 4 <= limit; offset += 4) {
+            const auto tic = memory_manager.Read<u32>(cbuf_address + offset) != 0 ? image(offset)
+                                                                                     : std::nullopt;
+            if (!tic || tic->Address() == 0 || !tic->IsBlockLinear()) continue;
+            // Only the pair's own formats count: the constant buffer also keeps stale handles of
+            // other passes (a 2560x1440 A8B8G8R8 image from the title network at +0xb8, for one),
+            // and one wider than the output used to reject the pair, leaving the output black.
+            if (tic->format == Texture::TextureFormat::B10G11R11 ||
+                tic->format == Texture::TextureFormat::E5B9G9R9) {
+                widest = (std::max)(widest, tic->Width());
+            }
+            if (tic->format == Texture::TextureFormat::B10G11R11) {
+                outputs.push_back(*tic);
+            }
+            if (tic->format == Texture::TextureFormat::E5B9G9R9 &&
+                (!input || tic->Width() > input->Width())) {
+                input = tic;
+            }
+        }
+        // Ocarina's gameplay network keeps its input at cbuf0+0xc0 and its output at +0xd0. Other
+        // B10G11R11 handles in the buffer can be as wide (the scene target the packed frame
+        // aliases, an item-get pass's target), and picking one of them left the presented output
+        // black for seconds. Use those slots when they hold such a pair.
+        if (const auto slot_in = image(0xc0), slot_out = image(0xd0);
+            slot_in && slot_out && slot_in->format == Texture::TextureFormat::E5B9G9R9 &&
+            slot_out->format == Texture::TextureFormat::B10G11R11 && slot_in->Address() != 0 &&
+            slot_out->Address() != 0 && slot_in->Address() != slot_out->Address() &&
+            slot_in->IsBlockLinear() && slot_out->IsBlockLinear()) {
+            input = slot_in;
+            outputs.clear();
+            outputs.push_back(*slot_out);
+            widest = (std::max)(slot_in->Width(), slot_out->Width());
+        }
+        // Otherwise the widest B10G11R11 image that is not the input's own memory (the packed
+        // frame aliases the scene's render target; a blit onto itself leaves the output black).
+        for (const Texture::TICEntry& candidate : outputs) {
+            if (input && candidate.Address() == input->Address()) continue;
+            if (!output || candidate.Width() > output->Width()) {
+                output = candidate;
+            }
+        }
+        rgb9e5_pair = [&] {
+            if (!input || !output || output->Width() != widest || input->Width() > widest ||
+                4 * input->Width() < widest) {
+                return false;
+            }
+            const u64 cross_a = u64{input->Width()} * output->Height();
+            const u64 cross_b = u64{output->Width()} * input->Height();
+            return (std::max)(cross_a, cross_b) - (std::min)(cross_a, cross_b) <= cross_b / 50;
+        }();
+        if (!rgb9e5_pair) {
+            input.reset();
+            output.reset();
+        }
+    }
+    if (!rgb9e5_pair) {
+        input = image(0x90);
+        output = image(0xa0);
+        if (!upscale_pair(input, output)) {
+            input = image(0x328);
+            output = image(0x348);
+        }
+        if (!upscale_pair(input, output)) {
+            input.reset();
+            output.reset();
+        }
+    }
+    if (!input) {
+        for (u32 first = 0x80; first < 0x120 && !input; first += 4) {
+            const auto from = memory_manager.Read<u32>(cbuf_address + first) != 0 ? image(first)
+                                                                                    : std::nullopt;
+            for (u32 second = first + 4; from && second < 0x120; second += 4) {
+                if (memory_manager.Read<u32>(cbuf_address + second) == 0) continue;
+                const auto to = image(second);
+                if (upscale_pair(from, to)) {
+                    input = from;
+                    output = to;
+                    break;
+                }
+            }
+        }
+    }
+    if (!input || !output)
+        return false;
+    using RTFormat = Tegra::RenderTargetFormat;
+    const auto rt_format = [](Texture::TextureFormat format) -> std::optional<RTFormat> {
+        switch (format) {
+        case Texture::TextureFormat::A2B10G10R10: return RTFormat::A2B10G10R10_UNORM;
+        case Texture::TextureFormat::A8B8G8R8: return RTFormat::A8B8G8R8_UNORM;
+        case Texture::TextureFormat::B10G11R11: return RTFormat::B10G11R11_FLOAT;
+        case Texture::TextureFormat::R16G16B16A16: return RTFormat::R16G16B16A16_FLOAT;
+        case Texture::TextureFormat::E5B9G9R9: return RTFormat::E5B9G9R9_FLOAT;
+        default: return std::nullopt;
+        }
+    };
+    if (!rt_format(input->format) || !rt_format(output->format))
+        return false;
+    const auto surface = [&](const Texture::TICEntry& tic) {
+        Fermi2D::Surface result{};
+        result.format = *rt_format(tic.format);
+        result.linear = Fermi2D::MemoryLayout::BlockLinear;
+        result.block_width.Assign(tic.block_width);
+        result.block_height.Assign(tic.block_height);
+        result.block_depth.Assign(tic.block_depth);
+        result.depth = 1;
+        result.width = tic.Width();
+        result.height = tic.Height();
+        result.addr_upper = static_cast<u32>(tic.Address() >> 32);
+        result.addr_lower = static_cast<u32>(tic.Address());
+        return result;
+    };
+    // Title 4's program ends by decoding its result from sRGB to linear (the 0.04045 threshold
+    // and the 2.4 exponent as half-precision immediates of HSETP2 and HMUL2). The copy of its
+    // sRGB input left the frame gamma-encoded twice, washed out: decode in the copy when the
+    // program does.
+    static std::unordered_map<GPUVAddr, bool> decodes_srgb;
+    const GPUVAddr program = regs.code_loc.Address();
+    const auto [known, inserted] = decodes_srgb.try_emplace(program, false);
+    if (inserted) {
+        bool threshold = false, exponent = false;
+        std::array<u32, 0x400> block{};
+        for (u64 offset = 0; offset < 0x20000 && !(threshold && exponent); offset += sizeof(block)) {
+            if (!memory_manager.IsFullyMappedRange(program + offset, sizeof(block))) break;
+            memory_manager.ReadBlock(program + offset, block.data(), sizeof(block));
+            for (size_t word = 0; word < block.size(); word += 4) {
+                const u32 opcode = block[word] & 0xfff;
+                threshold |= opcode == 0x434 && block[word + 1] == 0x292d292d;
+                exponent |= opcode == 0x832 && block[word + 1] == 0x40cc40cc;
+            }
+        }
+        known->second = threshold && exponent;
+        LOG_INFO(HW_GPU, "Upscale fallback for program {:#x}: {}", program,
+                 known->second ? "decodes sRGB like the program" : "plain copy");
+    }
+    const Fermi2D::Config config{
+        .operation = rgb9e5_pair      ? Fermi2D::Operation::SrcCopySquare
+                     : known->second ? Fermi2D::Operation::SrcCopySrgbToLinear
+                                     : Fermi2D::Operation::SrcCopy,
+        .filter = Fermi2D::Filter::Bilinear,
+        .must_accelerate = true,
+        .dst_x0 = 0,
+        .dst_y0 = 0,
+        .dst_x1 = static_cast<s32>(output->Width()),
+        .dst_y1 = static_cast<s32>(output->Height()),
+        .src_x0 = 0,
+        .src_y0 = 0,
+        .src_x1 = static_cast<s32>(input->Width()),
+        .src_y1 = static_cast<s32>(input->Height()),
+    };
+    const bool done = rasterizer->AccelerateSurfaceCopy(surface(*input), surface(*output), config);
+    static u32 logged{};
+    if (logged++ < 4) {
+        LOG_INFO(HW_GPU, "Upscale fallback {:#x} {}x{} block {}/{}/{} -> {:#x} {}x{} block {}/{}/{} levels {}: {}",
+                 input->Address(), input->Width(), input->Height(), input->block_width.Value(),
+                 input->block_height.Value(), input->block_depth.Value(), output->Address(),
+                 output->Width(), output->Height(), output->block_width.Value(),
+                 output->block_height.Value(), output->block_depth.Value(), output->max_mip_level.Value(),
+                 done ? "blitted" : "not accelerated");
+    }
+    return done;
 }
 
 // Logs the images a rejected program's handles (constant bank 0, bytes 0x80-0x11c) point to, so a
