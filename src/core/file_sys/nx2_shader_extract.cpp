@@ -774,7 +774,9 @@ void Collect(const VirtualDir& dir, const std::string& path, std::vector<FileIte
     }
 }
 
-void LoadDictionaries(const std::span<const VirtualDir> roots, Zstd& zstd) {
+/// Whether the game has a dictionary pack.
+bool LoadDictionaries(const std::span<const VirtualDir> roots, Zstd& zstd) {
+    bool found = false;
     ZSTD_DCtx* context = ZSTD_createDCtx();
     for (const auto& root : roots) {
         const auto pack = root ? root->GetDirectoryRelative("Pack") : nullptr;
@@ -782,6 +784,7 @@ void LoadDictionaries(const std::span<const VirtualDir> roots, Zstd& zstd) {
         if (!file) {
             continue;
         }
+        found = true;
         try {
             const auto bytes = file->ReadAllBytes();
             const auto sarc = Inflate(zstd, context, bytes, MaxBlob);
@@ -794,6 +797,7 @@ void LoadDictionaries(const std::span<const VirtualDir> roots, Zstd& zstd) {
         }
     }
     ZSTD_freeDCtx(context);
+    return found;
 }
 
 } // Anonymous namespace
@@ -843,7 +847,7 @@ u64 Fingerprint(std::span<const u8> control, std::span<const u8> code) {
 Result Extract(std::span<const VirtualDir> roots, unsigned threads, Progress* progress,
                std::stop_token stop) {
     Zstd zstd;
-    LoadDictionaries(roots, zstd);
+    const bool dictionary_pack = LoadDictionaries(roots, zstd);
     std::vector<FileItem> files;
     for (const auto& root : roots) {
         if (root) {
@@ -926,7 +930,7 @@ Result Extract(std::span<const VirtualDir> roots, unsigned threads, Progress* pr
         result.stats.containers += stats[i].containers;
         result.stats.occurrences += stats[i].occurrences;
     }
-    if (zstd.Count() == 0) {
+    if (dictionary_pack && zstd.Count() == 0) {
         result.errors.push_back("Pack/ZsDic.pack.zs: no zstd dictionaries (files that need one "
                                 "are reported as missing their dictionary)");
     }
