@@ -138,7 +138,8 @@ bool NvidiaDlssUpscaler::Upscale(const Inputs &in) {
     }
     hdr_input = in.hdr;
     depth_inverted = in.depth_inverted;
-    const auto neural_mode = Settings::GetNvidiaDlssRuntimeSettings().neural_rendering;
+    const auto neural_options = Settings::GetNvidiaDlssRuntimeSettings();
+    const auto neural_mode = neural_options.neural_rendering;
     const bool requested = device.SupportsNeuralRendering() &&
                            neural_mode != Settings::NeuralRendering::Off;
     const auto neural_style = requested ? static_cast<NR::Style>(static_cast<u32>(neural_mode) - 1)
@@ -159,7 +160,7 @@ bool NvidiaDlssUpscaler::Upscale(const Inputs &in) {
                     {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
                     VK_IMAGE_ASPECT_COLOR_BIT};
     scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([this, in, out, hdr, auto_exposure, mode, preset, neural_style,
+    scheduler.Record([this, in, out, hdr, auto_exposure, mode, preset, neural_style, neural_options,
                       reset = in.reset || options_changed](vk::CommandBuffer cmdbuf) {
         const auto &api = Ngx::GetApi();
         const auto clear_output = [&] {
@@ -282,6 +283,9 @@ bool NvidiaDlssUpscaler::Upscale(const Inputs &in) {
             if (neural_rendering) {
                 NR::Frame frame;
                 frame.style = neural_style;
+                frame.intensity = neural_options.strength / 100.0f;
+                frame.tone = neural_options.tone / 100.0f;
+                frame.structure = neural_options.structure / 100.0f;
                 frame.reset = reset;
                 frame.hdr = in.hdr;
                 frame.motion_scale = {in.motion_vector_scale[0] / in.render_size.width,

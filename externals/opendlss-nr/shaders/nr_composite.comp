@@ -172,6 +172,12 @@ void main() {
   }
   vec3 history = vec3(truncateHalf(neural.r), truncateHalf(neural.g), truncateHalf(neural.b));
   imageStore(historyNext, ivec2(id), vec4(history, 1.0));
+  // Keep neural history warm at zero strength while preserving the exact DLSS/DLAA image,
+  // including HDR values outside the LDR proxy range.
+  if (params.intensity == 0.0) {
+    imageStore(outputImage, ivec2(id), raw);
+    return;
+  }
   vec3 styled = neural;
   bool stylized = params.styleMode != 0u || params.style != 0.0;
   if (params.styleMode != 0u) styled = nrStyleCustom(history);

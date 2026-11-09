@@ -187,6 +187,20 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "Runs natively on Linux.\nStart the game with NVIDIA DLSS enabled, then apply style "
               "changes while playing. Off disables neural rendering. First activation may briefly "
               "pause rendering while the model loads."));
+    INSERT(Settings, neural_rendering_strength, tr("Neural rendering strength:"),
+           tr("Blend the neural result with ordinary NVIDIA DLSS/DLAA.\n"
+              "0% shows the original DLSS/DLAA image; 100% applies the full neural result. "
+              "The default is 100%.\nRequires a neural style. Apply changes while playing. "
+              "Lower strength keeps the neural model running; select Off to free its GPU resources."));
+    INSERT(Settings, neural_rendering_tone, tr("Neural rendering tone:"),
+           tr("Adjust the neural model's tonal treatment, including style-dependent lighting "
+              "and colour changes. The default is 100%.\nRequires a neural style. Apply changes "
+              "while playing; changing tone resets neural history."));
+    INSERT(Settings, neural_rendering_structure, tr("Neural rendering structure:"),
+           tr("Adjust how strongly the neural model changes scene detail and shapes. "
+              "Lower values can help retain the original appearance. The default is 100%.\n"
+              "Requires a neural style. Apply changes while playing; changing structure resets "
+              "neural history."));
     INSERT(Settings, anti_aliasing, tr("Anti-Aliasing Method:"),
            tr("The anti-aliasing method to use.\nSMAA offers the best quality.\nFXAA "
               "can produce a more stable picture in lower resolutions."));

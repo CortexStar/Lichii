@@ -419,6 +419,15 @@ struct Values {
     SwitchableSetting<NeuralRendering> neural_rendering{linkage, NeuralRendering::Off,
                                                         "neural_rendering", Category::Renderer,
                                                         Specialization::Default, true, true};
+    SwitchableSetting<u32, true> neural_rendering_strength{
+        linkage, 100, 0, 100, "neural_rendering_strength", Category::Renderer,
+        Specialization::Scalar | Specialization::Percentage, true, true};
+    SwitchableSetting<u32, true> neural_rendering_tone{
+        linkage, 100, 0, 100, "neural_rendering_tone", Category::RendererAdvanced,
+        Specialization::Scalar | Specialization::Percentage, true, true};
+    SwitchableSetting<u32, true> neural_rendering_structure{
+        linkage, 100, 0, 100, "neural_rendering_structure", Category::RendererAdvanced,
+        Specialization::Scalar | Specialization::Percentage, true, true};
     SwitchableSetting<AspectRatio, true> aspect_ratio{linkage,
                                                       AspectRatio::R16_9,
                                                       "aspect_ratio",
@@ -1058,6 +1067,9 @@ extern Values values;
 struct NvidiaDlssRuntimeSettings {
     NvidiaDlssQuality quality;
     NeuralRendering neural_rendering;
+    u32 strength = 100;
+    u32 tone = 100;
+    u32 structure = 100;
 };
 
 /// Publish the selected DLSS options from the settings thread for use by renderer threads.

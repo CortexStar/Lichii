@@ -236,7 +236,8 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
         }
 #endif
 #ifndef EGLANTINE_NGX
-        if (setting->Id() == Settings::values.neural_rendering.Id()) {
+        if (setting->Id() == Settings::values.neural_rendering.Id() ||
+            setting->Id() == Settings::values.neural_rendering_strength.Id()) {
             continue;
         }
 #endif

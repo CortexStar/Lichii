@@ -76,7 +76,7 @@ InputImage MakeInput(const Device &device, MemoryAllocator &allocator, VkFormat 
     return result;
 }
 
-/// Check live quality/style changes, history resets, rebinding, and failures with concurrent submits.
+/// Check live neural controls, quality, history resets, rebinding and failures with concurrent submits.
 void RenderCases(const Device& device, u32 scale, bool request_neural, bool expect_neural) {
     MemoryAllocator allocator{device};
     StateTracker tracker;
@@ -128,12 +128,23 @@ void RenderCases(const Device& device, u32 scale, bool request_neural, bool expe
         Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Off},
         Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural},
         Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural, 50},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural, 0},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural, 0},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural, 100, 0},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural, 100, 100, 0},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural},
         Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural}};
     u64 neural_frames{};
     std::array<double, 3> natural_reset{};
     for (size_t frame = 0; frame < cases.size(); ++frame) {
         Settings::values.nvidia_dlss_quality = cases[frame].quality;
         Settings::values.neural_rendering = request_neural ? cases[frame].neural_rendering : Neural::Off;
+        Settings::values.neural_rendering_strength = cases[frame].strength;
+        Settings::values.neural_rendering_tone = cases[frame].tone;
+        Settings::values.neural_rendering_structure = cases[frame].structure;
         Settings::RefreshNvidiaDlssRuntimeSettings();
         const auto options = Settings::GetNvidiaDlssRuntimeSettings();
         const bool neural_on = expect_neural && options.neural_rendering != Neural::Off;
@@ -149,9 +160,10 @@ void RenderCases(const Device& device, u32 scale, bool request_neural, bool expe
                 return NVSDK_NGX_Result_FAIL_FeatureNotSupported;
             };
         }
-        const bool hdr = frame == 5 || frame == 10;
-        const std::array<float, 4> expected = hdr ? std::array{0.75f, 0.25f, 0.5f, 1.0f}
-                                                : std::array{0.25f, 0.5f, 0.75f, 1.0f};
+        const bool hdr = frame == 5 || frame == 10 || frame == 14;
+        const std::array<float, 4> expected = frame == 14 ? std::array{2.0f, 0.25f, 0.5f, 1.0f}
+                                            : hdr ? std::array{0.75f, 0.25f, 0.5f, 1.0f}
+                                                  : std::array{0.25f, 0.5f, 0.75f, 1.0f};
         scheduler.Record([&, frame, expected](vk::CommandBuffer cmd) {
             for (const auto &image : {color.resource, depth.resource, motion.resource}) {
                 cmd.PipelineBarrier(
@@ -235,7 +247,7 @@ void RenderCases(const Device& device, u32 scale, bool request_neural, bool expe
         }
         double style_difference{};
         for (size_t c = 0; c < sums.size(); ++c) {
-            if (!neural_on || inject_failure) {
+            if (!neural_on || options.strength == 0 || inject_failure) {
                 Require(std::abs(sums[c] / pixels - (inject_failure ? 0.0f : expected[c])) < 0.025,
                         "Readback differs from input; stale or incorrect output");
             } else {
@@ -245,21 +257,31 @@ void RenderCases(const Device& device, u32 scale, bool request_neural, bool expe
             if (expect_neural && frame == 2) {
                 natural_reset[c] = sums[c] / pixels;
             }
-            if (expect_neural && (frame == 6 || frame == 9)) {
+            if (expect_neural && (frame == 6 || frame == 9 || frame == 16 || frame == 18)) {
                 Require(std::abs(sums[c] / pixels - natural_reset[c]) < 0.001,
-                        "Style switch retained old history or differs from a fresh activation");
+                        "Neural adjustment retained old history or differs from a fresh activation");
+            }
+            if (expect_neural && frame == 12) {
+                const auto halfway = (expected[c] + natural_reset[c]) / 2;
+                Require(std::abs(sums[c] / pixels - halfway) < 0.003,
+                        "50% strength did not blend the original and neural images");
             }
             style_difference += std::abs(sums[c] / pixels - natural_reset[c]);
         }
         if (expect_neural && frame == 3) {
             Require(style_difference > 0.01, "Switching Natural to Cinematic did not change output");
         }
+        if (expect_neural && (frame == 15 || frame == 17)) {
+            Require(style_difference > 0.00001, "Tone/structure control did not change output");
+        }
         neural_frames += neural_on && !inject_failure;
         const auto neural = VideoCore::NeuralRendering::GetStatus();
         Require(neural.submitted_frames == neural_frames, "Incorrect neural rendering submission count");
         Require(neural.ready == neural_on, "Neural readiness did not follow the live setting");
-        std::printf("PASS frame %zu: %ux%u -> %ux%u; RGB %.4f %.4f %.4f\n", frame,
+        std::printf("PASS frame %zu: %ux%u -> %ux%u; strength/tone/structure %u/%u/%u; "
+                    "RGB %.4f %.4f %.4f\n", frame,
                     input_extent.width, input_extent.height, extent.width, extent.height,
+                    options.strength, options.tone, options.structure,
                     sums[0] / pixels, sums[1] / pixels, sums[2] / pixels);
     }
     Require(Ngx::GetStatus().evaluations == cases.size() - 1, "Incorrect evaluation count");

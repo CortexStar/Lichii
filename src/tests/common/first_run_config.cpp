@@ -286,6 +286,49 @@ TEST_CASE("Per-game overrides and use-global flags survive the new global profil
     }
 }
 
+TEST_CASE("Neural controls retain defaults, persist, and publish per-game overrides", "[config]") {
+    ConfigDirectory directory;
+    directory.Write("qt-config.ini", "[Renderer]\nneural_rendering=2\nneural_rendering\\default=false\n");
+    FileConfig global{std::string{"qt-config"}};
+    auto& values = Settings::values;
+    CHECK(values.neural_rendering_strength.GetValue() == 100);
+    CHECK(values.neural_rendering_tone.GetValue() == 100);
+    CHECK(values.neural_rendering_structure.GetValue() == 100);
+    values.neural_rendering_strength = 37;
+    values.neural_rendering_tone = 82;
+    values.neural_rendering_structure = 61;
+    global.SaveValues();
+    values.neural_rendering_strength = 100;
+    values.neural_rendering_tone = 100;
+    values.neural_rendering_structure = 100;
+    FileConfig reloaded{std::string{"qt-config"}};
+    CHECK(values.neural_rendering_strength.GetValue() == 37);
+    CHECK(values.neural_rendering_tone.GetValue() == 82);
+    CHECK(values.neural_rendering_structure.GetValue() == 61);
+
+    directory.Write("custom/neural.ini",
+                    "[Renderer]\nneural_rendering_strength=0\n"
+                    "neural_rendering_strength\\default=false\n"
+                    "neural_rendering_strength\\use_global=false\n"
+                    "neural_rendering_tone=200\nneural_rendering_tone\\default=false\n"
+                    "neural_rendering_tone\\use_global=false\n"
+                    "neural_rendering_structure\\use_global=true\n");
+    FileConfig game{std::string{"neural"}, Config::ConfigType::PerGameConfig};
+    Settings::RefreshNvidiaDlssRuntimeSettings();
+    const auto options = Settings::GetNvidiaDlssRuntimeSettings();
+    CHECK(options.neural_rendering == Settings::NeuralRendering::Natural);
+    CHECK(options.strength == 0);
+    CHECK(options.tone == 100);
+    CHECK(options.structure == 61);
+    CHECK(values.neural_rendering_strength.GetValue(true) == 37);
+    CHECK(values.neural_rendering_tone.GetValue(true) == 82);
+    values.neural_rendering_strength.SetGlobal(true);
+    values.neural_rendering_tone.SetGlobal(true);
+    Settings::RefreshNvidiaDlssRuntimeSettings();
+    CHECK(Settings::GetNvidiaDlssRuntimeSettings().strength == 37);
+    CHECK(Settings::GetNvidiaDlssRuntimeSettings().tone == 82);
+}
+
 TEST_CASE("Missing per-game and input profiles are not seeded", "[config]") {
     ConfigDirectory directory;
     FileConfig global{std::string{"qt-config"}};

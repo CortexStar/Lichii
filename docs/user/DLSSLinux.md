@@ -68,9 +68,10 @@ CUDA toolkit is required at runtime.
    `nvngx_dlssnr.dll`. Choose **Standard**, **Natural**, or **Cinematic** in
    **DLSS neural rendering**. Leave it **Off** for ordinary DLSS/DLAA.
 6. Apply the settings and start the game. While playing, reopen Graphics, change
-   **NVIDIA DLSS quality** or **DLSS neural rendering**, and click **Apply** or
-   **OK**. Both settings take effect without restarting and support per-game
-   overrides. If a per-game override is active, change it in the running game's
+   **NVIDIA DLSS quality**, **DLSS neural rendering**, or the neural controls
+   below, and click **Apply** or **OK**. These settings take effect without
+   restarting and support per-game overrides. If a per-game override is active,
+   change it in the running game's
    configuration rather than the global settings.
 
 You can switch between Off, Standard, Natural, and Cinematic in the same session.
@@ -79,6 +80,23 @@ one. Off releases the neural model's GPU resources while ordinary DLSS/DLAA
 continues. Turning it back on or changing quality can briefly pause rendering
 while model resources are prepared. The main NVIDIA DLSS checkbox, renderer,
 and GPU selection still require restarting the game.
+
+Neural controls range from **0–100%** and default to **100%**, preserving the
+existing appearance:
+
+- **Graphics → Neural rendering strength:** blends ordinary DLSS/DLAA with the
+  neural result. At 0%, the original DLSS/DLAA image is shown; 100% applies the full
+  effect. The model continues running at low or zero strength, so GPU cost stays
+  roughly the same. Select neural rendering **Off** to release its GPU resources.
+- **Graphics → Advanced → Neural rendering tone:** adjusts the model's tonal
+  treatment, including style-dependent lighting and colour changes.
+- **Graphics → Advanced → Neural rendering structure:** adjusts the model's
+  changes to scene detail and shapes. Lower values can help retain the original
+  appearance.
+
+All three controls apply to the selected neural style and support per-game
+overrides. Tone and Structure changes reset neural history; Strength blends the
+output while retaining history. None of these adjustments reloads the model.
 
 Launch Lichii without an external DLSS5VKLayer wrapper so only the selected
 Lichii processing is applied. If using a custom launcher, keep its existing
@@ -163,7 +181,8 @@ build/bin/ngx_smoke /path/to/linux/dlss/runtime/directory 0 1 /path/to/ngx/nr/31
 The numeric arguments are the Vulkan GPU index and image scale (1–8). Scale 8
 uses 2560×1440 input and 3840×2160 upscaled output. The test covers device
 lifecycle, SR/DLAA readback, reset, resize, HDR/depth modes, motion-view rebinding,
-live style/Off/quality changes, and injected NGX failure. Use `missing` instead of
+live style/Off/quality changes, strength blending (including zero-strength HDR),
+tone/structure history resets, and injected NGX failure. Use `missing` instead of
 the NR model path to check missing-model fallback. It is excluded from `ctest`
 because it requires the GPU and separately supplied models. Disable external
 graphics layers for this test.

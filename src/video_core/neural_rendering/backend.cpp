@@ -77,6 +77,7 @@ struct Backend::Impl {
     uint32_t frames{};
     bool history_valid{};
     Style previous_style{};
+    float previous_tone{}, previous_structure{};
     bool previous_hdr{};
 
     /// Wait for GPU use and destroy backend resources; the caller must hold device queue
@@ -340,13 +341,13 @@ void Backend::Rebind(VkImage color, VkImageView color_view, VkImageView motion_v
     state.RecordCommands();
 }
 
-/// Append inference and output copy commands, resetting history when frame, style, or HDR state
-/// requires it.
+/// Append inference and output copy commands, resetting history when conditioning or HDR changes.
 void Backend::Record(VkCommandBuffer commands, const Frame& frame) {
     auto& state = *impl;
     const uint32_t h = state.frames & 1u;
     const bool reset = frame.reset || !state.history_valid || frame.style != state.previous_style ||
-                       frame.hdr != state.previous_hdr;
+                       frame.tone != state.previous_tone ||
+                       frame.structure != state.previous_structure || frame.hdr != state.previous_hdr;
     Params params{};
     params.full_width = state.geometry.fullWidth;
     params.full_height = state.geometry.fullHeight;
@@ -389,6 +390,8 @@ void Backend::Record(VkCommandBuffer commands, const Frame& frame) {
                  VK_IMAGE_LAYOUT_GENERAL);
     state.history_valid = true;
     state.previous_style = frame.style;
+    state.previous_tone = frame.tone;
+    state.previous_structure = frame.structure;
     state.previous_hdr = frame.hdr;
     ++state.frames;
 }
