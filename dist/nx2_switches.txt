@@ -43,3 +43,8 @@ EDEN_NX2_FENCE_BATCH=1
 #EDEN_NX2_SPLIT_SKIP=1
 #EDEN_NX2_AUTO_STUB=1
 #EDEN_NX2_KEEP_ASTC=1
+# Native task/mesh pipeline builds at once (boot, background and precache alike): each can take
+# minutes and gigabytes in the driver's compiler (Mesa's Intel driver: 150-180 s and several GB
+# per Ocarina of Time task/mesh pipeline). Default: one per 8 GiB of a quarter of the RAM (1 to
+# 8). 0 removes the limit.
+#EDEN_NX2_HEAVY_BUILD_SLOTS=2
