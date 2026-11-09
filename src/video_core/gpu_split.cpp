@@ -464,6 +464,9 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             }
         }
         u64 last_store = read_position;
+        // One profile scope per batch: zones the entries open (draws, binds, ...) are subtracted,
+        // so `method` stays the time spent processing methods, without two clock reads each.
+        Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
         while (read_position != available) {
             const size_t index = read_position & RingMask;
             const size_t size =
@@ -471,6 +474,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             read_position += size != 0 ? size : RingWords - index;
             if (hook_requested.load(std::memory_order_relaxed) &&
                 idle_hook != nullptr) [[unlikely]] {
+                Nx2Profile::Scope hook_scope{Nx2Profile::Zone::FlushWork};
                 hook_requested.store(false, std::memory_order_seq_cst);
                 idle_hook(idle_argument);
             }

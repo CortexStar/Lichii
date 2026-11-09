@@ -3304,6 +3304,8 @@ private:
     /// CallMethod with every check, for the cases and tools CallMethodFast leaves out.
     void CallMethodSlow(Core::System& system, u32 method, u32 method_argument, bool is_last_call);
     void CallMethodFast(u32 method, u32 method_argument, bool is_last_call);
+    /// EDEN_NX2_GPU_PROFILE: counts a register write and whether it repeats the held value.
+    void CountWrite(u32 method, u32 argument) const;
     /// EDEN_NX2_PERF_VERIFY: CallMethodFast's register state against CallMethodSlow's.
     void VerifyCallMethod(Core::System& system, u32 method, u32 method_argument, bool is_last_call);
 
