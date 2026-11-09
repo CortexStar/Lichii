@@ -582,6 +582,61 @@ void TextureCache<P>::TickFrame() {
         gc_deletes = gc_costly_deletes = gc_download_deletes = async_decodes_queued = 0;
         images_created = images_deleted = 0;
     }
+    // EDEN_NX2_RT_EVICT_PRESSURE: while the cache is over its expected size, fresh render targets
+    // (see FindRenderTargetView) unused for that many frames are deleted now, before the age-based
+    // collector reaches them. In Ocarina of Time's Market the crowds make a new target every
+    // couple of frames; the dead ones piled up, the cache went over the card's budget, the driver
+    // moved video memory into system RAM and on an 8 GB card the device was lost after ~1-4 min.
+    // The collector can't keep up there: it waits 10-50 frames and downloads each GPU-written
+    // image first. These targets never held guest data, so they're marked stale instead, the
+    // way the collector handles images it doesn't download.
+    if (const u64 rt_evict = RtEvictPressureFrames();
+        rt_evict != 0 && total_used_memory > expected_memory) {
+        for (size_t budget = transient_targets.size(); budget != 0 && !transient_targets.empty();
+             --budget) {
+            TransientTarget entry = transient_targets.front();
+            if (frame_tick - entry.check_tick < rt_evict) {
+                break;
+            }
+            transient_targets.pop_front();
+            if (!slot_images.contains(entry.id)) {
+                continue;
+            }
+            Image& image = slot_images[entry.id];
+            if (image.allocation_tick != entry.allocation_tick ||
+                False(image.flags & ImageFlagBits::TransientTarget) ||
+                False(image.flags & ImageFlagBits::Registered)) {
+                continue;
+            }
+            const u64 last_use = lru_cache.GetTick(image.lru_index);
+            if (frame_tick - last_use < rt_evict || True(image.flags & ImageFlagBits::IsDecoding)) {
+                // Still in use: check again later; one used for long is a lasting target.
+                if (++entry.survived < 4) {
+                    entry.check_tick = frame_tick;
+                    transient_targets.push_back(entry);
+                } else {
+                    image.flags &= ~ImageFlagBits::TransientTarget;
+                }
+                continue;
+            }
+            MarkStale(image); // before UntrackImage (see MarkStale)
+            if (True(image.flags & ImageFlagBits::Tracked)) {
+                UntrackImage(image, entry.id);
+            }
+            UnregisterImage(entry.id);
+            DeleteImage(entry.id, false);
+            ++transient_evictions;
+        }
+    } else if (transient_targets.size() > 8192) {
+        // Not evicting now: keep the waiting list from growing without end.
+        transient_targets.erase(transient_targets.begin(),
+                                transient_targets.begin() + (transient_targets.size() - 8192));
+    }
+    if (frame_tick % 600 == 0 && transient_evictions != logged_transient_evictions) {
+        LOG_INFO(HW_GPU, "RT evict: {} unused fresh render targets deleted early so far, {} waiting",
+                 transient_evictions, transient_targets.size());
+        logged_transient_evictions = transient_evictions;
+    }
     // An image that could not be made at all: the driver is out of memory whatever the counts
     // say, so collect as at the critical threshold.
     bool out_of_memory = false;
@@ -3479,6 +3534,26 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
         return NULL_IMAGE_VIEW_ID;
     }
     Image& image = slot_images[image_id];
+    // EDEN_NX2_RT_EVICT_PRESSURE (Switch 2 titles): a render target the GPU never wrote and
+    // nothing copied into starts undefined instead of loading the guest memory under it, and is
+    // remembered so TickFrame can delete it early once it is dead. Ocarina of Time places its post
+    // effects' targets at a new address every frame: each new one loaded 10-40 MB of stale memory
+    // the next pass overwrites.
+    if (RtEvictPressureFrames() != 0 && Tegra::g_nx2_ampere.load(std::memory_order_relaxed) &&
+        image.modification_tick == 0 && True(image.flags & ImageFlagBits::CpuModified) &&
+        False(image.flags & ImageFlagBits::GpuModified) &&
+        False(image.flags & (ImageFlagBits::SparseLayers | ImageFlagBits::SparseTiles |
+                             ImageFlagBits::Unbacked)) &&
+        image.dirty_layers.empty()) {
+        image.flags &= ~ImageFlagBits::CpuModified;
+        if (False(image.flags & ImageFlagBits::Tracked)) {
+            TrackImage(image, image_id);
+        }
+        if (False(image.flags & ImageFlagBits::TransientTarget)) {
+            image.flags |= ImageFlagBits::TransientTarget;
+            transient_targets.push_back({image_id, image.allocation_tick, frame_tick, 0});
+        }
+    }
     const ImageViewType view_type = RenderTargetImageViewType(info);
     SubresourceBase base;
     if (image.info.type == ImageType::Linear) {
