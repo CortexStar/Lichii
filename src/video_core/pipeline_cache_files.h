@@ -10,6 +10,7 @@
 #include <span>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 
 #include <fmt/format.h>
 
@@ -151,19 +152,149 @@ inline bool CopyCompatiblePipelineCache(const std::filesystem::path& source,
 
 struct PipelineCacheCarryOver {
     std::optional<u32> version{}; ///< The older version the cache was started from
+    bool merged{}; ///< The older records were appended into an already existing newer cache
     bool failed{}; ///< An older cache to start from is there, but it couldn't be read or copied
 };
 
+/// Marker that a compatible older cache has already been carried into this one, by copy or by
+/// appending its records. Without it, a cache written by a build without the carry-over would
+/// have the older records appended again on every boot.
+[[nodiscard]] inline std::filesystem::path CarryOverMarkerPath(
+    const std::filesystem::path& file) {
+    auto marker = file;
+    marker += ".carried";
+    return marker;
+}
+
+[[nodiscard]] inline bool CarryOverMarkerExists(const std::filesystem::path& file) {
+    std::error_code error;
+    return std::filesystem::exists(CarryOverMarkerPath(file), error);
+}
+
+inline bool WriteCarryOverMarker(const std::filesystem::path& file) {
+    std::ofstream marker(CarryOverMarkerPath(file), std::ios::binary | std::ios::trunc);
+    return marker.is_open();
+}
+
+/// Appends the records of a compatible older cache to an existing newer one, skipping the older
+/// file's header: the record layouts match (see CompatibleVulkanPipelineCacheVersions), so the
+/// bytes read identically. Duplicates and stale records are dropped when the file is loaded and
+/// compacted.
+inline bool AppendCompatiblePipelineCacheRecords(const std::filesystem::path& source,
+                                                 const std::filesystem::path& destination,
+                                                 const std::array<char, 8>& magic,
+                                                 u32 source_version) {
+    if (!PipelineCacheHeaderMatches(source, magic, source_version)) {
+        return false;
+    }
+    std::ifstream in(source, std::ios::binary);
+    std::ofstream out(destination, std::ios::binary | std::ios::app);
+    if (!in.is_open() || !out.is_open()) {
+        return false;
+    }
+    in.seekg(static_cast<std::streamoff>(magic.size() + sizeof(u32)));
+    out << in.rdbuf();
+    return out.good() && !in.bad();
+}
+
+/// Unions an older used-list file into the current one, keeping the smallest age per hash. The
+/// records brought in by a merge load only when the used list knows their hashes (or the build
+/// precaches them), so the list has to come along with them.
+inline bool MergeUsedPipelineCacheFiles(const std::filesystem::path& destination,
+                                        const std::filesystem::path& source, u32 magic) {
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(source, error) || error) {
+        return false;
+    }
+    std::unordered_map<u64, u8> entries;
+    if (std::ifstream current(destination, std::ios::binary); current.is_open()) {
+        u32 current_magic{}, current_count{};
+        if (current.read(reinterpret_cast<char*>(&current_magic), sizeof(current_magic)) &&
+            current_magic == magic &&
+            current.read(reinterpret_cast<char*>(&current_count), sizeof(current_count))) {
+            for (u32 i = 0; i < current_count; ++i) {
+                u64 hash{};
+                u8 age{};
+                if (!current.read(reinterpret_cast<char*>(&hash), sizeof(hash)) ||
+                    !current.read(reinterpret_cast<char*>(&age), sizeof(age))) {
+                    break;
+                }
+                entries.emplace(hash, age);
+            }
+        }
+    }
+    std::ifstream in(source, std::ios::binary);
+    u32 source_magic{}, source_count{};
+    if (!in.is_open() || !in.read(reinterpret_cast<char*>(&source_magic), sizeof(source_magic)) ||
+        source_magic != magic ||
+        !in.read(reinterpret_cast<char*>(&source_count), sizeof(source_count))) {
+        return false;
+    }
+    for (u32 i = 0; i < source_count; ++i) {
+        u64 hash{};
+        u8 age{};
+        if (!in.read(reinterpret_cast<char*>(&hash), sizeof(hash)) ||
+            !in.read(reinterpret_cast<char*>(&age), sizeof(age))) {
+            break;
+        }
+        const auto [entry, inserted] = entries.try_emplace(hash, age);
+        if (!inserted && age < entry->second) {
+            entry->second = age;
+        }
+    }
+    std::ofstream out(destination, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        return false;
+    }
+    const u32 count = static_cast<u32>(entries.size());
+    out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+    out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+    for (const auto& [hash, age] : entries) {
+        out.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
+        out.write(reinterpret_cast<const char*>(&age), sizeof(age));
+    }
+    return out.good();
+}
+
 /// Starts the `version` cache named `stem` from the newest cache of `versions` in `directory`,
 /// unless a `version` cache already exists. Older files are copied, never changed, so the builds
-/// that wrote them keep them.
+/// that wrote them keep them. When a current cache does exist and predates the carry-over, the
+/// records of the newest compatible older cache are appended into it instead, so an upgrade from
+/// a build without this feature keeps what the game has already shown.
 inline PipelineCacheCarryOver CarryOverPipelineCache(const std::filesystem::path& directory,
                                                      std::string_view stem,
                                                      const std::array<char, 8>& magic,
                                                      std::span<const u32> versions, u32 version) {
     const auto destination = VersionedPipelineCachePath(directory, stem, version);
     std::error_code error;
-    if (std::filesystem::exists(destination, error) || error) {
+    const bool destination_exists = std::filesystem::exists(destination, error);
+    if (error) {
+        return {};
+    }
+    // Only the guest environment cache is appended to in place, so only it can take records from
+    // an older cache when a current one already exists; the driver pipeline cache is replaced
+    // whole and has nothing this feature can add.
+    const bool mergeable = magic == PipelineCacheMagic;
+    if (destination_exists) {
+        if (!mergeable || CarryOverMarkerExists(destination)) {
+            return {};
+        }
+        std::optional<Common::FS::FileLock> lock;
+        lock.emplace(PipelineCacheLockPath(destination), PipelineCacheLockWait);
+        for (const u32 source_version : versions) {
+            const auto source = VersionedPipelineCachePath(directory, stem, source_version);
+            if (!std::filesystem::is_regular_file(source, error)) {
+                continue;
+            }
+            if (!PipelineCacheHeaderMatches(source, magic, source_version)) {
+                continue; // Another file under that name, or one cut off before its header ends
+            }
+            if (AppendCompatiblePipelineCacheRecords(source, destination, magic, source_version)) {
+                WriteCarryOverMarker(destination);
+                return {.version = source_version, .merged = true};
+            }
+            return {.failed = true};
+        }
         return {};
     }
     // Another emulator starting the same cache, or appending to it once started, goes first: the
@@ -186,6 +317,7 @@ inline PipelineCacheCarryOver CarryOverPipelineCache(const std::filesystem::path
             continue; // Another file under that name, or one cut off before its header ends
         }
         if (CopyCompatiblePipelineCache(source, destination, magic, source_version, version)) {
+            WriteCarryOverMarker(destination);
             return {.version = source_version};
         }
         return {.failed = true};
