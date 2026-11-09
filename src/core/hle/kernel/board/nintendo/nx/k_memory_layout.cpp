@@ -6,6 +6,7 @@
 
 #include "common/alignment.h"
 #include "common/literals.h"
+#include "common/logging.h"
 #include "core/hle/kernel/k_memory_layout.h"
 #include "core/hle/kernel/k_memory_manager.h"
 #include "core/hle/kernel/k_system_control.h"
@@ -128,10 +129,21 @@ void SetupPoolPartitionMemoryRegions(KMemoryLayout& memory_layout) {
     // On 5.0.0+, setup modern 4-pool-partition layout.
 
     // Get Application and Applet pool sizes.
-    const size_t application_pool_size = KSystemControl::Init::GetApplicationPoolSize();
+    size_t application_pool_size = KSystemControl::Init::GetApplicationPoolSize();
     const size_t applet_pool_size = KSystemControl::Init::GetAppletPoolSize();
     const size_t unsafe_system_pool_min_size =
         KSystemControl::Init::GetMinimumNonSecureSystemPoolSize();
+
+    // EDEN_NX2_APP_POOL_PROBE can ask for a larger application pool than DRAM holds beside the
+    // other pools: limit it to what fits, so the pool starts below cannot wrap around.
+    const size_t max_application_pool_size = Common::AlignDown(
+        pool_end - pool_partitions_start - applet_pool_size - unsafe_system_pool_min_size,
+        CarveoutAlignment);
+    if (application_pool_size > max_application_pool_size) {
+        LOG_WARNING(Kernel, "Application pool of {} MiB does not fit, using {} MiB",
+                    application_pool_size / 1_MiB, max_application_pool_size / 1_MiB);
+        application_pool_size = max_application_pool_size;
+    }
 
     // Decide on starting addresses for our pools.
     const u64 application_pool_start = pool_end - application_pool_size;
