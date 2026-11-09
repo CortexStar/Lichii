@@ -1519,7 +1519,7 @@ int Recipe(const std::filesystem::path& precompiled, const std::filesystem::path
     const auto bytes = ReadFile(precompiled);
     VideoCommon::Nx2Recipe::Report report;
     const auto recipe = VideoCommon::Nx2Recipe::MakeRecipe(
-        bytes,  programs,
+        bytes, programs,
         {.title_id = game.title_id, .game_version = game.version,
          .cache_version = Load<u32>(bytes, 8)},
         report, threads);
@@ -1528,7 +1528,13 @@ int Recipe(const std::filesystem::path& precompiled, const std::filesystem::path
                static_cast<std::streamsize>(recipe.size()));
     PrintReport(report);
     fmt::print("recipe {} bytes (precompiled file {} bytes)\n", recipe.size(), bytes.size());
-    return report.records_dropped ? 1 : 0;
+    // A record whose program is not in the game's files (one built into its executable, say)
+    // cannot be rebuilt from a recipe, so it is left out; the recipe holds everything else.
+    if (report.records_dropped) {
+        fmt::print("{} records left out: their programs are not in the game's files\n",
+                   report.records_dropped);
+    }
+    return 0;
 }
 
 // assemble: a recipe and the game's own programs give this build's precompiled file.
