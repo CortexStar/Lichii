@@ -372,13 +372,11 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
             Nx2FastDraw::Break(Nx2FastDraw::Reason::OtherEngine);
         }
         if ((head & Direct) != 0) {
-            Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
             engine->ConsumeSink(*system);
             engine->CallMethod(*system, method, argument, true);
         } else if (!engine->execution_mask[method]) {
             engine->method_sink.emplace_back(method, argument);
         } else {
-            Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
             engine->ConsumeSink(*system);
             if ((head & HasSegment) != 0) {
                 engine->current_dma_segment = entry[1];
@@ -395,7 +393,6 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
         if (!engine->reports_fast_draw_breaks) {
             Nx2FastDraw::Break(Nx2FastDraw::Reason::OtherEngine);
         }
-        Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
         engine->ConsumeSink(*system);
         if ((head & HasSegment) != 0) {
             engine->current_dma_segment = entry[2];
@@ -464,8 +461,9 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             }
         }
         u64 last_store = read_position;
-        // One profile scope per batch: zones the entries open (draws, binds, ...) are subtracted,
-        // so `method` stays the time spent processing methods, without two clock reads each.
+        // One profile scope per batch (Execute opens none): zones the entries open (draws, binds,
+        // ...) are subtracted, so `method` stays the time spent processing methods, without two
+        // clock reads each, and its count is the number of batches.
         Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
         while (read_position != available) {
             const size_t index = read_position & RingMask;

@@ -567,7 +567,9 @@ bool IsStoreOnlyExecutable(u32 method) {
 // no write history, trace or profile, not a macro call or SET_SHADOW_RAM_CONTROL. The hot
 // executable methods go straight to their handler.
 void Maxwell3D::CallMethodFast(u32 method, u32 method_argument, bool is_last_call) {
-    if (VideoCommon::Nx2Profile::Enabled()) [[unlikely]] {
+    // VerifyCallMethod's fast pass is undone and the write made again by CallMethodSlow, which
+    // counts it.
+    if (VideoCommon::Nx2Profile::Enabled() && !verify_fast_pass) [[unlikely]] {
         CountWrite(method, method_argument);
     }
     const u32 argument = ProcessShadowRam(method, method_argument);
@@ -627,7 +629,9 @@ void Maxwell3D::VerifyCallMethod(Core::System& system, u32 method, u32 method_ar
     const u32 reg = regs.reg_array[method];
     const u32 shadow = shadow_state.reg_array[method];
     const DirtyState::Flags flags = dirty.flags;
+    verify_fast_pass = true;
     CallMethodFast(method, method_argument, is_last_call);
+    verify_fast_pass = false;
     const u32 fast_reg = regs.reg_array[method];
     const u32 fast_shadow = shadow_state.reg_array[method];
     const DirtyState::Flags fast_flags = dirty.flags;
@@ -700,13 +704,13 @@ void Maxwell3D::CallConstBufferWords(Core::System& system, const u32* methods,
         }
         return;
     }
-    if (VideoCommon::Nx2Profile::Enabled()) [[unlikely]] {
-        for (u32 i = 0; i < count; ++i) {
+    // As CallMethodFast for each word: the first may issue a deferred draw, before any upload.
+    // Each word is counted before it changes the register, as CallMethodFast counts.
+    const bool count_writes = VideoCommon::Nx2Profile::Enabled();
+    for (u32 i = 0; i < count; ++i) {
+        if (count_writes) [[unlikely]] {
             CountWrite(methods[i], arguments[i]);
         }
-    }
-    // As CallMethodFast for each word: the first may issue a deferred draw, before any upload.
-    for (u32 i = 0; i < count; ++i) {
         ProcessDirtyRegisters(methods[i], ProcessShadowRam(methods[i], arguments[i]));
     }
     if (VideoCommon::Nx2FastDraw::Enabled()) {

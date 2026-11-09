@@ -3306,6 +3306,8 @@ private:
     void CallMethodFast(u32 method, u32 method_argument, bool is_last_call);
     /// EDEN_NX2_GPU_PROFILE: counts a register write and whether it repeats the held value.
     void CountWrite(u32 method, u32 argument) const;
+    /// VerifyCallMethod runs CallMethodFast only to compare its result: not counted.
+    bool verify_fast_pass = false;
     /// EDEN_NX2_PERF_VERIFY: CallMethodFast's register state against CallMethodSlow's.
     void VerifyCallMethod(Core::System& system, u32 method, u32 method_argument, bool is_last_call);
 
