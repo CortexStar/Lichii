@@ -282,7 +282,10 @@ public:
         MediumImages, ///< Images past half a default block, up to a quarter of its own blocks
     };
     static constexpr VkDeviceSize SeparatePoolBlockSize = 16ULL << 20;
-    static constexpr VkDeviceSize MediumImagePoolBlockSize = 256ULL << 20;
+    static constexpr VkDeviceSize MediumImagePoolBlockSize = 64ULL << 20;
+    /// Blocks the medium image pool may hold at most (512 MiB): past that, images take the usual
+    /// path. Unbounded 256 MiB blocks left ~1.1 GB of partly used memory on an 8 GB card.
+    static constexpr u32 MediumImagePoolMaxBlocks = 8;
 
     /// The pool of that kind for a memory type, created on first use (null if that failed).
     VmaPool GetSeparatePool(SeparatePool kind, u32 memory_type) const;

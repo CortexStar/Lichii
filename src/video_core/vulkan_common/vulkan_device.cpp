@@ -874,7 +874,7 @@ VmaPool Device::GetSeparatePool(SeparatePool kind, u32 memory_type) const {
             .blockSize = kind == SeparatePool::MediumImages ? MediumImagePoolBlockSize
                                                             : SeparatePoolBlockSize,
             .minBlockCount = 0,
-            .maxBlockCount = 0,
+            .maxBlockCount = kind == SeparatePool::MediumImages ? MediumImagePoolMaxBlocks : 0,
             .priority = 0.f,
             .minAllocationAlignment = 0,
             .pMemoryAllocateNext = nullptr,
