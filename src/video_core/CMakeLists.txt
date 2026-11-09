@@ -581,4 +581,36 @@ if (ENABLE_NVIDIA_DLSS)
     message(STATUS "NVIDIA DLSS through Streamline: ${STREAMLINE_INCLUDE_DIR}")
 endif()
 
+# Linux: NVIDIA DLSS through NGX directly (Streamline is Windows-only). Point EGLANTINE_NGX_SDK at
+# a checkout of https://github.com/NVIDIA/DLSS (include/, lib/Linux_x86_64/). Its
+# libnvidia-ngx-dlss.so.* is copied next to the binary, where NGX looks for it at run time.
+set(EGLANTINE_NGX_SDK "" CACHE PATH "NVIDIA DLSS SDK directory, for DLSS on Linux through NGX")
+if (EGLANTINE_NGX_SDK AND NOT ENABLE_NVIDIA_DLSS AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
+    AND ARCHITECTURE_x86_64)
+    target_sources(video_core PRIVATE
+        renderer_vulkan/vk_ngx_dlss.cpp
+        renderer_vulkan/vk_streamline_dlss.h
+        vulkan_common/streamline_ngx.cpp
+        vulkan_common/streamline.h
+    )
+    target_include_directories(video_core PRIVATE "${EGLANTINE_NGX_SDK}/include")
+    target_link_libraries(video_core PRIVATE
+        "${EGLANTINE_NGX_SDK}/lib/Linux_x86_64/libnvsdk_ngx.a" ${CMAKE_DL_LIBS})
+    # The rest of the renderer only sees the Streamline interface (vulkan_common/streamline.h).
+    target_compile_definitions(video_core PUBLIC EGLANTINE_STREAMLINE EGLANTINE_NGX)
+    # Off for release builds that must not ship NVIDIA's DLSS model; users then put it in the
+    # streamline folder themselves.
+    option(EGLANTINE_NGX_COPY_MODEL "Copy NVIDIA's libnvidia-ngx-dlss.so.* next to the binary" ON)
+    if (EGLANTINE_NGX_COPY_MODEL)
+        file(GLOB NGX_DLSS_MODEL "${EGLANTINE_NGX_SDK}/lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.*")
+        if (NGX_DLSS_MODEL)
+            file(COPY ${NGX_DLSS_MODEL} DESTINATION "${CMAKE_BINARY_DIR}/bin")
+        else()
+            message(WARNING "No libnvidia-ngx-dlss.so.* in ${EGLANTINE_NGX_SDK}/lib/Linux_x86_64/rel; "
+                            "DLSS needs it in the streamline folder at run time")
+        endif()
+    endif()
+    message(STATUS "NVIDIA DLSS through NGX: ${EGLANTINE_NGX_SDK}")
+endif()
+
 create_target_directory_groups(video_core)

@@ -278,6 +278,13 @@ jobs:
             -DUSE_DISCORD_PRESENCE=OFF
             -DUSE_CCACHE=ON
           )
+          if [ '${{ runner.arch }}' = 'X64' ]; then
+            # NVIDIA DLSS through NGX. Only NGX's static library is linked; NVIDIA's DLSS model
+            # (libnvidia-ngx-dlss.so.*) is not shipped, users put it in the streamline folder.
+            git clone --quiet --depth 1 --branch v310.9.16 https://github.com/NVIDIA/DLSS.git \
+              "$RUNNER_TEMP/dlss-sdk"
+            flags+=("-DEGLANTINE_NGX_SDK=$RUNNER_TEMP/dlss-sdk" -DEGLANTINE_NGX_COPY_MODEL=OFF)
+          fi
           if [ '${{ matrix.pgo }}' = 'true' ]; then
             # Same flags Eden's CI passes for its clang PGO build.
             profile="-fprofile-use=$PWD/eglantine.profdata -Wno-backend-plugin \
