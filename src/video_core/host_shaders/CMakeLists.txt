@@ -108,6 +108,8 @@ set(SHADER_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/ocarina_dlss_output.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/ocarina_dlss_4k_composite.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/ocarina_dlss_4k_reference.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ocarina_dlss_effects.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ocarina_dlss_bias.comp
 )
 
 if (HAIKUOS)

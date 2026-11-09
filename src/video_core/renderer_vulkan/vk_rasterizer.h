@@ -306,6 +306,9 @@ private:
     std::optional<u64> oot_dlss_frame;
     std::optional<u64> oot_4k_scene_frame;
     VkImage oot_4k_guest_present{};
+    std::optional<u64> oot_effects_frame;
+    GPUVAddr oot_effects_address{};
+    VkImageView oot_effects_scene{};
     struct OcarinaActorPose {
         u64 frame{};
         const Tegra::MemoryManager* channel{};
