@@ -318,6 +318,9 @@ void DumpSpirvShader(u64 shader_hash, std::span<const u32> spirv_code) {
 
     const auto shader_path = dump_dir / fmt::format("{:016x}_{:016x}.spv",
                                                     Settings::GetCurrentProgramID(), shader_hash);
+    // Parallel pipeline variants share this filename; keep each complete write together.
+    static std::mutex dump_mutex;
+    std::scoped_lock lock{dump_mutex};
     Common::FS::IOFile shader_file(shader_path, FileAccessMode::Write, FileType::BinaryFile);
     if (!shader_file.IsOpen()) {
         LOG_WARNING(Render_Vulkan, "[Shader Dump] Failed to open {}", shader_path.string());
