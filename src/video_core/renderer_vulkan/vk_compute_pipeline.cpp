@@ -15,6 +15,7 @@
 #include <boost/container/small_vector.hpp>
 #include <fmt/format.h>
 
+#include "video_core/nx2_profile.h"
 #include "video_core/renderer_vulkan/pipeline_build_failure.h"
 #include "video_core/renderer_vulkan/pipeline_build_trace.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
@@ -386,7 +387,9 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     for (const auto& desc : info.storage_buffers_descriptors) {
         ASSERT(desc.count == 1);
         buffer_cache.BindComputeStorageBuffer(ssbo_index, desc.cbuf_index, desc.cbuf_offset,
-                                              desc.is_written, desc.indirect_offset);
+                                              desc.is_written, desc.indirect_offset,
+
+                                              desc.write_extent);
         ++ssbo_index;
     }
 
@@ -624,6 +627,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     if (!is_built.load(std::memory_order::relaxed)) {
         // Wait for the pipeline to be built
         scheduler.Record([this](vk::CommandBuffer) {
+            const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::PipelineWait};
             RunBuild();
             std::unique_lock lock{build_mutex};
             build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });

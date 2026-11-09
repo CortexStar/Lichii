@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -45,6 +46,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_download_trace.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/types.h"
 
@@ -156,6 +158,10 @@ public:
     std::array<u64, NUM_STAGES> written_storage_buffers{};
     u64 enabled_compute_storage_buffers = 0;
     u64 written_compute_storage_buffers = 0;
+    // Bound by a native (Switch 2) compute program, whose pointers carry no size.
+    u64 native_compute_storage_buffers = 0;
+    // Bytes from each compute storage binding's start that a dispatch marks GPU-written.
+    std::array<u32, NUM_STORAGE_BUFFERS> compute_storage_write_marks{};
 
     u32 total_graphics_storage_buffers = 0;
     u32 total_compute_storage_buffers = 0;
@@ -238,7 +244,8 @@ public:
     void TickFrame();
 
     bool BindMultiRangeStorage(const Binding& binding, bool is_written,
-                               std::span<const MultiRangeSegment> pool);
+                               std::span<const MultiRangeSegment> pool,
+                               u64 write_mark_limit = ~u64{0});
 
     void ResolveMultiRangeStorage(Binding& binding, bool is_written,
                                   std::vector<MultiRangeSegment>& pool);
@@ -268,6 +275,15 @@ public:
     void DownloadMemory(DAddr device_addr, u64 size);
 
     std::optional<VideoCore::RasterizerDownloadArea> GetFlushArea(DAddr device_addr, u64 size);
+
+    /// The core consumed the read traps of these pages for a read the texture cache answered:
+    /// the next GPU write here must arm them again (GetFlushArea forgets them otherwise).
+    void ForgetReadTraps(DAddr device_addr, u64 size) {
+        read_trapped_ranges.Subtract(
+            Common::AlignDown(device_addr, Core::DEVICE_PAGESIZE),
+            Common::AlignUp(device_addr + size, Core::DEVICE_PAGESIZE) -
+                Common::AlignDown(device_addr, Core::DEVICE_PAGESIZE));
+    }
 
     /// Without downloads at every fence, a guest CPU read is the only way GPU-written buffer
     /// data reaches guest memory, so reads must ask the buffer cache (GetFlushArea).
@@ -308,8 +324,10 @@ public:
 
     void UnbindComputeStorageBuffers();
 
+    /// write_extent: how far the program's stores reach past the pointer (native programs).
     void BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
-                                  bool is_written, u32 indirect_offset = ~0U);
+                                  bool is_written, u32 indirect_offset = ~0U,
+                                  const Shader::StorageWriteExtent& write_extent = {});
 
     void UnbindComputeTextureBuffers();
 
@@ -368,13 +386,16 @@ public:
     }
     /// True when it recorded copies, which the GPU completes at `tick` (the caller submits).
     bool Nx2CopyListPages(u64 tick);
-    enum class Nx2ListRead { Unknown, Copied, Synced, NeedsSync };
+    enum class Nx2ListRead { Unknown, Copied, Synced, NeedsSync, Pending };
     /// Front thread: Synced when guest memory holds the page `device_addr` lies in (flushed and
     /// written by no GPU work since), else Copied with `out` filled from the copy of its last
     /// write once the GPU is done with it. Unknown otherwise: the caller drains and flushes.
     /// Pages draws write are only Synced or Unknown, and NeedsSync until `past_sync`: the
     /// split's back ran the work before the last host-level wait (GpuSplit::WaitForSync).
-    Nx2ListRead Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool past_sync);
+    /// With `pending_tick`, a copy the GPU has not finished returns Pending and sets the tick
+    /// instead of waiting for it.
+    Nx2ListRead Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool past_sync,
+                                u64* pending_tick = nullptr);
     /// Front thread, the split drained: the command list page was flushed to guest memory.
     void Nx2NoteListSynced(DAddr page);
 
@@ -452,6 +473,9 @@ public:
 
     [[nodiscard]] std::pair<Buffer*, u32> GetDrawIndirectBuffer();
 
+    /// Fast draw verify (nx2_fast_draw.h): a hash of the bindings a delta draw keeps.
+    [[nodiscard]] u64 KeptGraphicsBindingsHash(bool vertex, bool storage, bool texture) const;
+
     template <typename Func>
     void BufferOperations(Func&& func) {
         do {
@@ -459,6 +483,11 @@ public:
             func();
         } while (channel_state->has_deleted_buffers);
     }
+
+    /// Called before each graphics draw binds its buffers (uniform keeps). `delta`: the constant
+    /// buffer binds and data since the previous draw when it is a fast draw delta draw, else
+    /// nullptr.
+    void BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta);
 
     Common::SpinRecursiveMutex mutex;
     Runtime& runtime;
@@ -581,6 +610,9 @@ private:
 
     bool SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size);
 
+    /// SynchronizeBuffer for vertex buffer slots 0-31 and the index buffer (slot 32).
+    void SynchronizeGeometryBuffer(u32 slot, BufferId buffer_id, DAddr device_addr, u32 size);
+
     void UploadMemory(Buffer& buffer, u64 total_size_bytes, u64 largest_copy,
                       std::span<BufferCopy> copies);
 
@@ -651,6 +683,59 @@ private:
     u32 stale_vertex_buffers_mask = 0;
     u64 vertex_buffers_serial = 0;
     std::array<Binding, 32> v_buffer{};
+
+    /// The range each geometry slot last scanned for uploads (SynchronizeGeometryBuffer).
+    struct GeometrySync {
+        BufferId buffer_id{};
+        DAddr device_addr{};
+        u32 size{};
+        u64 deletions{};
+    };
+    std::array<GeometrySync, NUM_VERTEX_BUFFERS + 1> geometry_syncs{};
+    /// Counts DeleteBuffer calls: a buffer id older than this count may have been freed or reused.
+    u64 buffer_deletions = 0;
+    struct GeometryStats {
+        u64 syncs{};
+        u64 syncs_skipped{};
+        u64 verify_mismatches{};
+    } geometry_stats;
+
+    /// Uniform keeps: a delta draw binds a small uniform buffer from the stream
+    /// allocation the previous draw made for it, without reading guest memory, when nothing ordered
+    /// between the two draws wrote its range: no inline constant data, no rebind, no CPU write the
+    /// caches were told about, no GPU write and no buffer deletion. Anything else in between ends
+    /// the delta chain.
+    [[nodiscard]] bool UniformRangeKept(size_t stage, u32 index, DAddr device_addr,
+                                        u32 size) const noexcept;
+    void NoteUniformWrite(DAddr device_addr, u64 size) {
+        UniformKeep& keep = uniform_keep;
+        if (keep.memory_writes.size() == keep.memory_writes.capacity()) {
+            keep.memory_writes_lost = true;
+            return;
+        }
+        keep.memory_writes.emplace_back(device_addr, device_addr + size);
+    }
+    /// EDEN_NX2_UBO_KEEP_VERIFY=1: binds what a keep would skip the original way and logs where
+    /// guest memory changed.
+    const bool ubo_keep_verify = [] {
+        const char* const value = std::getenv("EDEN_NX2_UBO_KEEP_VERIFY");
+        return value != nullptr && value[0] == '1';
+    }();
+    struct UniformKeep {
+        std::array<u32, NUM_STAGES> candidates{}; ///< Streamed by the previous draw, not rebound
+        std::array<u32, NUM_STAGES> streamed{};   ///< Streamed by this draw
+        /// Device ranges written since the previous draw began: inline constant data, then the
+        /// CPU writes and GPU-modified marks.
+        boost::container::static_vector<std::pair<DAddr, DAddr>, Nx2FastDraw::Delta::MaxWrites + 8>
+            writes;
+        boost::container::static_vector<std::pair<DAddr, DAddr>, 8> memory_writes;
+        bool memory_writes_lost{}; ///< More writes than memory_writes holds
+        u64 draw_deletions{}; ///< buffer_deletions when the previous draw began
+        u64 kept{};
+        u64 streamed_binds{};
+        u64 verified{};
+        u64 mismatches{};
+    } uniform_keep;
 
     boost::container::small_vector<BufferCopy, 4> upload_copies;
 
@@ -725,10 +810,11 @@ private:
     void ArmReadTraps(DAddr device_addr, u64 size) {
         const DAddr begin = Common::AlignDown(device_addr, Core::DEVICE_PAGESIZE);
         const DAddr end = Common::AlignUp(device_addr + size, Core::DEVICE_PAGESIZE);
-        if (!read_trapped_ranges.Arm(begin, end - begin)) {
-            return;
-        }
-        device_memory.ArmReadTraps(begin, end - begin);
+        // Only the parts not armed yet: the core visits each page it is given, and a buffer the
+        // GPU rewrites every frame is mostly still armed (the guest read a few of its pages).
+        read_trapped_ranges.Arm(begin, end - begin, [this](DAddr part, u64 part_size) {
+            device_memory.ArmReadTraps(part, part_size);
+        });
     }
 
     ReadTrapTracker read_trapped_ranges;
