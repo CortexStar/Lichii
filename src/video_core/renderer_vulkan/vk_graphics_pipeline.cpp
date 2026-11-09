@@ -29,8 +29,10 @@
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_frame_dump.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
+#include "video_core/renderer_vulkan/vk_pipeline_binaries.h"
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_shader_cache_v2.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
@@ -301,6 +303,42 @@ bool TextureMemoVerify() {
     return verify;
 }
 
+// EDEN_NX2_DELTA_DESCRIPTORS_VERIFY=1: delta draws resolve their image descriptors as before and
+// compare them with the kept ones.
+const bool delta_descriptors_verify = [] {
+    const char* const value = std::getenv("EDEN_NX2_DELTA_DESCRIPTORS_VERIFY");
+    return value != nullptr && value[0] == '1';
+}();
+
+// Delta draws on the drawing thread, logged every 10 s with EDEN_NX2_GPU_PROFILE or the verify
+// env.
+struct DeltaDescriptorStats {
+    u64 replayed{};
+    u64 pushed{};
+    u64 verified{};
+    u64 mismatches{};
+    std::chrono::steady_clock::time_point next_report{};
+} delta_descriptor_stats;
+
+void ReportDeltaDescriptors() {
+    DeltaDescriptorStats& stats = delta_descriptor_stats;
+    if (((stats.replayed + stats.pushed) & 1023) != 0 ||
+        (!VideoCommon::Nx2Profile::Enabled() && !delta_descriptors_verify)) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now < stats.next_report) {
+        return;
+    }
+    if (stats.next_report != std::chrono::steady_clock::time_point{}) {
+        LOG_INFO(Render_Vulkan,
+                 "Delta descriptors in 10 s: {} replayed, {} pushed, {} verified, {} verify "
+                 "mismatches",
+                 stats.replayed, stats.pushed, stats.verified, stats.mismatches);
+    }
+    stats = {.next_report = now + std::chrono::seconds{10}};
+}
+
 // Texture memo counts, logged every 10 s with EDEN_NX2_GPU_PROFILE or the verify env.
 std::atomic<u64> g_memo_hits{};
 std::atomic<u64> g_memo_misses{};
@@ -341,20 +379,21 @@ std::chrono::nanoseconds GraphicsPipeline::TakeHoldTime() noexcept {
 // TODO(crueter): This is the worst-formatted code I have EVER seen
 GraphicsPipeline::GraphicsPipeline(
     Scheduler& scheduler_, BufferCache& buffer_cache_, TextureCache& texture_cache_,
-    vk::PipelineCache& pipeline_cache_, VideoCore::ShaderNotify* shader_notify,
+    vk::PipelineCache& pipeline_cache_, PipelineBinaries* binaries_,
+    VideoCore::ShaderNotify* shader_notify,
     const Device& device_, DescriptorPool& descriptor_pool,
     GuestDescriptorQueue& guest_descriptor_queue_, DescriptorBufferRing& descriptor_buffer_ring_,
-    Common::ThreadWorker* worker_thread,
+    const PipelineBuildQueue& build_queue,
     PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
     const GraphicsPipelineCacheKey& key_, std::array<vk::ShaderModule, NUM_STAGES> stages,
     const std::array<const Shader::Info*, NUM_STAGES>& infos,
     std::function<std::array<vk::ShaderModule, NUM_STAGES>()> emit_stages,
     std::optional<MeshEmulationSetup> mesh_emulation_)
     : key{key_}, device{device_}, texture_cache{texture_cache_}, buffer_cache{buffer_cache_},
-      pipeline_cache(pipeline_cache_), scheduler{scheduler_},
+      pipeline_cache(pipeline_cache_), binaries{binaries_}, scheduler{scheduler_},
       guest_descriptor_queue{guest_descriptor_queue_},
       descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)},
-      worker_only_build{worker_thread && static_cast<bool>(emit_stages)},
+      worker_only_build{build_queue.jobs && static_cast<bool>(emit_stages)},
       mesh_emulation{std::move(mesh_emulation_)} {
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
@@ -532,6 +571,27 @@ GraphicsPipeline::GraphicsPipeline(
         }
     }
 
+    // Shader cache v2: the emission is the CPU stage of the build's job.
+    std::function<void()> emit;
+    if (build_queue.jobs && emit_stages) {
+        emit = [this, shader_notify, emit_stages = std::exchange(emit_stages, {})] {
+            try {
+                spv_modules = emit_stages();
+            } catch (const Shader::Exception& exception) {
+                LOG_ERROR(Render_Vulkan, "Graphics pipeline {:016x}: {}", key.Hash(),
+                          exception.what());
+                if (shader_notify) {
+                    shader_notify->MarkShaderComplete();
+                }
+                throw;
+            } catch (...) {
+                if (shader_notify) {
+                    shader_notify->MarkShaderComplete();
+                }
+                throw;
+            }
+        };
+    }
     auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics,
                 emit_stages = std::move(emit_stages)] {
         const auto begin = std::chrono::steady_clock::now();
@@ -583,7 +643,7 @@ GraphicsPipeline::GraphicsPipeline(
         present_stages[stage] = infos[stage] != nullptr;
     }
     configure_func = ConfigureFunc(present_stages, stage_infos);
-    build.emplace(worker_thread, std::move(func));
+    build.emplace(build_queue, std::move(func), std::move(emit));
 }
 
 void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
@@ -860,7 +920,9 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             }
         }
     }
-    if (std::exchange(capture_delta, false) && delta_blocker == DeltaBlocker::None) {
+    const bool captured_delta =
+        std::exchange(capture_delta, false) && delta_blocker == DeltaBlocker::None;
+    if (captured_delta) {
         const auto same_view = [](const VideoCommon::ImageViewInOut& lhs,
                                   const VideoCommon::ImageViewInOut& rhs) {
             return lhs.index == rhs.index && lhs.id == rhs.id;
@@ -874,6 +936,10 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         delta_samplers.assign(samplers.begin(), samplers.end());
         configured_stages = Spec::enabled_stages;
         delta_views_valid = true;
+        kept_images_valid = false;
+    }
+    if (captured_delta) {
+        kept_image_entries.clear();
     }
 
     if constexpr (Spec::has_texture_buffers || Spec::has_image_buffers) {
@@ -979,6 +1045,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         }
         {
             Profile::Scope scope{Profile::Zone::PushDescriptors};
+            const size_t first_entry = guest_descriptor_queue.UpdateCount();
             PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
                                  rescaling, samplers_it, views_it,
                                  Settings::values.experimental_texture_binding_optimizations.GetValue() &&
@@ -988,6 +1055,9 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                                          !VideoCommon::RenderTrace::Enabled()
                                      ? &stable_sampled_chunks[stage]
                                      : nullptr);
+            if (captured_delta) {
+                KeepImageDescriptors(stage, first_entry);
+            }
         }
         const auto& info{stage_infos[stage]};
         if (info.uses_render_area) {
@@ -1013,6 +1083,11 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     }
     if constexpr (Spec::enabled_stages[4]) {
         prepare_stage(4);
+    }
+    if (captured_delta) {
+        kept_rescaling = rescaling.Data();
+        kept_scale_epoch = texture_cache.ScaleEpoch();
+        kept_images_valid = true;
     }
     if (mesh_emulation) {
         if (!mesh_output_buffer) {
@@ -1091,6 +1166,22 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
     RenderAreaPushConstant render_area;
     const VideoCommon::SamplerId* samplers_it{delta_samplers.data()};
     const VideoCommon::ImageViewInOut* views_it{delta_views.data()};
+    // Push the entries kept for delta_views instead of resolving every view and sampler again;
+    // with EDEN_NX2_DELTA_DESCRIPTORS_VERIFY resolve them and compare.
+    const bool kept_usable = kept_images_valid && kept_scale_epoch == texture_cache.ScaleEpoch();
+    const bool replay_images = kept_usable && !delta_descriptors_verify;
+    struct Kept {
+        std::vector<DescriptorUpdateEntry> entries;
+        std::array<std::pair<u32, u32>, NUM_STAGES> ranges;
+        std::array<u32, Shader::Backend::SPIRV::NUM_TEXTURE_AND_IMAGE_SCALING_WORDS> rescaling;
+    };
+    std::optional<Kept> verify_kept;
+    if (!replay_images) {
+        if (kept_usable) {
+            verify_kept.emplace(std::move(kept_image_entries), kept_image_ranges, kept_rescaling);
+        }
+        kept_image_entries.clear();
+    }
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
         if (!configured_stages[stage]) {
             continue;
@@ -1099,10 +1190,16 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
             Profile::Scope scope{Profile::Zone::BindStageBuffers};
             buffer_cache.BindHostStageBuffers(stage);
         }
-        {
+        if (replay_images) {
             Profile::Scope scope{Profile::Zone::PushDescriptors};
+            const auto [first, count] = kept_image_ranges[stage];
+            guest_descriptor_queue.AddEntries({kept_image_entries.data() + first, count});
+        } else {
+            Profile::Scope scope{Profile::Zone::PushDescriptors};
+            const size_t first_entry = guest_descriptor_queue.UpdateCount();
             PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
                                  rescaling, samplers_it, views_it);
+            KeepImageDescriptors(stage, first_entry);
         }
         if (stage_infos[stage].uses_render_area) {
             render_area.uses_render_area = true;
@@ -1112,6 +1209,34 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
                                  static_cast<float>(clip_set ? clip_height : u32{regs.rt[0].height})};
         }
     }
+    if (replay_images) {
+        rescaling.Assign(kept_rescaling);
+        ++delta_descriptor_stats.replayed;
+    } else {
+        kept_rescaling = rescaling.Data();
+        kept_scale_epoch = texture_cache.ScaleEpoch();
+        kept_images_valid = true;
+        ++delta_descriptor_stats.pushed;
+        if (verify_kept) {
+            ++delta_descriptor_stats.verified;
+            const auto same_image = [](const DescriptorUpdateEntry& lhs,
+                                       const DescriptorUpdateEntry& rhs) {
+                return lhs.image.sampler == rhs.image.sampler &&
+                       lhs.image.imageView == rhs.image.imageView &&
+                       lhs.image.imageLayout == rhs.image.imageLayout;
+            };
+            if ((verify_kept->ranges != kept_image_ranges ||
+                 verify_kept->rescaling != kept_rescaling ||
+                 !std::ranges::equal(verify_kept->entries, kept_image_entries, same_image)) &&
+                delta_descriptor_stats.mismatches++ < 16) {
+                LOG_ERROR(Render_Vulkan,
+                          "Delta descriptors verify: pipeline {:016x} resolved other image "
+                          "descriptors or rescaling words than the previous draw",
+                          key.Hash());
+            }
+        }
+    }
+    ReportDeltaDescriptors();
     if (buffer_cache.any_buffer_uploaded) {
         buffer_cache.runtime.PostCopyBarrier();
         buffer_cache.any_buffer_uploaded = false;
@@ -1131,6 +1256,15 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
     }
     Profile::Scope scope{Profile::Zone::ConfigureDraw};
     return ConfigureDraw(rescaling, render_area);
+}
+
+void GraphicsPipeline::KeepImageDescriptors(size_t stage, size_t first_entry) {
+    const DescriptorUpdateEntry* const entries = guest_descriptor_queue.UpdateData();
+    const size_t end_entry = guest_descriptor_queue.UpdateCount();
+    kept_image_ranges[stage] = {static_cast<u32>(kept_image_entries.size()),
+                                static_cast<u32>(end_entry - first_entry)};
+    kept_image_entries.insert(kept_image_entries.end(), entries + first_entry,
+                              entries + end_entry);
 }
 
 bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
@@ -1309,6 +1443,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     if (!IsBuilt()) {
         // Wait for the pipeline to be built
         scheduler.Record([this](vk::CommandBuffer) {
+            const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::PipelineWait};
             const auto begin = std::chrono::steady_clock::now();
             build->Wait(!worker_only_build);
             hold_time_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -1422,8 +1557,9 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
             .pNext = nullptr,
             .requiredSubgroupSize = GuestWarpSize,
         };
+        // Their binaries are stored under the graphics key, one key per program
         const auto make_compute = [&](VkShaderModule module, VkPipelineLayout layout,
-                                      const Shader::Info* info) {
+                                      const Shader::Info* info, u64 program) {
             const bool uses_warp_ops{info && (info->uses_subgroup_vote ||
                                               info->uses_subgroup_invocation_id ||
                                               info->uses_subgroup_shuffles ||
@@ -1431,36 +1567,39 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                                               info->uses_quad_shuffles || info->uses_fswzadd)};
             const bool force_warp_size{uses_warp_ops && device.IsExtSubgroupSizeControlSupported() &&
                                        device.IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT)};
-            return device.GetLogical().CreateComputePipeline(
-                VkComputePipelineCreateInfo{
-                    .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-                    .pNext = nullptr,
+            const VkComputePipelineCreateInfo compute_ci{
+                .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .stage{
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                    .pNext = force_warp_size ? &compute_subgroup_size_ci : nullptr,
                     .flags = 0,
-                    .stage{
-                        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                        .pNext = force_warp_size ? &compute_subgroup_size_ci : nullptr,
-                        .flags = 0,
-                        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-                        .module = module,
-                        .pName = "main",
-                        .pSpecializationInfo = nullptr,
-                    },
-                    .layout = layout,
-                    .basePipelineHandle = nullptr,
-                    .basePipelineIndex = 0,
+                    .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                    .module = module,
+                    .pName = "main",
+                    .pSpecializationInfo = nullptr,
                 },
-                *pipeline_cache);
+                .layout = layout,
+                .basePipelineHandle = nullptr,
+                .basePipelineIndex = 0,
+            };
+            return binaries ? binaries->CreateComputePipeline(
+                                  compute_ci, *pipeline_cache,
+                                  GraphicsRecordKey(key) ^ (program * 0x9e3779b97f4a7c15ULL))
+                            : device.GetLogical().CreateComputePipeline(compute_ci,
+                                                                        *pipeline_cache);
         };
         mesh_vertex_module = BuildShader(device, mesh_emulation->vertex_spirv);
         mesh_compute_pipeline = make_compute(*spv_modules[mesh_emulation->mesh_stage],
                                              *pipeline_layout,
-                                             &stage_infos[mesh_emulation->mesh_stage]);
+                                             &stage_infos[mesh_emulation->mesh_stage], 1);
         if (mesh_emulation->has_task) {
             task_compute_pipeline =
-                make_compute(*spv_modules[0], *pipeline_layout, &stage_infos[0]);
+                make_compute(*spv_modules[0], *pipeline_layout, &stage_infos[0], 2);
             distribution_module = BuildShader(device, mesh_emulation->distribution_spirv);
             distribution_pipeline =
-                make_compute(*distribution_module, *distribution_layout, nullptr);
+                make_compute(*distribution_module, *distribution_layout, nullptr, 3);
         }
     }
     FixedPipelineState::DynamicState dynamic{};
@@ -1905,7 +2044,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     const bool unoptimized = (flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT) != 0;
     const auto trace_begin = std::chrono::steady_clock::now();
     TracePipelineBuild("BEGIN", "graphics", key.Hash(), key.unique_hashes, unoptimized);
-    pipeline = device.GetLogical().CreateGraphicsPipeline({
+    const VkGraphicsPipelineCreateInfo pipeline_ci{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext = nullptr,
         .flags = flags,
@@ -1929,7 +2068,10 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .subpass = 0,
         .basePipelineHandle = nullptr,
         .basePipelineIndex = 0,
-    }, *pipeline_cache);
+    };
+    pipeline = binaries ? binaries->CreateGraphicsPipeline(pipeline_ci, *pipeline_cache,
+                                                           GraphicsRecordKey(key))
+                        : device.GetLogical().CreateGraphicsPipeline(pipeline_ci, *pipeline_cache);
     TracePipelineBuild("END", "graphics", key.Hash(), key.unique_hashes, unoptimized,
                        std::chrono::duration<double, std::milli>(
                            std::chrono::steady_clock::now() - trace_begin)
