@@ -117,7 +117,11 @@ add_library(video_core STATIC
     nx2_cmdpage_diag.h
     nx2_debug_control.cpp
     nx2_debug_control.h
+    nx2_fast_draw.cpp
+    nx2_fast_draw.h
     nx2_profile.h
+    nx2_stutter_trace.cpp
+    nx2_stutter_trace.h
     nx2_perf.h
     nx2_download_trace.h
     pending_maps.h
@@ -255,6 +259,7 @@ add_library(video_core STATIC
     vulkan_common/vulkan_library.cpp
     vulkan_common/vulkan_library.h
     vulkan_common/vulkan_overlay_filter.h
+    vulkan_common/unbacked_fallback.h
     vulkan_common/vulkan_memory_allocator.cpp
     vulkan_common/vulkan_memory_allocator.h
     vulkan_common/vulkan_surface.cpp

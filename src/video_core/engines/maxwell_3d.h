@@ -26,6 +26,7 @@
 #include "video_core/engines/engine_upload.h"
 #include "video_core/gpu.h"
 #include "video_core/macro.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/textures/texture.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -3271,6 +3272,16 @@ public:
     /// Handles a write to the CB_BIND register.
     void ProcessCBBind(size_t stage_index);
 
+    /// Fast draw (nx2_fast_draw.h): registers that only parameterize the next draw, the next
+    /// constant buffer bind or the buffers a delta draw binds again, or that ProcessMethodCall
+    /// handles, so writing them doesn't end draw reuse.
+    static bool IsFastDrawParameter(u32 method);
+    /// Methods fast draw records as light changes (constant buffer data and binds).
+    static bool IsFastDrawDeltaMethod(u32 method);
+    /// A vertex stream's address, size or limit (not its stride or enable).
+    static bool IsFastDrawVertexBuffer(u32 method);
+    void NoteFastDrawConstantData(GPUVAddr begin, GPUVAddr end);
+
     /// Handles a write to the CB_DATA[i] register.
     void ProcessCBData(u32 value);
     void ProcessCBMultiData(const u32* start_base, u32 amount);
@@ -3345,6 +3356,10 @@ private:
 
     MemoryManager& memory_manager;
 
+    /// Device memory of the texture and sampler header tables (NoteFastDrawConstantData).
+    VideoCommon::Nx2FastDraw::DeviceSpans fast_draw_header_spans;
+    VideoCommon::Nx2FastDraw::DeviceSpans fast_draw_sampler_spans;
+
     VideoCore::RasterizerInterface* rasterizer = nullptr;
 
     /// Start offsets of each macro in macro_memory
@@ -3413,6 +3428,7 @@ private:
     bool FrontSkipsLoopWrite(FrontState& state, u32 method, u32 value, bool shadow_kept);
     void FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& state, u32 macro, u32 method,
                       u32 count);
+    void FrontNoteReport(VideoCommon::GpuSplit& split, const FrontState& state);
     void FrontVerify(VideoCommon::GpuSplit& split, FrontState& state);
     void FinishFrontMacro(Core::System& system);
     std::unique_ptr<FrontState> front;
