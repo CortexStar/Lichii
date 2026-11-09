@@ -22,8 +22,8 @@ void ReportPipelineBuildFailure(VkResult result) {
         LOG_CRITICAL(Render_Vulkan,
                      "The GPU driver ran out of host memory building a pipeline: Windows commit is "
                      "{:.1f} of {:.1f} GiB. The commit limit is RAM plus the page file, and a "
-                     "Switch 2 game commits 14 GiB of guest memory when it starts. Enlarge the "
-                     "page file; until then, pipelines that fail draw nothing.",
+                     "Switch 2 game commits 14 GiB of guest memory when it starts. If commit is "
+                     "near the limit, enlarge the page file. Pipelines that fail draw nothing.",
                      static_cast<double>(usage.system_commit) / GiB,
                      static_cast<double>(usage.system_commit_limit) / GiB);
         return;
