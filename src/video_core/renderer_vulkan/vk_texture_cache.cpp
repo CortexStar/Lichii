@@ -4648,10 +4648,8 @@ void CustomBorderColorBudget::Release() noexcept {
 f32 TextureCacheRuntime::OcarinaFsrLodBias() {
     if (!ocarina_fsr_lod_bias) {
         const bool ocarina = Settings::GetCurrentProgramID() == 0x0400486024DEC000ULL;
-        ocarina_fsr_lod_bias = ocarina ? VideoCommon::OcarinaFsrLodBias(
-                                             ResolveOcarinaUpscaler(device),
-                                             Settings::IsDockedMode())
-                                       : 0.0f;
+        ocarina_fsr_lod_bias =
+            ocarina ? VideoCommon::OcarinaFsrLodBias(ResolveOcarinaUpscaler(device)) : 0.0f;
     }
     return *ocarina_fsr_lod_bias;
 }
@@ -4762,11 +4760,13 @@ Sampler::VariantKey Sampler::MakeKey(const ImageView& image_view, bool is_depth)
     key.drop_compare = has_depth_comparison && !is_depth;
     // The FSR bias is for the game's textures. Images the GPU wrote (render targets: bloom and
     // blur chains, reflections, fog) keep the game's own bias, or they'd read a mip too sharp.
-    // After the upscaler failed this session every image does (the game's pass runs again).
+    // So does every image in handheld mode (the console mode can change in-session), and after
+    // the upscaler failed this session (the game's pass runs again).
     if (added_lod_bias != 0.0f) {
         const Image* const image = image_view.BackingImage();
         key.drop_lod_bias = !VideoCommon::KeepOcarinaFsrLodBias(
-            *ocarina_fsr_failed, image != nullptr && True(image->flags & ImageFlagBits::GpuModified));
+            Settings::IsDockedMode(), *ocarina_fsr_failed,
+            image != nullptr && True(image->flags & ImageFlagBits::GpuModified));
     }
     if (needs_swizzle_mapping && !key.drop_custom_border && !image_view.HasIdentitySwizzle()) {
         const VkComponentMapping& mapping = image_view.Swizzle();

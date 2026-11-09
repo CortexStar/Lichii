@@ -74,13 +74,16 @@ enabled and the runtime is available; otherwise an enabled temporal selection us
   writes on but the test off writes no depth (Vulkan disables writes with the test), so the
   depth-write flag alone doesn't count. DLSS gets no jitter.
 - Motion with jitter: FSR is told the motion vectors carry no jitter (no jitter-cancellation
-  flag). Camera motion comes from the unjittered matrices. The replay of Link's skinned draw is
+  flag). Camera motion comes from the unjittered matrices, reconstructed at each depth sample's
+  unjittered position (the pixel centre minus the jitter). The replay of Link's skinned draw is
   offset by the same jitter, so its scene-depth check compares the same samples the game drew,
   and its motion is taken from the unjittered position. Without that offset the jitter made the
   check fail on most of the fragments it otherwise accepts.
 - Texture LOD bias (FSR only): when the session's upscaler is FSR, mipmapped samplers get
   AMD's recommended bias log2(render / output) - 1 = -1.58 in docked mode (none in handheld).
-  Images the GPU wrote (render targets: bloom, blur, reflections, fog) keep the game's own bias.
+  Samplers pick the biased or unbiased variant at each bind, so a console mode switch takes
+  effect in-session. Images the GPU wrote (render targets: bloom, blur, reflections, fog) keep
+  the game's own bias.
 - #644 (`82494c4820`, `74a2d20c90`, `4352c06bbf`) supplies the backend-neutral effects capture.
   FSR uses its R16F current/history bias as both reactive and transparency/composition masks;
   missing capture uses zero masks, not stale history. The DLSS preset changes were not imported.

@@ -97,8 +97,12 @@ constexpr std::array TEMPLATES{
                                     sizeof(DescriptorUpdateEntry), sizeof(DescriptorUpdateEntry)},
 };
 constexpr DescriptorBankInfo BANK{.textures = 1, .images = 1, .score = 2};
+struct CameraMotionParameters {
+    Matrix clip_to_previous_clip;
+    std::array<f32, 2> jitter; ///< the scene's viewport offset this frame (render pixels)
+};
 constexpr std::array PUSH_CONSTANTS{
-    VkPushConstantRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Matrix)},
+    VkPushConstantRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(CameraMotionParameters)},
 };
 constexpr VkImageSubresourceRange MOTION_RANGE{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 
@@ -360,10 +364,10 @@ public:
                       OCARINA_CAMERA_MOTION_COMP_SPV) {}
 
     /// Fill camera motion from depth, then overwrite visible actor pixels with skinned motion.
-    void Record(Scheduler& scheduler, const void* descriptors, const Matrix& transform,
-                VkImage motion, VkExtent2D size,
+    void Record(Scheduler& scheduler, const void* descriptors,
+                const CameraMotionParameters& parameters, VkImage motion, VkExtent2D size,
                 const ActorOverlay* overlay) {
-        scheduler.Record([this, descriptors, transform, motion, size, overlay]
+        scheduler.Record([this, descriptors, parameters, motion, size, overlay]
                          (vk::CommandBuffer cmdbuf) {
             const VkMemoryBarrier read_depth{
                 .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
@@ -388,7 +392,7 @@ public:
             device.GetLogical().UpdateDescriptorSet(set, *descriptor_template, descriptors);
             cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
             cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, *layout, 0, set, {});
-            cmdbuf.PushConstants(*layout, VK_SHADER_STAGE_COMPUTE_BIT, transform);
+            cmdbuf.PushConstants(*layout, VK_SHADER_STAGE_COMPUTE_BIT, parameters);
             cmdbuf.Dispatch((size.width + 7) / 8, (size.height + 7) / 8, 1);
             const VkMemoryBarrier to_overlay{
                 .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
@@ -946,7 +950,7 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
     state.queue.AddSampledImage(depth, sampler);
     state.queue.AddImage(*resources.motion_view);
     resources.tick = state.scheduler.CurrentTick();
-    state.motion_pass.Record(state.scheduler, state.queue.UpdateData(), *transform,
+    state.motion_pass.Record(state.scheduler, state.queue.UpdateData(), {*transform, jitter},
                              *resources.motion, extent, resources.overlay.get());
     state.queue.Acquire(state.scheduler, 2);
     state.queue.AddSampledImage(color, sampler);
