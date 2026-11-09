@@ -1351,6 +1351,24 @@ void OpenGame(Game& out, const std::filesystem::path& game, const std::filesyste
     if (std::filesystem::is_directory(game)) {
         out.roots.push_back(out.filesystem.OpenDirectory(Common::FS::PathToUTF8String(game),
                                                          FileSys::OpenMode::Read));
+        // An unpacked game (base/exefs beside base/romfs): its title as the game's loader reads
+        // it, the ACI0 program ID of the ExeFS's main.npdm. Its version stays 0, as the game
+        // list's recipe menu sees it.
+        auto romfs = game.lexically_normal();
+        if (!romfs.has_filename()) {
+            romfs = romfs.parent_path();
+        }
+        if (const auto npdm = out.filesystem.OpenFile(
+                Common::FS::PathToUTF8String(romfs.parent_path() / "exefs" / "main.npdm"),
+                FileSys::OpenMode::Read)) {
+            u32 aci_offset = 0;
+            std::array<char, 4> magic{};
+            if (npdm->ReadObject(&aci_offset, 0x70) == sizeof(aci_offset) &&
+                npdm->ReadObject(&magic, aci_offset) == magic.size() &&
+                std::memcmp(magic.data(), "ACI0", 4) == 0) {
+                npdm->ReadObject(&out.title_id, aci_offset + 0x10);
+            }
+        }
         return;
     }
     const auto file =

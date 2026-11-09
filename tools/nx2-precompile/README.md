@@ -119,6 +119,9 @@ One person does this per game version and cache version; everyone else only need
        bash tools/nx2-precompile/run_pipeline.sh session1/vulkan.fork-v54.bin session2/vulkan.fork-v54.bin
    ```
 
+   For an unpacked game, `NX2_GAME` is its `romfs` folder; the recipe takes the game's title ID
+   from the `exefs/main.npdm` beside it, so the game list's recipe menu accepts it.
+
    About 8 minutes for Ocarina of Time. It writes `out/precompiled.fork-v<N>.nx2prep` and
    `out/game.nx2recipe` (`NX2_RECIPE` names another), and ends with the audit, which must report
    0 pieces of code.
