@@ -218,13 +218,27 @@ json FrameTimes(ToolState& state, const json& params) {
     }
     // past_seconds: the frames already presented in that many seconds before now, from the
     // present history, without waiting (a run's frames read after it, other calls not held up).
-    if (const double past = params.value("past_seconds", 0.0); past > 0.0) {
+    if (const double past = params.value("past_seconds", 0.0); past != 0.0) {
+        if (!std::isfinite(past) || past < 0.0 || past > 3600.0) {
+            throw std::runtime_error{"past_seconds must be > 0 and <= 3600"};
+        }
         const u64 after = g_nx2_present_count.load(std::memory_order_relaxed);
         const auto now = std::chrono::steady_clock::now();
         const auto since = now - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                                      std::chrono::duration<double>(past));
+        const u64 since_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(since.time_since_epoch()).count();
+        // Truncated only when the history no longer reaches back to `since`: its oldest frame
+        // kept is newer than that.
+        const u64 capacity = g_nx2_present_times_ns.size();
+        u64 before = 0;
+        if (after > capacity &&
+            g_nx2_present_times_ns[(after - capacity + 1) % capacity].load(
+                std::memory_order_relaxed) <= since_ns) {
+            before = after - capacity;
+        }
         return ReadFrameTimes(
-            0, after,
+            before, after,
             std::chrono::duration_cast<std::chrono::nanoseconds>(since.time_since_epoch()).count(),
             std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(),
             refresh_hz);
