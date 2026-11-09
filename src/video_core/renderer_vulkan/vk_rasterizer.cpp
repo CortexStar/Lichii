@@ -2879,22 +2879,9 @@ f32 Halton(u32 index, u32 base) {
     return result;
 }
 
-/// EDEN_NX2_OOT_JITTER: on by default; 0 turns it off, -1 negates the offset given to FSR
-/// (sign check: the image gets worse).
-int OcarinaJitterMode() {
-    static const int mode = [] {
-        const char* value = std::getenv("EDEN_NX2_OOT_JITTER");
-        const std::string_view text{value ? value : ""};
-        return text == "0" ? 0 : text == "-1" ? -1 : 1;
-    }();
-    return mode;
-}
 } // Anonymous namespace
 
 void RasterizerVulkan::UpdateOcarinaJitter() {
-    if (OcarinaJitterMode() == 0) {
-        return;
-    }
     std::array<f32, 2> want{};
     // Only while FSR replaced the previous frame's upscale: a frame the game upscales itself
     // would show the offset as a shake. Only draws that depth-test against the scene depth at
@@ -3165,8 +3152,7 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
         const bool recorded = oot_live_dlss->Record(color_view, depth.DepthView(), target_view,
                                                    extent, output_extent, target_extent, oot_motion.current,
                                                    oot_motion.previous, mesh, depth.ImageHandle(),
-                                                   render_trace_frame, jitter,
-                                                   OcarinaJitterMode() < 0);
+                                                   render_trace_frame, jitter);
         if (!recorded) {
             return fail("temporal upscaler declined the frame");
         }

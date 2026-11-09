@@ -59,8 +59,7 @@ public:
     bool Record(VkImageView color, VkImageView depth, VkImageView target, VkExtent2D extent,
                 VkExtent2D output_extent, VkExtent2D target_extent, const std::array<f32, 16>& current,
                 const std::array<f32, 16>& previous, const OcarinaActorMesh& mesh,
-                VkImage depth_image, u64 frame, std::array<f32, 2> scene_jitter = {},
-                bool negate_jitter = false);
+                VkImage depth_image, u64 frame, std::array<f32, 2> jitter = {});
 
 private:
     struct Impl;

@@ -4647,14 +4647,10 @@ void CustomBorderColorBudget::Release() noexcept {
 
 f32 TextureCacheRuntime::OcarinaFsrLodBias() {
     if (!ocarina_fsr_lod_bias) {
-        std::optional<f32> override;
-        if (const char* const value = std::getenv("EDEN_NX2_OOT_LOD_BIAS")) {
-            override = std::strtof(value, nullptr);
-        }
         const bool ocarina = Settings::GetCurrentProgramID() == 0x0400486024DEC000ULL;
         ocarina_fsr_lod_bias = ocarina ? VideoCommon::OcarinaFsrLodBias(
                                              ResolveOcarinaUpscaler(device),
-                                             Settings::IsDockedMode(), override)
+                                             Settings::IsDockedMode())
                                        : 0.0f;
     }
     return *ocarina_fsr_lod_bias;

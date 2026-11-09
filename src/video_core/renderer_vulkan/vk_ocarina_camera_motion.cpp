@@ -905,12 +905,8 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
                             VkExtent2D output_extent, VkExtent2D target_extent,
                             const Matrix& current, const Matrix& previous,
                             const OcarinaActorMesh& mesh, VkImage depth_image, u64 frame,
-                            std::array<f32, 2> scene_jitter, bool negate_jitter) {
+                            std::array<f32, 2> jitter) {
     auto& state = *impl;
-    // What FSR is told; negated only for the EDEN_NX2_OOT_JITTER=-1 sign check. The motion
-    // replay below always follows the offset the scene was drawn with.
-    const std::array<f32, 2> jitter = negate_jitter
-        ? std::array<f32, 2>{-scene_jitter[0], -scene_jitter[1]} : scene_jitter;
     if (state.last_frame == frame || state.Failed()) {
         return false;
     }
@@ -933,7 +929,7 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
     const VkSampler sampler = state.PointSampler();
     const ActorTransforms actor_transforms{
         current, previous, mesh.current_origin, mesh.previous_origin,
-        {static_cast<f32>(extent.width), static_cast<f32>(extent.height)}, scene_jitter,
+        {static_cast<f32>(extent.width), static_cast<f32>(extent.height)}, jitter,
     };
     // Without Link's pose (dialogue, cutscenes, first person) the motion comes from the camera alone.
     if (mesh.indices.empty()) {
