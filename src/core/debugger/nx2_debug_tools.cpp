@@ -226,8 +226,10 @@ json FrameTimes(ToolState& state, const json& params) {
         const auto now = std::chrono::steady_clock::now();
         const auto since = now - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                                      std::chrono::duration<double>(past));
-        const u64 since_ns =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(since.time_since_epoch()).count();
+        // Clamped: the clock may have started less than `past` ago (it counts from boot).
+        const u64 since_ns = static_cast<u64>((std::max)(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(since.time_since_epoch()).count(),
+            std::chrono::nanoseconds::rep{0}));
         // Truncated only when the history no longer reaches back to `since`: its oldest frame
         // kept is newer than that.
         const u64 capacity = g_nx2_present_times_ns.size();
@@ -238,8 +240,7 @@ json FrameTimes(ToolState& state, const json& params) {
             before = after - capacity;
         }
         return ReadFrameTimes(
-            before, after,
-            std::chrono::duration_cast<std::chrono::nanoseconds>(since.time_since_epoch()).count(),
+            before, after, since_ns,
             std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(),
             refresh_hz);
     }
