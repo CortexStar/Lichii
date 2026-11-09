@@ -116,6 +116,8 @@ struct ComputePipelineCacheEntry {
     /// Constant buffer slots bound as storage buffer pointers (see MappedStoragePointerKeys)
     std::vector<u64> mapped_pointers;
     u32 rebuilds{};
+    /// Whether a dispatch looked it up yet (kept only with EDEN_NX2_STUTTER_TRACE)
+    bool used{};
 
     [[nodiscard]] ComputePipeline* Get(bool native, GPUVAddr address,
                                        const ComputePipelineCacheKey& key) const;
@@ -258,6 +260,9 @@ private:
     std::atomic<size_t> last_cache_size{};
     std::atomic_bool flush_in_flight{};
 
+    /// Requested first when the cache is destroyed, to stop a rewrite of the disk cache: Android
+    /// and yuzu_cmd load with a stop token that never stops
+    std::stop_source serialization_stop;
     Common::ThreadWorker workers;
     Common::ThreadWorker serialization_thread;
     DynamicFeatures dynamic_features;
