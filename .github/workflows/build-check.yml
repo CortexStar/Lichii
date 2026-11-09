@@ -105,6 +105,7 @@ jobs:
             -DBUILD_TESTING=ON \
             -DYUZU_TESTS=ON \
             -DENABLE_QT=ON \
+            -DENABLE_QT_TRANSLATION=ON \
             -DYUZU_CMD=ON \
             -DYUZU_ROOM=OFF \
             -DYUZU_ROOM_STANDALONE=OFF \
@@ -229,6 +230,7 @@ jobs:
           -DBUILD_TESTING=ON
           -DYUZU_TESTS=ON
           -DENABLE_QT=ON
+          -DENABLE_QT_TRANSLATION=ON
           -DYUZU_CMD=ON
           -DYUZU_ROOM=OFF
           -DYUZU_ROOM_STANDALONE=OFF
