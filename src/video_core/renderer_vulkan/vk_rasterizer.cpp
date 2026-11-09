@@ -49,9 +49,9 @@
 #include "video_core/renderer_vulkan/framebuffer_clear_layers.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/vk_ocarina_camera_motion.h"
-#ifdef EGLANTINE_STREAMLINE
-#include "video_core/renderer_vulkan/vk_streamline_dlss.h"
-#include "video_core/vulkan_common/streamline.h"
+#ifdef EGLANTINE_NVIDIA_DLSS
+#include "video_core/renderer_vulkan/vk_nvidia_dlss.h"
+#include "video_core/vulkan_common/nvidia_dlss.h"
 #endif
 #include "video_core/renderer_vulkan/submission_policy.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
@@ -749,6 +749,8 @@ bool RasterizerVulkan::TryNx2IndirectReset(bool is_indexed, u32 instance_count) 
     return true;
 }
 
+/// Prepare guest draw state and resources, then invoke the supplied indexed or non-indexed draw
+/// operation.
 template <typename Func>
 void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_indirect) {
 
@@ -1048,7 +1050,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         }
     }
 
-#ifdef EGLANTINE_STREAMLINE
+#ifdef EGLANTINE_NVIDIA_DLSS
     TrackOcarinaCamera();
     TrackOcarinaActor(pipeline->ShaderHashes()[1], is_indexed, is_indirect);
 #endif
@@ -1106,7 +1108,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     }
     submitted = true;
     buffer_cache.NoteWorkRecorded(false);
-#ifdef EGLANTINE_STREAMLINE
+#ifdef EGLANTINE_NVIDIA_DLSS
     constexpr u64 final_vertex = 0x16aff33d999f993fULL;
     constexpr u64 final_fragment = 0x52402d8e8ab55263ULL;
     const auto hashes = pipeline->ShaderHashes();
@@ -1583,8 +1585,10 @@ void RasterizerVulkan::DrawIndirect() {
     buffer_cache.SetDrawIndirect(nullptr);
 }
 
+/// Return the Ocarina sharpening-bypass state only when active NVIDIA DLSS does not take
+/// precedence.
 VideoCommon::OotNetwork::BypassState* RasterizerVulkan::OotNetworkBypass() {
-#ifdef EGLANTINE_STREAMLINE
+#ifdef EGLANTINE_NVIDIA_DLSS
     // NVIDIA DLSS replaces the same output pass and takes precedence until its evaluation fails.
     if (OcarinaDlssEnabled() && !(oot_live_dlss && oot_live_dlss->EvaluationFailed())) {
         static bool logged = false;
@@ -2039,6 +2043,8 @@ void RasterizerVulkan::Clear(u32 layer_count) {
     }
 }
 
+/// Translate and dispatch guest compute work, applying supported replacements and cache
+/// synchronization.
 void RasterizerVulkan::DispatchCompute() {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Compute};
     FlushWork();
@@ -2064,7 +2070,7 @@ void RasterizerVulkan::DispatchCompute() {
         }
     };
     const auto indirect_address = kepler_compute->GetIndirectComputeAddress();
-#ifdef EGLANTINE_STREAMLINE
+#ifdef EGLANTINE_NVIDIA_DLSS
     const bool can_replace = OcarinaDlssEnabled() && pipeline->CanReplaceOcarinaUpscale() &&
                              !indirect_address && !frame_dump.Capturing();
 #else
@@ -2174,7 +2180,7 @@ void RasterizerVulkan::DispatchCompute() {
     }
     scheduler.RequestOutsideRenderPassOperationContext();
     record_read_barrier();
-#ifdef EGLANTINE_STREAMLINE
+#ifdef EGLANTINE_NVIDIA_DLSS
     const auto* const replacement =
         can_replace && !byte_addressed_shadow && TryOcarinaDlss(*pipeline, true)
             ? oot_live_dlss.get()
@@ -2186,11 +2192,11 @@ void RasterizerVulkan::DispatchCompute() {
     scheduler.TraceComputePipeline(pipeline->ShaderHash());
 #endif
     scheduler.Record([this, pipeline, dim, byte_addressed_shadow, bind = std::move(deferred_bind)
-#ifdef EGLANTINE_STREAMLINE
+#ifdef EGLANTINE_NVIDIA_DLSS
                       , replacement
 #endif
                      ](vk::CommandBuffer cmdbuf) {
-#ifdef EGLANTINE_STREAMLINE
+#ifdef EGLANTINE_NVIDIA_DLSS
         if (replacement && !replacement->EvaluationFailed()) {
             return;
         }
@@ -2221,7 +2227,7 @@ void RasterizerVulkan::DispatchCompute() {
     SubmitNx2ListCopies();
     publish_collision_map();
 
-#ifdef EGLANTINE_STREAMLINE
+#ifdef EGLANTINE_NVIDIA_DLSS
     if (!can_replace) {
         TryOcarinaDlss(*pipeline, false);
     }
@@ -2788,11 +2794,12 @@ void RasterizerVulkan::TracePendingCpuWrites(bool compute, std::span<const u64> 
     });
 }
 
-#ifdef EGLANTINE_STREAMLINE
+#ifdef EGLANTINE_NVIDIA_DLSS
+/// Report whether this title and renderer state permit the selected NVIDIA DLSS replacement.
 bool RasterizerVulkan::OcarinaDlssEnabled() const {
     constexpr u64 ocarina_program = 0x0400486024DEC000ULL;
     return program_id == ocarina_program && !oot_live_failed &&
-           Settings::values.nvidia_dlss.GetValue() && Streamline::IsDlssAvailable();
+           Settings::values.nvidia_dlss.GetValue() && NvidiaDlss::IsAvailable();
 }
 
 /// Capture the two camera matrices from a draw targeting the scene color and depth. Terrain and
@@ -2945,7 +2952,10 @@ void RasterizerVulkan::ReadOcarinaActor(OcarinaActorMesh& mesh) {
 /// Track the scene depth on its reader dispatch, or try to replace a recognized upscale dispatch.
 bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool replace) {
     constexpr u64 depth_reader = 0x1fc7a0423116281fULL;
-    const bool upscale_4k = replace && pipeline.ShaderHash() == ComputePipeline::Ocarina1440pShader;
+    const bool pass_1440p = replace && pipeline.ShaderHash() == ComputePipeline::Ocarina1440pShader;
+    const bool native_resolution = Settings::GetNvidiaDlssRuntimeSettings().quality ==
+                                   Settings::NvidiaDlssQuality::Native;
+    const bool upscale_4k = pass_1440p && !native_resolution;
     if ((!replace && pipeline.ShaderHash() != depth_reader) || !OcarinaDlssEnabled()) {
         return false;
     }
@@ -3030,7 +3040,7 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
     auto& target = texture_cache.GetImageView(written[0]);
     using VideoCore::Surface::PixelFormat;
     const auto extent = oot_motion.extent;
-    const bool valid_extents = upscale_4k
+    const bool valid_extents = pass_1440p
         ? extent.width == 2560 && extent.height == 1440 &&
             target.size.width == 2560 && target.size.height == 1440
         : target.size.width == extent.width * 4 / 3 &&
@@ -3069,7 +3079,8 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
                 device, scheduler, descriptor_pool, compute_pass_descriptor_queue, memory_allocator);
         }
         const VkExtent2D target_extent{target.size.width, target.size.height};
-        const VkExtent2D output_extent = upscale_4k ? VkExtent2D{3840, 2160} : target_extent;
+        const VkExtent2D output_extent = native_resolution ? extent
+            : upscale_4k ? VkExtent2D{3840, 2160} : target_extent;
         const bool recorded = oot_live_dlss->Record(color_view, depth.DepthView(), target_view,
                                                    extent, output_extent, target_extent, oot_motion.current,
                                                    oot_motion.previous, mesh, depth.ImageHandle(),
@@ -3341,6 +3352,8 @@ void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
     pipeline_cache.InvalidateRegion(*cpu_addr, copy_size);
 }
 
+/// Resolve a guest framebuffer into a cached display texture, applying any active presentation
+/// replacement.
 std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
     const Tegra::FramebufferConfig& config, DAddr framebuffer_addr, u32 pixel_stride) {
     if (!framebuffer_addr) {
@@ -3375,7 +3388,7 @@ std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
     info.height = image_view->size.height;
     info.scaled_width = scaled ? resolution.ScaleUp(info.width) : info.width;
     info.scaled_height = scaled ? resolution.ScaleUp(info.height) : info.height;
-#ifdef EGLANTINE_STREAMLINE
+#ifdef EGLANTINE_NVIDIA_DLSS
     info.anti_aliased = oot_dlss_frame == render_trace_frame && !oot_live_dlss->EvaluationFailed();
     if (oot_4k_scene_frame == render_trace_frame && info.image &&
         info.image == oot_4k_guest_present && info.image_view &&

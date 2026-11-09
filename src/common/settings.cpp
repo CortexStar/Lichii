@@ -10,6 +10,7 @@
 #include <exception>
 #include <stdexcept>
 #endif
+#include <atomic>
 #include <compare>
 #include <cstddef>
 #include <filesystem>
@@ -47,6 +48,8 @@ SETTING(u16, false);
 SWITCHABLE(AnisotropyMode, true);
 SWITCHABLE(AntiAliasing, false);
 SWITCHABLE(OotAntiAliasing, false);
+SWITCHABLE(NvidiaDlssQuality, false);
+SWITCHABLE(NeuralRendering, false);
 SWITCHABLE(AspectRatio, true);
 SWITCHABLE(AstcDecodeMode, true);
 SWITCHABLE(AstcRecompression, true);
@@ -83,6 +86,33 @@ SWITCHABLE(ConfirmStop, true);
 #endif
 
 Values values;
+
+namespace {
+// One byte per option; the three percentages default to 100 while quality/style default to zero.
+std::atomic<u64> nvidia_dlss_runtime_options{(u64{100} << 16) | (u64{100} << 24) | (u64{100} << 32)};
+} // namespace
+
+/// Publish quality, style and neural percentages together after frontend settings are applied.
+void RefreshNvidiaDlssRuntimeSettings() {
+    const auto quality = static_cast<u64>(values.nvidia_dlss_quality.GetValue());
+    const auto neural = static_cast<u64>(values.neural_rendering.GetValue());
+    const auto strength = static_cast<u64>(values.neural_rendering_strength.GetValue());
+    const auto tone = static_cast<u64>(values.neural_rendering_tone.GetValue());
+    const auto structure = static_cast<u64>(values.neural_rendering_structure.GetValue());
+    nvidia_dlss_runtime_options.store(
+        quality | (neural << 8) | (strength << 16) | (tone << 24) | (structure << 32),
+        std::memory_order_relaxed);
+}
+
+/// Decode the atomic option snapshot used by the GPU and scheduler threads.
+NvidiaDlssRuntimeSettings GetNvidiaDlssRuntimeSettings() {
+    const auto options = nvidia_dlss_runtime_options.load(std::memory_order_relaxed);
+    return {static_cast<NvidiaDlssQuality>(options & 0xff),
+            static_cast<NeuralRendering>((options >> 8) & 0xff),
+            static_cast<u32>((options >> 16) & 0xff),
+            static_cast<u32>((options >> 24) & 0xff),
+            static_cast<u32>((options >> 32) & 0xff)};
+}
 
 std::string GetTimeZoneString(TimeZone time_zone) {
     const auto time_zone_index = static_cast<std::size_t>(time_zone);

@@ -168,12 +168,39 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "of the AMD FSR 1 and SGSR window adapting filters."));
     INSERT(Settings, nvidia_dlss, tr("Use NVIDIA DLSS in place of a game's DLSS (experimental)"),
            tr("Uses NVIDIA DLSS on GeForce RTX cards in place of a Switch 2 game's own DLSS, "
-              "instead of AMD FSR 3.1.\nNeeds NVIDIA's Streamline loader, and NVIDIA DLSS unless "
-              "the NVIDIA app has downloaded it; Lichii does not ship NVIDIA's files. Use the "
-              "download button below.\nFire Emblem: Fortune's Weave also needs "
+              "instead of AMD FSR 3.1.\nRequires NVIDIA's runtime files. Use the setup controls "
+              "below to download or locate them. Windows uses Streamline; Linux uses native NGX.\n"
+              "Fire Emblem: Fortune's Weave also needs "
               "EDEN_NX2_DLSS_REPLACEMENT=dlss. Without that override, its spatial workaround "
               "remains active.\nIn The Legend of Zelda: Ocarina of Time it replaces the game's "
               "upscaler at 1x resolution scale.\nTakes effect when a game starts."));
+    INSERT(Settings, nvidia_dlss_quality, tr("NVIDIA DLSS quality:"),
+           tr("Automatic preserves the game's supported upscaling path.\n"
+              "Native (DLAA) applies anti-aliasing at the game's render resolution. "
+              "In Ocarina's 1440p mode, this keeps the scene and output at 1440p instead of "
+              "upscaling to 4K.\nRequires NVIDIA DLSS to be enabled. Apply changes while playing; "
+              "switching resolution may briefly pause rendering."));
+    INSERT(Settings, neural_rendering, tr("DLSS neural rendering:"),
+           tr("Re-renders the scene after NVIDIA DLSS using the Standard, Natural or Cinematic "
+              "style.\n"
+              "Requires a supported NVIDIA GPU and an imported neural rendering model. "
+              "Runs natively on Linux.\nStart the game with NVIDIA DLSS enabled, then apply style "
+              "changes while playing. Off disables neural rendering. First activation may briefly "
+              "pause rendering while the model loads."));
+    INSERT(Settings, neural_rendering_strength, tr("Neural rendering strength:"),
+           tr("Blend the neural result with ordinary NVIDIA DLSS/DLAA.\n"
+              "0% shows the original DLSS/DLAA image; 100% applies the full neural result. "
+              "The default is 100%.\nRequires a neural style. Apply changes while playing. "
+              "Lower strength keeps the neural model running; select Off to free its GPU resources."));
+    INSERT(Settings, neural_rendering_tone, tr("Neural rendering tone:"),
+           tr("Adjust the neural model's tonal treatment, including style-dependent lighting "
+              "and colour changes. The default is 100%.\nRequires a neural style. Apply changes "
+              "while playing; changing tone resets neural history."));
+    INSERT(Settings, neural_rendering_structure, tr("Neural rendering structure:"),
+           tr("Adjust how strongly the neural model changes scene detail and shapes. "
+              "Lower values can help retain the original appearance. The default is 100%.\n"
+              "Requires a neural style. Apply changes while playing; changing structure resets "
+              "neural history."));
     INSERT(Settings, anti_aliasing, tr("Anti-Aliasing Method:"),
            tr("The anti-aliasing method to use.\nSMAA offers the best quality.\nFXAA "
               "can produce a more stable picture in lower resolutions."));
@@ -439,6 +466,7 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     return translations;
 }
 
+/// Build the localized labels for each settings enum exposed through a configuration combobox.
 std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
     std::unique_ptr<ComboboxTranslationMap> translations =
         std::make_unique<ComboboxTranslationMap>();
@@ -596,6 +624,18 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                           {
                               PAIR(OotAntiAliasing, Game, tr("Game")),
                               PAIR(OotAntiAliasing, NoSharpening, tr("No sharpening")),
+                          }});
+    translations->insert({Settings::EnumMetadata<Settings::NvidiaDlssQuality>::Index(),
+                          {
+                              PAIR(NvidiaDlssQuality, Automatic, tr("Automatic (upscaling)")),
+                              PAIR(NvidiaDlssQuality, Native, tr("Native (DLAA)")),
+                          }});
+    translations->insert({Settings::EnumMetadata<Settings::NeuralRendering>::Index(),
+                          {
+                              PAIR(NeuralRendering, Off, tr("Off")),
+                              PAIR(NeuralRendering, Standard, tr("Standard")),
+                              PAIR(NeuralRendering, Natural, tr("Natural")),
+                              PAIR(NeuralRendering, Cinematic, tr("Cinematic")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::AspectRatio>::Index(),
                           {

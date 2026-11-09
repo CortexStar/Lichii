@@ -95,8 +95,8 @@ private:
 
     std::shared_ptr<Common::DynamicLibrary> library;
     vk::InstanceDispatch dld;
-#ifdef EGLANTINE_STREAMLINE
-    bool streamline_started; ///< NVIDIA Streamline starts before the instance.
+#ifdef EGLANTINE_NVIDIA_DLSS
+    bool nvidia_dlss_started; ///< The platform DLSS runtime starts before the instance.
 #endif
 
     // Keep original handles for compatibility with existing code
