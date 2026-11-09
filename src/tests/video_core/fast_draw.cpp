@@ -345,6 +345,19 @@ TEST_CASE("Fast draw keeps base vertex and instance as draw parameters", "[fast_
     CHECK(f.Reusable());
 }
 
+TEST_CASE("Fast draw keeps counter resets and the render enable condition light", "[fast_draw]") {
+    FastDrawFixture f;
+    f.DrawArrays(0, 3);
+    constexpr u32 clear_report = MAXWELL3D_REG_INDEX(clear_report_value);
+    f.Write(clear_report, f.Reg(clear_report) ^ 1);
+    f.DrawArrays(3, 3);
+    CHECK(f.Reusable());
+    f.Write(MAXWELL3D_REG_INDEX(render_enable.mode), 1); // True: the next draws run
+    f.DrawArrays(6, 3);
+    CHECK(f.rasterizer.draws.size() == 3);
+    CHECK(f.Reusable());
+}
+
 TEST_CASE("Fast draw keeps the vertex id base as a draw parameter", "[fast_draw]") {
     FastDrawFixture f;
     f.DrawArrays(0, 3);

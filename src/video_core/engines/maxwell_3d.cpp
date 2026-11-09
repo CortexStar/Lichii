@@ -367,7 +367,20 @@ bool Maxwell3D::IsFastDrawParameter(u32 method) {
         return true;
     default:
         return DrawManager::IsInstanceLoopMethod(method) || IsFastDrawDeltaMethod(method) ||
-               IsFastDrawVertexBuffer(method);
+               IsFastDrawVertexBuffer(method) || IsFastDrawNeutralMethod(method);
+    }
+}
+
+bool Maxwell3D::IsFastDrawNeutralMethod(u32 method) {
+    switch (method) {
+    // A counter reset only touches the query cache. The render enable condition decides whether
+    // the next draws run (ShouldExecute, or host conditional rendering), not what they bind; a
+    // render pass either one ends is caught by the reusable draw's render pass check.
+    case MAXWELL3D_REG_INDEX(clear_report_value):
+    case MAXWELL3D_REG_INDEX(render_enable.mode):
+        return true;
+    default:
+        return false;
     }
 }
 
@@ -403,7 +416,8 @@ bool Maxwell3D::IsFastDrawDeltaMethod(u32 method) {
 }
 
 void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argument, bool is_last_call) {
-    if (!DrawManager::IsInstanceLoopMethod(method) && !IsFastDrawDeltaMethod(method)) {
+    if (!DrawManager::IsInstanceLoopMethod(method) && !IsFastDrawDeltaMethod(method) &&
+        !IsFastDrawNeutralMethod(method)) {
         VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Method, method);
     }
     if (GetNativeMacroEngine().native_turing && method == MAXWELL3D_REG_INDEX(clear_surface)) {
