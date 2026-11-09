@@ -537,6 +537,9 @@ GraphicsPipeline::GraphicsPipeline(
             if (shader_notify) {
                 shader_notify->MarkShaderComplete();
             }
+            if (worker_only_build) {
+                pending_builds.fetch_sub(1, std::memory_order_relaxed);
+            }
         };
         try {
             if (emit_stages) {
@@ -581,6 +584,9 @@ GraphicsPipeline::GraphicsPipeline(
         present_stages[stage] = infos[stage] != nullptr;
     }
     configure_func = ConfigureFunc(present_stages, stage_infos);
+    if (worker_only_build) {
+        pending_builds.fetch_add(1, std::memory_order_relaxed);
+    }
     build.emplace(worker_thread, std::move(func));
 }
 

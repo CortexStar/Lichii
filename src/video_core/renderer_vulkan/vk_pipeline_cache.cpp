@@ -1757,6 +1757,13 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
         }
         return enabled;
     }();
+    // A skipped draw that runs once (text rendered to a texture) is never drawn again: without a
+    // depth target, only skip while so many pipelines are pending that waiting would stall for
+    // seconds. Scene draws into a depth target come back on the next frame.
+    static const u32 discard_min_pending = [] {
+        const char* value = std::getenv("EDEN_NX2_ASYNC_DISCARD_MIN_PENDING");
+        return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 32U;
+    }();
     const auto& draw_state = maxwell3d->draw_manager.draw_state;
     const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
     // The environment variable wins over the setting; the setting is read per call.
@@ -1773,7 +1780,10 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
             break;
         }
         if (discard_native) {
-            mode = NativePendingMode::Skip;
+            mode = maxwell3d->regs.zeta_enable != 0 ||
+                           GraphicsPipeline::PendingBuilds() >= discard_min_pending
+                       ? NativePendingMode::Skip
+                       : NativePendingMode::Wait;
         }
     }
     // Native draws are judged by the heuristic only when a mode other than Wait is chosen.
