@@ -2543,6 +2543,7 @@ template <class P>
 void TextureCache<P>::InvalidateScale(Image& image) {
     // Its views are deleted: a fast draw delta draw keeping one must not follow.
     VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
+    ++scale_epoch;
     if (image.scale_tick <= frame_tick) {
         image.scale_tick = frame_tick + 1;
     }

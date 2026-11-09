@@ -128,3 +128,42 @@ TEST_CASE("Uniform stream reuse preserves data through mutation and session rese
     Check(memory.gathered > 1000 && memory.in_place > 1000,
           "the reads did not take both the gathered and the in-place path");
 }
+
+TEST_CASE("Uniform stream keeps require the same range and live allocation", "[video_core]") {
+    using VideoCommon::BindSmallUniformReusing;
+    using VideoCommon::RebindKeptUniform;
+    Memory memory;
+    Runtime runtime;
+    VideoCommon::ResetUniformStreamReuse<Runtime>();
+    CHECK_FALSE(RebindKeptUniform(runtime, 0, 0, 0, 64));
+    REQUIRE(BindSmallUniformReusing(runtime, memory, 0, 0, 0, 0, 64));
+    const u32 gathered = memory.gathered;
+    const u32 in_place = memory.in_place;
+    REQUIRE(RebindKeptUniform(runtime, 0, 0, 0, 64));
+    CheckBound(runtime, memory, 0, 64);
+    CHECK(memory.gathered == gathered);
+    CHECK(memory.in_place == in_place);
+    CHECK_FALSE(RebindKeptUniform(runtime, 0, 0, 64, 64));
+    CHECK_FALSE(RebindKeptUniform(runtime, 0, 0, 0, 32));
+    CHECK_FALSE(RebindKeptUniform(runtime, 0, 1, 0, 64));
+    CHECK_FALSE(RebindKeptUniform(runtime, 1, 0, 0, 64));
+    CHECK_FALSE(RebindKeptUniform(runtime, 5, 0, 0, 64));
+    CHECK_FALSE(RebindKeptUniform(runtime, 0, 18, 0, 64));
+    CHECK_FALSE(RebindKeptUniform(runtime, 0, 0, 0, 0));
+    CHECK_FALSE(RebindKeptUniform(runtime, 0, 0, 0, 4097));
+
+    // Equal bytes at a different address reuse the allocation, but update the keep's range.
+    REQUIRE(BindSmallUniformReusing(runtime, memory, 0, 0, 0, 64, 64));
+    CHECK(runtime.allocations.size() == 1);
+    CHECK_FALSE(RebindKeptUniform(runtime, 0, 0, 0, 64));
+    REQUIRE(RebindKeptUniform(runtime, 0, 0, 64, 64));
+    CHECK(VideoCommon::KeptUniformHolds<Runtime>(memory, 0, 0, 64, 64));
+    memory.bytes[67] = 9;
+    CHECK_FALSE(VideoCommon::KeptUniformHolds<Runtime>(memory, 0, 0, 64, 64));
+
+    runtime.NextTick();
+    CHECK_FALSE(RebindKeptUniform(runtime, 0, 0, 64, 64));
+    REQUIRE(BindSmallUniformReusing(runtime, memory, 0, 0, 0, 64, 64));
+    VideoCommon::ResetUniformStreamReuse<Runtime>();
+    CHECK_FALSE(RebindKeptUniform(runtime, 0, 0, 64, 64));
+}
