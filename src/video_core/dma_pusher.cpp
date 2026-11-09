@@ -620,19 +620,24 @@ bool DmaPusher::WaitForListWriters(GPUVAddr address, size_t size) {
     // idle, a GP entry's sync bit; NoteSync). Only the work sent before the last one can have
     // written commands read now, not every dispatch and copy sent so far (Ocarina of Time fights:
     // ~5,000 waits a second, 160-540 ms of the front's time).
-    bool written = split.WaitForSync() && IsGpuWrittenCommands(address, size);
-    if (!written && VideoCommon::Nx2Perf::Verify() && split.WaitForWriters() &&
-        IsGpuWrittenCommands(address, size)) {
-        // Work after the last host sync wrote these commands: waiting for the sync only would
-        // have run what the CPU submitted instead.
-        static std::atomic<u32> reports{};
-        if (reports.fetch_add(1, std::memory_order_relaxed) < 32) {
-            LOG_ERROR(HW_GPU,
-                      "Nx2Perf list wait: commands at {:#x} ({} bytes) were written by work after "
-                      "the last host sync",
-                      address, size);
+    // Checked again even without a wait: the back may have marked the pages since the caller's
+    // check, before it passed the sync.
+    split.WaitForSync();
+    bool written = IsGpuWrittenCommands(address, size);
+    if (!written && VideoCommon::Nx2Perf::Verify()) {
+        split.WaitForWriters();
+        if (IsGpuWrittenCommands(address, size)) {
+            // Work after the last host sync wrote these commands: waiting for the sync only would
+            // have run what the CPU submitted instead.
+            static std::atomic<u32> reports{};
+            if (reports.fetch_add(1, std::memory_order_relaxed) < 32) {
+                LOG_ERROR(HW_GPU,
+                          "Nx2Perf list wait: commands at {:#x} ({} bytes) were written by work "
+                          "after the last host sync",
+                          address, size);
+            }
+            written = true;
         }
-        written = true;
     }
     return written;
 }
