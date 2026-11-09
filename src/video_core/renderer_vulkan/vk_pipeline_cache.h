@@ -186,6 +186,7 @@ private:
     struct PrecacheJob {
         u64 graphics_hash{}; ///< The cached graphics pipeline it builds, 0 for a compute program
         Common::UniqueFunction<bool> build;
+        u64 compute_hash{}; ///< The compute program it builds (its unique hash), else 0
     };
 
     /// Shader precache before the game starts (precache_shaders), on every CPU thread: the cached

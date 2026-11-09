@@ -45,6 +45,7 @@
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/pipeline_shader_emission.h"
+#include "video_core/renderer_vulkan/precache_journal.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
 #include "video_core/renderer_vulkan/vertex_repack.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
@@ -1368,13 +1369,15 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
                 if (compute_cache.contains(key)) {
                     continue;
                 }
-                jobs.push_back({0, [this, key, env = std::move(env)]() mutable {
+                jobs.push_back({0,
+                                [this, key, env = std::move(env)]() mutable {
                                     static const GuessMissing guess{};
                                     env.SetGuessMissing(&guess);
                                     ShaderPools pools;
                                     return CreateComputePipeline(pools, key, env, nullptr, false)
                                                .pipeline != nullptr;
-                                }});
+                                },
+                                key.unique_hash});
             }
             compute_pending = true;
         } catch (const std::exception& e) {
@@ -1390,6 +1393,13 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
 
     const auto begin = std::chrono::steady_clock::now();
     const size_t num_threads = std::clamp<size_t>(std::thread::hardware_concurrency(), 1, 64);
+    // Builds a driver crash ended an earlier precache on are skipped (precache_journal.h). Cached
+    // graphics pipelines and compute programs are named by their hashes, which don't depend on a
+    // file: the journal belongs to the driver and the pipeline cache version.
+    PrecacheJournal journal{
+        ShaderWarm::ComputeWarmPath(title_id).parent_path() / "precache-jobs",
+        fmt::format("{} {} {}", device.GetDriverVersion(), device.GetDeviceID(), CACHE_VERSION),
+        num_threads, "pipeline"};
     std::vector<u8> built(jobs.size());
     std::atomic<size_t> next{};
     std::atomic<size_t> done{};
@@ -1402,18 +1412,24 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
     if (!jobs.empty()) {
         std::vector<std::jthread> threads;
         for (size_t thread = 0; thread < num_threads; ++thread) {
-            threads.emplace_back([&jobs, &built, &next, &done, &cancel] {
+            threads.emplace_back([&jobs, &built, &next, &done, &cancel, &journal, thread] {
                 Common::SetCurrentThreadName("VkShaderPrecache");
                 while (!cancel.load(std::memory_order_relaxed)) {
                     const size_t index = next.fetch_add(1);
                     if (index >= jobs.size()) {
                         break;
                     }
-                    try {
-                        // Built and destroyed here: only the driver's cache keeps it.
-                        built[index] = jobs[index].build();
-                    } catch (const std::exception& e) {
-                        LOG_DEBUG(Render_Vulkan, "Shader precache: {}", e.what());
+                    const u64 id = jobs[index].graphics_hash != 0 ? jobs[index].graphics_hash
+                                                                  : jobs[index].compute_hash;
+                    if (!journal.Poisoned(id)) {
+                        journal.Begin(thread, id);
+                        try {
+                            // Built and destroyed here: only the driver's cache keeps it.
+                            built[index] = jobs[index].build();
+                        } catch (const std::exception& e) {
+                            LOG_DEBUG(Render_Vulkan, "Shader precache: {}", e.what());
+                        }
+                        journal.End(thread);
                     }
                     jobs[index].build = {};
                     done.fetch_add(1);
