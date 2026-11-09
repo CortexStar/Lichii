@@ -1676,7 +1676,7 @@ void PipelineCache::TickFrame() {
 
 void PipelineCache::EvictUnusedPipelines() {
     // Building a pipeline again on MoltenVK means a Metal compile mid-game, far dearer than the
-    // 2-3 ms below, so none are evicted there.
+    // rebuild cost below, so none are evicted there.
     if (device.IsMoltenVK()) {
         return;
     }
@@ -1688,7 +1688,8 @@ void PipelineCache::EvictUnusedPipelines() {
     }
     // Each built pipeline holds ~0.45 MB of driver memory and none was ever destroyed, so it grew
     // with every place a session went (title 1: 1,500 on its title screen alone). One unused for
-    // this long is destroyed; it takes 2-3 ms to build again from the driver's pipeline cache.
+    // this long is destroyed; rebuilding it later requires a full GPU-thread shader translation
+    // (~8.5 ms each) plus a driver pipeline cache hit.
     constexpr u64 EvictAfterFrames = 9000;
     if (frame_count <= EvictAfterFrames) {
         return;
@@ -2386,7 +2387,7 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
                     max_shared_memory / 1024);
         program.shared_memory_size = max_shared_memory;
     }
-    const std::vector<u32> code{EmitSPIRV(profile, program)};
+    std::vector<u32> code{EmitSPIRV(profile, program)};
     device.SaveShader(code);
     vk::ShaderModule spv_module{BuildShader(device, code)};
 
@@ -2411,9 +2412,18 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
         spv_module.SetObjectNameEXT(name.c_str());
     }
     Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};
+    const Shader::Info info{std::move(program.info)};
+    if (!thread_worker) {
+        // The driver compiles on this thread. Precache and boot workers would otherwise hold their
+        // IR through the compile, up to hundreds of MiB for one large shader.
+        program = {};
+        code = std::vector<u32>{};
+        pools.block.Free();
+        pools.inst.Free();
+    }
     return {.pipeline = std::make_unique<ComputePipeline>(
                 device, scheduler, vulkan_pipeline_cache, descriptor_pool, guest_descriptor_queue,
-                descriptor_buffer_ring, thread_worker, statistics, &shader_notify, program.info,
+                descriptor_buffer_ring, thread_worker, statistics, &shader_notify, info,
                 std::move(spv_module), key.unique_hash),
             .null_pointer_slots = env.IsNativeProgram() ? env.NullStoragePointerSlots()
                                                         : std::vector<std::pair<u32, u32>>{},
