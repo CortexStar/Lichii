@@ -974,13 +974,19 @@ ComputePipeline* PipelineCache::CurrentComputePipeline(u64& native_key) {
         if (rebuilt.pipeline && entry.pipeline && !rebuilt.pipeline->IsBuilt()) {
             entry.pending_rebuild =
                 std::make_unique<ComputePipelineCacheEntry>(std::move(rebuilt));
-        } else if (rebuilt.pipeline) {
+        } else if (rebuilt.pipeline && (!entry.pipeline || rebuilt.pipeline->IsBound())) {
             replace(std::move(rebuilt));
         } else {
             // Keep the working translation when the new one cannot be built (for example a
-            // narrow access that now stays global across two buffers), and stop retrying.
+            // narrow access that now stays global across two buffers) or its driver compile
+            // already failed, and stop retrying.
             LOG_WARNING(Render_Vulkan, "Keeping compute shader {:016x}: rebuild failed: {}",
-                        key.unique_hash, rebuilt.failure);
+                        key.unique_hash,
+                        rebuilt.pipeline ? std::string{"driver compile failed"} : rebuilt.failure);
+            if (rebuilt.pipeline) {
+                retired_compute_pipelines.emplace_back(scheduler.CurrentTick(),
+                                                       std::move(rebuilt.pipeline));
+            }
             entry.rebuilds = MaxComputeRebuilds;
         }
     }
