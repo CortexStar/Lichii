@@ -2026,7 +2026,7 @@ bool TextureCacheRuntime::UpscaleWithDlss(Framebuffer* dst_framebuffer, ImageVie
             .barrier_aspect = ImageAspectMask(view.format),
         };
     };
-    const bool native_resolution = Settings::values.nvidia_dlss_quality.GetValue() ==
+    const bool native_resolution = Settings::GetNvidiaDlssRuntimeSettings().quality ==
                                    Settings::NvidiaDlssQuality::Native;
     const VkExtent2D extent = native_resolution ? VkExtent2D{render_size[0], render_size[1]}
                                                : dst_framebuffer->RenderArea();

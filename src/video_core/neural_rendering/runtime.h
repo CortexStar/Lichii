@@ -17,6 +17,8 @@ struct RuntimeStatus {
 [[nodiscard]] RuntimeStatus GetStatus();
 void ResetStatus();
 void ReportReady();
+/// Mark a user-disabled backend inactive while retaining its submitted-frame counter.
+void ReportInactive();
 void ReportFailure(std::string error);
 void ReportFrame();
 } // namespace VideoCore::NeuralRendering

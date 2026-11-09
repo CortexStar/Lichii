@@ -414,9 +414,11 @@ struct Values {
     // NVIDIA DLSS through the platform runtime, in place of a game's DLSS.
     SwitchableSetting<bool> nvidia_dlss{linkage, false, "nvidia_dlss", Category::Renderer};
     SwitchableSetting<NvidiaDlssQuality> nvidia_dlss_quality{
-        linkage, NvidiaDlssQuality::Automatic, "nvidia_dlss_quality", Category::Renderer};
+        linkage, NvidiaDlssQuality::Automatic, "nvidia_dlss_quality", Category::Renderer,
+        Specialization::Default, true, true};
     SwitchableSetting<NeuralRendering> neural_rendering{linkage, NeuralRendering::Off,
-                                                        "neural_rendering", Category::Renderer};
+                                                        "neural_rendering", Category::Renderer,
+                                                        Specialization::Default, true, true};
     SwitchableSetting<AspectRatio, true> aspect_ratio{linkage,
                                                       AspectRatio::R16_9,
                                                       "aspect_ratio",
@@ -1052,6 +1054,16 @@ struct Values {
 };
 
 extern Values values;
+
+struct NvidiaDlssRuntimeSettings {
+    NvidiaDlssQuality quality;
+    NeuralRendering neural_rendering;
+};
+
+/// Publish the selected DLSS options from the settings thread for use by renderer threads.
+void RefreshNvidiaDlssRuntimeSettings();
+/// Read one coherent snapshot without accessing the frontend's mutable settings storage.
+[[nodiscard]] NvidiaDlssRuntimeSettings GetNvidiaDlssRuntimeSettings();
 
 constexpr u32 MIN_FRAME_GEN_MULTIPLIER = 2;
 constexpr u32 MAX_FRAME_GEN_MULTIPLIER = 4;

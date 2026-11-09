@@ -67,9 +67,18 @@ CUDA toolkit is required at runtime.
 5. For neural rendering, click **Import neural rendering model…** and select
    `nvngx_dlssnr.dll`. Choose **Standard**, **Natural**, or **Cinematic** in
    **DLSS neural rendering**. Leave it **Off** for ordinary DLSS/DLAA.
-6. Apply the settings and start the game. Restart the game after changing DLSS
-   quality or neural rendering style. These settings also support per-game
-   overrides.
+6. Apply the settings and start the game. While playing, reopen Graphics, change
+   **NVIDIA DLSS quality** or **DLSS neural rendering**, and click **Apply** or
+   **OK**. Both settings take effect without restarting and support per-game
+   overrides. If a per-game override is active, change it in the running game's
+   configuration rather than the global settings.
+
+You can switch between Off, Standard, Natural, and Cinematic in the same session.
+Style changes reset neural history to avoid mixing the previous look into the new
+one. Off releases the neural model's GPU resources while ordinary DLSS/DLAA
+continues. Turning it back on or changing quality can briefly pause rendering
+while model resources are prepared. The main NVIDIA DLSS checkbox, renderer,
+and GPU selection still require restarting the game.
 
 Launch Lichii without an external DLSS5VKLayer wrapper so only the selected
 Lichii processing is applied. If using a custom launcher, keep its existing
@@ -154,9 +163,10 @@ build/bin/ngx_smoke /path/to/linux/dlss/runtime/directory 0 1 /path/to/ngx/nr/31
 The numeric arguments are the Vulkan GPU index and image scale (1–8). Scale 8
 uses 2560×1440 input and 3840×2160 upscaled output. The test covers device
 lifecycle, SR/DLAA readback, reset, resize, HDR/depth modes, motion-view rebinding,
-and injected NGX failure. Use `missing` instead of the NR model path to check
-missing-model fallback. It is excluded from `ctest` because it requires the GPU
-and separately supplied models. Disable external graphics layers for this test.
+live style/Off/quality changes, and injected NGX failure. Use `missing` instead of
+the NR model path to check missing-model fallback. It is excluded from `ctest`
+because it requires the GPU and separately supplied models. Disable external
+graphics layers for this test.
 
 The native NR kernel watchdog is checked during initialization and motion-view
 rebinding; continuous runtime timeout monitoring is not implemented. RenderDoc

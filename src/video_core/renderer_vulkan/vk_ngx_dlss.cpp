@@ -83,8 +83,7 @@ VkImageMemoryBarrier Barrier(const NvidiaDlssUpscaler::Image &image, VkAccessFla
 
 } // namespace
 
-/// Initialize the native NGX upscaler and capture the requested neural style; NGX must already
-/// be available.
+/// Initialize the native NGX upscaler; NGX must already be available.
 NvidiaDlssUpscaler::NvidiaDlssUpscaler(const Device &device_, Scheduler &scheduler_,
                                        MemoryAllocator &memory_allocator_)
     : device{device_}, scheduler{scheduler_}, memory_allocator{memory_allocator_} {
@@ -92,11 +91,6 @@ NvidiaDlssUpscaler::NvidiaDlssUpscaler(const Device &device_, Scheduler &schedul
         throw vk::Exception(VK_ERROR_FEATURE_NOT_PRESENT);
     }
     CreateSampler();
-    const auto mode = Settings::values.neural_rendering.GetValue();
-    neural_requested = device.SupportsNeuralRendering() && mode != Settings::NeuralRendering::Off;
-    if (neural_requested) {
-        neural_style = static_cast<u32>(mode) - 1;
-    }
 }
 
 /// Serialize device-idle waits and release neural/NGX resources after renderer recording has
@@ -144,7 +138,12 @@ bool NvidiaDlssUpscaler::Upscale(const Inputs &in) {
     }
     hdr_input = in.hdr;
     depth_inverted = in.depth_inverted;
-    PrepareNeuralRendering(in);
+    const auto neural_mode = Settings::GetNvidiaDlssRuntimeSettings().neural_rendering;
+    const bool requested = device.SupportsNeuralRendering() &&
+                           neural_mode != Settings::NeuralRendering::Off;
+    const auto neural_style = requested ? static_cast<NR::Style>(static_cast<u32>(neural_mode) - 1)
+                                       : NR::Style::Standard;
+    PrepareNeuralRendering(in, requested);
     const bool hdr = in.hdr && EnvInt("EDEN_NX2_DLSS_HDR", 1) != 0;
     const bool auto_exposure = in.hdr && EnvInt("EDEN_NX2_DLSS_AUTO_EXPOSURE", 1) != 0;
     const auto mode = ModeFor(in.render_size, in.upscale_size);
@@ -160,7 +159,7 @@ bool NvidiaDlssUpscaler::Upscale(const Inputs &in) {
                     {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
                     VK_IMAGE_ASPECT_COLOR_BIT};
     scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([this, in, out, hdr, auto_exposure, mode, preset,
+    scheduler.Record([this, in, out, hdr, auto_exposure, mode, preset, neural_style,
                       reset = in.reset || options_changed](vk::CommandBuffer cmdbuf) {
         const auto &api = Ngx::GetApi();
         const auto clear_output = [&] {
@@ -282,7 +281,7 @@ bool NvidiaDlssUpscaler::Upscale(const Inputs &in) {
             Ngx::ReportEvaluation();
             if (neural_rendering) {
                 NR::Frame frame;
-                frame.style = static_cast<NR::Style>(neural_style);
+                frame.style = neural_style;
                 frame.reset = reset;
                 frame.hdr = in.hdr;
                 frame.motion_scale = {in.motion_vector_scale[0] / in.render_size.width,
@@ -298,7 +297,19 @@ bool NvidiaDlssUpscaler::Upscale(const Inputs &in) {
 
 /// Verify and initialize or rebind neural resources after draining work, serializing queue use
 /// and failure cleanup.
-void NvidiaDlssUpscaler::PrepareNeuralRendering(const Inputs& in) {
+void NvidiaDlssUpscaler::PrepareNeuralRendering(const Inputs& in, bool requested) {
+    if (requested != neural_requested) {
+        neural_requested = requested;
+        neural_failed = false;
+        if (!requested) {
+            // Drain recorded uses before freeing the backend or clearing its status.
+            scheduler.Finish();
+            std::scoped_lock queue_lock{scheduler.submit_mutex};
+            neural_rendering.reset();
+            neural_motion_view = VK_NULL_HANDLE;
+            NR::ReportInactive();
+        }
+    }
     if (!neural_requested || neural_failed ||
         (neural_rendering && neural_motion_view == in.motion_vectors.view)) {
         return;
@@ -326,8 +337,8 @@ void NvidiaDlssUpscaler::PrepareNeuralRendering(const Inputs& in) {
                 device.GetInstance(), device.GetPhysical(), *device.GetLogical(),
                 device.GetGraphicsFamily(), model, in.upscale_size, *output_image, *output_view,
                 in.motion_vectors.view);
-            LOG_INFO(Render_Vulkan, "Native FP8 neural rendering ready: {}x{}, style {}",
-                     in.upscale_size.width, in.upscale_size.height, neural_style);
+            LOG_INFO(Render_Vulkan, "Native FP8 neural rendering ready: {}x{}",
+                     in.upscale_size.width, in.upscale_size.height);
             NR::ReportReady();
         }
         neural_motion_view = in.motion_vectors.view;

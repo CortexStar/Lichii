@@ -10,6 +10,7 @@
 #include <exception>
 #include <stdexcept>
 #endif
+#include <atomic>
 #include <compare>
 #include <cstddef>
 #include <filesystem>
@@ -85,6 +86,23 @@ SWITCHABLE(ConfirmStop, true);
 #endif
 
 Values values;
+
+namespace {
+std::atomic<u32> nvidia_dlss_runtime_options{};
+} // namespace
+
+/// Publish quality and neural style together after frontend settings have been applied.
+void RefreshNvidiaDlssRuntimeSettings() {
+    const auto quality = static_cast<u32>(values.nvidia_dlss_quality.GetValue());
+    const auto neural = static_cast<u32>(values.neural_rendering.GetValue());
+    nvidia_dlss_runtime_options.store(quality | (neural << 8), std::memory_order_relaxed);
+}
+
+/// Decode the atomic option snapshot used by the GPU and scheduler threads.
+NvidiaDlssRuntimeSettings GetNvidiaDlssRuntimeSettings() {
+    const auto options = nvidia_dlss_runtime_options.load(std::memory_order_relaxed);
+    return {static_cast<NvidiaDlssQuality>(options & 0xff), static_cast<NeuralRendering>(options >> 8)};
+}
 
 std::string GetTimeZoneString(TimeZone time_zone) {
     const auto time_zone_index = static_cast<std::size_t>(time_zone);

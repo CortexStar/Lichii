@@ -75,10 +75,9 @@ class NvidiaDlssUpscaler {
     Scheduler &scheduler;
     MemoryAllocator &memory_allocator;
 #ifdef EGLANTINE_NGX
-    void PrepareNeuralRendering(const Inputs& inputs);
+    void PrepareNeuralRendering(const Inputs& inputs, bool requested);
     std::unique_ptr<VideoCore::NeuralRendering::Backend> neural_rendering;
     VkImageView neural_motion_view{};
-    u32 neural_style{};
     bool neural_requested{};
     bool neural_failed{};
     bool neural_model_verified{};

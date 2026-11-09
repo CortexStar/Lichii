@@ -39,6 +39,13 @@ void ReportReady() {
     status.error.clear();
 }
 
+/// Clear readiness and runtime failures when the user turns neural rendering off.
+void ReportInactive() {
+    std::scoped_lock lock{status_mutex};
+    status.ready = false;
+    status.error.clear();
+}
+
 void ReportFailure(std::string error) {
     LOG_WARNING(Render_Vulkan, "Neural rendering: {}; continuing with NVIDIA DLSS", error);
     std::scoped_lock lock{status_mutex};

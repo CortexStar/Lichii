@@ -868,14 +868,12 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 #endif
 }
 
-/// Enable native inference only when requested and all required device extensions, features,
-/// and limits are supported.
+/// Prepare native inference features when DLSS is enabled so neural styles can be switched live.
 bool Device::EnableNeuralRendering() {
 #ifdef EGLANTINE_NGX
     namespace NR = VideoCore::NeuralRendering;
     NR::ResetStatus();
-    if (!Settings::values.nvidia_dlss.GetValue() ||
-        Settings::values.neural_rendering.GetValue() == Settings::NeuralRendering::Off) {
+    if (!Settings::values.nvidia_dlss.GetValue()) {
         return false;
     }
     const auto unavailable = [](const char* reason) {

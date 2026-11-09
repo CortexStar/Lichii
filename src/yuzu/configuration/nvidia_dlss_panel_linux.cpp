@@ -27,6 +27,7 @@
 #include <QtConcurrent/QtConcurrentRun>
 #include "common/dynamic_library.h"
 #include "common/fs/fs_util.h"
+#include "common/settings.h"
 #include "video_core/neural_rendering/model.h"
 #include "video_core/neural_rendering/runtime.h"
 #include "video_core/vulkan_common/ngx_dlss.h"
@@ -161,6 +162,8 @@ void NvidiaDlssPanel::Refresh() {
     } else if (!neural_model_valid) {
         neural_text = Tr(
             "Import a DLSS neural rendering 310.8.0 model to use Standard, Natural or Cinematic.");
+    } else if (Settings::values.neural_rendering.GetValue() == Settings::NeuralRendering::Off) {
+        neural_text = Tr("Neural rendering is off. Choose a style and apply to enable it.");
     } else if (!neural.error.empty()) {
         neural_text = Tr("Neural rendering: %1. Restart the game after resolving this.")
                           .arg(QString::fromStdString(neural.error));
@@ -169,7 +172,7 @@ void NvidiaDlssPanel::Refresh() {
                           .arg(neural.submitted_frames);
     } else {
         neural_text =
-            Tr("Neural rendering model installed. Choose a style below and restart the game.");
+            Tr("Neural rendering model installed. Apply a style to use it with NVIDIA DLSS.");
     }
     neural_status_label->setText(neural_text);
     neural_status_label->setToolTip(PathText(NR::UserFolder()));

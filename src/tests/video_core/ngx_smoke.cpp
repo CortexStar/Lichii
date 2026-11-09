@@ -76,9 +76,8 @@ InputImage MakeInput(const Device &device, MemoryAllocator &allocator, VkFormat 
     return result;
 }
 
-/// Check DLSS output, resizing, rebinding, and failure handling while another thread submits to
-/// the queue.
-void RenderCases(const Device& device, u32 scale, bool expect_neural) {
+/// Check live quality/style changes, history resets, rebinding, and failures with concurrent submits.
+void RenderCases(const Device& device, u32 scale, bool request_neural, bool expect_neural) {
     MemoryAllocator allocator{device};
     StateTracker tracker;
     Scheduler scheduler{device, tracker};
@@ -115,23 +114,44 @@ void RenderCases(const Device& device, u32 scale, bool expect_neural) {
     auto &api = const_cast<Ngx::Api &>(Ngx::GetApi());
     const auto evaluate = api.evaluate;
     SCOPE_EXIT { api.evaluate = evaluate; };
-    constexpr std::array outputs{VkExtent2D{480, 270}, VkExtent2D{480, 270}, VkExtent2D{480, 270},
-                                 VkExtent2D{320, 180}, VkExtent2D{480, 270}, VkExtent2D{480, 270},
-                                 VkExtent2D{480, 270}};
-    for (size_t frame = 0; frame < outputs.size(); ++frame) {
+    using Quality = Settings::NvidiaDlssQuality;
+    using Neural = Settings::NeuralRendering;
+    constexpr std::array cases{
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Off},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Standard},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Cinematic},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Native, Neural::Cinematic},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Native, Neural::Off},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Off},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural},
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural}};
+    u64 neural_frames{};
+    std::array<double, 3> natural_reset{};
+    for (size_t frame = 0; frame < cases.size(); ++frame) {
+        Settings::values.nvidia_dlss_quality = cases[frame].quality;
+        Settings::values.neural_rendering = request_neural ? cases[frame].neural_rendering : Neural::Off;
+        Settings::RefreshNvidiaDlssRuntimeSettings();
+        const auto options = Settings::GetNvidiaDlssRuntimeSettings();
+        const bool neural_on = expect_neural && options.neural_rendering != Neural::Off;
         // Rebind while temporal history is live, without resizing the backend.
         motion.resource.view = frame == 1 ? *alternate_motion_view : original_motion_view;
-        const VkExtent2D extent{outputs[frame].width * scale, outputs[frame].height * scale};
-        const bool inject_failure = frame == outputs.size() - 1;
+        const VkExtent2D extent = options.quality == Quality::Native
+                                      ? input_extent
+                                      : VkExtent2D{480 * scale, 270 * scale};
+        const bool inject_failure = frame == cases.size() - 1;
         if (inject_failure) {
             api.evaluate = [](VkCommandBuffer, const NVSDK_NGX_Handle *,
                               const NVSDK_NGX_Parameter *, PFN_NVSDK_NGX_ProgressCallback) {
                 return NVSDK_NGX_Result_FAIL_FeatureNotSupported;
             };
         }
-        const std::array<float, 4> expected = (frame < 2 || frame % 2 == 0)
-                                                  ? std::array{0.25f, 0.5f, 0.75f, 1.0f}
-                                                  : std::array{0.75f, 0.25f, 0.5f, 1.0f};
+        const bool hdr = frame == 5 || frame == 10;
+        const std::array<float, 4> expected = hdr ? std::array{0.75f, 0.25f, 0.5f, 1.0f}
+                                                : std::array{0.25f, 0.5f, 0.75f, 1.0f};
         scheduler.Record([&, frame, expected](vk::CommandBuffer cmd) {
             for (const auto &image : {color.resource, depth.resource, motion.resource}) {
                 cmd.PipelineBarrier(
@@ -167,9 +187,9 @@ void RenderCases(const Device& device, u32 scale, bool expect_neural) {
                                   extent,
                                   {0, 0},
                                   {1, 1},
-                                  frame != 1,
-                                  frame != 5,
-                                  frame == 5}),
+                                  frame == 0,
+                                  !hdr,
+                                  hdr}),
                 "Upscale refused a frame");
         auto readback = allocator.CreateBuffer(
             {
@@ -213,23 +233,36 @@ void RenderCases(const Device& device, u32 scale, bool expect_neural) {
                 sums[c] += value;
             }
         }
+        double style_difference{};
         for (size_t c = 0; c < sums.size(); ++c) {
-            if (!expect_neural || inject_failure) {
+            if (!neural_on || inject_failure) {
                 Require(std::abs(sums[c] / pixels - (inject_failure ? 0.0f : expected[c])) < 0.025,
                         "Readback differs from input; stale or incorrect output");
             } else {
                 Require(sums[c] / pixels > 0.01 && sums[c] / pixels < 16.0,
                         "Neural output is empty or outside the expected HDR range");
             }
+            if (expect_neural && frame == 2) {
+                natural_reset[c] = sums[c] / pixels;
+            }
+            if (expect_neural && (frame == 6 || frame == 9)) {
+                Require(std::abs(sums[c] / pixels - natural_reset[c]) < 0.001,
+                        "Style switch retained old history or differs from a fresh activation");
+            }
+            style_difference += std::abs(sums[c] / pixels - natural_reset[c]);
         }
+        if (expect_neural && frame == 3) {
+            Require(style_difference > 0.01, "Switching Natural to Cinematic did not change output");
+        }
+        neural_frames += neural_on && !inject_failure;
+        const auto neural = VideoCore::NeuralRendering::GetStatus();
+        Require(neural.submitted_frames == neural_frames, "Incorrect neural rendering submission count");
+        Require(neural.ready == neural_on, "Neural readiness did not follow the live setting");
         std::printf("PASS frame %zu: %ux%u -> %ux%u; RGB %.4f %.4f %.4f\n", frame,
                     input_extent.width, input_extent.height, extent.width, extent.height,
                     sums[0] / pixels, sums[1] / pixels, sums[2] / pixels);
     }
-    Require(Ngx::GetStatus().evaluations == outputs.size() - 1, "Incorrect evaluation count");
-    const auto neural = VideoCore::NeuralRendering::GetStatus();
-    Require(neural.submitted_frames == (expect_neural ? outputs.size() - 1 : 0),
-            "Incorrect neural rendering submission count");
+    Require(Ngx::GetStatus().evaluations == cases.size() - 1, "Incorrect evaluation count");
 }
 } // namespace
 
@@ -260,8 +293,6 @@ int main(int argc, char **argv) try {
     const auto scale = argc > 3 ? std::stoul(argv[3]) : 1;
     const bool request_neural = argc > 4;
     const bool expect_neural = request_neural && std::string_view{argv[4]} != "missing";
-    Settings::values.neural_rendering =
-        request_neural ? Settings::NeuralRendering::Natural : Settings::NeuralRendering::Off;
     if (expect_neural) {
         const auto target = VideoCore::NeuralRendering::UserFolder();
         std::filesystem::create_directories(target.parent_path());
@@ -269,6 +300,9 @@ int main(int argc, char **argv) try {
     }
     Require(scale >= 1 && scale <= 8, "Scale must be between 1 and 8 (4K output)");
     for (int run = 0; run < 2; ++run) {
+        // Device creation must prepare inference features even when the session starts with Off.
+        Settings::values.neural_rendering = Settings::NeuralRendering::Off;
+        Settings::RefreshNvidiaDlssRuntimeSettings();
         Require(NvidiaDlss::Start(), "NGX startup failed");
         {
             auto library = OpenLibrary();
@@ -289,7 +323,7 @@ int main(int argc, char **argv) try {
                                               duplicate_dispatch),
                     "NGX accepted a second device attachment");
             Require(NvidiaDlss::IsAvailable(), "Duplicate attachment disturbed the active device");
-            RenderCases(device, static_cast<u32>(scale), expect_neural);
+            RenderCases(device, static_cast<u32>(scale), request_neural, expect_neural);
             if (request_neural && !expect_neural) {
                 Require(!VideoCore::NeuralRendering::GetStatus().error.empty(),
                         "Missing neural model was not diagnosed");
