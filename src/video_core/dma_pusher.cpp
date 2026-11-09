@@ -771,8 +771,9 @@ void DmaPusher::NoteEngineWrites(Engines::EngineTypes type, u32 method) {
     if (!device) {
         return;
     }
-    // Fence-flagged reports: they land once their fence ran.
-    constexpr auto landing = VideoCommon::GpuSplit::Landing::Fenced;
+    // Fence-flagged payload releases: they land once their fence ran, or as the back runs them
+    // where CounterReport keeps them synchronized.
+    const auto landing = VideoCommon::GpuSplit::FencedPayloadLanding();
     split.NoteSemaphoreWrite(*device, dma_registers[MaxwellDMA::SemaphoreMethod + 2], true, false,
                              landing);
     VideoCommon::Nx2AcquireStats::NoteRelease(*device,

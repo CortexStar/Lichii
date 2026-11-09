@@ -353,6 +353,10 @@ public:
         Fenced, ///< Once the fence signaled after it ran (QueryCacheBase::CounterReport):
                 ///< fence-flagged reports, counter reports
     };
+    /// When a fence-flagged payload release reaches memory. Below High GPU accuracy with Default
+    /// fences, CounterReport keeps it synchronized (is_synced): its operation runs as the back
+    /// runs it, without waiting for the fence.
+    static Landing FencedPayloadLanding();
     /// A semaphore release was just sent: once it landed (`landing`), the word at
     /// `device_address` holds `payload`, or a value the front can't tell (`known` false: a
     /// reduction, a counter report), or `payload` at least (`at_least`: a maximum with a value the
