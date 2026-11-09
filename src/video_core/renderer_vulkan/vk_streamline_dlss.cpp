@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <string_view>
 
+#include <boost/container/static_vector.hpp>
+
 #include "common/logging.h"
 #include "video_core/dlss_evaluation.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -301,7 +303,7 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
             VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
         // The inputs come from the game's draws and dispatches and stay in GENERAL otherwise;
         // DLSS reads them as sampled images.
-        const std::array to_read{
+        boost::container::static_vector<VkImageMemoryBarrier, 4> to_read{
             Barrier(in.color, WRITES, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
             Barrier(in.depth, WRITES, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
@@ -361,9 +363,9 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
                                    sl::ResourceLifecycle::eValidUntilEvaluate, &render_area};
         sl::ResourceTag output_tag{&output, sl::kBufferTypeScalingOutputColor,
                                    sl::ResourceLifecycle::eValidUntilEvaluate, &output_area};
-        const sl::BaseStructure* inputs[] = {&viewport, &color_tag, &depth_tag, &motion_tag,
-                                             &output_tag};
-        const std::array to_general{
+        boost::container::static_vector<const sl::BaseStructure*, 6> inputs{
+            &viewport, &color_tag, &depth_tag, &motion_tag, &output_tag};
+        boost::container::static_vector<VkImageMemoryBarrier, 4> to_general{
             Barrier(in.color, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_READ_BIT | WRITES,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL),
             Barrier(in.depth, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_READ_BIT | WRITES,
@@ -371,6 +373,24 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
             Barrier(in.motion_vectors, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_READ_BIT | WRITES,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL),
         };
+        std::optional<sl::Resource> bias;
+        std::optional<sl::ResourceTag> bias_tag;
+        if (in.bias_current_color) {
+            const auto& image = *in.bias_current_color;
+            bias = Resource(image.image, image.view, image.format,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, in.render_size,
+                            VK_IMAGE_USAGE_SAMPLED_BIT);
+            bias_tag.emplace(&*bias, sl::kBufferTypeBiasCurrentColorHint,
+                             sl::ResourceLifecycle::eValidUntilEvaluate, &render_area);
+            inputs.push_back(&*bias_tag);
+            to_read.push_back(Barrier(image, WRITES, VK_ACCESS_SHADER_READ_BIT,
+                                      VK_IMAGE_LAYOUT_GENERAL,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
+            to_general.push_back(Barrier(image, VK_ACCESS_SHADER_READ_BIT,
+                                         VK_ACCESS_SHADER_READ_BIT | WRITES,
+                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                         VK_IMAGE_LAYOUT_GENERAL));
+        }
         const VkMemoryBarrier output_written{
             .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
             .pNext = nullptr,
@@ -400,7 +420,8 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
                 return api_result == sl::Result::eOk;
             },
             [&] {
-                api_result = api.evaluate_feature(sl::kFeatureDLSS, *frame, inputs, std::size(inputs),
+                api_result = api.evaluate_feature(sl::kFeatureDLSS, *frame, inputs.data(),
+                                                  static_cast<u32>(inputs.size()),
                                                   reinterpret_cast<sl::CommandBuffer*>(*cmdbuf));
                 return api_result == sl::Result::eOk;
             },
