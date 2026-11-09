@@ -13,6 +13,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <span>
 #include <string>
 #include <vector>
@@ -196,6 +197,11 @@ public:
 
     /// Set the shutting down state.
     void SetShuttingDown(bool shutting_down);
+
+    /// Frontend readers of the application's memory (Adventure Notes) hold this while they read,
+    /// and check IsShuttingDown once they have it. ShutdownMainProcess takes it exclusively after
+    /// setting the shutting down state, so no such read outlives the process.
+    [[nodiscard]] std::shared_lock<std::shared_mutex> LockGuestMemoryReaders();
 
     /// Forcibly detach the debugger if it is running.
     void DetachDebugger();
