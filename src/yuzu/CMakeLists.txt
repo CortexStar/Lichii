@@ -454,7 +454,10 @@ if (YUZU_USE_QT_WEB_ENGINE)
 endif ()
 
 if(UNIX AND NOT APPLE)
+    include(GNUInstallDirs)
     install(TARGETS yuzu)
+    # The shipped Adventure Notes modules, next to the program (ShippedDir).
+    install(DIRECTORY ${PROJECT_SOURCE_DIR}/dist/notes DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
 if (WIN32 AND NOT YUZU_USE_BUNDLED_QT)

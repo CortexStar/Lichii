@@ -84,6 +84,7 @@ private:
     int current_tab = 0;
     QString tab_name;  ///< Kept when the tabs are rebuilt, to come back to the same page.
     QString view_name;
+    QString tick_error;  ///< The last tick() error shown, so a failing tick shows it once.
     QStringList favorites;      ///< "tab/view/title" of the starred lines, in the order starred.
     QStringList favorite_rows;  ///< The key of each line of the Favorites view.
     std::array<QSize, 2> sizes;

@@ -640,9 +640,17 @@ void AdventureNotes::TickModule() {
     }
     QString error;
     if (script->Tick(error)) {
+        tick_error.clear();
         ReadSave();
     } else if (!error.isEmpty()) {
-        LOG_WARNING(Frontend, "Adventure Notes tick: {}", error.toStdString());
+        // Shown once in the panel, like a read() error, rather than ten times a second.
+        if (error != tick_error) {
+            tick_error = error;
+            LOG_WARNING(Frontend, "Adventure Notes tick: {}", error.toStdString());
+            ShowMessage(error);
+        }
+    } else {
+        tick_error.clear();
     }
 }
 

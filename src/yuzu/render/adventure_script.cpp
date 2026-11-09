@@ -16,6 +16,7 @@
 #include <QJSEngine>
 #include <QJSValue>
 #include <QSaveFile>
+#include <zlib.h>
 
 #include "core/core.h"
 #include "core/debugger/nx2_debug_tools.h"
@@ -287,13 +288,39 @@ QByteArray NotesHost::unzip(const QByteArray& data, int offset, int end) {
         engine->throwError(QStringLiteral("unzip: offset outside the data"));
         return {};
     }
-    // qUncompress wants the size up front; it is only a hint and grows when it is short.
-    QByteArray packed(4, '\0');
-    packed[1] = '\x40';
-    packed.append(data.constData() + offset, stop - offset);
-    const QByteArray result = qUncompress(packed);
-    if (result.isEmpty()) {
+    // Inflated in steps with a ceiling: a stream that expands without end (a crafted save) stops
+    // at the limit, or when the watchdog interrupts the module, instead of filling the memory.
+    constexpr qsizetype Limit = qsizetype{256} << 20;
+    constexpr qsizetype Step = qsizetype{1} << 20;
+    z_stream stream{};
+    if (inflateInit(&stream) != Z_OK) {
         engine->throwError(QStringLiteral("unzip: not a zlib stream"));
+        return {};
+    }
+    stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(data.constData() + offset));
+    stream.avail_in = static_cast<uInt>(stop - offset);
+    QByteArray result;
+    int status = Z_OK;
+    while (status == Z_OK) {
+        if (result.size() >= Limit || engine->isInterrupted()) {
+            inflateEnd(&stream);
+            engine->throwError(QStringLiteral("unzip: the data expands past 256 MiB"));
+            return {};
+        }
+        const qsizetype used = result.size();
+        result.resize(used + Step);
+        stream.next_out = reinterpret_cast<Bytef*>(result.data() + used);
+        stream.avail_out = static_cast<uInt>(Step);
+        status = inflate(&stream, Z_NO_FLUSH);
+        result.resize(used + Step - static_cast<qsizetype>(stream.avail_out));
+        if (status == Z_BUF_ERROR && stream.avail_in == 0) {
+            break; // The input ends before the stream does: keep what it held.
+        }
+    }
+    inflateEnd(&stream);
+    if ((status != Z_STREAM_END && status != Z_BUF_ERROR) || result.isEmpty()) {
+        engine->throwError(QStringLiteral("unzip: not a zlib stream"));
+        return {};
     }
     return result;
 }
@@ -347,24 +374,37 @@ bool NotesScript::Load(const QString& path, const QStringList& library_dirs, QSt
     const QJSValue make = engine->evaluate(QString::fromLatin1(Bootstrap));
     engine->globalObject().setProperty(QStringLiteral("notes"),
                                        make.call({engine->newQObject(host.get())}));
-    QJSValue game;
+    // Everything the module's code can run (its body, game's getters, the read lookup) stays
+    // under the watchdog.
+    bool game_error = false;
+    bool has_read = false;
+    QString load_error;
     {
         Watchdog watchdog{*engine};
         const QJSValue result = engine->evaluate(QString::fromUtf8(input.readAll()), path);
         if (result.isError()) {
-            error = Describe(result);
-            engine->setInterrupted(false);
-            return false;
+            load_error = Describe(result);
+        } else {
+            const QJSValue game = engine->evaluate(QStringLiteral("game"));
+            game_error = game.isError();
+            title = game.property(QStringLiteral("title")).toString();
+            accent = game.property(QStringLiteral("accent")).toString();
+            folder = game.property(QStringLiteral("folder")).toString();
+            file = game.property(QStringLiteral("file")).toString();
+            has_read = engine->globalObject().property(QStringLiteral("read")).isCallable();
         }
-        game = engine->evaluate(QStringLiteral("game"));
     }
+    const bool interrupted = engine->isInterrupted();
     engine->setInterrupted(false);
-    title = game.property(QStringLiteral("title")).toString();
-    accent = game.property(QStringLiteral("accent")).toString();
-    folder = game.property(QStringLiteral("folder")).toString();
-    file = game.property(QStringLiteral("file")).toString();
-    if (game.isError() || !engine->globalObject().property(QStringLiteral("read")).isCallable() ||
-        folder.isEmpty() || file.isEmpty()) {
+    if (interrupted) {
+        error = QStringLiteral("The module was stopped: loading took over 5 seconds");
+        return false;
+    }
+    if (!load_error.isEmpty()) {
+        error = load_error;
+        return false;
+    }
+    if (game_error || !has_read || folder.isEmpty() || file.isEmpty()) {
         error = QStringLiteral("A module needs game, with folder and file, and a read function");
         return false;
     }
@@ -393,36 +433,51 @@ std::optional<NotesReport> NotesScript::Read(const QString& path, QString& error
     QJSValue save = engine->newObject();
     save.setProperty(QStringLiteral("data"), engine->toScriptValue(input.readAll()));
     save.setProperty(QStringLiteral("slot"), info.dir().dirName());
-    QJSValue result;
+    // The report is parsed, and an error described, under the watchdog too: both run the
+    // module's getters.
+    std::optional<NotesReport> report;
     {
         Watchdog watchdog{*engine};
-        result = engine->globalObject().property(QStringLiteral("read")).call({save});
+        const QJSValue result =
+            engine->globalObject().property(QStringLiteral("read")).call({save});
+        if (result.isError()) {
+            error = Describe(result);
+        } else {
+            report = ParseReport(result);
+        }
     }
+    const bool interrupted = engine->isInterrupted();
     engine->setInterrupted(false);
-    if (result.isError()) {
-        error = Describe(result);
+    if (interrupted) {
+        error = QStringLiteral("The module was stopped: read() took over 5 seconds");
         return std::nullopt;
     }
-    return ParseReport(result);
+    return report;
 }
 
 bool NotesScript::Tick(QString& error) {
     if (!engine) {
         return false;
     }
-    const QJSValue tick = engine->globalObject().property(QStringLiteral("tick"));
-    if (!tick.isCallable()) {
-        return false;
-    }
-    QJSValue result;
+    // The lookup too: tick may be a getter.
+    bool redraw = false;
     {
         Watchdog watchdog{*engine};
-        result = tick.call();
+        const QJSValue tick = engine->globalObject().property(QStringLiteral("tick"));
+        if (tick.isCallable()) {
+            const QJSValue result = tick.call();
+            if (result.isError()) {
+                error = Describe(result);
+            } else {
+                redraw = result.toBool();
+            }
+        }
     }
+    const bool interrupted = engine->isInterrupted();
     engine->setInterrupted(false);
-    if (result.isError()) {
-        error = Describe(result);
+    if (interrupted) {
+        error = QStringLiteral("The module was stopped: tick() took over 5 seconds");
         return false;
     }
-    return result.toBool();
+    return redraw;
 }
