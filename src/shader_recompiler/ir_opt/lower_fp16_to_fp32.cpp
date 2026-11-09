@@ -48,6 +48,8 @@ IR::Opcode Replace(IR::Opcode op) {
         return IR::Opcode::CompositeInsertF32x3;
     case IR::Opcode::CompositeInsertF16x4:
         return IR::Opcode::CompositeInsertF32x4;
+    case IR::Opcode::SelectF16:
+        return IR::Opcode::SelectF32;
     case IR::Opcode::FPOrdEqual16:
         return IR::Opcode::FPOrdEqual32;
     case IR::Opcode::FPUnordEqual16:

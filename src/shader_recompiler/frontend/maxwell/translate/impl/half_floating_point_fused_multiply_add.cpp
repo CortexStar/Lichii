@@ -46,10 +46,13 @@ void HFMA2(TranslatorVisitor& v, u64 insn, Merge merge, Swizzle swizzle_a, bool 
     };
     IR::F16F32F64 lhs{v.ir.FPFma(lhs_a, lhs_b, lhs_c, fp_control)};
     IR::F16F32F64 rhs{v.ir.FPFma(rhs_a, rhs_b, rhs_c, fp_control)};
-    if (precision == HalfPrecision::FMZ && !sat) {
-        // Do not implement FMZ if SAT is enabled, as it does the logic for us.
-        // On D3D9 mode, anything * 0 is zero, even NAN and infinity
-        const IR::F32 zero{v.ir.Imm32(0.0f)};
+    if (precision == HalfPrecision::FMZ) {
+        // On D3D9 mode, anything * 0 is zero, even NAN and infinity, so the result is c.
+        // SAT can't stand in for this: it would turn 0 * inf + c into sat(NaN) instead of sat(c).
+        // The operands are all F16 unless one of them was promoted, so compare in their type.
+        const IR::F16F32F64 zero{lhs_a.Type() == IR::Type::F16
+                                     ? v.ir.FPConvert(16, v.ir.Imm32(0.0f))
+                                     : IR::F16F32F64{v.ir.Imm32(0.0f)}};
         const IR::U1 lhs_zero_a{v.ir.FPEqual(lhs_a, zero)};
         const IR::U1 lhs_zero_b{v.ir.FPEqual(lhs_b, zero)};
         const IR::U1 lhs_any_zero{v.ir.LogicalOr(lhs_zero_a, lhs_zero_b)};
