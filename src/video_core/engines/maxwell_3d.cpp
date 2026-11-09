@@ -11,6 +11,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include "common/assert.h"
 #include "common/bit_util.h"
 #include "common/scope_exit.h"
@@ -1211,6 +1212,24 @@ bool FrontSkipSame() {
     return skip;
 }
 
+// 16-byte slots report semaphores were sent to, with the ring position they were sent at (front
+// thread only).
+std::unordered_map<GPUVAddr, u64>& FrontReportSlots() {
+    static std::unordered_map<GPUVAddr, u64> slots;
+    return slots;
+}
+
+/// A report to [source, source + bytes) is still queued for the back.
+bool QueuedFrontReport(const VideoCommon::GpuSplit& split, GPUVAddr source, size_t bytes) {
+    const auto& slots = FrontReportSlots();
+    for (GPUVAddr slot = source & ~GPUVAddr{0xf}; slot < source + bytes; slot += 16) {
+        if (const auto it = slots.find(slot); it != slots.end() && !split.Executed(it->second)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // Anonymous namespace
 
 Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSplit& split) {
@@ -1349,6 +1368,7 @@ void Maxwell3D::FrontNoteReport(VideoCommon::GpuSplit& split, const FrontState& 
         operation != Regs::ReportSemaphore::Operation::ReportOnly) {
         return;
     }
+    FrontReportSlots()[report.Address() & ~GPUVAddr{0xf}] = split.Position();
     const auto device = memory_manager.GpuToCpuAddress(report.Address());
     if (!device) {
         return;
@@ -1582,7 +1602,25 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
         memory_manager.ReadBlockUnsafe(source, diag_before.data(), read_bytes);
     }
     VideoCommon::Nx2Profile::CountDmaRead(macro);
-    split.Drain(VideoCommon::DrainSite::MacroDmaRead);
+    // Most reads are of report slots the back already wrote. Skip the drain and the flushes when
+    // no page of the range may hold GPU-written data and no report to it is still queued; compute
+    // and copy work still queued can write it, so wait for that work only.
+    bool fast = false;
+    {
+        bool may_gpu_written = false;
+        for (GPUVAddr page = source & ~GPUVAddr{0xfff}; page < source + read_bytes;
+             page += 0x1000) {
+            const auto device = memory_manager.GpuToCpuAddress(page);
+            may_gpu_written |= !device || Tegra::Nx2MayBeGpuWritten(*device, 0x1000);
+        }
+        if (!may_gpu_written) {
+            (void)split.WaitForWriters();
+            fast = !QueuedFrontReport(split, source, read_bytes);
+        }
+    }
+    if (!fast) {
+        split.Drain(VideoCommon::DrainSite::MacroDmaRead);
+    }
     if (VideoCommon::QueryDma::TraceEnabled()) {
         split.Run(
             [this, macro, method, source, read_bytes] {
@@ -1597,7 +1635,8 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
     if (VideoCommon::Nx2Profile::Enabled()) {
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DmaReadBytes, read_bytes);
     }
-    if (memory_manager.IsMemoryDirty(source, read_bytes, VideoCommon::CacheType::BufferCache)) {
+    if (!fast &&
+        memory_manager.IsMemoryDirty(source, read_bytes, VideoCommon::CacheType::BufferCache)) {
         split.Run(
             [memory = &memory_manager, source, read_bytes] {
                 memory->FlushRegion(source, read_bytes, VideoCommon::CacheType::BufferCache);
@@ -1605,11 +1644,14 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
             VideoCommon::DrainSite::MacroDmaFlush);
     }
     // Write out the reports held in the query cache, or the read returns stale occlusion counts.
-    split.Run(
-        [this, source, read_bytes] {
-            VideoCommon::QueryDma::FlushPending(memory_manager, *rasterizer, source, read_bytes);
-        },
-        VideoCommon::DrainSite::MacroDmaFlush);
+    if (!fast) {
+        split.Run(
+            [this, source, read_bytes] {
+                VideoCommon::QueryDma::FlushPending(memory_manager, *rasterizer, source,
+                                                    read_bytes);
+            },
+            VideoCommon::DrainSite::MacroDmaFlush);
+    }
     u32 changed{};
     for (u32 i = 0; i < words; ++i) {
         const u32 word = memory_manager.Read<u32>(source + u64{i} * sizeof(u32));

@@ -227,6 +227,15 @@ public:
     /// Waits until the back executed everything sent so far.
     void Drain(DrainSite site = DrainSite::Other);
 
+    /// Ring position of the next entry the front sends.
+    [[nodiscard]] u64 Position() const {
+        return write_position;
+    }
+    /// Whether the back executed the entry sent at `position`.
+    [[nodiscard]] bool Executed(u64 position) const {
+        return consumed.load(std::memory_order_acquire) > position;
+    }
+
     /// Compute or copy work was just sent: what can write GPU-written command lists.
     void NoteWriter() {
         last_writer_position = write_position;
