@@ -460,7 +460,13 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
                             "allocating it anyway",
                             ci.size, static_cast<u32>(usage));
             }
-            pressure_events.fetch_add(1, std::memory_order_relaxed);
+            // The texture cache answers each pressure event by keeping more device memory free.
+            // Upload and download buffers live in host memory on a discrete GPU, so they only
+            // count when the heaps are shared or the buffer asked for device-local memory.
+            if (device.IsIntegrated() || usage == MemoryUsage::DeviceLocal ||
+                usage == MemoryUsage::Stream) {
+                pressure_events.fetch_add(1, std::memory_order_relaxed);
+            }
             VmaAllocationCreateInfo relaxed = alloc_ci;
             relaxed.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
             result = vmaCreateBuffer(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
