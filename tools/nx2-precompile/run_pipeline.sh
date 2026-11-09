@@ -11,8 +11,6 @@
 #   NX2_RECIPE   the recipe to write (default $NX2_OUT/game.nx2recipe)
 #   NX2_TOOL     nx2-precompile executable (default: nx2-precompile on PATH)
 #   NX2_K        predicted render states per vertex/pixel pair (default 4)
-#   NX2_CACHE_VERSION  pipeline cache version, the file name's v<N> (default: the one NX2_TOOL was
-#                built with; it must match the Lichii build that reads the file)
 #   PYTHON       Python 3.11+ (default python)
 set -euo pipefail
 
@@ -21,7 +19,7 @@ set -euo pipefail
 OUT=${NX2_OUT:-$PWD/nx2-precompile-out}
 TOOL=${NX2_TOOL:-nx2-precompile}
 K=${NX2_K:-4}
-VERSION=${NX2_CACHE_VERSION:-$("$TOOL" cache-version)}
+VERSION=$("$TOOL" cache-version) # the file name's v<N>; the Lichii build reading it must match
 PREP=$OUT/precompiled.fork-v$VERSION.nx2prep
 RECIPE=${NX2_RECIPE:-$OUT/game.nx2recipe}
 PYTHON=${PYTHON:-python}

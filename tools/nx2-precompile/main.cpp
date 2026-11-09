@@ -1141,7 +1141,10 @@ int MeshEnvs(const std::filesystem::path& pkg, const std::filesystem::path& comb
         if (stage != Stage::Task && stage != Stage::Mesh)
             return;
         std::string error;
-        lowered[i] = CaptureAndLower(packages.programs[i], error);
+        try {
+            lowered[i] = CaptureAndLower(packages.programs[i], error);
+        } catch (const std::exception&) {
+        }
     });
     std::unordered_map<u64, size_t> by_hash;
     for (size_t i = 0; i < lowered.size(); ++i)
@@ -1418,7 +1421,7 @@ FileSys::Nx2ShaderExtract::Result ExtractGame(const Game& game, unsigned threads
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             if (tick % 50 == 49 && progress.files_total) {
                 fmt::print(stderr, "progress: {}/{}\n", progress.files_done.load(),
-                           progress.files_total);
+                           progress.files_total.load());
             }
         }
     });
@@ -1605,7 +1608,8 @@ int main(int argc, char** argv) {
         }
         std::filesystem::path pkg, cache, out, priors_path, check_file, game, recipe;
         std::string packages = "merged";
-        unsigned threads = std::max(1U, std::thread::hardware_concurrency() - 2);
+        const unsigned hardware_threads = std::thread::hardware_concurrency();
+        unsigned threads = hardware_threads > 2 ? hardware_threads - 2 : 1;
         for (int i = 2; i + 1 < argc; i += 2) {
             const std::string arg = argv[i];
             const std::string value = argv[i + 1];

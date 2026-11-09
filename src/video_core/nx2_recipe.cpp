@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <exception>
 #include <map>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
@@ -99,13 +101,28 @@ template <typename F>
 void ParallelFor(size_t count, unsigned threads, F&& body) {
     const unsigned n = threads ? threads : std::max(1u, std::thread::hardware_concurrency());
     std::atomic<size_t> next{0};
-    std::vector<std::jthread> pool;
-    for (unsigned t = 0; t < n; ++t) {
-        pool.emplace_back([&] {
-            for (size_t i; (i = next.fetch_add(1)) < count;) {
-                body(i);
-            }
-        });
+    std::mutex mutex;
+    std::exception_ptr failure;
+    {
+        std::vector<std::jthread> pool;
+        for (unsigned t = 0; t < n; ++t) {
+            pool.emplace_back([&] {
+                try {
+                    for (size_t i; (i = next.fetch_add(1)) < count;) {
+                        body(i);
+                    }
+                } catch (...) {
+                    next = count; // the others stop at their next item
+                    std::scoped_lock lock{mutex};
+                    if (!failure) {
+                        failure = std::current_exception();
+                    }
+                }
+            });
+        }
+    }
+    if (failure) {
+        std::rethrow_exception(failure);
     }
 }
 
@@ -124,6 +141,12 @@ EnvParts Parse(Bytes env, bool has_code) {
     const u64 types = Load<u64>(env, 8), formats = Load<u64>(env, 16), cbufs = Load<u64>(env, 24),
               pointers = Load<u64>(env, 32), replacements = Load<u64>(env, 40);
     parts.stage = static_cast<Stage>(Load<u32>(env, 72));
+    // Each count is checked against the size first, so the sums below cannot wrap.
+    for (const u64 count : {code_size, types, formats, cbufs, pointers, replacements}) {
+        if (count > env.size()) {
+            throw std::runtime_error("bad shader environment");
+        }
+    }
     parts.code_end = EnvHeaderSize + code_size;
     parts.tables_end = parts.code_end + types * 8 + formats * 8 + cbufs * 12 + pointers * 9 +
                        replacements * 12;
@@ -431,6 +454,10 @@ std::vector<u8> MakeRecipe(std::span<const u8> precompiled, const X::Result& ext
     }
     for (u32 e = 0; e < env_count; ++e) {
         auto& env = envs[e];
+        if (index[e].first > precompiled.size() ||
+            index[e].second > precompiled.size() - index[e].first) {
+            throw std::runtime_error("precompiled environment out of bounds");
+        }
         const auto blob = precompiled.subspan(index[e].first, index[e].second);
         const auto parts = Parse(blob, true);
         env.stage = parts.stage;
@@ -531,6 +558,9 @@ std::vector<u8> MakeRecipe(std::span<const u8> precompiled, const X::Result& ext
         if (record.kind == 1) {
             offset += ComputeKeySize;
         } else {
+            if (offset > precompiled.size() || GraphicsKeySize > precompiled.size() - offset) {
+                throw std::runtime_error("truncated precompiled file");
+            }
             const auto key = precompiled.subspan(offset, GraphicsKeySize);
             offset += GraphicsKeySize;
             record.slots.fill(0xff);
@@ -744,8 +774,13 @@ std::vector<u8> Assemble(std::span<const u8> recipe, const X::Result& extracted,
         const u8 kind = r.Get<u8>();
         const u8 count = r.Get<u8>();
         r.Take(2);
+        if (kind > 1) {
+            // Its size is unknown, so nothing after it can be read.
+            throw std::runtime_error("precompile recipe with a record of an unknown kind");
+        }
         std::vector<u32> ids(count);
-        bool ok = true;
+        // A compute record has one environment, a graphics record at least one.
+        bool ok = count != 0 && (kind == 0 || count == 1);
         for (auto& id : ids) {
             id = r.Get<u32>();
             ok &= id < fact_count && envs[id].program >= 0;

@@ -1588,6 +1588,16 @@ void PipelineCache::PreparePrecompiled(const std::filesystem::path& base_dir,
                         Common::FS::PathToUTF8String(path));
             return;
         }
+        // Counts the file is too small for are damage, caught before anything is allocated: an
+        // index entry is 16 bytes and a record at least 8.
+        constexpr u64 HeaderSize = 24;
+        if (file_size < HeaderSize ||
+            u64{env_count} * sizeof(env_index[0]) + u64{record_count} * 8 >
+                file_size - HeaderSize) {
+            LOG_ERROR(Render_Vulkan, "Precompiled pipeline file {} is damaged",
+                      Common::FS::PathToUTF8String(path));
+            return;
+        }
         env_index.resize(env_count);
         file.read(reinterpret_cast<char*>(env_index.data()), env_count * sizeof(env_index[0]));
         records.reserve(record_count);
@@ -1606,11 +1616,15 @@ void PipelineCache::PreparePrecompiled(const std::filesystem::path& base_dir,
             } else {
                 file.read(reinterpret_cast<char*>(&record.graphics_key), sizeof(record.graphics_key));
             }
-            if (count == 0 || (record.compute && count != 1) ||
+            if (kind > 1 || count == 0 || (record.compute && count != 1) ||
                 std::ranges::any_of(record.envs, [&](u32 env) { return env >= env_count; })) {
                 LOG_ERROR(Render_Vulkan, "Precompiled pipeline file {} is damaged",
                           Common::FS::PathToUTF8String(path));
                 return;
+            }
+            if (!record.compute) {
+                // One environment per stage the key names, as for the disk cache's records.
+                VideoCommon::CheckGraphicsRecord(record.graphics_key.unique_hashes, count);
             }
             records.push_back(std::move(record));
         }

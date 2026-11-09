@@ -3018,7 +3018,7 @@ void MainWindow::OnGameListPrepareShadersFromRecipe(u64 program_id, const std::s
     const auto game_file = QtCommon::vfs->OpenFile(game_path, FileSys::OpenMode::Read);
     std::unique_ptr<FileSys::NupContainer> nup;
     std::vector<FileSys::VirtualDir> roots;
-    u32 game_version = 0;
+    std::optional<u32> game_version; // known for a NUP: its newest base or update package
     if (game_file && FileSys::NupContainer::IsNupFile(game_file)) {
         nup = std::make_unique<FileSys::NupContainer>(game_file);
         if (nup->GetStatus() == Loader::ResultStatus::Success) {
@@ -3030,9 +3030,10 @@ void MainWindow::OnGameListPrepareShadersFromRecipe(u64 program_id, const std::s
             if (merged) {
                 roots.push_back(merged);
             }
+            game_version = 0;
             for (const auto& package : nup->GetPackages()) {
                 if (package.kind != FileSys::NupContainer::PackageKind::Addon) {
-                    game_version = std::max(game_version, package.version);
+                    game_version = std::max(*game_version, package.version);
                 }
             }
         }
@@ -3070,7 +3071,10 @@ void MainWindow::OnGameListPrepareShadersFromRecipe(u64 program_id, const std::s
         Outcome outcome;
         try {
             const auto programs =
-                FileSys::Nx2ShaderExtract::Extract(roots, 0, &extract_progress, stop.get_token());
+                // An XCI's or NSP's NCA layers are read one file at a time: they are not
+                // thread-safe. A NUP's reads lock where they need to.
+                FileSys::Nx2ShaderExtract::Extract(roots, 0, &extract_progress, stop.get_token(),
+                                                   !nup);
             if (stop.stop_requested()) {
                 return outcome;
             }
@@ -3145,11 +3149,11 @@ void MainWindow::OnGameListPrepareShadersFromRecipe(u64 program_id, const std::s
                     .arg(report.programs)
                     .arg(report.records_dropped);
     }
-    if (header->game_version != game_version) {
+    if (game_version && header->game_version != *game_version) {
         text += QStringLiteral("\n\n") +
                 tr("The recipe was made for version %1 of the game; this copy is version %2.")
                     .arg(header->game_version)
-                    .arg(game_version);
+                    .arg(*game_version);
     }
     text += QStringLiteral("\n\n") +
             tr("NVIDIA: set Shader Cache Size to Unlimited in the NVIDIA Control Panel, or the "

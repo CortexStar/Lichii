@@ -64,13 +64,15 @@ struct Result {
 
 struct Progress {
     std::atomic<u64> files_done{};
-    u64 files_total{};
+    std::atomic<u64> files_total{};
 };
 
 /// Directories are scanned in order (base game first, then updates and add-ons); a program found
-/// in several keeps its first origin. `threads` 0 uses the hardware's.
+/// in several keeps its first origin. `threads` 0 uses the hardware's. `serial_reads` reads one
+/// file at a time, for storages that are not thread-safe (an XCI's or NSP's NCA layers).
 [[nodiscard]] Result Extract(std::span<const VirtualDir> roots, unsigned threads = 0,
-                             Progress* progress = nullptr, std::stop_token stop = {});
+                             Progress* progress = nullptr, std::stop_token stop = {},
+                             bool serial_reads = false);
 
 /// The fingerprint of one program (see the file comment).
 [[nodiscard]] u64 Fingerprint(std::span<const u8> control, std::span<const u8> code);

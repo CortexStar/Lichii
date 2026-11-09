@@ -22,6 +22,9 @@ while True:
     if 'environments ' in run.stdout:
         print(run.stdout.splitlines()[0])
         break
+    if not os.path.exists(progress):
+        sys.exit(f'check failed (exit {run.returncode}) before reaching an environment:\n'
+                 f'{run.stdout}{run.stderr}')
     index, stage, code_hash = open(progress).read().split()
     crashes.append(dict(index=int(index), stage=stage, code_hash=code_hash, exit=run.returncode))
     print('crash at environment', index, stage, code_hash, 'exit', run.returncode, flush=True)

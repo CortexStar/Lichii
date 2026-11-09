@@ -26,6 +26,7 @@ namespace FileSys::Nx2ShaderExtract {
 namespace {
 
 constexpr size_t MaxBlob = size_t{1} << 30;       // largest file or inflated member read whole
+constexpr size_t LargeFile = size_t{64} << 20;   // read and walked by one worker at a time
 constexpr size_t PeekBytes = 64 * 1024;           // what a compressed file shows before inflating
 constexpr int MaxDepth = 12;
 constexpr std::array<u8, 4> ControlMagic{0x34, 0x12, 0x76, 0x98};
@@ -166,7 +167,8 @@ std::vector<u8> Inflate(const Zstd& zstd, ZSTD_DCtx* context, Bytes frame, size_
         ZSTD_DCtx_refDDict(context, dict);
     }
     const unsigned long long declared = ZSTD_getFrameContentSize(frame.data(), frame.size());
-    size_t reserve = limit;
+    // A frame that doesn't declare its size starts small; the loop below grows the buffer.
+    size_t reserve = std::min<size_t>(limit, 1 << 16);
     if (declared != ZSTD_CONTENTSIZE_UNKNOWN && declared != ZSTD_CONTENTSIZE_ERROR) {
         if (declared > MaxBlob && limit > MaxBlob) {
             throw Bad(fmt::format("zstd content of {} bytes is too large", declared));
@@ -274,14 +276,22 @@ std::vector<Member> Sarc(Bytes data) {
     return members;
 }
 
+/// What the workers of one extraction share to take turns.
+struct Turns {
+    std::mutex large; ///< held while a large file is read and walked: bounds what workers hold
+    std::mutex reads; ///< held while a file is read, when its storage is not thread-safe
+    bool serial_reads{};
+};
+
 /// One extraction worker: its zstd context and the place it reports to.
 class Walker {
 public:
     using Found = std::function<void(Stage, Bytes control, Bytes code, std::string origin,
                                      std::string variation)>;
 
-    Walker(const Zstd& zstd_, Found found_, std::vector<std::string>& errors_, Stats& stats_)
-        : zstd{zstd_}, found{std::move(found_)}, errors{errors_}, stats{stats_},
+    Walker(const Zstd& zstd_, Found found_, std::vector<std::string>& errors_, Stats& stats_,
+           Turns& turns_)
+        : zstd{zstd_}, found{std::move(found_)}, errors{errors_}, stats{stats_}, turns{turns_},
           context{ZSTD_createDCtx()} {}
 
     ~Walker() {
@@ -293,7 +303,7 @@ public:
         ++stats.files;
         if (size > MaxBlob) {
             // Large media and data: only a container at the start would be read whole.
-            const auto head = file->ReadBytes(PeekBytes, 0);
+            const auto head = Read([&] { return file->ReadBytes(PeekBytes, 0); });
             stats.file_bytes += head.size();
             if (!LooksLikeContainer(head)) {
                 return;
@@ -301,12 +311,25 @@ public:
             errors.push_back(path + ": container larger than 1 GiB was not read");
             return;
         }
-        const std::vector<u8> data = file->ReadAllBytes();
+        std::unique_lock large{turns.large, std::defer_lock};
+        if (size > LargeFile) {
+            large.lock();
+        }
+        const std::vector<u8> data = Read([&] { return file->ReadAllBytes(); });
         stats.file_bytes += data.size();
         Guard(path, [&] { Top(data, path); });
     }
 
 private:
+    template <typename F>
+    std::vector<u8> Read(F&& read) {
+        std::unique_lock lock{turns.reads, std::defer_lock};
+        if (turns.serial_reads) {
+            lock.lock();
+        }
+        return read();
+    }
+
     template <typename F>
     void Guard(const std::string& where, F&& f) {
         try {
@@ -757,6 +780,7 @@ private:
     Found found;
     std::vector<std::string>& errors;
     Stats& stats;
+    Turns& turns;
     ZSTD_DCtx* context;
 };
 
@@ -845,7 +869,7 @@ u64 Fingerprint(std::span<const u8> control, std::span<const u8> code) {
 }
 
 Result Extract(std::span<const VirtualDir> roots, unsigned threads, Progress* progress,
-               std::stop_token stop) {
+               std::stop_token stop, bool serial_reads) {
     Zstd zstd;
     const bool dictionary_pack = LoadDictionaries(roots, zstd);
     std::vector<FileItem> files;
@@ -872,6 +896,8 @@ Result Extract(std::span<const VirtualDir> roots, unsigned threads, Progress* pr
     std::atomic<size_t> next{0};
     std::vector<std::vector<std::string>> errors(count);
     std::vector<Stats> stats(count);
+    Turns turns;
+    turns.serial_reads = serial_reads;
     const auto work = [&](unsigned worker) {
         size_t current = 0;
         Walker walker(
@@ -899,7 +925,7 @@ Result Extract(std::span<const VirtualDir> roots, unsigned threads, Progress* pr
                     members.push_back(it->second.index);
                 }
             },
-            errors[worker], stats[worker]);
+            errors[worker], stats[worker], turns);
         while (!stop.stop_requested()) {
             current = next.fetch_add(1);
             if (current >= files.size()) {

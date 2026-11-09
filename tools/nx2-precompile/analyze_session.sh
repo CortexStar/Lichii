@@ -7,7 +7,7 @@
 #   FIRST_NEW_RECORD  its record count before the session (printed as "records now" at the end)
 #   eden_log.txt      the session's log
 #
-# Environment: NX2_OUT and NX2_CACHE_VERSION as for run_pipeline.sh (its outputs are read),
+# Environment: NX2_OUT as for run_pipeline.sh (its outputs are read),
 # NX2_TOOL, PYTHON.
 set -euo pipefail
 
@@ -19,7 +19,7 @@ OUT=${NX2_OUT:-$PWD/nx2-precompile-out}
 TOOL=${NX2_TOOL:-nx2-precompile}
 PYTHON=${PYTHON:-python}
 PY=$(cd "$(dirname "$0")" && pwd)/py
-VERSION=${NX2_CACHE_VERSION:-$("$TOOL" cache-version)}
+VERSION=$("$TOOL" cache-version)
 
 "$TOOL" validate --pkg "$OUT/game.programs" --cache "$CACHE" --out "$OUT/${NAME}_validate" \
     --priors "$OUT/priors.json" | grep -v differs:

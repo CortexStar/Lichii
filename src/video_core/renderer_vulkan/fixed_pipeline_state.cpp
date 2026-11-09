@@ -433,10 +433,10 @@ void FixedPipelineState::CanonicalizeNative(u32 generic_read_mask) noexcept {
         }
     }
     // Outside the hashed bytes but given to the driver: depth bounds are dynamic state, and the
-    // stipple applies only with stippled lines.
+    // stipple applies only with stippled lines (or when they may be enabled dynamically).
     depth_bounds_min = 0;
     depth_bounds_max = 0;
-    if (!dynamic_state.line_stipple_enable) {
+    if (!dynamic_state.line_stipple_enable && !extended_dynamic_state_3_enables) {
         line_stipple_factor = 0;
         line_stipple_pattern = 0;
     }
