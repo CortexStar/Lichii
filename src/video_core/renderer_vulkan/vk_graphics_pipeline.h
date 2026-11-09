@@ -375,6 +375,8 @@ private:
     std::array<vk::ShaderModule, NUM_STAGES> spv_modules;
 
     std::array<Shader::Info, NUM_STAGES> stage_infos;
+    std::array<VideoCommon::StableSampled::ChunkCache<VkDescriptorImageInfo>, NUM_STAGES>
+        stable_sampled_chunks;
     std::array<u32, 5> enabled_uniform_buffer_masks{};
     VideoCommon::UniformBufferSizes uniform_buffer_sizes{};
     u32 num_descriptor_entries{};
