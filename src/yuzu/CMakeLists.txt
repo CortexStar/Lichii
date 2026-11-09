@@ -156,6 +156,8 @@ add_executable(yuzu
     configuration/configure_web.ui
     configuration/input_profiles.cpp
     configuration/input_profiles.h
+    configuration/settings_share.cpp
+    configuration/settings_share.h
     configuration/shared_widget.cpp
     configuration/shared_widget.h
     debugger/console.cpp

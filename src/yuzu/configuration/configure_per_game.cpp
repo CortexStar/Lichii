@@ -74,6 +74,7 @@
 #include "yuzu/configuration/configure_per_game.h"
 #include "yuzu/configuration/configure_per_game_addons.h"
 #include "yuzu/configuration/configure_system.h"
+#include "yuzu/configuration/settings_share.h"
 #include "yuzu/util/util.h"
 
 namespace {
@@ -451,6 +452,26 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
         connect(apply_button, &QAbstractButton::clicked, this,
                 &ConfigurePerGame::HandleApplyButtonClicked);
     }
+
+    SettingsShare::AddShareButton(
+        this, ui->buttonBox,
+        {
+            .current_section =
+                [this] {
+                    const std::map<const QWidget*, QString> sections{
+                        {system_tab.get(), QStringLiteral("sys")},
+                        {cpu_tab.get(), QStringLiteral("cpu")},
+                        {graphics_tab.get(), QStringLiteral("gfx")},
+                        {graphics_advanced_tab.get(), QStringLiteral("gfxa")},
+                        {graphics_extensions_tab.get(), QStringLiteral("gfxx")},
+                        {audio_tab.get(), QStringLiteral("aud")},
+                        {applets_tab.get(), QStringLiteral("app")},
+                    };
+                    const auto it = sections.find(ui->tabWidget->currentWidget());
+                    return it == sections.end() ? QString{} : it->second;
+                },
+            .builder = builder.get(),
+        });
 
     LoadConfiguration();
 }
