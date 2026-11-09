@@ -1525,6 +1525,7 @@ bool Device::GetSuitability(bool requires_swapchain) {
     return suitable;
 }
 
+// Disables extensions whose required features are missing, and picks the cooperative HMMA shapes.
 void Device::RemoveUnsuitableExtensions() {
     // VK_EXT_color_write_enable
     extensions.color_write_enable = features.color_write_enable.colorWriteEnable;
@@ -1746,9 +1747,10 @@ void Device::RemoveUnsuitableExtensions() {
         if (extensions.cooperative_matrix) {
             shapes = physical.GetCooperativeMatrixPropertiesKHR();
         }
-        const auto has_shape = [&](u32 columns) {
+        // Whether the driver offers rows x columns x 16 fp16 subgroup matrices without saturation.
+        const auto has_shape = [&](u32 rows, u32 columns) {
             return std::ranges::any_of(shapes, [=](const VkCooperativeMatrixPropertiesKHR& shape) {
-                return shape.MSize == 16 && shape.NSize == columns && shape.KSize == 16 &&
+                return shape.MSize == rows && shape.NSize == columns && shape.KSize == 16 &&
                        shape.AType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
                        shape.BType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
                        shape.CType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
@@ -1780,7 +1782,7 @@ void Device::RemoveUnsuitableExtensions() {
                             extensions.subgroup_size_control &&
                             features.subgroup_size_control.computeFullSubgroups;
         cooperative_hmma_16x8x16 =
-            usable && has_shape(8) &&
+            usable && has_shape(16, 8) &&
             (properties.subgroup_properties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
             properties.subgroup_properties.subgroupSize == GuestWarpSize &&
             // Compute subgroups may vary between these sizes (always with SPIR-V 1.6), and the
@@ -1788,8 +1790,12 @@ void Device::RemoveUnsuitableExtensions() {
             properties.subgroup_size_control.minSubgroupSize == GuestWarpSize &&
             properties.subgroup_size_control.maxSubgroupSize == GuestWarpSize;
         cooperative_hmma_16x16x16 =
-            usable && has_shape(16) && IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT);
-        extensions.cooperative_matrix = cooperative_hmma_16x8x16 || cooperative_hmma_16x16x16;
+            usable && has_shape(16, 16) && IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT);
+        // Intel Xe2 (ANV) only has 8x16x16: each HMMA is two products of 8 rows.
+        cooperative_hmma_8x16x16 =
+            usable && has_shape(8, 16) && IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT);
+        extensions.cooperative_matrix =
+            cooperative_hmma_16x8x16 || cooperative_hmma_16x16x16 || cooperative_hmma_8x16x16;
         features.cooperative_matrix.cooperativeMatrixRobustBufferAccess = VK_FALSE;
         RemoveExtensionFeatureIfUnsuitable(extensions.cooperative_matrix,
                                            features.cooperative_matrix,
