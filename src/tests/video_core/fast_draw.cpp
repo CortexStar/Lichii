@@ -345,6 +345,14 @@ TEST_CASE("Fast draw keeps base vertex and instance as draw parameters", "[fast_
     CHECK(f.Reusable());
 }
 
+TEST_CASE("Fast draw keeps the vertex id base as a draw parameter", "[fast_draw]") {
+    FastDrawFixture f;
+    f.DrawArrays(0, 3);
+    f.Write(MAXWELL3D_REG_INDEX(vertex_id_base), f.Reg(MAXWELL3D_REG_INDEX(vertex_id_base)) + 3);
+    f.DrawArrays(3, 3);
+    CHECK(f.Reusable());
+}
+
 TEST_CASE("Fast draw keeps vertex stream addresses and sizes light", "[fast_draw]") {
     DeltaFixture f;
     const auto stream = [](u32 index, u32 word) {
