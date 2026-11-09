@@ -345,9 +345,16 @@ void ImportModel(const std::filesystem::path& dll, const std::filesystem::path& 
     auto staging = destination;
     staging += ".importing";
     std::filesystem::create_directories(destination.parent_path());
-    if (std::filesystem::exists(destination) || !std::filesystem::create_directory(staging)) {
+    if (std::filesystem::exists(destination)) {
         throw std::runtime_error(
-            "The neural rendering model destination already exists or is being imported");
+            "The neural rendering model destination exists but could not be verified: " +
+            destination.string() + ". Move it aside, then import again.");
+    }
+    if (!std::filesystem::create_directory(staging)) {
+        throw std::runtime_error(
+            "The neural rendering model staging directory already exists: " + staging.string() +
+            ". Wait for any active import to finish. If no import is running, move this directory "
+            "aside and import again.");
     }
     try {
         std::filesystem::create_directory(std::filesystem::path{staging} / "model");
