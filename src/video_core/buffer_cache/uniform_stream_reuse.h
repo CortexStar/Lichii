@@ -12,6 +12,7 @@
 #include <type_traits>
 
 #include "common/common_types.h"
+#include "core/device_memory_manager.h"
 
 namespace VideoCommon {
 
@@ -97,23 +98,34 @@ template <class Runtime, class DeviceMemory>
     }
     Reuse& reuse = UniformStreamReuseState<typename Runtime::StreamUniformRef>();
     typename Reuse::Slot& slot = reuse.slots[stage][index];
-    u8* const scratch = reuse.scratch.data();
-    device_memory.ReadBlockUnsafe(device_addr, scratch, size);
+    // Compared and copied straight from guest memory when it lies in one device page: the copy
+    // to `scratch` (a read of up to 4 KiB per bind) is only needed across pages.
+    const u8* source = nullptr;
+    if constexpr (requires { device_memory.template GetPointer<u8>(device_addr); }) {
+        if ((device_addr & Core::DEVICE_PAGEMASK) + size <= Core::DEVICE_PAGESIZE) {
+            source = device_memory.template GetPointer<u8>(device_addr);
+        }
+    }
+    if (source == nullptr) {
+        u8* const scratch = reuse.scratch.data();
+        device_memory.ReadBlockUnsafe(device_addr, scratch, size);
+        source = scratch;
+    }
 
     const bool same_bytes =
-        slot.size == size && std::memcmp(slot.bytes.data(), scratch, size) == 0;
+        slot.size == size && std::memcmp(slot.bytes.data(), source, size) == 0;
     if (same_bytes && slot.tick == runtime.CurrentTick()) {
         runtime.RebindStreamUniform(slot.ref, size);
         return true;
     }
     const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
-    std::memcpy(span.data(), scratch, size);
+    std::memcpy(span.data(), source, size);
     slot.ref = runtime.LastStreamUniformRef();
     // After the allocation: the tick the stream region is tagged with is the one current now.
     slot.tick = runtime.CurrentTick();
     if (!same_bytes) {
         slot.size = size;
-        std::memcpy(slot.bytes.data(), scratch, size);
+        std::memcpy(slot.bytes.data(), source, size);
     }
     return true;
 }

@@ -23,6 +23,11 @@ struct Memory {
         Check(address + size <= bytes.size(), "read outside guest memory");
         std::memcpy(destination, bytes.data() + address, size);
     }
+    /// Reads within one page take this pointer instead of ReadBlockUnsafe.
+    template <typename T>
+    T* GetPointer(u64 address) {
+        return address < bytes.size() ? reinterpret_cast<T*>(bytes.data() + address) : nullptr;
+    }
 };
 
 struct Runtime {
