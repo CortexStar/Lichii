@@ -76,12 +76,24 @@ bool AcquireMetQueued(DmaPusher& dma_pusher, GPUVAddr address, const Met& met) {
     if (!split.Active()) {
         return false;
     }
+    using VideoCommon::Nx2Profile::Counter;
     u32 word{};
+    QueuedReadFailure failure{};
     if (!ReadReportWordsQueued(dma_pusher.memory_manager, split, address, &word, 1,
-                               VideoCommon::DrainSite::Acquire) ||
-        !met(word)) {
+                               VideoCommon::DrainSite::AcquireWriters, &failure)) {
+        VideoCommon::Nx2Profile::Add(failure == QueuedReadFailure::GpuWritten
+                                         ? Counter::AcquireGpuWritten
+                                     : failure == QueuedReadFailure::PendingWrite
+                                         ? Counter::AcquirePending
+                                         : Counter::AcquireNotReport,
+                                     1);
         return false;
     }
+    if (!met(word)) {
+        VideoCommon::Nx2Profile::Add(Counter::AcquireQueuedNotMet, 1);
+        return false;
+    }
+    VideoCommon::Nx2Profile::Add(Counter::AcquireQueuedMet, 1);
     // A drain would have run the work queued before the acquire: GPU-written command lists
     // fetched after it wait for that work (WaitForSync) instead.
     split.NoteSync();

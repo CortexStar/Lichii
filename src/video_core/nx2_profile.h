@@ -109,7 +109,7 @@ inline u64 Ticks() {
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
-    std::array<u64, 8> counters{}; ///< See Counter
+    std::array<u64, 16> counters{}; ///< See Counter
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_ns{};
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_count{};
     u64 child_ns{};    ///< Time of the zones nested in the current one
@@ -163,6 +163,11 @@ enum class Counter : u32 {
     SameValueWrites, ///< Of MethodWrites: the register already held the value
     AcquireChecks,  ///< Semaphore acquires evaluated
     AcquireWaits,   ///< Of AcquireChecks: not met yet (the channel waits)
+    AcquireQueuedMet,    ///< Acquires (checks and resumes) met without draining the back
+    AcquireQueuedNotMet, ///< Read without draining, not met: drained path
+    AcquireNotReport,    ///< Not report memory, or unmapped: drained path
+    AcquireGpuWritten,   ///< On a page GPU work wrote: drained path
+    AcquirePending,      ///< A queued or unsettled report or fence write: drained path
 };
 
 /// Method calls on this thread by method (3D registers on the back, macros on the front), and
@@ -282,6 +287,17 @@ inline void Report(const char* thread_name = "GPU thread") {
     line += fmt::format(" | acquires {:.0f} ({:.0f} waited)",
                         static_cast<double>(data.counters[6]) * 1e9 / window,
                         static_cast<double>(data.counters[7]) * 1e9 / window);
+    if (data.counters[8] + data.counters[9] + data.counters[10] + data.counters[11] +
+            data.counters[12] !=
+        0) {
+        line += fmt::format(" | acquire reads without draining: {:.0f} met, {:.0f} not met, "
+                            "{:.0f} not report memory, {:.0f} GPU-written, {:.0f} pending writes",
+                            static_cast<double>(data.counters[8]) * 1e9 / window,
+                            static_cast<double>(data.counters[9]) * 1e9 / window,
+                            static_cast<double>(data.counters[10]) * 1e9 / window,
+                            static_cast<double>(data.counters[11]) * 1e9 / window,
+                            static_cast<double>(data.counters[12]) * 1e9 / window);
+    }
     std::string drains;
     for (size_t i = 0; i < data.drain_count.size(); ++i) {
         if (data.drain_count[i] != 0) {
