@@ -4482,6 +4482,42 @@ ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::NullImageV
     for (u32 i = 0; i < Shader::NUM_TEXTURE_TYPES; i++) {
         image_views[i] = MakeView(VK_FORMAT_A8B8G8R8_UNORM_PACK32, VK_IMAGE_ASPECT_COLOR_BIT);
     }
+
+    // A 2D view bound where the shader declares a 3D or cube texture is invalid: Metal samples it
+    // as the declared type and can read outside the image, which loses the device. Those slots
+    // get views of the matching type on their own null images.
+    const auto make_view = [&](VkImage image, VkImageViewType view_type, u32 layers) {
+        return device->GetLogical().CreateImageView({
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .image = image,
+            .viewType = view_type,
+            .format = VK_FORMAT_A8B8G8R8_UNORM_PACK32,
+            .components{},
+            .subresourceRange{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = layers,
+            },
+        });
+    };
+    ImageInfo info_3d = info;
+    info_3d.type = ImageType::e3D;
+    null_image_3d = MakeImage(*device, runtime.memory_allocator, info_3d, {});
+    image_views[static_cast<size_t>(Shader::TextureType::Color3D)] =
+        make_view(*null_image_3d, VK_IMAGE_VIEW_TYPE_3D, 1);
+
+    ImageInfo info_cube = info;
+    info_cube.type = ImageType::e2D;
+    info_cube.resources.layers = 6;
+    null_image_cube = MakeImage(*device, runtime.memory_allocator, info_cube, {});
+    image_views[static_cast<size_t>(Shader::TextureType::ColorCube)] =
+        make_view(*null_image_cube, VK_IMAGE_VIEW_TYPE_CUBE, 6);
+    image_views[static_cast<size_t>(Shader::TextureType::ColorArrayCube)] =
+        make_view(*null_image_cube, VK_IMAGE_VIEW_TYPE_CUBE_ARRAY, 6);
 }
 
 ImageView::~ImageView() = default;

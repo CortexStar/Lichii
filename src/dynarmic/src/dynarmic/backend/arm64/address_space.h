@@ -25,6 +25,8 @@
 
 namespace Dynarmic::Backend::Arm64 {
 
+struct StackLayout;
+
 class AddressSpace {
 public:
     explicit AddressSpace(std::size_t code_cache_size);
@@ -41,6 +43,10 @@ public:
     CodePtr ReverseGetEntryPoint(CodePtr host_pc);
 
     CodePtr GetOrEmit(IR::LocationDescriptor descriptor);
+
+    // GetOrEmit for the dispatcher, which runs on the JIT stack. Emitting can clear the code
+    // cache, and the return stack buffer would then hold pointers into overwritten code.
+    CodePtr GetOrEmitFromDispatcher(IR::LocationDescriptor descriptor, StackLayout& stack);
 
     void InvalidateBasicBlocks(const ::Common::unordered_set<IR::LocationDescriptor>& descriptors);
 
@@ -71,6 +77,7 @@ protected:
 
     IR::Block ir_block;
     const std::size_t code_cache_size;
+    u64 cache_generation = 0;
     oaknut::CodeBlock mem;
     oaknut::CodeGenerator code;
 

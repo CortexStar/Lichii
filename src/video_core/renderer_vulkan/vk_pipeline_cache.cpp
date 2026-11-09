@@ -770,12 +770,13 @@ constexpr size_t MaxPipelinesWithoutUsedList = 3000;
 constexpr size_t PrecacheCaptureLimit = size_t{1} << 30;
 
 // EDEN_NX2_PRELOAD_ALL_PIPELINES=1 builds every cached pipeline at boot, as before.
-bool PreloadAllPipelines() {
-    static const bool all = [] {
-        const char* value = std::getenv("EDEN_NX2_PRELOAD_ALL_PIPELINES");
-        return value != nullptr && value[0] == '1';
-    }();
-    return all;
+/// On MoltenVK every cached pipeline is built at boot unless EDEN_NX2_PRELOAD_ALL_PIPELINES=0:
+/// macOS keeps the compiled Metal shaders, so after the first boot this takes seconds (5,200
+/// Ocarina pipelines: ~5 min cold, 4 s warm on an M4 Pro), while each one built mid-game holds
+/// draws for ~0.5 s.
+bool PreloadAllPipelines(bool moltenvk) {
+    static const char* const value = std::getenv("EDEN_NX2_PRELOAD_ALL_PIPELINES");
+    return value != nullptr ? value[0] == '1' : moltenvk;
 }
 } // Anonymous namespace
 
@@ -1015,6 +1016,9 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     size_t skipped_pipelines = 0;
     size_t deferred_pipelines = 0;
     size_t queued_graphics = 0;
+    size_t dropped_dynamic_state = 0;
+    size_t unsupported_provoking = 0;
+    size_t dropped_duplicate = 0;
 
     // With the shader precache this boot, the cached graphics pipelines skipped below are built
     // on the loading screen too, unless an earlier precache built them for this driver.
@@ -1141,25 +1145,26 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                 dynamic_features.has_color_write_enable ||
             (key.state.dynamic_vertex_input != 0) !=
                 dynamic_features.has_dynamic_vertex_input) {
+            ++dropped_dynamic_state;
             return;
         }
 
+        // Keys asking for a last-vertex mode the device lacks are loaded as they are: draws look
+        // them up with the same bit, and the pipeline falls back to the first vertex when built.
         const bool key_requests_provoking_last = key.state.provoking_vertex_last != 0;
         if (key_requests_provoking_last && !dynamic_features.has_provoking_vertex_last_mode) {
-            return;
-        }
-
-        const bool key_uses_transform_feedback = key.state.xfb_enabled != 0;
-        if (key_uses_transform_feedback && key_requests_provoking_last &&
-            !dynamic_features.has_provoking_vertex_tf_preserve) {
+            ++unsupported_provoking;
+        } else if (key_requests_provoking_last && key.state.xfb_enabled != 0 &&
+                   !dynamic_features.has_provoking_vertex_tf_preserve) {
             return;
         }
 
         const u64 hash = key.Hash();
         if (!disk_pipelines.insert(hash).second) {
+            ++dropped_duplicate;
             return;
         }
-        if (!PreloadAllPipelines() &&
+        if (!PreloadAllPipelines(device.IsMoltenVK()) &&
             (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
                                     : !used_pipelines.contains(hash))) {
             ++skipped_pipelines;
@@ -1243,6 +1248,10 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     compute_envs.clear();
 
     LOG_INFO(Render_Vulkan, "Total Pipeline Count: {}", state.total);
+    LOG_INFO(Render_Vulkan,
+             "Cached graphics pipelines at load: {} dropped for dynamic state, {} duplicates, {} "
+             "with a last-vertex mode the device lacks",
+             dropped_dynamic_state, dropped_duplicate, unsupported_provoking);
     if (skipped_pipelines != 0) {
         LOG_INFO(
             Render_Vulkan,
@@ -1683,7 +1692,7 @@ void PipelineCache::EvictUnusedPipelines() {
     // EDEN_NX2_PRELOAD_ALL_PIPELINES asked for every cached pipeline built: evicting the ones not
     // used yet threw the preload away after 9000 frames (Ocarina: 22,510 of 24,285, then rebuilt
     // one by one in new places).
-    if (PreloadAllPipelines()) {
+    if (PreloadAllPipelines(false)) {
         return;
     }
     // Each built pipeline holds ~0.45 MB of driver memory and none was ever destroyed, so it grew
