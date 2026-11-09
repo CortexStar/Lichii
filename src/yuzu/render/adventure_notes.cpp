@@ -599,12 +599,22 @@ void AdventureNotes::CreateModule() {
 }
 
 void AdventureNotes::FillViews() {
-    const QSignalBlocker blocker{views};
-    views->clear();
+    QStringList names;
     if (static_cast<size_t>(current_tab) < report.tabs.size()) {
         for (const NotesView& view : report.tabs[static_cast<size_t>(current_tab)].views) {
-            views->addItem(view.name);
+            names.append(view.name);
         }
+    }
+    // A module that redraws every second (timers) would otherwise clear the list each time,
+    // closing it or losing the choice while it is open: it is rebuilt only when the views change.
+    QStringList shown;
+    for (int index = 0; index < views->count(); ++index) {
+        shown.append(views->itemText(index));
+    }
+    if (names != shown) {
+        const QSignalBlocker blocker{views};
+        views->clear();
+        views->addItems(names);
     }
     views->setVisible(!collapsed && views->count() > 1);
     Refresh();
