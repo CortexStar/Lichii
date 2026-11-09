@@ -1402,11 +1402,18 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     // Banks are keyed by the bytes they cover, not their start address: Ocarina of Time binds
     // thousands of overlapping 64 KiB windows a frame (one per draw in Hyrule Castle Town), and
     // uploading each window whole copied ~64 KiB per draw, which left the GPU thread at 2 fps.
+    // A start address already uploaded this frame is skipped only up to the size uploaded from
+    // it: a larger bind there still uploads its tail.
+    const auto uploaded_from_here = [&] {
+        const auto it = native_indirect_uniforms_this_frame.find(device_addr);
+        return it != native_indirect_uniforms_this_frame.end() && it->second >= size;
+    };
     if (has_host_buffer && (*channel_state->uniform_buffer_sizes)[stage][index] == 0x10000 &&
         size != 0 && gpu_memory != nullptr && gpu_memory->UsesNativeTiling() &&
-        (Nx2Perf::Verify() || !native_indirect_uniforms_this_frame.contains(device_addr)) &&
+        (Nx2Perf::Verify() || !uploaded_from_here()) &&
         !memory_tracker.IsRegionGpuModified(device_addr, size)) {
-        native_indirect_uniforms_this_frame.insert(device_addr);
+        u32& uploaded_size = native_indirect_uniforms_this_frame[device_addr];
+        uploaded_size = (std::max)(uploaded_size, size);
         // The bank size is only an upper limit: stop at the end of the mapped memory.
         u64 mapped_size = 0;
         while (mapped_size < size &&
