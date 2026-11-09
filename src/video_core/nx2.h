@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/bit_util.h"
 #include "common/common_types.h"
 
 namespace Tegra {
@@ -19,6 +20,18 @@ namespace Tegra {
 // Set once a Switch 2 (Ampere, NVN2) driver is talking to the GPU. Its command streams use
 // Ampere classes and the Turing+ macro ISA, which Eden's Maxwell engines don't implement.
 inline std::atomic<bool> g_nx2_ampere{false};
+
+// GPU VA that nx2:gpu GetVaRange and GetUserPartition report to NVN. The in-process
+// allocator hands out addresses in [Nx2GpuVaStart, Nx2GpuVaEnd). NvRm's AllocAsEx range
+// can be smaller; the GMMU page tables still have to cover this one.
+inline constexpr u64 Nx2GpuVaStart = 0x8000000ULL;
+inline constexpr u64 Nx2GpuVaEnd = 0xC000000000ULL;
+
+/// Bytes a Switch 2 GMMU covers when it is sized from Nx2GpuVaEnd. That end is not a
+/// power of two, so the page tables round up (Log2Ceil). NvRm's va_range_end can only
+/// make this larger. A range past it is left mapped, and its backing must stay.
+inline constexpr u64 Nx2GpuAddressSpaceSize = 1ULL << Common::Log2Ceil(Nx2GpuVaEnd);
+static_assert(Nx2GpuAddressSpaceSize == (1ULL << 40));
 
 // Device pages the GPU has written through the buffer cache (shader stores, copies), ever. Title 1
 // runs command lists the GPU writes each frame (20-byte entries its culling fills in); read
@@ -34,12 +47,16 @@ inline void Nx2MarkGpuWritten(u64 device_address, u64 size) {
     }
     const u64 last = std::min<u64>((device_address + size - 1) >> Nx2WrittenPageBits,
                                    g_nx2_gpu_written_pages.size() * 64 - 1);
-    for (u64 page = device_address >> Nx2WrittenPageBits; page <= last; ++page) {
+    // A word at a time: storage buffers of several MiB are marked on every draw that binds them.
+    for (u64 page = device_address >> Nx2WrittenPageBits; page <= last;) {
+        const u64 first_bit = page % 64;
+        const u64 bits = (std::min<u64>)(64 - first_bit, last - page + 1);
+        const u64 mask = (bits == 64 ? ~u64{0} : (u64{1} << bits) - 1) << first_bit;
         auto& word = g_nx2_gpu_written_pages[page / 64];
-        const u64 bit = u64{1} << (page % 64);
-        if ((word.load(std::memory_order_relaxed) & bit) == 0) {
-            word.fetch_or(bit, std::memory_order_relaxed);
+        if ((word.load(std::memory_order_relaxed) & mask) != mask) {
+            word.fetch_or(mask, std::memory_order_relaxed);
         }
+        page += bits;
     }
 }
 
