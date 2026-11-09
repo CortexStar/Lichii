@@ -230,12 +230,17 @@ std::vector<u8> Decompress(Bytes recipe) {
     if (recipe.size() < 16 || std::memcmp(recipe.data(), RecipeMagic.data(), 8) != 0) {
         throw std::runtime_error("not a precompile recipe");
     }
+    // The frame must declare the header's size, bounded (5 MB for Mario Kart World), before a
+    // buffer that size is allocated.
     const u32 size = Load<u32>(recipe, 8);
-    auto body = Common::Compression::DecompressDataZSTD(recipe.subspan(16));
-    if (body.size() != size) {
+    if (size > (u32{1} << 30)) {
         throw std::runtime_error("damaged precompile recipe");
     }
-    return body;
+    auto body = Common::Compression::TryDecompressDataZSTD(recipe.subspan(16), size);
+    if (!body || body->size() != size) {
+        throw std::runtime_error("damaged precompile recipe");
+    }
+    return std::move(*body);
 }
 
 std::vector<CodeMatch> FindCodeInBody(Bytes body, const X::Result& extracted, unsigned threads) {

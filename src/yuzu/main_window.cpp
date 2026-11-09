@@ -3015,7 +3015,7 @@ void MainWindow::OnGameListPrepareShadersFromRecipe(u64 program_id, const std::s
 
     // The game's RomFS as it loads it: a NUP's update laid over its base (loader/nup.cpp), or what
     // the game's loader reads.
-    const auto game_file = QtCommon::vfs->OpenFile(game_path, FileSys::OpenMode::Read);
+    const auto game_file = Core::GetGameFileFromPath(QtCommon::vfs, game_path);
     std::unique_ptr<FileSys::NupContainer> nup;
     std::vector<FileSys::VirtualDir> roots;
     std::optional<u32> game_version; // known for a NUP: its newest base or update package

@@ -27,6 +27,7 @@ namespace {
 
 constexpr size_t MaxBlob = size_t{1} << 30;       // largest file or inflated member read whole
 constexpr size_t LargeFile = size_t{64} << 20;   // read and walked by one worker at a time
+constexpr size_t InflateReserve = size_t{64} << 20; // largest first buffer a declared size gives
 constexpr size_t PeekBytes = 64 * 1024;           // what a compressed file shows before inflating
 constexpr int MaxDepth = 12;
 constexpr std::array<u8, 4> ControlMagic{0x34, 0x12, 0x76, 0x98};
@@ -167,17 +168,21 @@ std::vector<u8> Inflate(const Zstd& zstd, ZSTD_DCtx* context, Bytes frame, size_
         ZSTD_DCtx_refDDict(context, dict);
     }
     const unsigned long long declared = ZSTD_getFrameContentSize(frame.data(), frame.size());
-    // A frame that doesn't declare its size starts small; the loop below grows the buffer.
+    const bool whole = limit >= MaxBlob; // the whole content is wanted, not a peek at its start
+    // The declared size only sizes the first buffer, up to 64 MiB (a frame that doesn't declare
+    // it starts at 64 KiB); the loop below grows the buffer as content arrives.
     size_t reserve = std::min<size_t>(limit, 1 << 16);
     if (declared != ZSTD_CONTENTSIZE_UNKNOWN && declared != ZSTD_CONTENTSIZE_ERROR) {
-        if (declared > MaxBlob && limit > MaxBlob) {
+        if (declared > MaxBlob && whole) {
             throw Bad(fmt::format("zstd content of {} bytes is too large", declared));
         }
-        reserve = std::min<size_t>(limit, static_cast<size_t>(declared));
+        reserve = static_cast<size_t>(
+            std::min<unsigned long long>({declared, limit, InflateReserve}));
     }
-    std::vector<u8> out(std::min(reserve, MaxBlob));
+    std::vector<u8> out(reserve);
     ZSTD_inBuffer in{frame.data(), frame.size(), 0};
     size_t produced = 0;
+    bool ended = false;
     while (produced < limit) {
         if (produced == out.size()) {
             if (out.size() >= MaxBlob) {
@@ -192,8 +197,12 @@ std::vector<u8> Inflate(const Zstd& zstd, ZSTD_DCtx* context, Bytes frame, size_
         }
         produced += o.pos;
         if (status == 0 || (in.pos == in.size && o.pos == 0)) {
-            break; // end of frame, or no more input
+            ended = true; // end of frame, or no more input
+            break;
         }
+    }
+    if (whole && !ended) {
+        throw Bad("zstd content is too large");
     }
     out.resize(produced);
     return out;

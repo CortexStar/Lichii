@@ -1288,6 +1288,17 @@ int Check(const std::filesystem::path& path, unsigned threads) {
             id = Load<u32>(file, offset);
             offset += 4;
         }
+        if (kind > 1) {
+            fmt::print("record {} has unknown kind {}; the rest is not read\n", r, kind);
+            ++bad_records;
+            break;
+        }
+        if (count == 0 || (kind == 1 && count != 1) ||
+            std::ranges::any_of(ids, [&](u32 id) { return id >= envs.size(); })) {
+            ++bad_records;
+            offset += kind == 1 ? ComputeKeySize : GraphicsKeySize;
+            continue;
+        }
         if (kind == 1) {
             ++compute;
             const u64 key_hash = Load<u64>(file, offset);
@@ -1416,8 +1427,8 @@ FileSys::Nx2ShaderExtract::Result ExtractGame(const Game& game, unsigned threads
     namespace X = FileSys::Nx2ShaderExtract;
     X::Progress progress;
     std::atomic<bool> done{false};
-    std::jthread reporter([&] {
-        for (int tick = 0; !done.load(); ++tick) {
+    std::jthread reporter([&](std::stop_token stop) {
+        for (int tick = 0; !done.load() && !stop.stop_requested(); ++tick) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             if (tick % 50 == 49 && progress.files_total) {
                 fmt::print(stderr, "progress: {}/{}\n", progress.files_done.load(),
