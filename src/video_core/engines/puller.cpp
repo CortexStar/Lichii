@@ -91,6 +91,12 @@ QueuedAcquire AcquireMetQueued(DmaPusher& dma_pusher, GPUVAddr address, const Me
                                      1);
         return QueuedAcquire::Unknown;
     }
+    // A fence release still queued is overlaid on the word, but it lands only once its host fence
+    // signals: until then the drained path waits for it, so this must too.
+    if (dma_pusher.memory_manager.Read<u32>(address) != word) {
+        VideoCommon::Nx2Profile::Add(Counter::AcquirePending, 1);
+        return QueuedAcquire::Unknown;
+    }
     if (!met(word)) {
         VideoCommon::Nx2Profile::Add(Counter::AcquireQueuedNotMet, 1);
         return QueuedAcquire::NotMet;
