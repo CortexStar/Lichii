@@ -762,6 +762,11 @@ std::optional<IPv4Address> GetRoomIPv4Address() {
     return std::nullopt;
 }
 
+bool SwitchSportsLanFixesEnabled() {
+    constexpr u64 NintendoSwitchSportsResort = 0x04008E001F098000ULL;
+    return Settings::GetCurrentProgramID() == NintendoSwitchSportsResort;
+}
+
 std::string IPv4AddressToString(IPv4Address ip_addr) {
     std::array<char, INET_ADDRSTRLEN> buf = {};
     ASSERT(inet_ntop(AF_INET, &ip_addr, buf.data(), sizeof(buf)) == buf.data());
