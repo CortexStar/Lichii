@@ -2246,11 +2246,14 @@ void TextureCache<P>::RefreshSparseLayers(Image& image) {
         const u32 num_layers = static_cast<u32>(image.info.resources.layers);
         const u64 stride = image.info.layer_stride;
         std::vector<u32> layers;
+        const bool native_astc_fallback = IsPixelFormatASTC(image.info.format) &&
+                                          False(image.flags & ImageFlagBits::AcceleratedUpload);
         for (u32 layer = 0; layer < num_layers; ++layer) {
             const bool written =
-                image.dirty_layers.empty()
-                    ? !Tegra::Nx2SparseUnwritten(image.gpu_addr + layer * stride, stride)
-                    : ((image.dirty_layers[layer / 64] >> (layer % 64)) & 1) != 0;
+                (native_astc_fallback && layer == 0) ||
+                (image.dirty_layers.empty()
+                     ? !Tegra::Nx2SparseUnwritten(image.gpu_addr + layer * stride, stride)
+                     : ((image.dirty_layers[layer / 64] >> (layer % 64)) & 1) != 0);
             if (written) {
                 layers.push_back(layer);
             }
@@ -2300,6 +2303,23 @@ void TextureCache<P>::UploadLayers(Image& image, std::span<const u32> layers) {
                 auto layer_copies =
                     UnswizzleImage(*gpu_memory, layer_addr, layer_info, swizzle_data,
                                    staging.mapped_span.subspan(i * layer_size, layer_size));
+                // Zero is an invalid ASTC block and native decoders return opaque magenta. The
+                // software decoders use transparent black for invalid blocks; preserve that
+                // behavior for unwritten blocks in sparse native-ASTC arrays.
+                if (IsPixelFormatASTC(image.info.format)) {
+                    constexpr std::array<u8, 16> TransparentBlackAstc{
+                        0xfc, 0xfd, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    };
+                    std::span<u8> layer_data =
+                        staging.mapped_span.subspan(i * layer_size, layer_size);
+                    for (size_t offset = 0; offset + 16 <= layer_data.size(); offset += 16) {
+                        std::span<u8, 16> block{layer_data.subspan(offset, 16)};
+                        if (std::ranges::all_of(block, [](u8 value) { return value == 0; })) {
+                            std::ranges::copy(TransparentBlackAstc, block.begin());
+                        }
+                    }
+                }
                 for (BufferImageCopy copy : layer_copies) {
                     copy.buffer_offset += i * layer_size;
                     copy.image_subresource.base_layer = static_cast<s32>(layers[i]);

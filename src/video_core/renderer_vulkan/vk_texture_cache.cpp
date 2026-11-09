@@ -257,7 +257,7 @@ constexpr VkBorderColor ConvertBorderColor(const std::array<float, 4>& color) {
 // A large color array in a Switch 2 sparse region (title 1's terrain arrays: 13-26% of their
 // blocks written) gets memory by layer, as its layers are written: unbacked at first, then
 // Image::BindLayers. Only formats uploaded layer by layer: huge ASTC arrays (GPU decode) and
-// formats the host samples as they are.
+// formats the host samples as they are, including native ASTC.
 [[nodiscard]] bool UsesSparseLayers(const Device& device, const ImageInfo& info, GPUVAddr gpu_addr) {
     if (!device.CanUseUnbackedSparseImages() || !device.IsSparseResidencyImage2DSupported() ||
         info.type != ImageType::e2D ||
@@ -267,8 +267,9 @@ constexpr VkBorderColor ConvertBorderColor(const std::array<float, 4>& color) {
     }
     const bool layer_uploads =
         IsHugeAstcArray(device, info) ||
-        (!IsPixelFormatASTC(info.format) &&
-         (!IsPixelFormatBCn(info.format) || device.IsOptimalBcnSupported()));
+        (IsPixelFormatASTC(info.format) ? device.IsOptimalAstcSupported()
+                                        : (!IsPixelFormatBCn(info.format) ||
+                                           device.IsOptimalBcnSupported()));
     const u32 size = VideoCommon::CalculateGuestSizeInBytes(info);
     return layer_uploads && size >= (32U << 20) && Tegra::Nx2InSparseRegion(gpu_addr, size);
 }
