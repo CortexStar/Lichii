@@ -721,9 +721,9 @@ struct OcarinaUpscaler::Impl {
             || !dlss
 #endif
         ) {
-            // FSR 4 when an FFX API upscaler library loads; FSR 3.1 stays the fallback (it takes
-            // over if FSR 4 fails to create or dispatch).
-            if (Fsr4Upscaler::OpenLibrary()) {
+            // FSR 4 when it's turned on and AMD's runtime offers it; FSR 3.1 stays the fallback
+            // (it takes over if FSR 4 fails to create or dispatch).
+            if (Fsr4Upscaler::IsWanted(device)) {
                 try {
                     fsr4 = std::make_unique<Fsr4Upscaler>(device, scheduler, allocator);
                 } catch (const vk::Exception& error) {

@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// AMD FSR 4 through an FFX API upscaler library loaded at run time (EDEN_NX2_FSR4_LIB, or
-// amd_fidelityfx_upscaler_vk.so/.dll in the user folder; e.g. github.com/Astyyyyy/fsr4-vk's).
-// Same inputs as the Ocarina FSR 3.1 path, which takes over when the library is missing or fails.
+// AMD FSR 4 through AMD's FidelityFX runtime (vulkan_common/ffx_runtime.h), which the user
+// downloads from AMD in the Graphics settings. Same inputs as the Ocarina FSR 3.1 path, which takes
+// over when FSR 4 is off, missing or fails.
 
 #pragma once
 
@@ -11,9 +11,9 @@
 #include <atomic>
 #include <memory>
 #include <optional>
+#include <string>
 
 #include "common/common_types.h"
-#include "common/dynamic_library.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Vulkan {
@@ -21,6 +21,10 @@ namespace Vulkan {
 class Device;
 class MemoryAllocator;
 class Scheduler;
+
+namespace FfxRuntime {
+struct Api;
+}
 
 class Fsr4Upscaler {
 public:
@@ -48,11 +52,11 @@ public:
         std::array<f32, 2> jitter{}; ///< Offset the scene was drawn with, in render pixels.
     };
 
-    /// The library from EDEN_NX2_FSR4_LIB or the user folder, or null when there is none or it
-    /// doesn't load.
-    [[nodiscard]] static std::shared_ptr<Common::DynamicLibrary> OpenLibrary();
+    /// Whether FSR 4 is turned on and the device runs on AMD's driver.
+    [[nodiscard]] static bool IsWanted(const Device& device);
 
-    /// Throws vk::Exception when the library is missing or has no FFX API.
+    /// Throws vk::Exception when FSR 4 can't start on this device: AMD's files are missing or
+    /// don't check out, or AMD's runtime offers no FSR 4 for the GPU.
     explicit Fsr4Upscaler(const Device& device, Scheduler& scheduler,
                           MemoryAllocator& memory_allocator);
     ~Fsr4Upscaler();
@@ -72,8 +76,6 @@ public:
     }
 
 private:
-    struct Api;
-
     bool CreateContext(VkExtent2D render_size, VkExtent2D upscale_size);
     void DestroyContext();
     void CreateOutput(VkExtent2D upscale_size);
@@ -82,8 +84,9 @@ private:
     const Device& device;
     Scheduler& scheduler;
     MemoryAllocator& memory_allocator;
-    std::shared_ptr<Common::DynamicLibrary> library;
-    std::unique_ptr<Api> api;
+    std::shared_ptr<const FfxRuntime::Api> api;
+    u64 provider_id{};
+    std::string provider_name;
     void* context{}; ///< ffxContext
     VkExtent2D render_extent{};
     VkExtent2D upscale_extent{};

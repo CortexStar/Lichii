@@ -1,56 +1,41 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// AMD FSR 4 through an FFX API upscaler library loaded at run time. The library (for example
-// github.com/Astyyyyy/fsr4-vk's amd_fidelityfx_upscaler_vk, built from AMD's SDK 2.3.0 model)
-// takes plain Vulkan images: the inputs in SHADER_READ_ONLY_OPTIMAL (FFX "compute read"), the
-// output in GENERAL ("unordered access"), and records into our command buffer.
+// AMD FSR 4 through AMD's FidelityFX runtime. The runtime takes plain Vulkan images: the inputs
+// in SHADER_READ_ONLY_OPTIMAL (FFX "compute read"), the output in GENERAL ("unordered access"),
+// and records into our command buffer. Picking the FSR 4 provider by version follows
+// CheezerWheezer's FSR 4 integration for CheezyEmu.
 
-#include <array>
-#include <cstdlib>
-#include <filesystem>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include <boost/container/static_vector.hpp>
 
-// The vendored FFX API headers declare their entry points with MSVC's __declspec; this file only
-// calls them through pointers.
+#include "common/logging.h"
+#include "common/settings.h"
+#include "video_core/renderer_vulkan/vk_fsr4_upscaler.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/vulkan_common/ffx_runtime.h"
+#include "video_core/vulkan_common/vulkan_device.h"
+#include "video_core/vulkan_common/vulkan_memory_allocator.h"
+
+// After vulkan.h, which sets the platform macros the wrapper's Win32 entry points need.
 #ifndef _WIN32
 #define __declspec(x)
 #endif
+#include "api/include/vk/ffx_api_vk.h"
 #include "upscalers/include/ffx_upscale.h"
 #ifndef _WIN32
 #undef __declspec
 #endif
 
-#include "common/fs/fs_util.h"
-#include "common/fs/path_util.h"
-#include "common/logging.h"
-#include "video_core/renderer_vulkan/vk_fsr4_upscaler.h"
-#include "video_core/renderer_vulkan/vk_scheduler.h"
-#include "video_core/vulkan_common/vulkan_device.h"
-#include "video_core/vulkan_common/vulkan_memory_allocator.h"
-
 namespace Vulkan {
 namespace {
-#ifdef _WIN32
-constexpr const char* LIBRARY_NAME = "amd_fidelityfx_upscaler_vk.dll";
-#else
-constexpr const char* LIBRARY_NAME = "amd_fidelityfx_upscaler_vk.so";
-#endif
 constexpr VkFormat OUTPUT_FORMAT = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr VkImageUsageFlags OUTPUT_USAGE = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
                                            VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                                            VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-// ffx_api_vk.h's FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK (not in the vendored headers).
-constexpr ffxStructType_t BACKEND_VK_DESC_TYPE = 0x0000003u;
-struct CreateBackendVkDesc {
-    ffxCreateContextDescHeader header;
-    VkDevice device;
-    VkPhysicalDevice physical_device;
-    PFN_vkGetDeviceProcAddr get_device_proc_addr;
-};
-
 constexpr VkImageSubresourceRange COLOR_RANGE{
     .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
     .baseMipLevel = 0,
@@ -59,33 +44,11 @@ constexpr VkImageSubresourceRange COLOR_RANGE{
     .layerCount = 1,
 };
 
-u32 SurfaceFormat(VkFormat format) {
-    switch (format) {
-    case VK_FORMAT_R16G16B16A16_SFLOAT:
-        return FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT;
-    case VK_FORMAT_R16G16_SFLOAT:
-        return FFX_API_SURFACE_FORMAT_R16G16_FLOAT;
-    case VK_FORMAT_R16_SFLOAT:
-        return FFX_API_SURFACE_FORMAT_R16_FLOAT;
-    case VK_FORMAT_R32_SFLOAT:
-    case VK_FORMAT_D32_SFLOAT:
-        return FFX_API_SURFACE_FORMAT_R32_FLOAT;
-    case VK_FORMAT_R8G8B8A8_UNORM:
-        return FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM;
-    case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
-        return FFX_API_SURFACE_FORMAT_R10G10B10A2_UNORM;
-    case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
-        return FFX_API_SURFACE_FORMAT_R11G11B10_FLOAT;
-    default:
-        return FFX_API_SURFACE_FORMAT_UNKNOWN;
-    }
-}
-
 FfxApiResource Resource(VkImage image, VkFormat format, VkExtent2D size, u32 usage, u32 state) {
     FfxApiResource resource{};
     resource.resource = reinterpret_cast<void*>(image);
     resource.description.type = FFX_API_RESOURCE_TYPE_TEXTURE2D;
-    resource.description.format = SurfaceFormat(format);
+    resource.description.format = ffxApiGetSurfaceFormatVK(format);
     resource.description.width = size.width;
     resource.description.height = size.height;
     resource.description.depth = 1;
@@ -132,49 +95,73 @@ void Message(uint32_t type, const wchar_t* message) {
         LOG_INFO(Render_Vulkan, "FSR 4: {}", text);
     }
 }
-} // Anonymous namespace
 
-struct Fsr4Upscaler::Api {
-    PfnFfxCreateContext create_context{};
-    PfnFfxDestroyContext destroy_context{};
-    PfnFfxDispatch dispatch{};
+VkDeviceContext DeviceContext(const Device& device) {
+    return VkDeviceContext{
+        .vkDevice = *device.GetLogical(),
+        .vkPhysicalDevice = static_cast<VkPhysicalDevice>(device.GetPhysical()),
+        .vkDeviceProcAddr = device.GetDispatchLoader().vkGetDeviceProcAddr,
+    };
+}
+
+struct Provider {
+    u64 id{};
+    std::string name;
 };
 
-std::shared_ptr<Common::DynamicLibrary> Fsr4Upscaler::OpenLibrary() {
-    static const std::shared_ptr<Common::DynamicLibrary> library =
-        []() -> std::shared_ptr<Common::DynamicLibrary> {
-        // EDEN_NX2_FSR4_LIB, else the library's own name in the user folder.
-        std::string path;
-        if (const char* const env = std::getenv("EDEN_NX2_FSR4_LIB"); env && env[0] != '\0') {
-            path = env;
-        } else {
-            const auto file = Common::FS::GetEdenPath(Common::FS::EdenPath::EdenDir) / LIBRARY_NAME;
-            std::error_code ec;
-            if (!std::filesystem::is_regular_file(file, ec)) {
-                return nullptr;
-            }
-            path = Common::FS::PathToUTF8String(file);
+/// The newest FSR 4 (or later) upscaler AMD's runtime offers for this device. The runtime also
+/// offers FSR 3.1 on GPUs without FSR 4; that one is left to the built-in FSR 3.1.
+std::optional<Provider> FindFsr4(const FfxRuntime::Api& api, const Device& device) {
+    VkDeviceContext vk_context = DeviceContext(device);
+    u64 count = 0;
+    ffxQueryDescGetVersions versions{};
+    versions.header.type = FFX_API_QUERY_DESC_TYPE_GET_VERSIONS;
+    versions.createDescType = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
+    versions.device = &vk_context;
+    versions.outputCount = &count;
+    if (api.query(nullptr, &versions.header) != FFX_API_RETURN_OK || count == 0) {
+        LOG_INFO(Render_Vulkan, "AMD FSR 4: the FidelityFX runtime offers no upscaler for {}",
+                 device.GetModelName());
+        return std::nullopt;
+    }
+    std::vector<u64> ids(count);
+    std::vector<const char*> names(count);
+    versions.versionIds = ids.data();
+    versions.versionNames = names.data();
+    if (api.query(nullptr, &versions.header) != FFX_API_RETURN_OK) {
+        return std::nullopt;
+    }
+    std::string offered;
+    std::optional<Provider> fsr4;
+    for (u64 i = 0; i < count; ++i) {
+        const std::string name = names[i] ? names[i] : "";
+        offered += (offered.empty() ? "" : ", ") + name;
+        // Newest first.
+        if (!fsr4 && !name.empty() && name[0] >= '4' && name[0] <= '9') {
+            fsr4 = Provider{ids[i], name};
         }
-        auto lib = std::make_shared<Common::DynamicLibrary>(path.c_str());
-        if (!lib->IsOpen()) {
-            LOG_WARNING(Render_Vulkan, "FSR 4: {} doesn't load; using FSR 3.1", path);
-            return nullptr;
-        }
-        LOG_INFO(Render_Vulkan, "FSR 4: upscaler library {}", path);
-        return lib;
-    }();
-    return library;
+    }
+    LOG_INFO(Render_Vulkan, "AMD FSR 4: upscalers offered for {}: {}{}", device.GetModelName(),
+             offered, fsr4 ? "" : " (no FSR 4; using FSR 3.1)");
+    return fsr4;
+}
+} // Anonymous namespace
+
+bool Fsr4Upscaler::IsWanted(const Device& device) {
+    return Settings::values.amd_fsr4.GetValue() &&
+           device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY;
 }
 
 Fsr4Upscaler::Fsr4Upscaler(const Device& device_, Scheduler& scheduler_,
                            MemoryAllocator& memory_allocator_)
     : device{device_}, scheduler{scheduler_}, memory_allocator{memory_allocator_},
-      library{OpenLibrary()}, api{std::make_unique<Api>()} {
-    if (!library || !library->GetSymbol("ffxCreateContext", &api->create_context) ||
-        !library->GetSymbol("ffxDestroyContext", &api->destroy_context) ||
-        !library->GetSymbol("ffxDispatch", &api->dispatch)) {
+      api{FfxRuntime::Acquire()} {
+    const auto provider = api ? FindFsr4(*api, device) : std::nullopt;
+    if (!provider) {
         throw vk::Exception(VK_ERROR_FEATURE_NOT_PRESENT);
     }
+    provider_id = provider->id;
+    provider_name = provider->name;
     CreateExposure();
 }
 
@@ -194,16 +181,22 @@ void Fsr4Upscaler::DestroyContext() {
 
 bool Fsr4Upscaler::CreateContext(VkExtent2D render_size, VkExtent2D upscale_size) {
     DestroyContext();
-    CreateBackendVkDesc backend{};
-    backend.header.type = BACKEND_VK_DESC_TYPE;
+    ffxCreateBackendVKDesc backend{};
+    backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
     backend.header.pNext = nullptr;
-    backend.device = *device.GetLogical();
-    backend.physical_device = device.GetPhysical();
-    backend.get_device_proc_addr = device.GetDispatchLoader().vkGetDeviceProcAddr;
+    backend.deviceContext = DeviceContext(device);
+    ffxOverrideVersion version_override{};
+    version_override.header.type = FFX_API_DESC_TYPE_OVERRIDE_VERSION;
+    version_override.header.pNext = &backend.header;
+    version_override.versionId = provider_id;
+    ffxCreateContextDescUpscaleVersion api_version{};
+    api_version.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE_VERSION;
+    api_version.header.pNext = &version_override.header;
+    api_version.version = FFX_UPSCALER_VERSION;
 
     ffxCreateContextDescUpscale create{};
     create.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
-    create.header.pNext = &backend.header;
+    create.header.pNext = &api_version.header;
     // Tonemapped LDR colour, standard (not reversed) finite depth, exposure given (unit).
     create.flags = 0;
     create.maxRenderSize = {render_size.width, render_size.height};
@@ -220,8 +213,8 @@ bool Fsr4Upscaler::CreateContext(VkExtent2D render_size, VkExtent2D upscale_size
     context = ctx;
     render_extent = render_size;
     upscale_extent = upscale_size;
-    LOG_INFO(Render_Vulkan, "FSR 4: context {}x{} -> {}x{}", render_size.width, render_size.height,
-             upscale_size.width, upscale_size.height);
+    LOG_INFO(Render_Vulkan, "FSR 4: AMD FSR {} context {}x{} -> {}x{}", provider_name,
+             render_size.width, render_size.height, upscale_size.width, upscale_size.height);
     return true;
 }
 
