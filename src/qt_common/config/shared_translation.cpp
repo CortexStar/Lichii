@@ -174,6 +174,12 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "EDEN_NX2_DLSS_REPLACEMENT=dlss. Without that override, its spatial workaround "
               "remains active.\nIn The Legend of Zelda: Ocarina of Time it replaces the game's "
               "upscaler at 1x resolution scale.\nTakes effect when a game starts."));
+    INSERT(Settings, ocarina_dlss_mode, tr("NVIDIA DLSS mode in Ocarina of Time:"),
+           tr("How much of the game's output resolution Ocarina of Time renders before DLSS "
+              "upscales it.\nQuality: 67%.\nBalanced: 58%.\nPerformance: 50%.\nUltra "
+              "Performance: 33%, cheapest for smaller cards.\nNeeds NVIDIA DLSS on, docked "
+              "mode, the Max Resolution add-on and 1x resolution scale.\nTakes effect when the "
+              "game starts."));
     INSERT(Settings, anti_aliasing, tr("Anti-Aliasing Method:"),
            tr("The anti-aliasing method to use.\nSMAA offers the best quality.\nFXAA "
               "can produce a more stable picture in lower resolutions."));
@@ -596,6 +602,13 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                           {
                               PAIR(OotAntiAliasing, Game, tr("Game")),
                               PAIR(OotAntiAliasing, NoSharpening, tr("No sharpening")),
+                          }});
+    translations->insert({Settings::EnumMetadata<Settings::OcarinaDlssMode>::Index(),
+                          {
+                              PAIR(OcarinaDlssMode, Quality, tr("Quality")),
+                              PAIR(OcarinaDlssMode, Balanced, tr("Balanced")),
+                              PAIR(OcarinaDlssMode, Performance, tr("Performance")),
+                              PAIR(OcarinaDlssMode, UltraPerformance, tr("Ultra Performance")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::AspectRatio>::Index(),
                           {

@@ -62,6 +62,9 @@ public:
                                  BindCommand* deferred_bind = nullptr);
 
     static constexpr u64 Ocarina1440pShader = 0x6bd913e1f34e83ebULL;
+    /// The same upscale to 2560x1440 when the scene renders below it (ocarina_dlss_mode).
+    static constexpr u64 Ocarina1440pScaledShader = 0x4c1ae2fe58f30a97ULL;      // menus
+    static constexpr u64 Ocarina1440pScaledFieldShader = 0x9302bc0d6d1d9bc1ULL; // gameplay
     [[nodiscard]] bool CanReplaceOcarinaUpscale() const;
 
     bool IsBound() const noexcept {
