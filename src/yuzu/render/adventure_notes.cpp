@@ -13,10 +13,13 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDesktopServices>
+#include <QFile>
 #include <QBoxLayout>
 #include <QColor>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QLabel>
 #include <QLinearGradient>
 #include <QMouseEvent>
@@ -72,6 +75,13 @@ QStringList LibraryDirs() {
     return {QString::fromStdString((NotesDir() / "lib").string()),
             QString::fromStdString((ShippedDir() / "lib").string())};
 }
+
+/// Where the starred lines of a game are kept, next to the modules' own state.
+fs::path FavoritesFile(u64 program_id) {
+    return NotesDir() / "state" / fmt::format("{:016X}-favorites.json", program_id);
+}
+
+constexpr QStringView FavoritesTab = u"★ Favorites";
 
 fs::path SaveRoot() {
     return Common::FS::GetEdenPath(Common::FS::EdenPath::NANDDir) / "user" / "save" /
@@ -295,7 +305,10 @@ void AdventureNotes::SetAccent(const QString& color) {
         "QToolButton:hover { color: #ffffff; }"
         "QToolButton#tab { color: #c9ced4; font-size: 12px; font-weight: 600; "
         "border-radius: 8px; padding: 0 10px; }"
-        "QToolButton#tab:checked { color: #15181c; background: ACCENT; }");
+        "QToolButton#tab:checked { color: #15181c; background: ACCENT; }"
+        "QToolButton#star { color: #5a636d; font-size: 14px; padding: 0; }"
+        "QToolButton#star:checked { color: ACCENT; }"
+        "QToolButton#star:hover { color: #ffffff; }");
     setStyleSheet(style.replace(QStringLiteral("ACCENT"), accent));
 }
 
@@ -471,7 +484,78 @@ void AdventureNotes::LoadGame() {
         return;
     }
     SetAccent(script->Accent());
+    LoadFavorites();
     ReadSave();
+}
+
+void AdventureNotes::LoadFavorites() {
+    favorites.clear();
+    QFile file{QString::fromStdString(FavoritesFile(program_id).string())};
+    if (!file.open(QIODevice::ReadOnly)) {
+        return;
+    }
+    for (const QJsonValue& value : QJsonDocument::fromJson(file.readAll()).array()) {
+        if (value.isString() && !favorites.contains(value.toString())) {
+            favorites.append(value.toString());
+        }
+    }
+}
+
+void AdventureNotes::ToggleFavorite(const QString& key) {
+    if (!favorites.removeOne(key)) {
+        favorites.append(key);
+    }
+    std::error_code ec;
+    const fs::path path = FavoritesFile(program_id);
+    fs::create_directories(path.parent_path(), ec);
+    QFile file{QString::fromStdString(path.string())};
+    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        file.write(QJsonDocument(QJsonArray::fromStringList(favorites)).toJson());
+    }
+    // The module's report is read again: the Favorites tab and the stars follow.
+    ReadSave();
+}
+
+void AdventureNotes::AddFavoritesTab() {
+    // The starred lines of every tab, with their current values, as one more tab after Global.
+    NotesView view{QStringLiteral("Favorites"), {}};
+    favorite_rows.clear();
+    for (const QString& key : favorites) {
+        const QStringList parts = key.split(QLatin1Char('/'));
+        if (parts.size() < 3) {
+            continue;
+        }
+        const QString title = parts.mid(2).join(QLatin1Char('/'));
+        for (const NotesTab& tab : report.tabs) {
+            if (tab.name != parts[0]) {
+                continue;
+            }
+            for (const NotesView& source : tab.views) {
+                if (source.name != parts[1]) {
+                    continue;
+                }
+                for (const NotesRow& line : source.rows) {
+                    if (line.title == title) {
+                        NotesRow copy = line;
+                        if (source.name != tab.name) {
+                            copy.title = QStringLiteral("%1 · %2").arg(source.name, line.title);
+                        }
+                        view.rows.push_back(copy);
+                        favorite_rows.append(key);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if (view.rows.empty()) {
+        view.rows.push_back({tr("Click ☆ beside any line to keep it here"), {}, -1, -1, 0});
+        favorite_rows.append(QString{});
+    }
+    const auto at = !report.tabs.empty() && report.tabs.front().name == QStringLiteral("Global")
+                        ? report.tabs.begin() + 1
+                        : report.tabs.begin();
+    report.tabs.insert(at, NotesTab{FavoritesTab.toString(), {std::move(view)}});
 }
 
 void AdventureNotes::ReadSave() {
@@ -500,6 +584,7 @@ void AdventureNotes::ReadSave() {
     const QString tab = tab_name;
     const QString view = view_name;
     report = std::move(*result);
+    AddFavoritesTab();
     slot = QString::fromStdString(path->parent_path().filename().string());
     current_tab = 0;
     for (size_t index = 0; index < report.tabs.size(); ++index) {
@@ -620,7 +705,8 @@ void AdventureNotes::FillViews() {
     Refresh();
 }
 
-QWidget* AdventureNotes::MakeRow(const NotesRow& line, std::vector<QLabel*>& values) {
+QWidget* AdventureNotes::MakeRow(const NotesRow& line, std::vector<QLabel*>& values,
+                                 const QString& key) {
     auto* row = new QWidget(body);
     row->setObjectName(QStringLiteral("line"));
     row->setAttribute(Qt::WA_StyledBackground);
@@ -633,6 +719,20 @@ QWidget* AdventureNotes::MakeRow(const NotesRow& line, std::vector<QLabel*>& val
     text_row->setSpacing(10);
     lines->addLayout(text_row);
 
+    if (!key.isEmpty()) {
+        auto* star = new QToolButton(row);
+        star->setObjectName(QStringLiteral("star"));
+        star->setCheckable(true);
+        star->setChecked(favorites.contains(key));
+        star->setText(star->isChecked() ? QStringLiteral("★") : QStringLiteral("☆"));
+        star->setToolTip(star->isChecked() ? tr("Remove from Favorites") : tr("Add to Favorites"));
+        star->setFixedWidth(18);
+        // Queued: the redraw deletes this button, which must not happen inside its own click.
+        connect(
+            star, &QToolButton::clicked, this, [this, key] { ToggleFavorite(key); },
+            Qt::QueuedConnection);
+        text_row->addWidget(star);
+    }
     auto* name = new QLabel(line.title, row);
     name->setWordWrap(true);
     text_row->addWidget(name, 1);
@@ -677,10 +777,15 @@ void AdventureNotes::Refresh() {
     const int columns = strip ? 2 : 1;
     int count = 0;
     std::vector<QLabel*> values;
-    for (const NotesRow& line : report.tabs[static_cast<size_t>(current_tab)]
-                                    .views[static_cast<size_t>(view)]
-                                    .rows) {
-        rows->addWidget(MakeRow(line, values), count / columns, count % columns, Qt::AlignTop);
+    const NotesTab& tab = report.tabs[static_cast<size_t>(current_tab)];
+    const bool favorite_tab = tab.name == FavoritesTab;
+    for (const NotesRow& line : tab.views[static_cast<size_t>(view)].rows) {
+        // A line is known by its tab, view and title; the Favorites tab keeps its source's key.
+        const QString key =
+            favorite_tab ? favorite_rows.value(count)
+                         : QStringLiteral("%1/%2/%3").arg(tab.name, view_name, line.title);
+        rows->addWidget(MakeRow(line, values, key), count / columns, count % columns,
+                        Qt::AlignTop);
         ++count;
     }
     // One width for every value of the view: numbers and bars line up in columns.

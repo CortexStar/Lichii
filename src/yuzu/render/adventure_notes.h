@@ -66,7 +66,11 @@ private:
     void SelectTab(int index);
     void SetAccent(const QString& color);
     void SaveSettings();
-    [[nodiscard]] QWidget* MakeRow(const NotesRow& line, std::vector<QLabel*>& values);
+    [[nodiscard]] QWidget* MakeRow(const NotesRow& line, std::vector<QLabel*>& values,
+                                   const QString& key);
+    void LoadFavorites();
+    void AddFavoritesTab();
+    void ToggleFavorite(const QString& key);
 
     std::unique_ptr<NotesScript> script;
     NotesReport report;
@@ -80,6 +84,8 @@ private:
     int current_tab = 0;
     QString tab_name;  ///< Kept when the tabs are rebuilt, to come back to the same page.
     QString view_name;
+    QStringList favorites;      ///< "tab/view/title" of the starred lines, in the order starred.
+    QStringList favorite_rows;  ///< The key of each line of the Favorites view.
     std::array<QSize, 2> sizes;
     QSize open_size;
     QLabel* header = nullptr;
