@@ -86,6 +86,10 @@ function gamedataReport(save, data) {
             let done = flags.filter((field) => table.read(field.hash, "flag") !== 0).length;
             let total = flags.length;
             for (const collection of data.collections) {
+                // "merge": false keeps a collection in its own view only.
+                if (collection.merge === false) {
+                    continue;
+                }
                 for (const zone of collection.zones) {
                     if (sameZone(zone, view)) {
                         done += table.count(zone.keys);
@@ -129,6 +133,9 @@ function gamedataReport(save, data) {
                 : { title: field.title, value: value };
         });
         for (const collection of data.collections) {
+            if (collection.merge === false) {
+                continue;
+            }
             for (const zone of collection.zones) {
                 if (sameZone(zone, view)) {
                     rows.push({
