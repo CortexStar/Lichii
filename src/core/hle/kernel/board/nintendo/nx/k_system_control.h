@@ -44,6 +44,8 @@ public:
         static KPhysicalAddress GetKernelPhysicalBaseAddress(KPhysicalAddress base_address);
         static bool ShouldIncreaseThreadResourceLimit();
         static std::size_t GetApplicationPoolSize();
+        /// The part of GetApplicationPoolSize that EDEN_NX2_APP_POOL_PROBE adds.
+        static std::size_t GetApplicationPoolGrowth();
         static std::size_t GetAppletPoolSize();
         static std::size_t GetMinimumNonSecureSystemPoolSize();
     };

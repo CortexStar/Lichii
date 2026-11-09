@@ -143,15 +143,19 @@ std::size_t KSystemControl::Init::GetApplicationPoolSize() {
         }
     }();
 
+    // Return (possibly) adjusted size.
+    return base_pool_size + GetApplicationPoolGrowth();
+}
+
+std::size_t KSystemControl::Init::GetApplicationPoolGrowth() {
     // EDEN_NX2_APP_POOL_PROBE=<MiB> grows the pool: The Duskbloods network test's CSMemory heap "M"
     // asks for more than the 12 GB arrangement leaves (playDB-CNT issue 2).
-    if (const char* probe = std::getenv("EDEN_NX2_APP_POOL_PROBE"); probe != nullptr) {
-        return base_pool_size + static_cast<size_t>(std::strtoull(probe, nullptr, 10)) * 1_MiB +
-               KSystemControl::Nx2RemoteMemorySize();
+    const char* probe = std::getenv("EDEN_NX2_APP_POOL_PROBE");
+    if (probe == nullptr) {
+        return 0;
     }
-
-    // Return (possibly) adjusted size.
-    return base_pool_size;
+    return static_cast<size_t>(std::strtoull(probe, nullptr, 10)) * 1_MiB +
+           KSystemControl::Nx2RemoteMemorySize();
 }
 
 size_t KSystemControl::Init::GetAppletPoolSize() {
