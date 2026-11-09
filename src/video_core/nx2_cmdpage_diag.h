@@ -10,10 +10,12 @@
 #include <chrono>
 #include <cstdlib>
 #include <mutex>
+#include <span>
 #include <string>
 #include <unordered_map>
 
 #include <fmt/format.h>
+#include <fmt/ranges.h>
 
 #include "common/common_types.h"
 #include "common/logging.h"
@@ -199,7 +201,8 @@ inline void CheckMissedWrite(u64 page_addr, u32 begin, u32 end) {
 
 /// The front's macro read `words` at `source` after draining (MME DMA): `changed` of them differ
 /// from guest memory read before the drain; `gpu_written`: on pages GPU work has written.
-inline void RecordDmaRead(u64 source, u32 words, u32 changed, bool gpu_written) {
+inline void RecordDmaRead(u64 source, u32 words, u32 changed, bool gpu_written, u32 macro,
+                          std::span<const u32> before, std::span<const u32> after) {
     State& state = Get();
     state.dma_reads.fetch_add(1, std::memory_order_relaxed);
     state.dma_reads_gpu_pages.fetch_add(gpu_written ? 1 : 0, std::memory_order_relaxed);
@@ -209,10 +212,12 @@ inline void RecordDmaRead(u64 source, u32 words, u32 changed, bool gpu_written) 
     state.dma_reads_changed.fetch_add(1, std::memory_order_relaxed);
     state.dma_reads_changed_gpu_pages.fetch_add(gpu_written ? 1 : 0, std::memory_order_relaxed);
     if (state.dma_changed_logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+        const size_t shown = (std::min<size_t>)(before.size(), 8);
         LOG_INFO(HW_GPU,
-                 "cmdpage diag: macro DMA read of {} words at {:#x} ({}GPU-written pages): {} "
-                 "words changed by the drain",
-                 words, source, gpu_written ? "" : "no ", changed);
+                 "cmdpage diag: macro {:#x} DMA read of {} words at {:#x} ({}GPU-written pages): "
+                 "{} words changed by the drain: {:08x} -> {:08x}",
+                 macro, words, source, gpu_written ? "" : "no ", changed,
+                 fmt::join(before.first(shown), ","), fmt::join(after.first(shown), ","));
     }
 }
 

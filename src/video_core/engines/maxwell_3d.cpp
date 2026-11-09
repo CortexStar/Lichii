@@ -1583,8 +1583,12 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
         },
         VideoCommon::DrainSite::MacroDmaFlush);
     u32 changed{};
+    std::vector<u32> diag_after;
     for (u32 i = 0; i < words; ++i) {
         const u32 word = memory_manager.Read<u32>(source + u64{i} * sizeof(u32));
+        if (!diag_before.empty()) {
+            diag_after.push_back(word);
+        }
         if (method == 0x158) {
             fs.parameters.push_back(word);
         } else if (ram + i < native_data_ram.size()) {
@@ -1600,7 +1604,8 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
             const auto device = memory_manager.GpuToCpuAddress(page);
             gpu_written |= device && Tegra::Nx2IsGpuWritten(*device);
         }
-        Tegra::Nx2CmdPageDiag::RecordDmaRead(source, words, changed, gpu_written);
+        Tegra::Nx2CmdPageDiag::RecordDmaRead(source, words, changed, gpu_written, macro,
+                                             diag_before, diag_after);
     }
 }
 
