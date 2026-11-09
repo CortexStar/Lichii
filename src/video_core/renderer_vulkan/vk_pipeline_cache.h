@@ -123,6 +123,8 @@ struct ComputePipelineCacheEntry {
 
 class PipelineCache : public VideoCommon::ShaderCache {
 public:
+    /// Sets the eviction limit for a session with no disk cache yet; LoadDiskResources sizes it
+    /// to the cache it loads.
     explicit PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_, const Device& device,
                            Scheduler& scheduler, DescriptorPool& descriptor_pool,
                            GuestDescriptorQueue& guest_descriptor_queue,
@@ -137,6 +139,8 @@ public:
 
     [[nodiscard]] ComputePipeline* CurrentComputePipeline(u64& native_key);
 
+    /// Loads the title's disk shader cache, builds the pipelines recent sessions used, and sizes
+    /// the kept-pipeline limit to what it loaded (KeptPipelines).
     void LoadDiskResources(u64 title_id, std::stop_token stop_loading,
                            const VideoCore::DiskResourceLoadCallback& callback);
 
