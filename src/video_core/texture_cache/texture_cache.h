@@ -4136,7 +4136,8 @@ void TextureCache<P>::PrepareImageView(ImageViewId image_view_id, bool is_modifi
         return;
     }
     const ImageViewBase& image_view = slot_image_views[image_view_id];
-    if (image_view.IsBuffer()) {
+    // Views of empty descriptors point at the null image: there is nothing to upload or track.
+    if (image_view.IsBuffer() || image_view.image_id == NULL_IMAGE_ID) {
         return;
     }
     PrepareImage(image_view.image_id, is_modification, invalidate);
