@@ -39,7 +39,14 @@ EmuWindow_SDL3::EmuWindow_SDL3(InputCommon::InputSubsystem* input_subsystem_, Co
     titlebar_timer = SDL_AddTimer(2000, [](void *userdata, SDL_TimerID, Uint32) -> Uint32 {
         auto* this_ = (EmuWindow_SDL3*)userdata;
         auto const results = this_->system.GetAndResetPerfStats();
-        auto* const title = new std::string(fmt::format("{} | {}-{} | FPS: {:.0f} ({:.0f}%)", Common::g_build_fullname, Common::g_scm_branch, Common::g_scm_desc, results.average_game_fps, results.emulation_speed * 100.0f));
+        std::string game_title;
+        {
+            std::scoped_lock lock{this_->game_title_mutex};
+            game_title = this_->game_title;
+        }
+        auto* const title = new std::string(game_title.empty()
+            ? fmt::format("{} | {}-{} | FPS: {:.0f} ({:.0f}%)", Common::g_build_fullname, Common::g_scm_branch, Common::g_scm_desc, results.average_game_fps, results.emulation_speed * 100.0f)
+            : fmt::format("{} | {:.0f} FPS ({:.0f}%)", game_title, results.average_game_fps, results.emulation_speed * 100.0f));
         // Timers run on their own thread and AppKit throws when a title is set off the main
         // thread: ApplyPendingTitle sets it from the main loop.
         delete this_->pending_title.exchange(title);
@@ -168,6 +175,14 @@ void EmuWindow_SDL3::ApplyPendingTitle() {
         SDL_SetWindowTitle(render_window, title->c_str());
         delete title;
     }
+}
+
+void EmuWindow_SDL3::SetGameTitle(std::string title) {
+    {
+        std::scoped_lock lock{game_title_mutex};
+        game_title = title;
+    }
+    delete pending_title.exchange(new std::string(std::move(title)));
 }
 
 bool EmuWindow_SDL3::IsShown() const {

@@ -42,7 +42,9 @@
 #include "core/cpu_manager.h"
 #include "core/crypto/key_manager.h"
 #include "core/file_sys/common_funcs.h"
+#include "core/file_sys/control_metadata.h"
 #include "core/file_sys/nup_writer.h"
+#include "core/file_sys/patch_manager.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/hle/service/am/applet_manager.h"
@@ -717,6 +719,23 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
             "additional help.\n\nError Code: {:04X}-{:04X}\nError Description: {}",
             loader_id, error_id, Loader::ResultStatus(error_id));
         return SDL_APP_FAILURE;
+    }
+
+    {
+        std::string title_name;
+        const FileSys::PatchManager pm(state->system.GetApplicationProcessProgramID(),
+                                       state->system.GetFileSystemController(),
+                                       state->system.GetContentProvider());
+        if (const auto metadata = pm.GetControlMetadata(); metadata.first != nullptr) {
+            title_name = metadata.first->GetApplicationName();
+        }
+        if (title_name.empty() && state->system.GetGameName(title_name) != Loader::ResultStatus::Success) {
+            title_name.clear();
+        }
+        if (title_name.empty()) {
+            title_name = Common::FS::PathToUTF8String(std::filesystem::path{lp.filepath}.stem());
+        }
+        state->emu_window->SetGameTitle(std::move(title_name));
     }
 
     if (lp.use_multiplayer) {
