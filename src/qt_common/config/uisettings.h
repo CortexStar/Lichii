@@ -63,6 +63,11 @@ enum class Theme {
     MidnightBlueColorful,
 };
 
+enum class GameLibraryStyle : u8 {
+    Classic,
+    Modern,
+};
+
 static constexpr Theme default_theme{
 #ifdef _WIN32
     Theme::DarkColorful
@@ -215,7 +220,12 @@ struct Values {
     Setting<u32, true> folder_icon_size{linkage, 48, 8, 512, "folder_icon_size", Category::UiGameList};
     Setting<u8> row_1_text_id{linkage, 3, "row_1_text_id", Category::UiGameList};
     Setting<u8> row_2_text_id{linkage, 2, "row_2_text_id", Category::UiGameList};
-    Setting<Settings::GameListMode> game_list_mode{linkage, Settings::GameListMode::TreeView, "game_list_mode", Category::UiGameList};
+    Setting<Settings::GameListMode> game_list_mode{linkage, Settings::GameListMode::GridView, "game_list_mode", Category::UiGameList};
+    Setting<u8> game_library_style{linkage, static_cast<u8>(GameLibraryStyle::Modern),
+                                   "game_library_style", Category::UiGameList};
+    Setting<bool> has_selected_game_library_style{linkage, false,
+                                                  "has_selected_game_library_style",
+                                                  Category::UiGameList};
     Setting<bool> show_game_name{linkage, true, "show_game_name", Category::UiGameList};
 
     std::atomic_bool is_game_list_reload_pending{false};

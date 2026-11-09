@@ -100,12 +100,24 @@ ConfigureUi::ConfigureUi(Core::System& system_, QWidget* parent)
                                     QString::fromUtf8(theme.second));
     }
 
+    ui->game_library_style_combobox->addItem(tr("Modern Style (Recommended)"),
+                                             static_cast<u8>(UISettings::GameLibraryStyle::Modern));
+    ui->game_library_style_combobox->addItem(tr("Legacy Style"),
+                                             static_cast<u8>(UISettings::GameLibraryStyle::Classic));
+
     InitializeIconSizeComboBox();
     InitializeRowComboBoxes();
 
     PopulateResolutionComboBox(ui->screenshot_height, this);
 
     SetConfiguration();
+
+    connect(ui->game_library_style_combobox, QOverload<int>::of(&QComboBox::activated), this,
+            [this](int index) {
+                emit GameLibraryStyleChanged(
+                    ui->game_library_style_combobox->itemData(index).toUInt() ==
+                    static_cast<u8>(UISettings::GameLibraryStyle::Modern));
+            });
 
     // Force game list reload if any of the relevant settings are changed.
     connect(ui->show_add_ons, &QCheckBox::STATE_CHANGED, this, &ConfigureUi::RequestGameListUpdate);
@@ -151,6 +163,8 @@ ConfigureUi::~ConfigureUi() = default;
 void ConfigureUi::ApplyConfiguration() {
     UISettings::values.theme =
         ui->theme_combobox->itemData(ui->theme_combobox->currentIndex()).toString().toStdString();
+    UISettings::values.game_library_style =
+        static_cast<u8>(ui->game_library_style_combobox->currentData().toUInt());
     UISettings::values.show_add_ons = ui->show_add_ons->isChecked();
     UISettings::values.show_size = ui->show_size->isChecked();
     UISettings::values.show_types = ui->show_types->isChecked();
@@ -177,6 +191,8 @@ void ConfigureUi::RequestGameListUpdate() {
 void ConfigureUi::SetConfiguration() {
     ui->theme_combobox->setCurrentIndex(
         ui->theme_combobox->findData(QString::fromStdString(UISettings::values.theme)));
+    ui->game_library_style_combobox->setCurrentIndex(ui->game_library_style_combobox->findData(
+        UISettings::values.game_library_style.GetValue()));
     ui->language_combobox->setCurrentIndex(ui->language_combobox->findData(
         QString::fromStdString(UISettings::values.language.GetValue())));
     ui->show_add_ons->setChecked(UISettings::values.show_add_ons.GetValue());

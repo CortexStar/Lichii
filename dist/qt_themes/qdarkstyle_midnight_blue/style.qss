@@ -2880,3 +2880,193 @@ QDialog#QtSoftwareKeyboardDialog QPushButton#button_space:disabled,
 QDialog#QtSoftwareKeyboardDialog QPushButton#button_space_shift:disabled {
   image: url(:/overlay/osk_button_Y_dark_disabled.png);
 }
+
+QWidget#centralwidget[modernLibrary="true"] {
+    background-color: #17181a;
+}
+
+QWidget#gameListSearchField[modernLibrary="true"] {
+    background-color: #1d1e20;
+    border-top: 1px solid #2c2d30;
+}
+
+QListView#gameGridView {
+    background-color: #17181a;
+    border: none;
+}
+
+QMainWindow[modernLibrary="true"] QMenuBar {
+    min-height: 26px;
+    padding: 0 6px;
+    background-color: #1d1e20;
+    border-bottom: 1px solid #2c2d30;
+}
+
+QMainWindow[modernLibrary="true"] QMenuBar::item {
+    color: #c4c5c7;
+    padding: 4px 9px;
+    margin: 1px 2px;
+    border-radius: 4px;
+}
+
+QMainWindow[modernLibrary="true"] QMenuBar::item:selected {
+    color: #ffffff;
+    background-color: #2a2b2d;
+    border-bottom: 2px solid #66686c;
+}
+
+QWidget#gameFolderNavigation[modernLibrary="true"] QPushButton#gameFolderBackButton:hover {
+    background-color: #292a2c;
+    border: 1px solid #3c3d40;
+}
+
+QMainWindow[modernLibrary="true"] QToolBar {
+    spacing: 4px;
+    padding: 2px 4px;
+    background-color: #1d1e20;
+    border: none;
+}
+
+QMainWindow[modernLibrary="true"] QToolBar QToolButton:hover,
+QMainWindow[modernLibrary="true"] QToolBar QPushButton:hover {
+    background-color: #292a2c;
+    border: 1px solid #3c3d40;
+}
+
+QMainWindow[modernLibrary="true"] QStatusBar {
+    color: #a2a3a6;
+    padding-left: 8px;
+    background-color: #17181a;
+    border-top: 1px solid #2c2d30;
+}
+
+QDialog#ConfigureDialog[modernLibrary="true"] {
+    background-color: #17181a;
+    color: #e4e5e7;
+}
+
+QDialog#ConfigureDialog[modernLibrary="true"] QWidget {
+    background-color: transparent;
+}
+
+QDialog#ConfigureDialog[modernLibrary="true"] QListWidget#selectorList {
+    background-color: #1d1e20;
+    border: 1px solid #2c2d30;
+    border-radius: 8px;
+    padding: 6px;
+    outline: none;
+}
+
+QDialog#ConfigureDialog[modernLibrary="true"] QListWidget#selectorList::item {
+    color: #a2a3a6;
+    border-radius: 6px;
+    margin: 1px 0;
+    padding: 7px 10px;
+}
+
+QDialog#ConfigureDialog[modernLibrary="true"] QListWidget#selectorList::item:hover:!selected {
+    background-color: #252629;
+    color: #e4e5e7;
+}
+
+QDialog#ConfigureDialog[modernLibrary="true"] QListWidget#selectorList::item:selected {
+    background-color: #2a2b2d;
+    border-left: 2px solid #a6a8ab;
+    color: #ffffff;
+}
+
+QDialog#ConfigureDialog[modernLibrary="true"] QTabWidget#tabWidget::pane {
+    background-color: #17181a;
+    border: 1px solid #2c2d30;
+    border-radius: 8px;
+    top: -1px;
+}
+
+QDialog#ConfigureDialog[modernLibrary="true"] QTabWidget#tabWidget QTabBar::tab {
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: #a2a3a6;
+    margin-right: 4px;
+    padding: 7px 11px;
+}
+
+QDialog#ConfigureDialog[modernLibrary="true"] QTabWidget#tabWidget QTabBar::tab:selected {
+    background-color: #252629;
+    border-color: #2c2d30;
+    border-bottom: 2px solid #a6a8ab;
+    color: #ffffff;
+}
+
+QDialog#ConfigureDialog[modernLibrary="true"] QGroupBox {
+    background-color: #1d1e20;
+    border: 1px solid #2c2d30;
+    border-radius: 8px;
+    margin-top: 12px;
+}
+
+QDialog#ConfigureDialog[modernLibrary="true"] QGroupBox::title {
+    color: #c4c5c7;
+    left: 10px;
+    padding: 0 4px;
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+}
+
+QDialog#ConfigureDialog[modernLibrary="true"] QLineEdit,
+QDialog#ConfigureDialog[modernLibrary="true"] QComboBox,
+QDialog#ConfigureDialog[modernLibrary="true"] QSpinBox,
+QDialog#ConfigureDialog[modernLibrary="true"] QDoubleSpinBox,
+QDialog#ConfigureDialog[modernLibrary="true"] QTimeEdit,
+QDialog#ConfigureDialog[modernLibrary="true"] QDateEdit,
+QDialog#ConfigureDialog[modernLibrary="true"] QTextEdit,
+QDialog#ConfigureDialog[modernLibrary="true"] QPlainTextEdit {
+    background-color: #17181a;
+    border: 1px solid #3c3d40;
+    border-radius: 5px;
+    color: #e4e5e7;
+    padding-left: 7px;
+    padding-right: 7px;
+    selection-background-color: #4a4c50;
+}
+
+QDialog#ConfigureDialog[modernLibrary="true"] QLineEdit:focus,
+QDialog#ConfigureDialog[modernLibrary="true"] QComboBox:focus,
+QDialog#ConfigureDialog[modernLibrary="true"] QSpinBox:focus,
+QDialog#ConfigureDialog[modernLibrary="true"] QDoubleSpinBox:focus,
+QDialog#ConfigureDialog[modernLibrary="true"] QTimeEdit:focus,
+QDialog#ConfigureDialog[modernLibrary="true"] QDateEdit:focus {
+    border-color: #8a8c90;
+}
+
+QDialog#ConfigureDialog[modernLibrary="true"] QPushButton,
+QDialog#ConfigureDialog[modernLibrary="true"] QToolButton {
+    background-color: #252629;
+    border: 1px solid #3c3d40;
+    border-radius: 6px;
+    color: #e4e5e7;
+    padding-left: 10px;
+    padding-right: 10px;
+}
+
+QDialog#ConfigureDialog[modernLibrary="true"] QPushButton:hover,
+QDialog#ConfigureDialog[modernLibrary="true"] QToolButton:hover {
+    background-color: #303236;
+    border-color: #55575a;
+}
+
+QDialog#ConfigureDialog[modernLibrary="true"] QPushButton:pressed,
+QDialog#ConfigureDialog[modernLibrary="true"] QToolButton:pressed {
+    background-color: #151618;
+}
+
+QDialog#ConfigureDialog[modernLibrary="true"] QPushButton:disabled,
+QDialog#ConfigureDialog[modernLibrary="true"] QToolButton:disabled {
+    background-color: #1b1c1e;
+    color: #77797d;
+}
+
+QDialog#ConfigureDialog[modernLibrary="true"] QDialogButtonBox QPushButton:default {
+    border-color: #66686c;
+    font-weight: 600;
+}

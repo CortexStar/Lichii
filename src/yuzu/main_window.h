@@ -424,7 +424,7 @@ private slots:
     void ResetWindowSize900();
     void ResetWindowSize1080();
 
-    void SetGameListMode(Settings::GameListMode mode);
+    void SetGameListMode(Settings::GameListMode mode, bool update_library_style = true);
     void SetGridView();
     void SetTreeView();
     void SetCarouselView();
@@ -448,6 +448,10 @@ private slots:
     void OnEmulationStopped();
     void OnEmulationStopTimeExpired();
     void OnEmulationStopTimeout();
+
+    /// Shows the first-run game library style chooser and records the choice (the fallback when
+    /// the chooser is dismissed).
+    void PromptGameLibraryStyle();
 
 #ifdef ENABLE_UPDATE_CHECKER
     void OnEmulatorUpdateAvailable();
@@ -519,9 +523,14 @@ private:
     GRenderWindow* render_window = nullptr;
     GameList* game_list = nullptr;
     LoadingScreen* loading_screen = nullptr;
+    /// Artwork captured before RequestGameExit; the loader is freed by the emulation thread while
+    /// the closing screen is being prepared.
+    LoadingScreen::Snapshot closing_snapshot;
+    /// Set when a direct launch skipped the first-run library style chooser; the choice is asked
+    /// once the interactive library session comes back.
+    bool deferred_library_style_prompt = false;
     QTimer shutdown_timer;
     QTimer emu_terminate_timer;
-    OverlayDialog* shutdown_dialog{};
     PerformanceOverlay* perf_overlay = nullptr;
 #ifdef HAS_RESHADE
     ConfigurePostProcessing* post_processing_dialog = nullptr;

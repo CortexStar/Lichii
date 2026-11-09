@@ -8,6 +8,8 @@
 
 #include <chrono>
 #include <memory>
+#include <vector>
+#include <QPoint>
 #include <QString>
 #include <QWidget>
 #include <QtGlobal>
@@ -30,9 +32,12 @@ enum class LoadCallbackStage;
 
 class QBuffer;
 class QByteArray;
+class QGraphicsDropShadowEffect;
 class QGraphicsOpacityEffect;
+class QHideEvent;
 class QMovie;
 class QPropertyAnimation;
+class QShowEvent;
 class QPushButton;
 
 class LoadingScreen : public QWidget {
@@ -47,6 +52,20 @@ public:
     /// currently loaded application.
     void Prepare(Loader::AppLoader& loader);
 
+    /// A copy of the artwork an application loader can provide. Take it while emulation is still
+    /// running, before the loader is torn down, and hand it to PrepareClosing.
+    struct Snapshot {
+        std::vector<u8> banner;
+        std::vector<u8> logo;
+        QString title;
+    };
+
+    /// Reads the loader's banner, logo and title into a Snapshot.
+    static Snapshot SnapshotLoader(Loader::AppLoader& loader);
+
+    /// Shows the closing screen from a previously taken Snapshot of the loader.
+    void PrepareClosing(const Snapshot& snapshot);
+
     /// After the loading screen is hidden, the owner of this class can call this to clean up any
     /// used resources such as the logo and banner.
     void Clear();
@@ -56,6 +75,9 @@ public:
 
     /// Hides the LoadingScreen with a fade out effect
     void OnLoadComplete();
+
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
     // In order to use a custom widget with a stylesheet, you need to override the paintEvent
     // See https://wiki.qt.io/How_to_Change_the_Background_Color_of_QWidget
@@ -68,6 +90,12 @@ signals:
     void Hidden();
 
 private:
+    /// Resets header, stage and value widgets before Prepare or PrepareClosing.
+    void ResetDisplay();
+    /// Applies the banner, logo and title from a Snapshot, with the fallback wordmark when the
+    /// loader provided no artwork.
+    void ApplyArtwork(const Snapshot& snapshot);
+
 #ifndef YUZU_QT_MOVIE_MISSING
     std::unique_ptr<QMovie> animation;
     std::unique_ptr<QBuffer> backing_buf;
@@ -77,13 +105,20 @@ private:
     std::size_t previous_total = 0;
     VideoCore::LoadCallbackStage previous_stage;
 
+    QGraphicsDropShadowEffect* logo_glow = nullptr;
     QGraphicsOpacityEffect* opacity_effect = nullptr;
     QPushButton* skip_button = nullptr;
     std::unique_ptr<QPropertyAnimation> fadeout_animation;
+    std::unique_ptr<QPropertyAnimation> logo_float_animation;
+    QPoint logo_rest_position;
+    bool logo_rest_position_valid = false;
 
     // Definitions for the differences in text and styling for each stage
     ::Common::unordered_map<VideoCore::LoadCallbackStage, const char*> progressbar_style;
     ::Common::unordered_map<VideoCore::LoadCallbackStage, QString> stage_translations;
+
+    QString game_title;
+    bool closing_screen = false;
 
     // newly generated shaders are added to the end of the file, so when loading and compiling
     // shaders, it will start quickly but end slow if new shaders were added since previous launch.

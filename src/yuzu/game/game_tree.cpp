@@ -101,8 +101,7 @@ QString GameTree::GetLastFilterResultItem() const {
 int GameTree::FilterClosedResultCount(GameListModel* model) {
     int children_total = 0;
 
-    auto hide_favorites_row = UISettings::values.favorited_ids.size() == 0;
-    setRowHidden(0, model->invisibleRootItem()->index(), hide_favorites_row);
+    setRowHidden(0, model->invisibleRootItem()->index(), true);
 
     for (int i = 1; i < model->rowCount() - 1; ++i) {
         auto* folder = model->item(i, 0);
