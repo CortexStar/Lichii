@@ -153,7 +153,8 @@ private:
         ShaderPools& pools, const GraphicsPipelineCacheKey& key,
         std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
         bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools = nullptr,
-        std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr);
+        std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr,
+        bool heavy_on_own_threads = false);
 
     [[nodiscard]] bool StaleNullPointerSlot(const ComputePipelineCacheEntry& entry) const;
 

@@ -273,6 +273,19 @@ public:
         return build->WaitFor(timeout);
     }
 
+    /// Drops the build if no thread has started it (PipelineBuild::Cancel); for a load that stops.
+    bool CancelBuild() const {
+        return build->Cancel();
+    }
+
+    /// A task/mesh pipeline built natively, not through the compute emulation: a heavy build
+    /// (heavy_build_slots.h).
+    [[nodiscard]] static bool IsHeavyBuild(const Shader::Info* first_stage,
+                                           bool emulated) noexcept {
+        return first_stage != nullptr && (first_stage->is_task || first_stage->is_mesh) &&
+               !emulated;
+    }
+
     [[nodiscard]] bool Failed() const noexcept {
         return build->Failed();
     }

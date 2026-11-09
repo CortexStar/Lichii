@@ -3,13 +3,16 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <cstdlib>
+#include <memory>
 #include <mutex>
 
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "common/memory_detect.h"
+#include "common/thread_worker.h"
 
 namespace Vulkan {
 
@@ -19,6 +22,9 @@ namespace Vulkan {
 /// boot's pipeline workers built them all at once after a SPIR-V change and the process passed
 /// 73 GB. Other builds don't wait. Default: one slot per 8 GiB of a quarter of the host's RAM (1 to
 /// 8); EDEN_NX2_HEAVY_BUILD_SLOTS=N sets them (0: no limit).
+///
+/// Builds that may run elsewhere go to Workers(), one thread per slot, so none of them waits on a
+/// shared pipeline worker that the other builds need. A build run by its caller takes a Guard.
 class HeavyBuildSlots {
 public:
     /// Holds a slot while alive (none when the limit is off).
@@ -51,6 +57,29 @@ public:
 
     [[nodiscard]] size_t Limit() const noexcept {
         return limit;
+    }
+
+    /// The heavy builds' own threads, one per slot (started on first use); null with no limit,
+    /// where heavy builds share the other builds' workers. Each build there still takes a Guard,
+    /// so builds run by their callers count against the same slots.
+    [[nodiscard]] Common::ThreadWorker* Workers() {
+        if (limit == 0) {
+            return nullptr;
+        }
+        std::call_once(workers_started, [this] {
+            workers.reset(new Common::ThreadWorker(limit, "VkHeavyBuilder", {},
+                                                   Common::ThreadPlacement::Background));
+            started.store(workers.get(), std::memory_order_release);
+        });
+        return workers.get();
+    }
+
+    /// Waits for every build queued on Workers(), as for the other builds' workers before the
+    /// pipeline cache is saved or destroyed.
+    void WaitForBuilds() {
+        if (Common::ThreadWorker* const pool = started.load(std::memory_order_acquire)) {
+            pool->WaitForRequests();
+        }
     }
 
     /// The default number of slots for a host with `total_ram` bytes.
@@ -101,6 +130,9 @@ private:
     std::mutex mutex;
     std::condition_variable freed;
     size_t in_use{};
+    std::once_flag workers_started;
+    std::atomic<Common::ThreadWorker*> started{};
+    std::unique_ptr<Common::ThreadWorker> workers; ///< Last: stopped before the slots go
 };
 
 } // namespace Vulkan

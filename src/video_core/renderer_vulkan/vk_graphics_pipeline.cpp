@@ -1888,7 +1888,8 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
 
     const bool unoptimized = (flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT) != 0;
     // Native task/mesh pipelines take a heavy-build slot (heavy_build_slots.h): minutes and
-    // gigabytes each in Mesa's Intel compiler, and the boot builds every cached one at once.
+    // gigabytes each in Mesa's Intel driver. HeavyBuildSlots' own threads (one per slot) wait
+    // here only while builds run by their callers hold slots; those callers wait here too.
     std::optional<HeavyBuildSlots::Guard> heavy_slot;
     if (is_mesh && !mesh_emulation) {
         heavy_slot.emplace(HeavyBuildSlots::Instance());

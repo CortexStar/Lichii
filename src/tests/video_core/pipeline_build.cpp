@@ -381,3 +381,43 @@ TEST_CASE("Concurrent prebuild completion and adoption never return a pipeline t
         }
     }
 }
+
+TEST_CASE("Cancelling a pipeline build no thread has started drops it",
+          "[video_core][async_draw][pipeline_build]") {
+    Common::ThreadWorker workers{1, "PipelineTest"};
+    std::promise<void> release;
+    auto gate = release.get_future().share();
+    workers.QueueWork([gate] { gate.wait(); }); // keeps the build queued
+    std::atomic<bool> ran{};
+    PipelineBuild build{&workers, [&ran] { ran = true; }};
+    const bool cancelled = build.Cancel();
+    const bool cancelled_again = build.Cancel();
+    release.set_value();
+    workers.WaitForRequests();
+    build.Wait(true); // claimed: neither the worker nor this thread runs it
+    REQUIRE(cancelled);
+    REQUIRE_FALSE(cancelled_again);
+    REQUIRE(build.IsBuilt());
+    REQUIRE(build.Failed());
+    REQUIRE_FALSE(ran);
+}
+
+TEST_CASE("Cancelling a running pipeline build leaves it to finish",
+          "[video_core][async_draw][pipeline_build]") {
+    Common::ThreadWorker workers{1, "PipelineTest"};
+    std::promise<void> release, entered;
+    auto gate = release.get_future().share();
+    int output = 0;
+    PipelineBuild build{&workers, [gate, &entered, &output] {
+                            entered.set_value();
+                            gate.wait();
+                            output = 7;
+                        }};
+    entered.get_future().wait();
+    const bool cancelled = build.Cancel();
+    release.set_value();
+    build.Wait();
+    REQUIRE_FALSE(cancelled);
+    REQUIRE(output == 7);
+    REQUIRE_FALSE(build.Failed());
+}

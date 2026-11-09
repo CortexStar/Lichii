@@ -116,6 +116,22 @@ public:
         return IsBuilt() && state->failed;
     }
 
+    /// Ends a build no thread has started: it never runs, and Failed() is true. A build already
+    /// running or done is left as it is (Wait() for it).
+    /// @return True when the build was ended here.
+    bool Cancel() const {
+        const auto shared = state;
+        if (shared->claimed.exchange(true)) {
+            return false;
+        }
+        shared->failed = true;
+        shared->task = {};
+        std::scoped_lock lock{shared->mutex};
+        shared->complete.store(true, std::memory_order_release);
+        shared->condition.notify_all();
+        return true;
+    }
+
     void Wait(bool may_build = false) const {
         const auto shared = state;
         if (may_build) {

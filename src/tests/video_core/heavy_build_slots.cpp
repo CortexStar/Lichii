@@ -2,11 +2,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
+#include <optional>
 #include <thread>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "common/thread_worker.h"
 #include "video_core/renderer_vulkan/heavy_build_slots.h"
 
 TEST_CASE("Heavy build slots follow a quarter of the host RAM, 8 GiB each",
@@ -49,4 +52,67 @@ TEST_CASE("Zero heavy build slots means no limit", "[video_core][vulkan]") {
     const Vulkan::HeavyBuildSlots::Guard first{slots};
     const Vulkan::HeavyBuildSlots::Guard second{slots}; // would block with a limit of 1
     REQUIRE(slots.Limit() == 0);
+}
+
+TEST_CASE("Heavy builds waiting for a slot leave the shared workers free", "[video_core][vulkan]") {
+    Vulkan::HeavyBuildSlots slots{2};
+    Common::ThreadWorker shared{1, "SharedTest"};
+    std::promise<void> release;
+    const auto gate = release.get_future().share();
+    std::atomic<int> running{};
+    std::atomic<int> most{};
+    std::atomic<int> finished{};
+    Common::ThreadWorker* const heavy = slots.Workers();
+    REQUIRE(heavy != nullptr);
+    REQUIRE(heavy != &shared);
+    for (int i = 0; i < 5; ++i) {
+        heavy->QueueWork([&] {
+            const Vulkan::HeavyBuildSlots::Guard guard{slots};
+            const int now = ++running;
+            int seen = most.load();
+            while (now > seen && !most.compare_exchange_weak(seen, now)) {
+            }
+            gate.wait();
+            --running;
+            ++finished;
+        });
+    }
+    // Two heavy builds hold the slots and three wait; a light build still runs at once.
+    std::atomic<bool> light{};
+    shared.QueueWork([&] { light = true; });
+    auto light_done = std::async(std::launch::async, [&] { shared.WaitForRequests(); });
+    const bool light_ran_first =
+        light_done.wait_for(std::chrono::seconds{10}) == std::future_status::ready;
+    const int heavy_finished_before = finished.load();
+    release.set_value();
+    slots.WaitForBuilds();
+    light_done.get();
+    REQUIRE(light_ran_first);
+    REQUIRE(light);
+    REQUIRE(heavy_finished_before == 0);
+    REQUIRE(finished == 5);
+    REQUIRE(most <= 2);
+}
+
+TEST_CASE("A build run by its caller counts against the heavy threads' slots",
+          "[video_core][vulkan]") {
+    Vulkan::HeavyBuildSlots slots{1};
+    std::atomic<bool> pool_built{};
+    std::optional<Vulkan::HeavyBuildSlots::Guard> caller{std::in_place, slots};
+    slots.Workers()->QueueWork([&] {
+        const Vulkan::HeavyBuildSlots::Guard guard{slots};
+        pool_built = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    const bool waited = !pool_built;
+    caller.reset();
+    slots.WaitForBuilds();
+    REQUIRE(waited);
+    REQUIRE(pool_built);
+}
+
+TEST_CASE("No heavy build threads without a limit", "[video_core][vulkan]") {
+    Vulkan::HeavyBuildSlots slots{0};
+    REQUIRE(slots.Workers() == nullptr);
+    slots.WaitForBuilds(); // nothing started: returns at once
 }
