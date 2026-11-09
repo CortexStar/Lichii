@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -101,6 +102,7 @@ public:
     VirtualDir GetPackageDir(std::size_t package_index);
 
     /// Stream-hashes every member file against its stored SHA-256.
+    /// Damaged-member stand-ins are not included; only original container data is verified.
     Loader::ResultStatus VerifyIntegrity(
         std::function<bool(std::size_t, std::size_t)> progress_callback) const;
 
@@ -132,12 +134,22 @@ private:
     bool Parse();
     bool ParseMeta(PackageInfo& package);
     bool ValidateDirTree() const;
+    /// Opens a member while assigning a VFS name distinct from its stored name.
+    VirtualFile OpenFileAs(std::size_t file_index, const std::string& name);
+    /// Checks the member's initial data for Zstd magic; I/O failures are logged and treated as
+    /// inconclusive so they cannot trigger damaged-member substitution.
+    bool LacksZstdMagic(std::size_t file_index) const;
+    /// Selects the best valid sibling matching the damaged member's final name token.
+    std::optional<std::size_t> FindStandIn(
+        std::size_t damaged, std::span<const std::size_t> siblings) const;
+    /// Builds a directory tree, optionally replacing damaged members with matching siblings.
     void BuildDirTree(u32 dir_index, VectorVfsDirectory& out);
     VirtualDir BuildPackageDir(u32 dir_index);
     std::vector<u8> ReadExtentRaw(const FileNode& node) const;
 
     VirtualFile file;
     Loader::ResultStatus status{Loader::ResultStatus::ErrorNullFile};
+    bool damaged_fallback{};
 
     u64 toc_offset{};
     u64 toc_size{};
