@@ -264,7 +264,7 @@ public:
         return writes_images;
     }
 
-    /// Pipelines still waiting for or in a worker-only build.
+    /// Pipelines queued on or building in a worker thread.
     [[nodiscard]] static u32 PendingBuilds() noexcept {
         return pending_builds.load(std::memory_order_relaxed);
     }

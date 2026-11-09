@@ -6,8 +6,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -1753,7 +1755,8 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
         const char* value = std::getenv("EDEN_NX2_ASYNC_DISCARD");
         const bool enabled = value != nullptr && value[0] == '1';
         if (enabled) {
-            LOG_INFO(Render_Vulkan, "EDEN_NX2_ASYNC_DISCARD: native draws skip unbuilt pipelines");
+            LOG_INFO(Render_Vulkan, "EDEN_NX2_ASYNC_DISCARD: native draws with a depth target skip "
+                                    "unbuilt pipelines, others once many builds are pending");
         }
         return enabled;
     }();
@@ -1761,8 +1764,15 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
     // depth target, only skip while so many pipelines are pending that waiting would stall for
     // seconds. Scene draws into a depth target come back on the next frame.
     static const u32 discard_min_pending = [] {
+        constexpr u32 default_min_pending = 32;
         const char* value = std::getenv("EDEN_NX2_ASYNC_DISCARD_MIN_PENDING");
-        return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 32U;
+        if (value == nullptr) {
+            return default_min_pending;
+        }
+        const char* const end = value + std::strlen(value);
+        u32 parsed{};
+        const auto result = std::from_chars(value, end, parsed);
+        return result.ec == std::errc{} && result.ptr == end ? parsed : default_min_pending;
     }();
     const auto& draw_state = maxwell3d->draw_manager.draw_state;
     const bool native = maxwell3d->GetNativeMacroEngine().native_turing;

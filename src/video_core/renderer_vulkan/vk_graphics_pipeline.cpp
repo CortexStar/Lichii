@@ -530,14 +530,15 @@ GraphicsPipeline::GraphicsPipeline(
         }
     }
 
-    auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics,
+    const bool queued_on_worker{worker_thread != nullptr};
+    auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics, queued_on_worker,
                 emit_stages = std::move(emit_stages)] {
         const auto begin = std::chrono::steady_clock::now();
         SCOPE_EXIT {
             if (shader_notify) {
                 shader_notify->MarkShaderComplete();
             }
-            if (worker_only_build) {
+            if (queued_on_worker) {
                 pending_builds.fetch_sub(1, std::memory_order_relaxed);
             }
         };
@@ -584,7 +585,7 @@ GraphicsPipeline::GraphicsPipeline(
         present_stages[stage] = infos[stage] != nullptr;
     }
     configure_func = ConfigureFunc(present_stages, stage_infos);
-    if (worker_only_build) {
+    if (queued_on_worker) {
         pending_builds.fetch_add(1, std::memory_order_relaxed);
     }
     build.emplace(worker_thread, std::move(func));
